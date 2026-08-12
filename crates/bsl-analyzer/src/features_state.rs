@@ -1,16 +1,19 @@
 use ide_db::RootDatabaseImpl;
-use project_model::{FeaturesConfig, Project};
+use project_model::{FeaturesConfig, ProjectConfig};
+use std::sync::Arc;
 
 use crate::global_state::GlobalState;
 
 impl GlobalState {
     pub fn update_features_config(&mut self) {
-        let features = resolve_features(self.project.as_ref());
-        apply_features_to_db(self.analysis_host.raw_database_mut(), &features);
+        let config =
+            self.project.as_ref().map(|project| project.config.clone()).unwrap_or_default();
+        apply_project_config_to_db(self.analysis_host.raw_database_mut(), &config);
     }
 }
 
-fn resolve_features(project: Option<&Project>) -> FeaturesConfig {
+#[cfg(test)]
+fn resolve_features(project: Option<&project_model::Project>) -> FeaturesConfig {
     project.map(|p| p.config.features.clone()).unwrap_or_default()
 }
 
@@ -18,6 +21,26 @@ pub fn apply_features_to_db(db: &mut RootDatabaseImpl, features: &FeaturesConfig
     tracing::info!(type_narrowing = features.type_narrowing, "updated feature flags");
     db.set_type_narrowing_enabled(features.type_narrowing);
     db.set_env_options(env_options_from_features(features));
+}
+
+/// Apply every project-level semantic input shared by LSP and batch analysis.
+pub fn apply_project_config_to_db(db: &mut RootDatabaseImpl, config: &ProjectConfig) {
+    apply_features_to_db(db, &config.features);
+    let target = config.target_platform_version.as_deref().map(Arc::<str>::from);
+    let target_changed = db.target_platform_version().as_deref() != target.as_deref();
+    let catalog = bsl_platform::PlatformGlobalCatalog::instance();
+    if target_changed
+        && catalog.status_for_target(target.as_deref())
+            == bsl_platform::PlatformCatalogStatus::UnsupportedTarget
+    {
+        tracing::warn!(
+            target_platform_version = ?target,
+            bundled_catalog_version = ?catalog.metadata().map(|metadata| metadata.platform_version),
+            "bundled platform-global catalog does not cover the configured target; absence diagnostics are suppressed"
+        );
+    }
+    tracing::info!(target_platform_version = ?target, "updated platform target");
+    db.set_target_platform_version(target);
 }
 
 /// The availability diagnostics report only environments the project actually
@@ -65,7 +88,7 @@ fn env_options_from_features(features: &FeaturesConfig) -> hir::execution_env::E
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_features_to_db, resolve_features};
+    use super::{apply_features_to_db, apply_project_config_to_db, resolve_features};
     use ide_db::RootDatabaseImpl;
     use project_model::{FeaturesConfig, Project, ProjectConfig};
     use std::fs;
@@ -123,6 +146,22 @@ type_narrowing = false
         assert!(default_project_config.features.type_narrowing);
         apply_features_to_db(&mut db, &default_project_config.features);
         assert!(db.type_narrowing_enabled());
+    }
+
+    #[test]
+    fn target_platform_version_threads_to_database() {
+        let mut db = RootDatabaseImpl::new();
+        assert!(db.target_platform_version().is_none());
+
+        let config = ProjectConfig {
+            target_platform_version: Some("8.3.27.1644".to_string()),
+            ..ProjectConfig::default()
+        };
+        apply_project_config_to_db(&mut db, &config);
+        assert_eq!(db.target_platform_version().as_deref(), Some("8.3.27.1644"));
+
+        apply_project_config_to_db(&mut db, &ProjectConfig::default());
+        assert!(db.target_platform_version().is_none());
     }
 
     #[test]

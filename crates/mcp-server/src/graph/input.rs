@@ -1,11 +1,11 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide::RootDatabaseImpl;
+#[cfg(test)]
+use project_model::SourceSet;
 use vfs::FileId;
-use walkdir::WalkDir;
 
 /// The whole workspace is loaded into a single source root.
 pub(crate) const GRAPH_SOURCE_ROOT: SourceRootId = SourceRootId(0);
@@ -19,6 +19,10 @@ pub(crate) struct ProjectSnapshot {
     pub workspace_root: PathBuf,
     pub scan_roots: Vec<PathBuf>,
     pub configs: ide::WorkspaceConfigsSnapshot,
+    /// Search ownership derived from the same validated project as `scan_roots` and
+    /// `configs`. It travels with a published build so the publish hook never reloads a
+    /// newer project and mixes its roots with an older graph.
+    pub search_roots: Option<bsl_search::WorkspaceRoots>,
 }
 
 impl ProjectSnapshot {
@@ -26,7 +30,7 @@ impl ProjectSnapshot {
     /// a config broken by a mid-session edit restricts the scan to the
     /// workspace root (loud in logs) instead of walking a wrong universe.
     pub(crate) fn load(workspace_root: &Path) -> Self {
-        match project_model::Project::new(workspace_root) {
+        match crate::project::at(workspace_root) {
             Ok(project) => Self::from_project(&project),
             Err(e) => {
                 tracing::error!(
@@ -37,14 +41,14 @@ impl ProjectSnapshot {
                     workspace_root: workspace_root.to_path_buf(),
                     scan_roots: vec![workspace_root.to_path_buf()],
                     configs: ide::WorkspaceConfigsSnapshot::default(),
+                    search_roots: None,
                 }
             }
         }
     }
 
     pub(crate) fn from_project(project: &project_model::Project) -> Self {
-        let mut scan_roots = vec![project.source_path().to_path_buf()];
-        scan_roots.extend(project.extension_paths().iter().map(|(_, p)| p.clone()));
+        let scan_roots = project.source_roots();
         // The MCP file universe is enumerated canonically (`enumerate_bsl_files`
         // canonicalizes every `.bsl`), so the registered roots must be canonical
         // too — a raw symlinked root would miss both prefix matching and the
@@ -53,6 +57,7 @@ impl ProjectSnapshot {
             workspace_root: project.root.clone(),
             scan_roots,
             configs: ide::WorkspaceConfigsSnapshot::from_project(project).canonicalized(),
+            search_roots: Some(crate::project::workspace_roots(project).0),
         }
     }
 }
@@ -65,39 +70,31 @@ pub(super) fn scan_roots(workspace_root: &Path) -> Vec<PathBuf> {
 }
 
 /// Enumerate every `.bsl` file under the config + extension roots, assigning a
-/// stable [`FileId`] in walk order. No file text is read — this is the cheap
+/// stable [`FileId`] in scan order. No file text is read — this is the cheap
 /// file-id↔path map that lets the graph build load one batch of texts at a time
 /// while keeping ids consistent across batches.
+///
+/// Test-side wrapper: production paths scan a `ScannedUniverse` explicitly and
+/// share it across their passes, so the verdict of the same scan stays in hand.
+#[cfg(test)]
 pub(crate) fn enumerate_bsl_files(project: &ProjectSnapshot) -> Vec<(FileId, PathBuf)> {
-    let mut entries: Vec<(FileId, PathBuf)> = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut next_id = 0u32;
-    for root in &project.scan_roots {
-        for entry in WalkDir::new(root).follow_links(true) {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("graph scan: walk error: {e}");
-                    continue;
-                }
-            };
-            if !entry.file_type().is_file()
-                || entry.path().extension().and_then(|e| e.to_str()) != Some("bsl")
-            {
-                continue;
-            }
-            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
-            if !seen.insert(path.clone()) {
-                continue;
-            }
-            entries.push((FileId(next_id), path));
-            next_id += 1;
-        }
-    }
-    entries
+    super::universe::bsl_files_from(&SourceSet::scan(&project.scan_roots))
 }
 
 pub(crate) use ide_host_core::build_source_root;
+
+/// A loaded batch database together with the paths whose bytes could not be read.
+///
+/// The report exists because an unreadable file is registered with empty text and is
+/// then indistinguishable from an empty module: every consumer downstream would erase
+/// that module's knowledge on a text nobody could read. Callers accumulate `unread`
+/// into a SET — one batch is opened many times per build, so a per-call count would
+/// multiply.
+#[must_use]
+pub(crate) struct BatchLoad {
+    pub(crate) db: RootDatabaseImpl,
+    pub(crate) unread: Vec<PathBuf>,
+}
 
 /// Build a batch database that shares the whole-workspace `source_root` (so any
 /// target is addressable by path through the module index) but loads text only for
@@ -114,25 +111,30 @@ pub(crate) fn db_for_files(
     batch_files: &[(FileId, PathBuf)],
     configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
+) -> BatchLoad {
     let mut db = RootDatabaseImpl::default();
     if let Some(cache) = config_cache {
         db.set_graph_config_cache(Arc::clone(cache));
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
+    let mut unread = Vec::new();
     for (file_id, path) in batch_files {
         db.set_file_source_root(*file_id, GRAPH_SOURCE_ROOT);
         match std::fs::read_to_string(path) {
             Ok(text) => db.set_file_text(*file_id, &text),
             Err(e) => {
                 tracing::warn!(path = %path.display(), "graph scan: read failed: {e}");
-                db.set_file_text(*file_id, "");
+                // The empty overlay is load-bearing, not leniency: without a text
+                // input `file_text_query` re-reads from disk and panics. What changes
+                // is that the substitution stops being silent.
+                db.set_file_unreadable(*file_id);
+                unread.push(path.clone());
             }
         }
     }
     db.set_workspace_configs_snapshot(configs.clone());
-    ide::warm_batch_config_roots(&db, batch_files, &configs.paths);
-    db
+    ide::warm_batch_config_roots(&db, batch_files);
+    BatchLoad { db, unread }
 }
 
 /// Like [`db_for_files`] but disk-backed: registers each file's content revision
@@ -153,15 +155,18 @@ pub(crate) fn db_for_files_lazy(
     all_files: &[(FileId, PathBuf)],
     configs: &ide::WorkspaceConfigsSnapshot,
     config_cache: Option<&Arc<ide::GraphConfigCache>>,
-) -> RootDatabaseImpl {
+) -> BatchLoad {
     let mut db = RootDatabaseImpl::default();
     if let Some(cache) = config_cache {
         db.set_graph_config_cache(Arc::clone(cache));
     }
     db.set_source_root(GRAPH_SOURCE_ROOT, source_root.clone());
-    ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files);
+    let unread = ide_host_core::register_files_disk_backed(&mut db, GRAPH_SOURCE_ROOT, all_files)
+        .into_iter()
+        .map(|(path, _err)| path)
+        .collect();
     db.set_workspace_configs_snapshot(configs.clone());
-    db
+    BatchLoad { db, unread }
 }
 
 /// Walk the configuration source and extension directories, load every `.bsl`
@@ -175,6 +180,71 @@ pub(super) fn load_workspace_db(
     let project = ProjectSnapshot::load(workspace_root);
     let files = enumerate_bsl_files(&project);
     let source_root = build_source_root(&files);
-    let db = db_for_files(&source_root, &files, &project.configs, None);
-    Ok((db, files.len()))
+    let loaded = db_for_files(&source_root, &files, &project.configs, None);
+    Ok((loaded.db, files.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProjectSnapshot;
+    use crate::graph::test_support::write_common_module;
+    use std::fs;
+    use std::path::Path;
+
+    /// Configuration under `src/cf`, extension under `src/cfe/Расш` — outside the
+    /// configuration directory on purpose. Inside it, the configuration's own
+    /// recursive walk would cover the extension anyway, and a scan-root set that
+    /// lost the extension would still enumerate its modules.
+    fn workspace_with_an_extension(root: &Path) {
+        let cf = root.join("src/cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(&cf, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+
+        let ext = root.join("src/cfe/Расш");
+        fs::create_dir_all(&ext).unwrap();
+        fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "РасшМодуль",
+            true,
+            "&НаСервере\nФункция Р() Экспорт КонецФункции",
+        );
+    }
+
+    #[test]
+    fn the_scan_universe_is_every_root_the_project_declares() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        workspace_with_an_extension(root);
+        let project = project_model::Project::new(root).expect("valid test project");
+        assert_eq!(project.source_roots().len(), 2, "the stand must declare an extension root");
+
+        let snapshot = ProjectSnapshot::from_project(&project);
+
+        assert_eq!(
+            snapshot.scan_roots,
+            project.source_roots(),
+            "the graph universe must be the project's own root set, not a second derivation"
+        );
+    }
+
+    /// Separate from the root-set comparison above: that one compares directory
+    /// lists, this one asks what the walk actually returns. A root set that lost
+    /// the extension yields no module from it, which is the defect itself.
+    #[test]
+    fn a_module_in_an_extension_reaches_the_graph_universe() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        workspace_with_an_extension(root);
+        let project = project_model::Project::new(root).expect("valid test project");
+        let snapshot = ProjectSnapshot::from_project(&project);
+
+        let files = super::enumerate_bsl_files(&snapshot);
+
+        assert!(
+            files.iter().any(|(_, path)| path.ends_with("CommonModules/РасшМодуль/Ext/Module.bsl")),
+            "the extension module must be enumerated: {files:?}"
+        );
+    }
 }

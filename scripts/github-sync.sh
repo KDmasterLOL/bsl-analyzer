@@ -387,6 +387,10 @@ sed -i.bak 's/^INSTALL_SOURCE="gitlab"/INSTALL_SOURCE="github"/' \
     "$WORK_DIR/github/scripts/install.sh"
 rm -f "$WORK_DIR/github/scripts/install.sh.bak"
 
+sed -i.bak "s/^\$InstallSource = 'gitlab'/\$InstallSource = 'github'/" \
+    "$WORK_DIR/github/scripts/install.ps1"
+rm -f "$WORK_DIR/github/scripts/install.ps1.bak"
+
 sed -i.bak '/<!-- INSTALL_URL:gitlab -->/,/<!-- \/INSTALL_URL -->/c\
 <!-- INSTALL_URL:github -->\
 ```bash\
@@ -399,6 +403,20 @@ curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scrip
 curl -fsSL https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scripts/install.sh | bash -s -- --version 0.1.38\
 ```\
 <!-- /INSTALL_URL -->' "$WORK_DIR/github/README.md"
+rm -f "$WORK_DIR/github/README.md.bak"
+
+sed -i.bak '/<!-- INSTALL_URL_WINDOWS:gitlab -->/,/<!-- \/INSTALL_URL_WINDOWS -->/c\
+<!-- INSTALL_URL_WINDOWS:github -->\
+```powershell\
+irm https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scripts/install.ps1 | iex\
+```\
+\
+Или с указанием версии:\
+\
+```powershell\
+\& ([scriptblock]::Create((irm https://raw.githubusercontent.com/'"$GITHUB_REPO_SLUG"'/develop/scripts/install.ps1))) -Version <version>\
+```\
+<!-- /INSTALL_URL_WINDOWS -->' "$WORK_DIR/github/README.md"
 rm -f "$WORK_DIR/github/README.md.bak"
 
 git add -A

@@ -13,9 +13,14 @@ The current implementation checks these methods:
 - RunApp
 - BeginRunningApplication
 - RunAppAsync
-- FileSystemsClient.RunApp and FileSystems.RunApp
-- FileSystemClient.OpenExplorer
-- FileSystemClient.OpenFile
+- `ФайловаяСистемаКлиент.ЗапуститьПрограмму` and `ФайловаяСистема.ЗапуститьПрограмму`
+- `ФайловаяСистемаКлиент.ОткрытьПроводник`
+- `ФайловаяСистемаКлиент.ОткрытьФайл` and `РаботаСФайламиКлиент.ОткрытьФайл`
+
+The last three belong to library common modules rather than to the global
+context, so the receiver is taken into account. Platform types expose
+like-named methods that open a file or a stream and start nothing, so
+`ЗаписьXML.ОткрытьФайл(...)` is not reported.
 
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->

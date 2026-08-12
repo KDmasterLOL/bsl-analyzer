@@ -597,6 +597,15 @@ impl GlobalState {
         let _ = self.sender.send(notification.into());
     }
 
+    /// `window/showMessage` with warning severity — for a workspace that loads
+    /// but will produce misleading results, which the user cannot infer from
+    /// the diagnostics themselves.
+    pub fn show_warning_message(&self, message: String) {
+        let params = lsp_types::ShowMessageParams { typ: lsp_types::MessageType::WARNING, message };
+        let notification = lsp_server::Notification::new("window/showMessage".to_string(), params);
+        let _ = self.sender.send(notification.into());
+    }
+
     pub fn clear_batch_push_for(&mut self, uri: &Url) {
         if self.batch_pushed.remove(uri).is_some() {
             let params =
@@ -869,6 +878,81 @@ mod vfs_race_tests {
             state.analysis_host.raw_database().workspace_load_complete(),
             "a live workspace reload must keep the gate open"
         );
+    }
+
+    /// A workspace whose root is itself a configuration extension must be called
+    /// out to the client. Nothing else in the protocol explains why the findings
+    /// that follow report valid calls into the main configuration as unresolved,
+    /// and the LSP has no source-set flags to make the shape obvious either.
+    #[test]
+    fn a_workspace_root_that_is_an_extension_warns_the_client() {
+        #[derive(Debug)]
+        struct SilentLoader;
+        impl loader::Handle for SilentLoader {
+            fn spawn(_sender: loader::Sender) -> Self
+            where
+                Self: Sized,
+            {
+                unreachable!("injected via with_loader, never spawned")
+            }
+            fn set_config(&mut self, _config: loader::Config) {}
+            fn invalidate(&mut self, _path: paths::AbsPathBuf) {}
+            fn load_sync(&mut self, _path: &paths::AbsPath) -> Option<Vec<u8>> {
+                None
+            }
+        }
+
+        fn configuration(root: &std::path::Path, extension: bool) {
+            let purpose = if extension {
+                "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+            } else {
+                ""
+            };
+            std::fs::write(
+                root.join("Configuration.xml"),
+                format!(
+                    "<MetaDataObject><Configuration><Properties>{purpose}</Properties>\
+                     </Configuration></MetaDataObject>"
+                ),
+            )
+            .unwrap();
+        }
+
+        fn warnings(root: &std::path::Path) -> Vec<String> {
+            let (sender, receiver) = crossbeam_channel::unbounded();
+            let (_loader_tx, loader_receiver) = crossbeam_channel::bounded(4);
+            let mut state =
+                GlobalState::with_loader(sender, Box::new(SilentLoader), loader_receiver);
+
+            state.set_workspace_root(root.to_path_buf()).expect("the project must load");
+
+            std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter_map(|message| match message {
+                    Message::Notification(n) if n.method == "window/showMessage" => {
+                        let params: lsp_types::ShowMessageParams =
+                            serde_json::from_value(n.params).ok()?;
+                        (params.typ == lsp_types::MessageType::WARNING).then_some(params.message)
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let ext = tempfile::tempdir().expect("tempdir");
+        configuration(ext.path(), true);
+        let main = tempfile::tempdir().expect("tempdir");
+        configuration(main.path(), false);
+
+        let warned = warnings(ext.path());
+        assert_eq!(warned.len(), 1, "exactly one warning: {warned:?}");
+        assert!(
+            warned[0].contains("configuration extension analyzed without"),
+            "the warning must name the shape: {warned:?}"
+        );
+
+        // A main configuration carries the neighbouring compatibility-mode element
+        // and must not be mistaken for an extension.
+        assert!(warnings(main.path()).is_empty(), "a main configuration stays silent");
     }
 
     /// A live workspace reload that adds an extension root must emit a loader

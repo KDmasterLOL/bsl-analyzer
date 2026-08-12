@@ -215,7 +215,7 @@ impl AnalysisProvider for SalsaProvider<'_> {
             .collect()
     }
 
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         self.db.resolve_common_module_files(file_id, name)
     }
 
@@ -396,6 +396,20 @@ impl AnalysisProvider for SalsaProvider<'_> {
         vfs_path: &vfs::VfsPath,
     ) -> Option<FileId> {
         self.db.resolve_vfs_path(source_root_id, vfs_path)
+    }
+
+    fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        candidate: &std::path::Path,
+        tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<FileId> {
+        base_db::resolve_vfs_path_ci_query(
+            self.db,
+            self.db.source_root_input(source_root_id),
+            candidate.to_string_lossy().into_owned(),
+            tail_modes,
+        )
     }
 
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId> {

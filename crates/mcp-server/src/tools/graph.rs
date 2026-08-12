@@ -210,6 +210,11 @@ pub fn status(report: &crate::graph::GraphStatusReport) -> CallToolResult {
     if let Some(files) = report.files {
         body["files"] = json!(files);
     }
+    // Assembled field by field, so a new one must be added here or the report is
+    // right internally while nothing reaches the agent.
+    if let Some(unread) = report.unread_files {
+        body["unread_files"] = json!(unread);
+    }
     if let Some(revision) = report.revision {
         body["revision"] = json!(revision);
     }
@@ -244,9 +249,9 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "28",
+        "schema_version": "29",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
-        "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `superseded: true` (emitted only when it holds) means another daemon generation now owns this workspace's derived caches: answers keep coming from the snapshot this server already has, but it no longer rebuilds, so a `stale` snapshot stays stale — reconnect to pick up the daemon that does.",
+        "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, unread_files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `unread_files` counts modules whose bytes could not be read when the artefact was built or last patched: they contributed no nodes and no edges, so the graph is missing them, `stale` is true, and no fingerprint comparison reveals it (stat needs no read permission). A patch never clears an inherited one — only a full rebuild restores the missing rows. `files` here is the module count the artefact COVERS, unread ones included, so `unread_files` is a subset of it — unlike `diagnostics status`, whose `files` counts only what it serves and excludes them; do not apply one arithmetic to both. `superseded: true` (emitted only when it holds) means another daemon generation now owns this workspace's derived caches: answers keep coming from the snapshot this server already has, but it no longer rebuilds, so a `stale` snapshot stays stale — reconnect to pick up the daemon that does.",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips); `truncated: true` is emitted on a node whose `detail=bodies` source was cut short — or, when `source` is absent, dropped — to fit the output budget (so a short body is not mistaken for a complete one, nor a budget-dropped body for a method with no body)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
@@ -278,7 +283,7 @@ fn schema_json() -> Value {
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
             "revision": "u64 — snapshot generation the answer was computed at",
-            "stale": "bool — workspace drifted on disk since this snapshot",
+            "stale": "bool — this snapshot is not current: the workspace drifted on disk since it was built, and/or some module could not be read when it was built (see the status action's unread_files)",
             "reload": "none | running | failed — background re-index state",
             "result": "the action's payload (or an {error} object)",
             "delivery": "the payload lives in MCP structuredContent; the JSON text block is a compatibility mirror for clients without structured-output support — a host injects exactly one copy into model context"
@@ -381,6 +386,7 @@ mod tests {
         let ready = GraphStatusReport {
             state: "ready",
             files: Some(10),
+            unread_files: Some(0),
             revision: Some(3),
             stale: Some(false),
             reload: Some("none"),
@@ -397,6 +403,7 @@ mod tests {
         let failed = GraphStatusReport {
             state: "failed",
             files: None,
+            unread_files: None,
             revision: None,
             stale: None,
             reload: None,
@@ -424,7 +431,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "28");
+        assert_eq!(schema["schema_version"], "29");
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -496,7 +503,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "28");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "29");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

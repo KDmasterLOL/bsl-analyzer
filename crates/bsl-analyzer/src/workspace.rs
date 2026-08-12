@@ -67,6 +67,10 @@ impl GlobalState {
             }
         };
 
+        if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+            self.show_warning_message(notice);
+        }
+
         self.supersede_call_hierarchy_index(base_db::SourceRootId(0));
 
         let source_path = project.source_path().to_path_buf();
@@ -242,16 +246,20 @@ impl GlobalState {
             if is_bsl_path && text.is_none() {
                 if file_set.path_for_file(&file.file_id).is_some() {
                     file_set.remove(file.file_id);
+                    // `Deleted` rather than `Unreadable`: the VFS reports both as
+                    // absent text, and the eviction below puts the file out of every
+                    // consumer's reach anyway, so marking it unread would assert a
+                    // cause nobody established and nobody could read back.
                     ide_host_core::set_file_text_source(
                         db,
                         file.file_id,
-                        ide_host_core::FileTextSource::Tombstone,
+                        ide_host_core::FileTextSource::Deleted,
                     );
                     file_set_modified = true;
                     bsl_source_changed = true;
                     tracing::warn!(
                         file_id = file.file_id.0,
-                        "BSL file evicted from FileSet (deleted or unreadable); FileTextInput tombstoned",
+                        "BSL file evicted from FileSet (deleted or unreadable); text input emptied",
                     );
                 }
                 continue;
@@ -669,13 +677,23 @@ impl GlobalState {
                 // calling it is the warm-up; the returned list only feeds the metrics below.
                 let exports = Resolver::with_workspace_scope(ModuleId::new(anchor))
                     .global_common_module_exports(db);
-                let modules: std::collections::HashSet<String> =
-                    exports.iter().map(|(module, _, _)| module.as_str().to_lowercase()).collect();
+                let modules: std::collections::HashSet<String> = exports
+                    .entries
+                    .iter()
+                    .map(|entry| entry.module.as_str().to_lowercase())
+                    .collect();
 
+                let exported_methods = exports
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        matches!(entry.definition, hir::GlobalExportDefinition::Method(_))
+                    })
+                    .count();
                 let rss_after = crate::smoke::read_rss_bytes().unwrap_or(0);
                 tracing::info!(
                     global_modules = modules.len(),
-                    exported_methods = exports.len(),
+                    exported_methods,
                     elapsed_ms = warm_start.elapsed().as_millis() as u64,
                     rss_delta_mb = rss_after.saturating_sub(rss_before) / 1_048_576,
                     "global common modules warmed",

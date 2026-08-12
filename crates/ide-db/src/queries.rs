@@ -46,7 +46,7 @@ pub(crate) mod heap_estimate {
         0
     }
 
-    /// Module-level CFG is uniquely owned by its query (not part of `module_cfgs`).
+    /// Module-level CFG owns its graph; `module_cfgs` stores only a shared `Arc`.
     pub(super) fn module_level_cfg_heap(v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
         v.estimated_heap()
     }
@@ -139,6 +139,26 @@ pub fn configuration_path_for_file<'db>(
     ))
 }
 
+/// Resolve the constructed base-module candidate: exactly first, then with the
+/// module-path grammar's per-component case policy — the candidate carries the
+/// EXTENSION's spelling of the conventional segments, while the base file may
+/// spell them differently. Name positions stay exact (НУ-2).
+fn resolve_pair_candidate(
+    db: &dyn RootDatabase,
+    source_root: base_db::SourceRootId,
+    roots: &[(Option<String>, std::path::PathBuf)],
+    base_path: &std::path::Path,
+) -> Option<vfs::FileId> {
+    let candidate = base_path.to_string_lossy().into_owned();
+    let base_root = roots.iter().find_map(|(label, p)| label.is_none().then_some(p))?;
+    let modes = base_path
+        .strip_prefix(base_root)
+        .ok()
+        .and_then(|rel| hir::module_path_segment_modes(&rel.to_string_lossy()))
+        .unwrap_or_default();
+    base_db::resolve_vfs_path_ci_query(db, db.source_root_input(source_root), candidate, &modes)
+}
+
 /// The effective `&ИзменениеИКонтроль` module identity for an extension module file, or
 /// `None` when the file is not an extension module, has no resolvable base counterpart, or
 /// carries no usable change-and-validate splice (in which case ordinary analysis applies).
@@ -158,8 +178,7 @@ pub fn effective_target<'db>(
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
-    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
-    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+    let base_file = resolve_pair_candidate(db, source_root, &roots, &base_path)?;
 
     let eid = hir::EffectiveModuleId::new(db, base_file, ext_file);
     hir::effective_module_text(db, eid)?;
@@ -185,8 +204,7 @@ pub fn weaving_target<'db>(
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
-    let vfs_path = vfs::VfsPath::new(base_path.to_string_lossy().into_owned());
-    let base_file = db.resolve_vfs_path(source_root, &vfs_path)?;
+    let base_file = resolve_pair_candidate(db, source_root, &roots, &base_path)?;
 
     if base_file == ext_file {
         return None;
@@ -246,6 +264,15 @@ pub fn module_metadata_query<'db>(
     Arc::new(metadata)
 }
 
+#[salsa::tracked(lru = 512, returns(clone))]
+pub fn application_module_files_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: base_db::FileIdInput<'db>,
+    kind: hir::ApplicationModuleKind,
+) -> Option<hir::CommonModuleBodies> {
+    db.resolve_application_module_files_uncached(file_id_input.file_id(db), kind)
+}
+
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap, returns(clone))]
 pub fn module_cfgs_query<'db>(
     db: &'db dyn RootDatabase,
@@ -267,9 +294,15 @@ pub fn module_cfgs_query<'db>(
         );
         cfgs.insert(local_id, Arc::new(cfg));
     }
+    let module_code =
+        module_bodies.module_code().map(|_| module_level_cfg_query(db, file_id_input));
 
-    tracing::debug!(count = cfgs.len(), "Built module CFGs");
-    Arc::new(hir::cfg::ModuleCfgs::new(cfgs))
+    tracing::debug!(
+        methods = cfgs.len(),
+        has_module_code = module_code.is_some(),
+        "Built module CFGs"
+    );
+    Arc::new(hir::cfg::ModuleCfgs::new(cfgs, module_code))
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_cfg_heap, returns(clone))]
@@ -347,8 +380,37 @@ pub fn module_reaching_definitions_query<'db>(
         }
     }
 
-    tracing::debug!(count = results.len(), "Analyzed reaching definitions");
-    Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results))
+    let module_code = match (module_bodies.module_code(), module_cfgs.module_code()) {
+        (Some(body), Some(cfg)) => {
+            let def_index = hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(
+                body,
+                std::iter::empty(),
+            );
+            let initial_defs = hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
+            let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
+            let mut solver =
+                hir::dataflow::DataflowSolver::new(Arc::clone(cfg), body.clone(), transfer);
+            solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
+            solver.set_bottom_factory(|| {
+                hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
+            });
+            solver.set_initial_state(initial_defs);
+            solver.solve().map(|dataflow_result| {
+                Arc::new(hir::dataflow::reaching_defs::ReachingDefsResult::new(
+                    dataflow_result,
+                    body.clone(),
+                ))
+            })
+        }
+        _ => None,
+    };
+
+    tracing::debug!(
+        methods = results.len(),
+        has_module_code = module_code.is_some(),
+        "Analyzed reaching definitions"
+    );
+    Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results, module_code))
 }
 
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_path_terminates_heap, returns(clone))]

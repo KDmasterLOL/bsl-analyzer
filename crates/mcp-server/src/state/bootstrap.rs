@@ -12,7 +12,7 @@ use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
 use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -61,7 +61,7 @@ impl SharedState {
         source_dir: PathBuf,
         cache: crate::cache::WorkspaceCacheLayout,
     ) -> Result<Self, project_model::ProjectError> {
-        let project = project_model::Project::new(&source_dir)?;
+        let project = crate::project::at(&source_dir)?;
         let config_path = project.source_path();
         let source_root = config_path.to_path_buf();
 
@@ -70,11 +70,18 @@ impl SharedState {
         // generation of a pair that overlaps over them.
         let workspace_lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
 
+        // Said once, here, because this is the only point EVERY boot passes. The engine's own
+        // initialization has early exits before it builds a table — an unreachable shared
+        // baseline, a store that will not open — and on those a dropped root would never be
+        // named at all, which is the silence the warning exists to break. The resident builds
+        // the same table on every config drift and deliberately says nothing: a line repeated
+        // per rebuild buries the one that is new.
+        crate::project::warn_about_rejected_roots(&crate::project::workspace_roots(&project).1);
+
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         // Only the cheap, local part of baseline resolution runs here (config, env,
         // credential helper); the PG connect itself is deferred to a background thread
         // so a slow or unreachable server never delays the daemon's socket. The search
@@ -95,12 +102,26 @@ impl SharedState {
         // config source root plus every extension root — so diagnostics/graph drift in
         // extensions is event-delivered, not left to the reconciler. Search subscribes as a
         // sink and preserves its prior behavior (mark only source-root `.bsl` paths dirty).
-        let mut scan_roots = vec![config_path.to_path_buf()];
-        scan_roots.extend(project.extension_paths().iter().map(|(_, path)| path.clone()));
+        //
+        // Witnessed by `a_second_boot_over_a_matching_cache_declares_every_source_root_to_the_hub`,
+        // and only a second boot can witness it: every graph path that BUILDS re-declares the
+        // hub onto its own snapshot's roots, so a narrower set here would be repaired on a cold
+        // boot before a reader could reach it. The publish that reuses a matching cache is the
+        // one path that declares nothing. The window belongs to that test rather than to a
+        // session: a serving daemon calls `warm_start` right after this constructor, and the
+        // resident's publish re-declares the roots too.
+        let scan_roots = project.source_roots();
         let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
             &project.root,
             &scan_roots,
         ));
+
+        // Subscribed here, synchronously, before the thread that reads disk even exists —
+        // the same order the graph and the resident already keep, where the cursor is taken
+        // first and the baseline scan second, so only what lands after the baseline needs
+        // replaying. Search used to take it last, on a third thread, which left the window
+        // between the two paid for by a full rescan of every root on essentially every boot.
+        let sink_lease = crate::change_hub::CursorLease::new(change_hub.clone());
 
         // Created before the search-init thread so it can own the workspace graph: for
         // a local SQLite workspace the search-init drives a single fused parse pass
@@ -111,16 +132,43 @@ impl SharedState {
         // On each graph publish/adopt (on the graph's own background thread) re-render the
         // search chunks marked context-dirty by an `.xml` drift, now that the graph has
         // caught up. Captures only shared handles; the closure never runs on a query path.
-        // ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
+        // The overlay retry driver exists only where an Embed pass exists: Postgres mode
+        // with an embedder. It is created before the graph hook so a root transition can kick
+        // the SAME owner; no second warmup worker is introduced.
+        let overlay_retry =
+            if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                if Self::embedding_config().is_some() {
+                    Some(super::overlay_retry::OverlayRetry::spawn(
+                        Arc::clone(&search_engine),
+                        Arc::clone(&overlay_warmup),
+                        Arc::clone(&semantic_runtime),
+                        workspace_lease.clone(),
+                    ))
+                } else {
+                    Self::set_overlay_warmup_state(
+                        &overlay_warmup,
+                        OverlayWarmupState::Skipped("no embedder configured".to_owned()),
+                    );
+                    None
+                }
+            } else {
+                None
+            };
+
+        // ONE embed single-flight shared by the boot pass and the post-context/root refresh kick,
         // so overlapping passes collapse into one and the installed index is always built from
-        // the latest store state.
+        // the latest store state. Root-relevant drift has its own epoch: it fences the narrow
+        // validation→apply window without making an unrelated watched file reject the plan.
         let embed_flight = EmbedFlight::new();
+        let root_drift_epoch = Arc::new(AtomicU64::new(0));
         let publish_hook = Self::build_publish_hook(
             Arc::clone(&search_engine),
             cache.clone(),
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
+            overlay_retry.clone(),
+            Arc::clone(&root_drift_epoch),
             workspace_lease.clone(),
         );
         let graph = GraphState::for_workspace_with_cache(source_dir.clone(), cache.clone())
@@ -139,27 +187,25 @@ impl SharedState {
             crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
         );
 
+        // The sink is started by this thread, once there is an engine to feed and a watch
+        // to feed it from; the lease rides along so the cursor is released on every way out
+        // that does not end in a running sink — including this spawn failing, where the
+        // closure is dropped unrun.
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
-            Arc::clone(&overlay_warmup),
             source_dir.clone(),
-            Arc::clone(&watcher_ready),
+            change_hub.clone(),
+            sink_lease,
             baseline.clone(),
             workspace_search_mode.clone(),
             graph.clone(),
             Arc::clone(&embed_flight),
             Arc::clone(&snapshot_source),
             workspace_lease.clone(),
-        );
-
-        Self::spawn_search_sink(
-            change_hub.clone(),
-            Arc::clone(&search_engine),
-            Arc::clone(&watcher_ready),
-            config_path.to_path_buf(),
-            graph.clone(),
+            overlay_retry.clone(),
+            Arc::clone(&root_drift_epoch),
         );
 
         Ok(Self {
@@ -177,8 +223,8 @@ impl SharedState {
             graph,
             diagnostics,
             change_hub: Some(change_hub),
-            embed_flight,
             workspace_lease,
+            overlay_retry,
         })
     }
 
@@ -191,15 +237,17 @@ impl SharedState {
         search_engine: SharedSearchEngine,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
-        overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
         workspace_root: PathBuf,
-        watcher_ready: Arc<AtomicBool>,
+        change_hub: WorkspaceChangeHub,
+        sink_lease: crate::change_hub::CursorLease,
         baseline: DeferredBaselineRuntime,
         mode: WorkspaceSearchMode,
         graph: GraphState,
         embed_flight: Arc<EmbedFlight>,
         snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource>,
         lease: crate::workspace_lease::WorkspaceLease,
+        overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        root_drift_epoch: Arc<AtomicU64>,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -240,9 +288,10 @@ impl SharedState {
                     }
                     WorkspaceSearchMode::SqliteLocal => None,
                 };
+                let mut sink_lease = sink_lease;
                 let init = Self::init_workspace_search_engine(
                     &workspace_root,
-                    &watcher_ready,
+                    Some((&change_hub, super::sync::WatchWaitPolicy::PRODUCTION)),
                     mode,
                     external_baseline,
                     &graph,
@@ -261,6 +310,12 @@ impl SharedState {
                             "workspace search engine initialization failed".to_owned(),
                         ),
                     );
+                    // Terminal for this process: no engine will ever publish, and the
+                    // driver retrying "engine unavailable" forever would only mask the
+                    // failure with an endless OverlaySyncing/backoff cycle.
+                    if let Some(retry) = &overlay_retry {
+                        retry.disarm();
+                    }
                     tracing::warn!("workspace search engine initialization failed");
                     return;
                 };
@@ -335,6 +390,24 @@ impl SharedState {
                     *guard = Some(init.engine);
                 }
 
+                // Only now, and only if the watch is up: the sink drains into the published
+                // engine, and a sink started before this point would drop every batch it
+                // read into an engine that was not there yet.
+                if init.watch_armed {
+                    if let Some(cursor) = sink_lease.cursor() {
+                        if Self::spawn_search_sink(
+                            change_hub.clone(),
+                            cursor,
+                            Arc::clone(&search_engine),
+                            graph.clone(),
+                            overlay_retry.clone(),
+                            Arc::clone(&root_drift_epoch),
+                        ) {
+                            sink_lease.handed_over();
+                        }
+                    }
+                }
+
                 if has_leftover_marks {
                     graph.consume_leftover_marks(leftover_bound);
                 }
@@ -345,6 +418,7 @@ impl SharedState {
                 // honoured here — otherwise files the build skipped as byte-identical keep the
                 // contexts they were given under the old topology.
                 graph.flush_pending_topology_refresh();
+                graph.flush_pending_search_roots_refresh();
 
                 if let Some(status) = status_after_publish {
                     Self::set_semantic_runtime_status(&semantic_runtime, status);
@@ -367,27 +441,19 @@ impl SharedState {
                     );
                 }
 
+                // The startup warmup goes through the SAME single-flight the retries do:
+                // a direct spawn here would race a driver-triggered publication and let
+                // last-writer-wins install the older plan. The driver owns the semantic
+                // status transitions around each pass; the `!initialized` signal makes the
+                // first pass unconditional.
                 if needs_overlay_warmup {
-                    Self::set_semantic_runtime_status(
-                        &semantic_runtime,
-                        SemanticRuntimeStatus::OverlaySyncing,
-                    );
-                    let search_engine = Arc::clone(&search_engine);
-                    let semantic_runtime = Arc::clone(&semantic_runtime);
-                    let overlay_warmup = Arc::clone(&overlay_warmup);
-                    std::thread::Builder::new()
-                        .name("bsl-search-overlay-warmup".to_owned())
-                        .spawn(move || {
-                            tracing::info!("workspace overlay semantic warmup started");
-                            Self::run_overlay_warmup(&search_engine, &overlay_warmup);
-                            // Semantic stays available via the baseline even when the overlay
-                            // warmup failed; the detailed warmup outcome lives in `overlay_warmup`.
-                            Self::set_semantic_runtime_status(
-                                &semantic_runtime,
-                                SemanticRuntimeStatus::Ready,
-                            );
-                        })
-                        .ok();
+                    if let Some(retry) = &overlay_retry {
+                        // The fresh kick, not the bare one: the worker's first tick may have
+                        // raced this publication, collected a transient "engine unavailable"
+                        // and armed its backoff — the engine appearing is exactly the kind of
+                        // new fact that resets it.
+                        retry.kick_fresh();
+                    }
                 }
             })
             .ok();
@@ -473,8 +539,8 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
+            overlay_retry: None,
         }
     }
 
@@ -494,8 +560,8 @@ impl SharedState {
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
-            embed_flight: EmbedFlight::new(),
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
+            overlay_retry: None,
         }
     }
 
@@ -613,15 +679,16 @@ impl SharedState {
 
     fn configure_workspace_engine(
         engine: &mut SearchEngine,
-        workspace_source_root: &Path,
-        watcher_ready: &AtomicBool,
+        workspace_roots: bsl_search::WorkspaceRoots,
         hash_mode: BaselineHashMode,
-    ) {
-        engine.set_workspace_root(workspace_source_root.to_path_buf());
+    ) -> Result<(), bsl_search::SearchError> {
+        engine.initialize_workspace_roots(workspace_roots)?;
         engine.set_workspace_baseline_hash_mode(hash_mode);
-        if watcher_ready.load(Ordering::SeqCst) {
-            engine.enable_workspace_watcher_mode();
-        }
+        Ok(())
+    }
+
+    fn roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
+        crate::project::workspace_roots(project).0
     }
 
     fn semantic_runtime_status_for_mode(
@@ -659,13 +726,24 @@ impl SharedState {
         }
     }
 
+    /// `watch` is the change hub this boot's baseline must not outrun, with how long to
+    /// wait for it. Every read below is a baseline, and a baseline taken before the watch
+    /// armed can be older than the oldest change anyone will ever report — a window that
+    /// used to be paid for afterwards by a full rescan of every root. Waiting instead of
+    /// paying costs the arming time once; the rescan cost a walk plus a stat and a full
+    /// read of every file in the configuration, on every boot. `None` (tests, and the
+    /// entry points that have no hub) waits for nothing and reports no watch.
     pub(super) fn init_workspace_search_engine(
         workspace_root: &std::path::Path,
-        watcher_ready: &Arc<AtomicBool>,
+        watch: Option<(&WorkspaceChangeHub, super::sync::WatchWaitPolicy)>,
         mode: WorkspaceSearchMode,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
     ) -> Option<WorkspaceSearchInit> {
+        let watch_armed = match watch {
+            Some((hub, policy)) => Self::await_watch(hub, policy),
+            None => false,
+        };
         let cache = graph
             .cache()
             .cloned()
@@ -675,7 +753,7 @@ impl SharedState {
 
         // The daemon only reaches this after `workspace()` validated the project;
         // a config broken by a mid-session edit keeps search down, loudly.
-        let project = match project_model::Project::new(workspace_root) {
+        let project = match crate::project::at(workspace_root) {
             Ok(project) => project,
             Err(e) => {
                 tracing::error!(error = %e, "invalid project; workspace search stays offline");
@@ -701,12 +779,18 @@ impl SharedState {
                 return None;
             };
             let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
-            Self::configure_workspace_engine(
+            if let Err(error) = Self::configure_workspace_engine(
                 &mut engine,
-                &source_path,
-                watcher_ready,
+                Self::roots_of(&project),
                 BaselineHashMode::NormalizedChunks,
-            );
+            ) {
+                tracing::warn!("failed to configure workspace search roots: {error}");
+                return None;
+            }
+            if let Err(error) = engine.set_serves_external_baseline(true) {
+                tracing::warn!("failed to declare the external-baseline mode: {error}");
+                return None;
+            }
 
             let store = engine.store();
             if let Err(error) = store.clear_collection("code") {
@@ -790,6 +874,7 @@ impl SharedState {
             );
 
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::PostgresRemoteOverlay,
                 pending_embed: None,
@@ -807,12 +892,23 @@ impl SharedState {
         // embeddings, throwing away vectors already paid for — the opposite of resume.
         // Changed files are still detected and re-embedded via their content-hash mismatch.
 
-        Self::configure_workspace_engine(
+        if let Err(error) = Self::configure_workspace_engine(
             &mut engine,
-            &source_path,
-            watcher_ready,
+            Self::roots_of(&project),
             BaselineHashMode::RawFileBytes,
-        );
+        ) {
+            tracing::warn!("failed to configure workspace search roots: {error}");
+            return None;
+        }
+        // Declaring the local mode also clears inherited fingerprint rows: they claim
+        // "verified against the manifest", which this mode can neither honour nor refresh —
+        // a row surviving the local period would suppress a same-stat edit after a switch
+        // back to the same snapshot. A failed clear leaves that lie standing, so the boot
+        // fails closed, exactly like the Postgres branch does on its own failed clears.
+        if let Err(error) = engine.set_serves_external_baseline(false) {
+            tracing::warn!("failed to clear inherited overlay fingerprint rows: {error}");
+            return None;
+        }
 
         // Fused cold-build: the graph owns the startup build decision. When it builds
         // the graph fresh it streams the search chunks (with graph context) from the
@@ -832,12 +928,13 @@ impl SharedState {
             // deleted while the daemon was down. Reconcile the store to disk so the overlay baseline
             // truly == working tree before asserting Clean; a walk that could not prove this
             // downgrades to a prime (which never asserts a false clean).
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
             };
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
@@ -908,12 +1005,13 @@ impl SharedState {
             // (incl. edits made while the daemon was down) but did not remove rows for a `.bsl`
             // deleted while down. Reconcile the store to disk so the overlay baseline == working tree
             // before asserting Clean; a walk that could not prove this downgrades to a prime.
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
             };
             return Some(WorkspaceSearchInit {
+                watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
@@ -933,7 +1031,7 @@ impl SharedState {
                 Ok(indexed) => tracing::info!(indexed, "FTS index built"),
                 Err(e) => tracing::warn!("failed to build FTS index: {e}"),
             }
-            if Self::reconcile_boot_store_with_disk(&mut engine, &source_path) {
+            if Self::reconcile_boot_store_with_disk(&mut engine) {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
@@ -941,11 +1039,24 @@ impl SharedState {
         } else {
             // Warm store: prime handles the while-down EDITS; the reconcile still removes rows for
             // files DELETED while down (a prime only hides them lazily and never from the store).
-            Self::reconcile_boot_store_with_disk(&mut engine, &source_path);
+            // A root DECLARED while down is neither: it has no rows to refresh and no rows to
+            // remove, so the skip is taken per root and only the unindexed ones are ingested.
+            match engine.index_unindexed_roots_fts() {
+                Ok(indexed) if indexed > 0 => {
+                    tracing::info!(
+                        indexed,
+                        "indexed a source root declared while the daemon was down"
+                    )
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("failed to index a newly declared source root: {e}"),
+            }
+            Self::reconcile_boot_store_with_disk(&mut engine);
             OverlayInit::Prime
         };
 
         Some(WorkspaceSearchInit {
+            watch_armed,
             engine,
             mode: WorkspaceSearchMode::SqliteLocal,
             pending_embed: None,
@@ -1189,28 +1300,6 @@ impl SharedState {
         }
     }
 
-    pub fn init_search(&self) {
-        if let Some(root) = self.workspace_root.clone() {
-            let watcher_ready = Arc::new(AtomicBool::new(false));
-            Self::spawn_workspace_search_init(
-                Arc::clone(&self.search_engine),
-                Arc::clone(&self.index_progress),
-                Arc::clone(&self.semantic_runtime),
-                Arc::clone(&self.overlay_warmup),
-                root,
-                watcher_ready,
-                self.baseline.clone(),
-                self.workspace_search_mode.clone(),
-                self.graph.clone(),
-                Arc::clone(&self.embed_flight),
-                Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
-                    self.diagnostics.clone(),
-                )),
-                self.workspace_lease.clone(),
-            );
-        }
-    }
-
     fn reference_search_db_path() -> Option<PathBuf> {
         if let Some(base) = dirs::cache_dir() {
             return Some(base.join("bsl-analyzer").join("reference-search.db"));
@@ -1232,19 +1321,21 @@ impl SharedState {
 mod tests {
     use super::super::test_support::{write_common_module_tree, EnvVarGuard, ENV_LOCK};
     use super::{
-        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, OverlayWarmupState,
-        SemanticRuntimeStatus, SharedState, WorkspaceSearchMode,
+        DiagnosticsState, EmbedFlight, GraphState, OverlayInit, SemanticRuntimeStatus, SharedState,
+        WorkspaceSearchMode,
     };
     use crate::baseline::{
         BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
         ExternalBaselineService, RefreshableExternalBaselineSource,
     };
+    use crate::change_hub::WorkspaceChangeHub;
     use bsl_search::{
         BaselineRef, CorpusId, Document, ExternalBaselineConfig, IndexProgress, IndexedDocument,
         SearchEngine,
     };
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
@@ -1338,13 +1429,18 @@ mod tests {
             external_baseline: None,
         });
 
+        // Armed before the boot starts, so the wait for it costs nothing and the branch under
+        // test is the one that bails on the baseline, not the one that waits on the watch.
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(std::time::Duration::from_secs(5)), "the watch must arm");
+
         SharedState::spawn_workspace_search_init(
             Arc::new(Mutex::new(None)),
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
-            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace.clone(),
-            Arc::new(AtomicBool::new(false)),
+            hub.clone(),
+            crate::change_hub::CursorLease::new(hub),
             baseline,
             WorkspaceSearchMode::PostgresRemoteOverlay,
             graph.clone(),
@@ -1353,6 +1449,8 @@ mod tests {
                 DiagnosticsState::disabled(),
             )),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
+            None,
+            Arc::new(AtomicU64::new(0)),
         );
 
         for _ in 0..600 {
@@ -1363,6 +1461,216 @@ mod tests {
             }
         }
         panic!("the boot left the graph at {:?}; it must not stay lazy", graph.status());
+    }
+
+    fn local_workspace_for_boot(dir: &std::path::Path) -> (PathBuf, DeferredBaselineRuntime) {
+        let workspace = dir.to_path_buf();
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Сервер",
+            "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+        );
+        let baseline = DeferredBaselineRuntime::ready(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "sqlite",
+                selection: "test".to_owned(),
+                issue: None,
+                support: None,
+            },
+            external_baseline: None,
+        });
+        (workspace, baseline)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_local_boot(
+        workspace: PathBuf,
+        hub: WorkspaceChangeHub,
+        lease: crate::change_hub::CursorLease,
+        baseline: DeferredBaselineRuntime,
+        engine: super::SharedSearchEngine,
+    ) {
+        SharedState::spawn_workspace_search_init(
+            engine,
+            IndexProgress::new(),
+            Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            workspace,
+            hub,
+            lease,
+            baseline,
+            WorkspaceSearchMode::SqliteLocal,
+            GraphState::disabled(),
+            EmbedFlight::new(),
+            Arc::new(crate::diagnostics_state::ResidentModuleSnapshotSource::new(
+                DiagnosticsState::disabled(),
+            )),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+        );
+    }
+
+    /// Every read this init does is a baseline, and a baseline taken before the watch armed
+    /// can be older than the oldest change anyone will ever report — the window this node
+    /// exists to close. Closing it is nothing but statement order, which is exactly the kind
+    /// of guarantee a later edit erases without noticing, so both reads the init performs
+    /// are pinned, each by its own effect.
+    ///
+    /// The store is pinned by its file: none may exist while the hub is held. The project
+    /// load is pinned by its input: the extension is declared only in the instant before
+    /// release, so an init that read the project early would register one root and an init
+    /// that waited registers two. Checking only the store would leave the project read free
+    /// to drift back above the wait — reopening the window on exactly the input whose drift
+    /// this node is about.
+    #[test]
+    fn the_boot_read_waits_for_the_watch_to_arm() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        // The configuration sits in its own subdirectory and the extension beside it: an
+        // extension nested inside the configuration root is rejected as an overlap, and the
+        // test would then measure the rejection instead of the read order.
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext");
+        for (dir, name) in [(&configuration, "Конфа"), (&extension, "Расширение")] {
+            fs::create_dir_all(dir).unwrap();
+            fs::write(
+                dir.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                dir,
+                "Сервер",
+                "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
+            );
+        }
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+
+        let db_path = crate::cache::search_db_path(&workspace);
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![
+            crate::change_hub::WatchTarget::recursive(workspace.clone()),
+        ]);
+
+        let init = {
+            let workspace = workspace.clone();
+            let hub = hub.clone();
+            std::thread::spawn(move || {
+                SharedState::init_workspace_search_engine(
+                    &workspace,
+                    Some((
+                        &hub,
+                        crate::state::sync::WatchWaitPolicy::new(
+                            std::time::Duration::from_millis(5),
+                            std::time::Duration::from_secs(30),
+                        ),
+                    )),
+                    WorkspaceSearchMode::SqliteLocal,
+                    None,
+                    &GraphState::disabled(),
+                )
+                .map(|init| {
+                    init.engine.workspace_roots().map_or(0, |roots| roots.entries().count())
+                })
+            })
+        };
+
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !db_path.exists(),
+            "the boot opened its store before the watch was up: {}",
+            db_path.display(),
+        );
+
+        // Only now is the extension part of the project.
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"e\", path = \"ext\" }]\n",
+        )
+        .unwrap();
+        hold.release();
+
+        let roots = init.join().unwrap().expect("the init runs to completion once the watch is up");
+        assert_eq!(
+            roots, 2,
+            "the project was read after the watch, so the extension declared meanwhile is registered",
+        );
+        assert!(db_path.exists(), "and the store the init opened is on disk");
+    }
+
+    /// A cursor is subscribed before the thread that will read it exists, so every way out
+    /// that does not end in a running sink has to release it — and there are more of those
+    /// than a list would hold: a watch that never arms, an init that publishes nothing, a
+    /// spawn the operating system refuses. A cursor nobody drains holds entries back for
+    /// the life of the process.
+    #[test]
+    fn a_boot_without_a_watch_leaves_no_cursor_behind() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let (workspace, baseline) = local_workspace_for_boot(dir.path());
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![
+            crate::change_hub::WatchTarget::recursive(workspace.clone()),
+        ]);
+        let lease = crate::change_hub::CursorLease::new(hub.clone());
+        assert_eq!(hub.active_cursor_count(), 1, "the boot holds a cursor from the start");
+
+        spawn_local_boot(workspace, hub.clone(), lease, baseline, Arc::new(Mutex::new(None)));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while hub.active_cursor_count() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            hub.active_cursor_count(),
+            0,
+            "a boot that started no sink must not leave its cursor subscribed",
+        );
+    }
+
+    /// Watcher mode is one-way in the store and doubles as "skip the full rescan", so it may
+    /// only be asked for by something that is actually feeding the overlay. Asserting the
+    /// mode rather than one delivered change is the point: a polling overlay delivers changes
+    /// too, through the full scan, so a delivery test would pass either way.
+    #[test]
+    fn a_boot_with_a_watch_hands_the_cursor_to_a_running_sink() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+
+        let dir = tempdir().unwrap();
+        let (workspace, baseline) = local_workspace_for_boot(dir.path());
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(std::time::Duration::from_secs(5)), "the watch must arm");
+        let lease = crate::change_hub::CursorLease::new(hub.clone());
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(None));
+
+        spawn_local_boot(workspace, hub.clone(), lease, baseline, Arc::clone(&engine));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let mut watching = false;
+        while std::time::Instant::now() < deadline {
+            let mode = engine
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|engine| engine.workspace_overlay_stats().ok().flatten())
+                .map(|stats| stats.watcher_mode);
+            if mode == Some(true) {
+                watching = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(watching, "an armed boot must end with a sink feeding the overlay");
+        assert_eq!(hub.active_cursor_count(), 1, "and the sink owns the cursor it was handed");
     }
 
     /// A postgres config failure (unconfigured section, credential rejection) must NOT
@@ -1402,6 +1710,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     symbol_name: "ПризрачнаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -1424,6 +1733,7 @@ mod tests {
                 snapshot_fingerprint: Some("stale-fp".to_owned()),
                 files: vec![bsl_search::BaselineManifestFile {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     file_fingerprint: "ghost".to_owned(),
                     document_count: 1,
@@ -1434,7 +1744,6 @@ mod tests {
         assert!(stale_engine.store().load_baseline_manifest().unwrap().is_some());
         drop(stale_engine);
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
@@ -1450,7 +1759,7 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1506,6 +1815,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "GhostModule.bsl".to_owned(),
                     symbol_name: "ПризрачнаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -1520,7 +1830,6 @@ mod tests {
             .unwrap();
         drop(stale_engine);
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         let external = ExternalBaselineService::for_test(
             RefreshableExternalBaselineSource::for_test(
                 ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
@@ -1536,7 +1845,7 @@ mod tests {
 
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
             Some(external),
             &crate::graph::GraphState::disabled(),
@@ -1565,12 +1874,11 @@ mod tests {
         fs::write(workspace.join("CommonModule.bsl"), "Процедура СделатьЧтоТо()\nКонецПроцедуры")
             .unwrap();
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
         // A disabled graph has no workspace root, so the fused path is skipped and the
         // standalone semantic branch runs — the path that previously embedded inline.
         let init = SharedState::init_workspace_search_engine(
             workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1757,7 +2065,7 @@ mod tests {
                     .workspace_overlay_dirty_paths_snapshot()
                     .unwrap()
                     .keys()
-                    .any(|p| p.ends_with("Module.bsl"))
+                    .any(|key| key.path.ends_with("Module.bsl"))
             };
             if marked {
                 break;
@@ -1829,13 +2137,12 @@ mod tests {
             "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
         );
         let module = workspace.join("CommonModules").join("Сервер").join("Ext").join("Module.bsl");
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         // First (cold) boot: an empty store, so the FTS index is built from v1 disk and the branch
         // reconciles -> Clean. Dropping the init persists the store under the workspace cache dir.
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1857,7 +2164,7 @@ mod tests {
         // and the store is NOT reconciled with the while-down edit -> this branch must prime.
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1921,12 +2228,11 @@ mod tests {
             "Улетевший",
             "&НаСервере\nФункция ИсчезнувшийСимвол() Экспорт Возврат 1; КонецФункции\n",
         );
-        let watcher_ready = Arc::new(AtomicBool::new(false));
 
         // Cold boot: the deferred branch indexes both modules -> Clean; drop persists the store.
         let cold = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1945,7 +2251,7 @@ mod tests {
         // files, so ONLY the boot reconcile can remove the deleted module's rows.
         let warm = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),
@@ -1966,7 +2272,7 @@ mod tests {
             .all_files_in_collection("code")
             .unwrap()
             .into_iter()
-            .map(|(path, _hash)| path)
+            .map(|(key, _hash)| key.path)
             .collect();
         assert!(
             files.iter().any(|p| p.contains("Постоянный")),
@@ -2007,6 +2313,524 @@ mod tests {
             engine.chunk_count().unwrap(),
             0,
             "the stale chunk of the now-chunkless file is removed from the store",
+        );
+    }
+
+    /// Lay out a workspace whose configuration sits in a SUBDIRECTORY and whose extensions sit
+    /// beside it, then declare both extensions. The nesting matters: it is the only shape where
+    /// a table built on the configuration root and one built on the project root disagree about
+    /// every extension's identifier.
+    fn workspace_with_two_extensions() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(
+            configuration.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &configuration,
+            "Основной",
+            "&НаСервере\nФункция СимволКонфигурации() Экспорт Возврат 1; КонецФункции\n",
+        );
+        for (directory, symbol) in [("ext-a", "СимволПервого"), ("ext-b", "СимволВторого")]
+        {
+            let extension = workspace.join(directory);
+            fs::create_dir_all(&extension).unwrap();
+            fs::write(
+                extension.join("Configuration.xml"),
+                format!("<Configuration><Name>{directory}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                &extension,
+                "Расширенный",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\
+             extensions = [{ name = \"a\", path = \"ext-a\" }, { name = \"b\", path = \"ext-b\" }]\n",
+        )
+        .unwrap();
+        (dir, workspace)
+    }
+
+    /// The production boot must register EVERY declared extension root, and under the identifier
+    /// `WorkspaceRoots` promises: relative to the project directory, not to the configuration root
+    /// ("root ids are relative to it… not the configuration root, which may sit in a
+    /// subdirectory"). The identifier is the stored rows' identity across restarts, so an
+    /// absolute one is a silent, persistent mis-keying rather than a cosmetic difference.
+    /// Two extensions, because a table built from only the first element of the declared list
+    /// satisfies every single-extension check.
+    #[test]
+    fn boot_registers_every_declared_extension_under_a_workspace_relative_id() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let roots = init.engine.workspace_roots().expect("the boot configures a root table");
+        let ids: Vec<&str> = roots.ids().collect();
+        assert!(
+            ids.contains(&"ext-a") && ids.contains(&"ext-b"),
+            "both declared extensions are registered by their workspace-relative ids: {ids:?}",
+        );
+
+        let extension_module = workspace
+            .join("ext-a")
+            .join("CommonModules")
+            .join("Расширенный")
+            .join("Ext")
+            .join("Module.bsl");
+        assert!(
+            init.engine.mark_workspace_path_dirty(&extension_module).unwrap(),
+            "a file of a declared extension resolves to a store key",
+        );
+
+        // The table's workspace is the project directory, but the base callers resolve a hit's
+        // relative path against is the CONFIGURATION root. Conflating the two sends every
+        // relative path one directory level too high, which shows up as unresolvable graph ids
+        // and unrecognised root descriptors rather than as an error.
+        assert_eq!(
+            init.engine.configuration_root(),
+            Some(workspace.join("src").join("cf").as_path()),
+            "the configuration root stays the base of stored relative paths",
+        );
+    }
+
+    /// Drive a graph to `Ready`, or say which state it got stuck in.
+    fn wait_until_graph_ready(graph: &GraphState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match graph.status() {
+                crate::graph::GraphStatus::Ready { .. } => return,
+                crate::graph::GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
+                other => assert!(
+                    std::time::Instant::now() < deadline,
+                    "the graph never became ready; it stayed {other:?}",
+                ),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    fn canonical(path: &std::path::Path) -> PathBuf {
+        path.canonicalize()
+            .unwrap_or_else(|e| panic!("{path:?} must exist to be canonicalized: {e}"))
+    }
+
+    /// The boot declares to the change hub EVERY root the project has — the configuration
+    /// and each extension — plus the workspace directory itself, non-recursively, so a
+    /// config-file edit is delivered even in a nested layout.
+    ///
+    /// The set is observable on a SECOND boot and only there. Every graph path that builds
+    /// re-declares the hub onto its own snapshot's roots, so on a first boot a narrower set
+    /// here is repaired while the test is still waiting for the graph; the publish that
+    /// reuses a matching cache is the one path that declares nothing, which is why this test
+    /// pays for two boots. The same holds for the diagnostics resident, whose publish also
+    /// re-declares — hence the assertion that it never started.
+    ///
+    /// What the hub was ASKED to watch is the subject, not what the watcher took: an
+    /// exhausted inotify limit leaves the declaration intact, so this gate cannot turn red
+    /// on a machine's resource state.
+    #[test]
+    fn a_second_boot_over_a_matching_cache_declares_every_source_root_to_the_hub() {
+        use crate::diagnostics_state::DiagnosticsStatus;
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+        let graph_db = crate::cache::graph_db_path(&workspace);
+
+        let first = SharedState::workspace(workspace.clone()).expect("valid workspace project");
+        wait_until_graph_ready(first.graph());
+        first.shutdown();
+        let built_at_before = crate::graph::test_support::meta_string(&graph_db, "built_at");
+
+        let second = SharedState::workspace(workspace.clone()).expect("valid workspace project");
+        wait_until_graph_ready(second.graph());
+
+        let built_at_now = crate::graph::test_support::meta_string(&graph_db, "built_at");
+        let snapshot = second.graph().snapshot().expect("a ready graph snapshots");
+        let freshness = second.graph().freshness(&snapshot);
+        let resident = second.diagnostics().status();
+        let declared =
+            second.change_hub().expect("a workspace boot owns a change hub").declared_targets();
+        second.shutdown();
+
+        // Warmth, in three parts because the two non-warm branches announce themselves
+        // differently. A finished full build writes its meta before publishing `Ready`, so
+        // the timestamp catches it. The stale-cache publish writes no meta at all — it goes
+        // `Ready` and pre-claims the reload in one lock hold — so at the instant it is
+        // observed only the published state tells it apart from a warm republish. Where its
+        // catch-up lands then decides whether the declaration is repaired at all: a full
+        // rebuild re-declares the roots, a body-only incremental one never does. Neither
+        // outcome is safe to observe over, which is why this refuses both.
+        assert_eq!(
+            built_at_now, built_at_before,
+            "the second boot must republish the cached build, not rebuild it",
+        );
+        assert!(!freshness.stale, "a republished cache is not stale: {:?}", freshness.reload);
+        assert_eq!(freshness.reload, "none", "no catch-up reload may be in flight");
+        // The resident's publish re-declares the hub too, and moves neither the graph's meta
+        // nor its published state — the assertions above cannot see it. `SharedState::workspace`
+        // leaves the resident idle on purpose (serve paths call `warm_start` themselves); this
+        // says so out loud, so moving that call inside the constructor fails here instead of
+        // silently disarming the check below.
+        assert!(
+            matches!(resident, DiagnosticsStatus::Idle),
+            "the resident must not have started; it was {resident:?}",
+        );
+
+        let mut declared: Vec<(PathBuf, bool)> =
+            declared.iter().map(|t| (canonical(&t.path), t.recursive)).collect();
+        declared.sort();
+        // Spelled out rather than recomputed from `project.source_roots()`: the derivation is
+        // what is on trial, and checking a call against itself would pass whatever it returned.
+        let mut expected = vec![
+            (canonical(&workspace.join("src").join("cf")), true),
+            (canonical(&workspace.join("ext-a")), true),
+            (canonical(&workspace.join("ext-b")), true),
+            (canonical(&workspace), false),
+        ];
+        expected.sort();
+        assert_eq!(
+            declared, expected,
+            "the boot declares the configuration, every extension, and the workspace root",
+        );
+    }
+
+    /// Overlapping roots behave in two DIFFERENT ways, and both must survive the boot: an
+    /// extension INSIDE the configuration takes no root of its own (its files stay the
+    /// configuration's, and must remain findable), while an extension CONTAINING the
+    /// configuration registers normally and is told apart from it by the longest matching
+    /// prefix. An implementation that rejects the containing root loses its files entirely —
+    /// the configuration's walk never reaches them.
+    #[test]
+    fn overlapping_roots_keep_every_file_under_exactly_one_owner() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(
+            configuration.join("Configuration.xml"),
+            "<Configuration><Name>Конфа</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &configuration,
+            "Основной",
+            "&НаСервере\nФункция СимволКонфигурации() Экспорт Возврат 1; КонецФункции\n",
+        );
+        // Inside the configuration root.
+        let inner = configuration.join("inner-ext");
+        fs::create_dir_all(&inner).unwrap();
+        fs::write(
+            inner.join("Configuration.xml"),
+            "<Configuration><Name>Внутреннее</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &inner,
+            "Внутренний",
+            "&НаСервере\nФункция СимволВнутреннего() Экспорт Возврат 1; КонецФункции\n",
+        );
+        // Containing the configuration root: the workspace itself.
+        fs::write(
+            workspace.join("Configuration.xml"),
+            "<Configuration><Name>Внешнее</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            &workspace,
+            "Внешний",
+            "&НаСервере\nФункция СимволВнешнего() Экспорт Возврат 1; КонецФункции\n",
+        );
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\
+             extensions = [{ name = \"inner\", path = \"src/cf/inner-ext\" }, \
+             { name = \"outer\", path = \".\" }]\n",
+        )
+        .unwrap();
+        let project = crate::project::at(&workspace);
+        assert!(project.is_ok(), "the fixture project parses: {:?}", project.err());
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+        let roots = init.engine.workspace_roots().expect("the boot configures a root table");
+
+        let owner_of = |path: &std::path::Path| {
+            let canonical = path.canonicalize().expect("the fixture file exists");
+            roots.root_of(path, &canonical).expect("every fixture file has an owner")
+        };
+
+        let inner_module =
+            inner.join("CommonModules").join("Внутренний").join("Ext").join("Module.bsl");
+        let owner = owner_of(&inner_module);
+        assert_eq!(
+            owner.root_id,
+            bsl_search::CONFIGURATION_ROOT_ID,
+            "an extension inside the configuration takes no root of its own",
+        );
+
+        let configuration_module =
+            configuration.join("CommonModules").join("Основной").join("Ext").join("Module.bsl");
+        assert_eq!(
+            owner_of(&configuration_module).root_id,
+            bsl_search::CONFIGURATION_ROOT_ID,
+            "the containing extension does not steal the configuration's own files",
+        );
+
+        let outer_module =
+            workspace.join("CommonModules").join("Внешний").join("Ext").join("Module.bsl");
+        assert_eq!(
+            owner_of(&outer_module).root_id,
+            ".",
+            "a file outside the configuration belongs to the extension that contains it",
+        );
+    }
+
+    /// A cold boot must index the declared extensions, not just the configuration — otherwise the
+    /// extension reaches the index only if someone happens to edit it. And it must key each row by
+    /// its own root: a `cfe` extension repeats the configuration's relative paths wholesale, so a
+    /// writer that keys everything as the configuration silently overwrites one file with the
+    /// other and serves one symbol where two exist.
+    #[test]
+    fn a_cold_boot_indexes_every_root_and_keeps_same_named_paths_apart() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext-a");
+        for (root, name, symbol) in [
+            (&configuration, "Конфа", "СимволКонфигурации"),
+            (&extension, "Расш", "СимволРасширения"),
+        ] {
+            fs::create_dir_all(root).unwrap();
+            fs::write(
+                root.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            // The SAME relative path under both roots: this is the shape a `cfe` extension has.
+            write_common_module_tree(
+                root,
+                "Общий",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
+        )
+        .unwrap();
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let rows: Vec<(String, String)> = init
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        let module_rows: Vec<&(String, String)> =
+            rows.iter().filter(|(_, path)| path.ends_with("Module.bsl")).collect();
+        assert_eq!(
+            module_rows.len(),
+            2,
+            "the same relative path under two roots is two rows: {rows:?}",
+        );
+        assert!(
+            module_rows.iter().any(|(root_id, _)| root_id == "ext-a"),
+            "the extension's row is keyed by its own root: {rows:?}",
+        );
+
+        for symbol in ["СимволКонфигурации", "СимволРасширения"] {
+            let hits = init.engine.text_search(symbol, 10, Some("code")).unwrap();
+            assert!(!hits.is_empty(), "a cold boot serves {symbol}: {rows:?}");
+        }
+    }
+
+    /// A warm FTS store skips re-indexing entirely — that is what makes a restart cheap. But an
+    /// extension declared while the daemon was down has NO rows at all, and "skip everything"
+    /// would leave it out of the store until someone edits it. The cheap skip must therefore be
+    /// per-root, not global: roots that already have rows stay untouched (the whole point), roots
+    /// with none get indexed.
+    #[test]
+    fn a_warm_store_indexes_a_root_declared_while_it_was_down() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // No embedder: this is the FTS-only branch, the one that skips a warm store.
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        let extension = workspace.join("ext-a");
+        for (root, name, symbol) in [
+            (&configuration, "Конфа", "СимволКонфигурации"),
+            (&extension, "Расш", "СимволРасширения"),
+        ] {
+            fs::create_dir_all(root).unwrap();
+            fs::write(
+                root.join("Configuration.xml"),
+                format!("<Configuration><Name>{name}</Name></Configuration>"),
+            )
+            .unwrap();
+            write_common_module_tree(
+                root,
+                "Общий",
+                &format!("&НаСервере\nФункция {symbol}() Экспорт Возврат 1; КонецФункции\n"),
+            );
+        }
+        // First boot: the extension is not declared yet, so the store warms up on the
+        // configuration alone.
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+        let cold = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the first init produces an engine");
+        assert!(cold.engine.chunk_count().unwrap() > 0, "the first boot warms the store");
+        let configuration_rows = cold.engine.store().all_files_in_collection("code").unwrap();
+        drop(cold);
+
+        // The extension is declared while the daemon is down.
+        fs::write(
+            workspace.join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
+        )
+        .unwrap();
+        let warm = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the warm init produces an engine");
+
+        let rows: Vec<(String, String)> = warm
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        assert!(
+            rows.iter().any(|(root_id, _)| root_id == "ext-a"),
+            "the newly declared root is indexed on the warm boot: {rows:?}",
+        );
+        // The point of the warm branch is that the already-indexed root is NOT rewritten.
+        let warm_configuration: Vec<_> = warm
+            .engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .filter(|(key, _)| key.root_id.is_empty())
+            .collect();
+        assert_eq!(
+            warm_configuration, configuration_rows,
+            "the configuration's rows survive the warm boot untouched",
+        );
+    }
+
+    /// Reaching the store is not the same as reaching the SEMANTIC index: `search_code` serves a
+    /// query from its lexical half whenever the semantic half is empty, so "the symbol is found"
+    /// stays true with zero vectors for the extension. What must hold is that the extension's
+    /// chunks enter the embedding queue — that queue is exactly what the deferred pass drains.
+    /// The vectors themselves are written by the background pass over HTTP and are not built here.
+    #[test]
+    fn a_deferred_boot_queues_the_extension_for_embedding() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // A configured embedder selects the semantic deferred branch; the URL is never dialed.
+        let _embedding_url = EnvVarGuard::set("EMBEDDING_URL", "http://127.0.0.1:9/v1");
+        let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
+
+        let (_dir, workspace) = workspace_with_two_extensions();
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+        assert!(init.engine.has_semantic(), "a configured embedder selects the semantic branch");
+
+        let pending = init.engine.store().load_pending_embedding_documents("code").unwrap();
+        let queued_roots: Vec<&str> =
+            pending.iter().map(|(_, document)| document.root_id.as_str()).collect();
+        for root_id in ["", "ext-a", "ext-b"] {
+            assert!(
+                queued_roots.contains(&root_id),
+                "root {root_id:?} has chunks waiting for a vector: {queued_roots:?}",
+            );
+        }
+        // Positive control on the count: an empty queue would satisfy a "no root is missing"
+        // check written as a subset test, so the queue must actually hold chunks.
+        assert!(pending.len() >= 3, "one chunk per module at least: {}", pending.len());
+    }
+
+    /// The negative control for the test above: with nothing declared, the very same file is NOT
+    /// a workspace key. Without it, an implementation that keys every path under the sun would
+    /// pass the positive check.
+    #[test]
+    fn a_file_outside_every_declared_root_has_no_key() {
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let (_dir, workspace) = workspace_with_two_extensions();
+        fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+
+        let init = SharedState::init_workspace_search_engine(
+            &workspace,
+            None,
+            crate::state::WorkspaceSearchMode::SqliteLocal,
+            None,
+            &crate::graph::GraphState::disabled(),
+        )
+        .expect("the local init produces an engine");
+
+        let extension_module = workspace
+            .join("ext-a")
+            .join("CommonModules")
+            .join("Расширенный")
+            .join("Ext")
+            .join("Module.bsl");
+        assert!(
+            !init.engine.mark_workspace_path_dirty(&extension_module).unwrap(),
+            "an undeclared tree stays outside the index",
         );
     }
 }

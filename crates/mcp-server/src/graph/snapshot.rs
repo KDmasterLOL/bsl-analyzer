@@ -26,6 +26,9 @@ pub(super) struct FpMapState {
     pub(super) map: Option<std::collections::BTreeMap<String, (u128, u64)>>,
     pub(super) walked_at: Option<Instant>,
     pub(super) topology: u64,
+    /// Verdict of the walk that anchored `map`: hub deliveries patch stats but
+    /// cannot re-judge completeness, so the last walk's verdict rides along.
+    pub(super) clean: bool,
 }
 
 /// Throttled cache of the last on-disk fingerprint scan. Guarded by its own mutex
@@ -33,6 +36,9 @@ pub(super) struct FpMapState {
 pub(super) struct ScanCache {
     pub(super) at: Instant,
     pub(super) disk_fp: crate::graph_db::GraphFp,
+    /// Whether the scan behind `disk_fp` covered the whole tree — the reload
+    /// decision needs it to retire a `force_stale` build once the tree heals.
+    pub(super) clean: bool,
 }
 
 /// Cap on idle pooled snapshot handles. Concurrent graph queries beyond it just open
@@ -57,6 +63,17 @@ pub(crate) struct GraphSnapshot {
     pub(super) generation: u64,
     fingerprint: crate::graph_db::GraphFp,
     force_stale: bool,
+    /// Modules this artefact was built without being able to read. Makes `stale`
+    /// true — the graph is missing their nodes and edges — WITHOUT making
+    /// `wants_reload` true, since rebuilding cannot read them either.
+    unread_files: usize,
+}
+
+impl GraphSnapshot {
+    /// Modules this artefact could not read when it was built or last patched.
+    pub(crate) fn unread_files(&self) -> usize {
+        self.unread_files
+    }
 }
 
 /// A read handle checked out of (and returned to) [`GraphState::snapshot_pool`].
@@ -103,6 +120,7 @@ impl GraphState {
                 if entry.generation == published_generation {
                     let (generation, fingerprint, force_stale) =
                         (entry.generation, entry.fingerprint, entry.force_stale);
+                    let unread_files = entry.db.unread_files();
                     return Some(GraphSnapshot {
                         graph: PooledGraphDb {
                             entry: Some(entry),
@@ -111,6 +129,7 @@ impl GraphState {
                         generation,
                         fingerprint,
                         force_stale,
+                        unread_files,
                     });
                 }
             }
@@ -118,6 +137,10 @@ impl GraphState {
         let path = self.graph_db_path()?;
         let graph = GraphDb::open(&path).ok()?;
         let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
+        // Read from the artefact itself, like the freshness token beside it: an
+        // adoption path that reconstructed this from elsewhere would report "no holes"
+        // for a graph built blind.
+        let unread_files = graph.unread_files();
         // The file at this path is not necessarily the one WE published: a daemon of another
         // generation over the same workspace (see [`crate::workspace_lease`]) renames its own
         // build into place, and a build made under a different extension topology answers
@@ -147,6 +170,7 @@ impl GraphState {
             generation,
             fingerprint,
             force_stale,
+            unread_files,
         })
     }
 
@@ -156,9 +180,10 @@ impl GraphState {
     /// latest published snapshot. Walks the filesystem, so call from a blocking
     /// context.
     pub(crate) fn freshness(&self, snapshot: &GraphSnapshot) -> Freshness {
-        let disk_fp = self.current_disk_fp();
-        let stale =
-            snapshot.force_stale || disk_fp.map(|fp| fp != snapshot.fingerprint).unwrap_or(false);
+        let disk = self.current_disk_fp();
+        let stale = snapshot.force_stale
+            || snapshot.unread_files > 0
+            || disk.map(|(fp, _)| fp != snapshot.fingerprint).unwrap_or(false);
         // Read before the lock: the lease may go to disk, and the inner mutex serializes every
         // graph query. Drift is still reported (the response says `stale`), but only the daemon
         // that owns the workspace's derived caches acts on it — see [`crate::workspace_lease`].
@@ -169,9 +194,8 @@ impl GraphState {
             return Freshness { revision: snapshot.generation, stale, reload: "none" };
         };
         let mut reload = published.reload.label();
-        let claim_reload = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false)
-            && published.reload != ReloadState::Running
-            && may_build;
+        let claim_reload =
+            published.wants_reload(disk) && published.reload != ReloadState::Running && may_build;
         if claim_reload {
             published.reload = ReloadState::Running;
             reload = "running";
@@ -195,18 +219,25 @@ impl GraphState {
         Freshness { revision: snapshot.generation, stale, reload }
     }
 
-    pub(super) fn current_disk_fp(&self) -> Option<crate::graph_db::GraphFp> {
+    pub(super) fn current_disk_fp(&self) -> Option<(crate::graph_db::GraphFp, bool)> {
         let root = self.workspace_root.as_deref()?;
         self.invalidate_scan_on_hub_drift();
         let mut cache = lock_recover(&self.scan);
         if let Some(c) = cache.as_ref() {
             if c.at.elapsed() < self.drift_interval {
-                return Some(c.disk_fp);
+                return Some((c.disk_fp, c.clean));
             }
         }
+        // Asked about OUR cursor, not about the hub at large: `invalidate_scan_on_hub_drift`
+        // above has just drained it, so any debt left here is the hub's own incompleteness
+        // — while a shared verdict would also carry the debt of a consumer that simply
+        // stopped draining, and put this one on a full walk for as long as that lasted.
         let hub_healthy = matches!(
             &self.change_hub,
-            Some(hub) if matches!(hub.health(), crate::change_hub::Health::Healthy)
+            Some(hub) if matches!(
+                hub.health_for(*lock_recover(&self.hub_cursor)),
+                crate::change_hub::Health::Healthy
+            )
         );
         if !hub_healthy {
             let mut fp_state = lock_recover(&self.fp_map);
@@ -223,8 +254,9 @@ impl GraphState {
                         files: fold_fingerprint_entries(&entries),
                         topology: fp_state.topology,
                     };
-                    *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
-                    return Some(fp);
+                    let clean = fp_state.clean;
+                    *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp, clean });
+                    return Some((fp, clean));
                 }
             }
         }
@@ -233,11 +265,10 @@ impl GraphState {
         // the topology hash come from the same snapshot, so the fold can never
         // pair one project state's files with another's topology.
         let project = super::input::ProjectSnapshot::load(root);
+        let universe = super::universe::ScannedUniverse::scan(&project.scan_roots);
+        let clean = universe.clean();
         let mut entries: Vec<(String, u128, u64)> =
-            super::scan::scan_stats_over_roots(&project.scan_roots)
-                .into_iter()
-                .map(|s| (s.path, s.mtime, s.len))
-                .collect();
+            universe.stats.into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
         entries.sort();
         let topology = super::scan::topology_u64(&project.configs);
         let fp = crate::graph_db::GraphFp { files: fold_fingerprint_entries(&entries), topology };
@@ -246,9 +277,10 @@ impl GraphState {
             fp_state.map = Some(entries.into_iter().map(|(p, m, l)| (p, (m, l))).collect());
             fp_state.walked_at = Some(Instant::now());
             fp_state.topology = topology;
+            fp_state.clean = clean;
         }
-        *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp });
-        Some(fp)
+        *cache = Some(ScanCache { at: Instant::now(), disk_fp: fp, clean });
+        Some((fp, clean))
     }
 
     fn invalidate_scan_on_hub_drift(&self) {
@@ -314,7 +346,8 @@ fn entry_touches_scan_universe(entry: &ChangeEntry) -> bool {
         return true;
     }
     let is_scan_ext = |path: &Path| {
-        matches!(path.extension().and_then(|e| e.to_str()), Some("bsl") | Some("xml"))
+        bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION)
+            || bsl_conventions::has_extension(path, bsl_conventions::XML_EXTENSION)
     };
     is_scan_ext(&entry.canonical) || is_scan_ext(&entry.raw) || entry_is_config_file(entry)
 }
@@ -359,6 +392,21 @@ mod tests {
     use super::*;
     use crate::change_hub::WorkspaceChangeHub;
     use std::time::Duration;
+
+    #[test]
+    fn a_case_variant_module_still_touches_the_scan_universe() {
+        let path = std::path::PathBuf::from("/w/CommonModules/X/Ext/Module.BSL");
+        let entry = ChangeEntry {
+            canonical: path.clone(),
+            raw: path,
+            kind: ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        assert!(
+            entry_touches_scan_universe(&entry),
+            "Module.BSL входит во вселенную скана — хаб обязан сбросить кэш отпечатка"
+        );
+    }
 
     /// A second daemon generation over the same workspace renames ITS build into the shared
     /// path. On a pool miss the reopen must not serve that file when it was built under a
@@ -618,6 +666,80 @@ mod tests {
             }
         }
         assert!(seen, "the hub must deliver events under the newly-added extension root");
+    }
+
+    /// Another consumer that stopped draining owes its own reconcile. Answering that debt
+    /// here used to drop the graph's fingerprint map and buy a full tree walk on every
+    /// freshness check — for as long as the other consumer stayed silent, which is
+    /// forever if its thread is gone.
+    #[test]
+    fn a_foreign_cursors_debt_does_not_cost_the_graph_a_walk() {
+        use crate::change_hub::WorkspaceChangeHub;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let hub = WorkspaceChangeHub::start(vec![root.to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        // Without this the throttled scan cache answers before the health question is ever
+        // asked, and this test would pass no matter what the answer would have been.
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+        // The graph's own cursor exists and is clean from here on: `current_disk_fp`
+        // drains it before it asks anything. Two calls settle the map and its own debt.
+        let _ = graph.current_disk_fp();
+        let _ = graph.current_disk_fp();
+
+        // A stranger subscribes and never drains; then everyone is asked to reconcile.
+        // The graph answers for ITSELF with one walk — that debt is genuinely its own —
+        // and the stranger's stays outstanding for ever after.
+        let _stranger = hub.subscribe();
+        hub.degrade_external();
+        let _ = graph.current_disk_fp();
+
+        let walks = graph.scan_count.load(std::sync::atomic::Ordering::SeqCst);
+        let _ = graph.current_disk_fp();
+        assert_eq!(
+            graph.scan_count.load(std::sync::atomic::Ordering::SeqCst),
+            walks,
+            "somebody else's outstanding reconcile is not the graph's to pay for"
+        );
+    }
+
+    /// The other half, and the one that keeps the first honest: when the HUB cannot
+    /// deliver, the graph must keep walking however clean its own cursor is. Without this
+    /// leg, replacing the health question with an unconditional fast path passes every
+    /// other gate here while going quietly blind.
+    ///
+    /// The carrier is a hub whose thread never started, not a blind root: the graph
+    /// re-declares the hub's targets as it builds, which would take an unwatched root out
+    /// of the declaration and leave the hub honestly healthy — a stand that proves nothing.
+    #[test]
+    fn a_hub_that_cannot_deliver_still_sends_the_graph_back_to_a_walk() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            root.to_path_buf(),
+        )]);
+
+        let mut graph = GraphState::for_workspace(root.to_path_buf()).with_change_hub(hub);
+        graph.drift_interval = Duration::ZERO;
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let _ = graph.current_disk_fp();
+        let walks = graph.scan_count.load(std::sync::atomic::Ordering::SeqCst);
+
+        let _ = graph.current_disk_fp();
+        assert!(
+            graph.scan_count.load(std::sync::atomic::Ordering::SeqCst) > walks,
+            "a hub that will never deliver leaves the graph nothing to trust"
+        );
     }
 
     /// A config-file change delivered by the hub must invalidate the throttled

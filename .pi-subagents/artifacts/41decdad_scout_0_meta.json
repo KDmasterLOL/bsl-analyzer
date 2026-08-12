@@ -1,0 +1,143 @@
+{
+  "runId": "41decdad",
+  "agent": "scout",
+  "task": "Read-only reconnaissance for GitLab issue #209 in /home/itrous/src/tools_migration/lsp/bsl-analyzer at HEAD develop. Map the exact production trigger path for a bsl-analyzer.toml/extensions topology change: change hub -> graph/resident/search, current locks/threads, where fresh Project/WorkspaceRoots are available, and the best composition seam to update search roots. Report file:line evidence, invariants, and open design choices. Do not edit files or run subagents.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/outputs/41decdad/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "processSignal": "SIGTERM",
+  "usage": {
+    "input": 97215,
+    "output": 4662,
+    "cacheRead": 232448,
+    "cacheWrite": 0,
+    "cost": 0.742159,
+    "turns": 11
+  },
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 97215,
+        "output": 4662,
+        "cacheRead": 232448,
+        "cacheWrite": 0,
+        "cost": 0.742159,
+        "turns": 11
+      }
+    }
+  ],
+  "durationMs": 141431,
+  "toolCount": 36,
+  "launchContractDigest": "4a77f0c7e6da822cd4a93b7de2afdf4fd90dcfefd992720d03b4deb56a309da3",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:e414f01f6029c834"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:e414f01f6029c834"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Concrete severity-tagged findings and residual risks cite exact Rust file:line ranges and map hub -> graph/resident/search production flow."
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "git branch --show-current && git rev-parse --short HEAD && git status --porcelain=v1",
+          "result": "passed",
+          "summary": "Confirmed develop at 4b703bd1; only .pi-subagents/ is untracked."
+        }
+      ],
+      "validationOutput": [
+        "Read-only targeted grep/read inspection completed.",
+        "Production trigger, locks/threads, fresh Project availability, and composition seam attested with file:line evidence."
+      ],
+      "residualRisks": [
+        "Root-table replacement alone does not purge persisted rows from removed roots.",
+        "Reloading Project in the publish hook needs a topology fence to avoid mixing a newer config with the just-published graph.",
+        "Invalid mid-session config requires an explicit last-known-good versus fallback-root policy."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "No source diff; wrote only the requested reconnaissance artifact.",
+      "reviewFindings": [
+        "high: crates/mcp-server/src/state/sync.rs:201-239 - config topology drift nudges graph and dirties context but never updates SearchEngine workspace roots.",
+        "medium: crates/bsl-search/src/engine.rs:1299-1305 - set_workspace_roots clears overlay cache but does not reconcile persisted documents from removed roots.",
+        "medium: crates/mcp-server/src/state/sync.rs:201-217 - search treats matching config basenames anywhere as config drift, unlike resident exact-root matching."
+      ],
+      "manualNotes": "Recommended seam: graph publish hook in state/embed.rs, with project::at + project::workspace_roots and a signal-topology guard."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/41decdad_scout_0_transcript.jsonl",
+  "timestamp": 1786468468102
+}

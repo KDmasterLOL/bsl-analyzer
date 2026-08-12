@@ -3,7 +3,7 @@ use crate::change_hub::WorkspaceChangeHub;
 use crate::graph::GraphState;
 use bsl_search::SearchEngine;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,37 +14,99 @@ use std::time::Duration;
 pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// One slice of waiting for the watch to arm, and the whole budget for it.
+///
+/// The slice is only how often the wait comes up for air; the budget is what actually
+/// bounds it. Ten minutes is far more than the initial walk of a large configuration
+/// takes and still finite — a boot that waited forever would never publish an engine at
+/// all, and one that gave up after a single slice abandons the workspace whose walk
+/// merely outlasted a minute.
+const WATCH_READY_SLICE: Duration = Duration::from_secs(60);
+const WATCH_READY_BUDGET: Duration = Duration::from_secs(600);
+
+/// How long the boot waits for the watch, in one slice and in total. A parameter
+/// rather than the two constants read directly, so a test can drive the slow-start path
+/// without standing through a production-sized slice.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct WatchWaitPolicy {
+    slice: Duration,
+    budget: Duration,
+}
+
+impl WatchWaitPolicy {
+    pub(super) const PRODUCTION: Self =
+        Self { slice: WATCH_READY_SLICE, budget: WATCH_READY_BUDGET };
+
+    #[cfg(test)]
+    pub(super) fn new(slice: Duration, budget: Duration) -> Self {
+        Self { slice, budget }
+    }
+}
+
 impl SharedState {
+    /// Wait for the watch to arm; `false` means it will not, or not within the budget.
+    ///
+    /// Three readiness answers, two decisions. `Failed` is permanent, so waiting out the
+    /// budget over it would only delay a boot that has to happen either way. `NotYet` says
+    /// nothing has gone wrong yet — a long initial walk looks exactly like this — so the
+    /// wait resumes until the budget is spent.
+    pub(super) fn await_watch(hub: &WorkspaceChangeHub, policy: WatchWaitPolicy) -> bool {
+        let deadline = std::time::Instant::now() + policy.budget;
+        loop {
+            // The slice never outlives the budget. Asked for a whole slice at the very end
+            // of one, the hub answers a slice past the deadline the caller was promised —
+            // and with a production slice that overshoot is a minute, long enough to be
+            // mistaken for a hub that is still arming.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            match hub.watch_readiness(policy.slice.min(remaining)) {
+                crate::change_hub::WatchReadiness::Armed => return true,
+                crate::change_hub::WatchReadiness::Failed => {
+                    tracing::warn!(
+                        "workspace change hub could not be set up; search overlay stays in scan mode"
+                    );
+                    return false;
+                }
+                crate::change_hub::WatchReadiness::NotYet => {
+                    if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            budget_secs = policy.budget.as_secs(),
+                            "workspace change hub did not arm within the budget; search overlay stays in scan mode for this run of the daemon"
+                        );
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
     /// Drive the search overlay from the change hub. Search is one sink among
     /// several: it drains its own cursor and applies the shared drift classification
     /// (stateless policy) — `.bsl` bodies marked dirty, deleted `.bsl` removed from the
     /// store, `.xml` metadata resolved to the affected documents' context. The raw
     /// (non-canonical) path is used so the strip against the configured source root
     /// still matches when that root has symlinks.
+    ///
+    /// Started by the boot, after the engine is published and only once the watch is up.
+    /// Existing any earlier would mean draining events into an engine that is not there:
+    /// every apply below no-ops on `None` and the batch is gone for good. The cursor is
+    /// older than the boot's own read of disk, so the stream begins strictly before the
+    /// baseline it corrects and nothing falls between the two.
+    ///
+    /// Returns whether the thread started. Until it does, the cursor belongs to the caller.
     pub(super) fn spawn_search_sink(
         hub: WorkspaceChangeHub,
+        cursor: crate::change_hub::SinkCursor,
         engine: SharedSearchEngine,
-        watcher_ready: Arc<AtomicBool>,
-        watch_root: PathBuf,
         graph: GraphState,
-    ) {
+        overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        root_drift_epoch: Arc<AtomicU64>,
+    ) -> bool {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
             .spawn(move || {
-                // Setup is asynchronous, so wait for it to settle rather than racing
-                // a bare `is_watching` check that would bail before the watch arms.
-                if !hub.wait_until_watching(Duration::from_secs(60)) {
-                    tracing::warn!(
-                        "workspace change hub is not watching; search overlay stays in scan mode"
-                    );
-                    return;
-                }
-
-                // Publish readiness before the engine may exist: the engine's own
-                // configuration step checks this flag and enables watcher mode when
-                // it finishes initializing. Enabling here too covers a warm engine
-                // that is already published.
-                watcher_ready.store(true, Ordering::SeqCst);
+                // Watcher mode is one-way in the store and doubles as "skip the full
+                // rescan", so the only place it can be asked for safely is inside the
+                // consumer that feeds it: a running thread is a feeder that exists.
                 if let Ok(mut guard) = engine.lock() {
                     if let Some(engine) = guard.as_mut() {
                         engine.enable_workspace_watcher_mode();
@@ -52,7 +114,7 @@ impl SharedState {
                 }
                 tracing::info!("search overlay sink subscribed to workspace change hub");
 
-                let mut cursor = hub.subscribe();
+                let mut cursor = cursor;
                 let mut generation = 0u64;
                 loop {
                     // Wake on new drift; the timeout only bounds how long a shutdown
@@ -60,16 +122,59 @@ impl SharedState {
                     generation = hub.wait_for_change(generation, Duration::from_secs(30));
                     let batch = hub.drain(cursor);
                     cursor = batch.cursor;
+                    let fresh = !batch.entries.is_empty() || batch.rescan_required;
+                    if Self::root_transition_relevant_drift(
+                        &batch.entries,
+                        batch.rescan_required,
+                        &graph,
+                    ) {
+                        // Before applying the batch: if a root transition already owns the
+                        // engine lock, this event will wait and be attributed by the new roots;
+                        // otherwise the transition sees the epoch move and rejects its stale plan.
+                        root_drift_epoch.fetch_add(1, Ordering::SeqCst);
+                    }
                     Self::apply_search_drift(
                         &engine,
-                        &watch_root,
                         &batch.entries,
                         batch.rescan_required,
                         &graph,
                     );
+                    // Root-transition retry is independent of new file events. This loop
+                    // already owns the bounded wake, so no second timer/thread is needed.
+                    graph.flush_pending_search_roots_refresh();
+                    // Only GENUINE drift kicks the retry driver (and resets its backoff):
+                    // this loop also wakes on the bare 30-second timeout with an empty
+                    // batch, and an unconditional kick would zero the backoff each tick.
+                    if fresh {
+                        if let Some(retry) = &overlay_retry {
+                            retry.kick_fresh();
+                        }
+                    }
                 }
             })
-            .ok();
+            .is_ok()
+    }
+
+    /// Whether a drained batch can invalidate a root-transition filesystem snapshot. Source and
+    /// metadata files, analyzer config, subtree loss and detail-losing rescans are relevant.
+    /// `MaybeRemoved` is conservative because a vanished path cannot be stat-ed to distinguish a
+    /// file from a directory (including directories whose names contain a dot).
+    fn root_transition_relevant_drift(
+        entries: &[crate::change_hub::ChangeEntry],
+        rescan_required: bool,
+        graph: &GraphState,
+    ) -> bool {
+        rescan_required
+            || entries.iter().any(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::change_hub::ChangeKind::MaybeRemoved
+                        | crate::change_hub::ChangeKind::SubtreeRemoved
+                ) || project_model::file_role(&entry.canonical) != project_model::FileRole::Ignored
+                    || project_model::file_role(&entry.raw) != project_model::FileRole::Ignored
+                    || graph.is_workspace_config_path(&entry.canonical)
+                    || graph.is_workspace_config_path(&entry.raw)
+            })
     }
 
     /// Apply one drained batch to the search overlay. Extracted from the sink loop so it
@@ -78,7 +183,6 @@ impl SharedState {
     /// each bucket: `.bsl` bodies dirty, deleted `.bsl` removed, `.xml` → affected context.
     pub(super) fn apply_search_drift(
         engine: &SharedSearchEngine,
-        watch_root: &Path,
         entries: &[crate::change_hub::ChangeEntry],
         rescan_required: bool,
         graph: &GraphState,
@@ -91,13 +195,18 @@ impl SharedState {
             tracing::warn!(
                 "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
             );
-            Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+            // A demand to reconcile does not make the paths in the SAME batch untrue: the hub
+            // keeps its entries on every input but a channel overflow. Deletions are the one
+            // bucket the re-walk below cannot recover — an incomplete walk skips the reconcile
+            // exactly so it does not evict healthy files, and then nothing removes them.
+            Self::remove_delivered_deletions(engine, entries);
+            Self::rewalk_workspace_bsl_dirty(engine);
             // The dropped (or re-arm-superseded) detail may have included an
             // analyzer-config edit no scan of file bodies can reconstruct — treat
             // the rescan like a config change: conservative whole-collection mark
             // plus a graph nudge.
             Self::mark_all_context_dirty(engine);
-            graph.nudge_rebuild();
+            graph.nudge_project_reload();
             return;
         }
 
@@ -116,6 +225,11 @@ impl SharedState {
             Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
         }
 
+        // A vanished directory: the classifier calls it structural and skips it, and the
+        // re-walk below refuses to reconcile when it is incomplete, so without this its
+        // files answer searches until some later clean pass.
+        Self::remove_delivered_subtrees(engine, entries);
+
         // Changed `.xml` metadata: mark the affected documents' stored context stale, then
         // nudge the graph to catch up. The context re-render only runs on a graph publish;
         // without this nudge a user who only calls `search_code` never triggers a rebuild,
@@ -131,13 +245,9 @@ impl SharedState {
         // graph context of EVERY module — with no `.xml` stat moving at all. Mark the
         // whole collection and nudge; the topology-triggered rebuild's publish then
         // re-renders exactly these marks (they carry seqs below the build's start).
-        let config_changed = entries.iter().any(|e| {
-            let is_config = |p: &Path| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n))
-            };
-            is_config(&e.canonical) || is_config(&e.raw)
+        let config_changed = entries.iter().any(|entry| {
+            graph.is_workspace_config_path(&entry.canonical)
+                || graph.is_workspace_config_path(&entry.raw)
         });
         if config_changed {
             // The nudge must NOT be gated on the marking succeeding: with the
@@ -149,12 +259,12 @@ impl SharedState {
                     "config change before the search engine published; relying on the                      graph's topology-changed publish for the context re-render"
                 );
             }
-            graph.nudge_rebuild();
+            graph.nudge_project_reload();
         }
 
         // A subtree removal lost the descendant list → reconsider the whole tree.
         if class.structural_rescan {
-            Self::rewalk_workspace_bsl_dirty(engine, watch_root);
+            Self::rewalk_workspace_bsl_dirty(engine);
         }
     }
 
@@ -169,6 +279,69 @@ impl SharedState {
             Err(e) => {
                 tracing::warn!("failed to mark collection context dirty on config change: {e}");
                 false
+            }
+        }
+    }
+
+    /// Apply the deletions a batch delivered, whatever else that batch also demanded.
+    ///
+    /// A vanished directory is applied through the engine's subtree removal rather than as a
+    /// path: the drain names the directory alone, and the files that went with it are exactly
+    /// what no walk can enumerate any more.
+    fn remove_delivered_deletions(
+        engine: &SharedSearchEngine,
+        entries: &[crate::change_hub::ChangeEntry],
+    ) {
+        let class =
+            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
+        if !class.bsl_removed.is_empty() {
+            Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
+        }
+        Self::remove_delivered_subtrees(engine, entries);
+    }
+
+    /// Take the subtrees a batch reported gone out of the index.
+    ///
+    /// Needed on every branch, not just after an overflow: the classifier treats a subtree
+    /// removal as structural and skips it, so nothing else removes the descendants — and
+    /// they are precisely the paths no event ever names.
+    fn remove_delivered_subtrees(
+        engine: &SharedSearchEngine,
+        entries: &[crate::change_hub::ChangeEntry],
+    ) {
+        // EVERY reported removal is a candidate prefix, with no guessing at what the path
+        // was. The hub cannot tell: it calls a vanished path a subtree by the absence of an
+        // extension, because a path that is gone cannot be asked what it used to be — so a
+        // directory named `Расширение.v1` arrives as an ordinary removal, and one named
+        // `Модули.bsl` as a file. Judging by name is what kept losing whole classes.
+        //
+        // Nor is the state of the path itself the question. A directory that is back says
+        // nothing about which of its files came back with it, and an event says only what
+        // was true when it fired. The engine answers the question actually being asked —
+        // whether each indexed file is still there — one key at a time.
+        let removals: Vec<PathBuf> = entries
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    crate::change_hub::ChangeKind::SubtreeRemoved
+                        | crate::change_hub::ChangeKind::MaybeRemoved
+                )
+            })
+            .map(|e| e.raw.clone())
+            .collect();
+        if removals.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = engine.lock() {
+            if let Some(engine) = guard.as_mut() {
+                match engine.remove_vanished_under(&removals) {
+                    Ok(removed) if removed > 0 => {
+                        tracing::info!(removed, "removed vanished files under reported removals")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("failed to remove vanished files: {e}"),
+                }
             }
         }
     }
@@ -203,7 +376,7 @@ impl SharedState {
     /// conservatively marks the whole collection. REFERENCING modules (a module that
     /// merely READS the changed MDO — its rendered `graph_context` embeds the object's
     /// metadata reads) are additionally resolved through the persisted graph's inbound read
-    /// edges (see [`Self::resolve_referencing_module_rels`]).
+    /// edges (see [`Self::resolve_referencing_module_files`]).
     ///
     /// The filesystem walk (owned-subtree resolution) and the graph db read (referencing
     /// resolution) both run OUTSIDE the engine lock; the lock is taken only briefly for the
@@ -215,31 +388,34 @@ impl SharedState {
         xml_paths: &[crate::drift_classify::DriftPath],
         graph: &GraphState,
     ) -> bool {
-        // Read the workspace root once (brief lock), then resolve owned subtrees off-lock.
-        let workspace_root = {
+        // Take the root table once (brief lock), then resolve owned subtrees off-lock.
+        let roots = {
             let Ok(guard) = engine.lock() else { return false };
             let Some(engine) = guard.as_ref() else { return false };
-            engine.workspace_root().map(Path::to_path_buf)
+            engine.workspace_roots().cloned()
         };
 
         let mut owned_modules: Vec<PathBuf> = Vec::new();
         let mut mark_whole_collection = false;
         for dp in xml_paths {
-            match owned_module_subtree(&dp.raw) {
-                Some(subtree) => owned_modules.extend(walk_bsl_files(&subtree)),
-                None if is_workspace_root_xml(&dp.raw, workspace_root.as_deref()) => {
-                    mark_whole_collection = true;
-                }
-                None => {}
+            // The root question is asked FIRST and independently: a root descriptor may well
+            // have a namesake subtree beside it, and the collection its change reaches is a
+            // superset of that subtree. Deciding by whichever branch matched first would
+            // leave the rest of the tree serving a stale context.
+            if is_root_descriptor(roots.as_ref(), &dp.raw) {
+                mark_whole_collection = true;
+                continue;
+            }
+            if let Some(subtree) = owned_module_subtree(&dp.raw) {
+                owned_modules.extend(walk_bsl_files(&subtree));
             }
         }
 
         // Referencing modules: resolved off any lock via the persisted graph, BEFORE the
         // store-write lock below (the graph db read must never nest under the engine lock).
-        let referencing_rels =
-            Self::resolve_referencing_module_rels(graph, xml_paths, workspace_root.as_deref());
+        let referencing_files = Self::resolve_referencing_module_files(graph, xml_paths);
 
-        if owned_modules.is_empty() && referencing_rels.is_empty() && !mark_whole_collection {
+        if owned_modules.is_empty() && referencing_files.is_empty() && !mark_whole_collection {
             return false;
         }
 
@@ -259,21 +435,33 @@ impl SharedState {
                 Err(e) => tracing::warn!(path = ?bsl, "failed to mark context dirty: {e}"),
             }
         }
-        for rel in referencing_rels {
-            match engine.mark_workspace_path_context_dirty(&rel) {
+        for file in referencing_files {
+            match engine.mark_workspace_path_context_dirty(&file) {
                 Ok(did) => marked |= did,
                 Err(e) => {
-                    tracing::warn!(path = %rel, "failed to mark referencing context dirty: {e}")
+                    tracing::warn!(path = ?file, "failed to mark referencing context dirty: {e}")
                 }
             }
         }
         marked
     }
 
-    /// Reverse-look-up the workspace modules that READ any changed MDO, returning their
-    /// workspace-relative `.bsl` keys (the spelling the `code` collection stores). A metadata
-    /// change alters the `graph_context` of every module that reads the object — not just its
-    /// owned modules — and the persisted graph is the only record of who reads what.
+    /// Reverse-look-up the workspace modules that READ any changed MDO, returning the graph's
+    /// own absolute spelling of each. A metadata change alters the `graph_context` of every
+    /// module that reads the object — not just its owned modules — and the persisted graph is
+    /// the only record of who reads what.
+    ///
+    /// Absolute, because attributing a path to its root is one procedure and it lives on the
+    /// root table: a caller that relativised the path itself would be a second one, and being
+    /// able to strip only ONE root's prefix is exactly how the modules of every other root
+    /// used to fall out of the result.
+    ///
+    /// The graph keeps these paths as strings, so under a root whose name holds bytes no
+    /// `str` can carry they come back rendered: such a path attributes to nothing, or — with
+    /// roots nested inside one another — to an ancestor, under whose key the mark normally
+    /// finds no row. Either way the module itself waits for a wider mark, and that is the
+    /// deliberate answer: a rendering fits several roots at once, and a key guessed from it
+    /// would name a file that did not change.
     ///
     /// Queries the CURRENTLY PUBLISHED graph via [`GraphState::snapshot`], which gates on a
     /// published build and opens the read-only db off the graph's inner lock. Pre-drift edges
@@ -287,33 +475,24 @@ impl SharedState {
     /// Off-lock throughout: opens the graph db once and runs one index-backed inbound-edge
     /// query per resolved MDO node id, so a batch of N `.xml` edits does at most N indexed
     /// queries, never a table scan.
-    fn resolve_referencing_module_rels(
+    fn resolve_referencing_module_files(
         graph: &GraphState,
         xml_paths: &[crate::drift_classify::DriftPath],
-        workspace_root: Option<&Path>,
-    ) -> std::collections::HashSet<String> {
-        let mut rels = std::collections::HashSet::new();
+    ) -> std::collections::HashSet<PathBuf> {
+        let mut files = std::collections::HashSet::new();
         let mdo_ids: Vec<String> =
             xml_paths.iter().filter_map(|dp| xml_to_mdo_id(&dp.raw)).collect();
         if mdo_ids.is_empty() {
-            return rels;
+            return files;
         }
-        let Some(workspace_root) = workspace_root else { return rels };
-        let Some(snapshot) = graph.snapshot() else { return rels };
-        let source_prefix = canonical_source_prefix(workspace_root);
+        let Some(snapshot) = graph.snapshot() else { return files };
         for mdo_id in mdo_ids {
             match snapshot.graph.referencing_files(&mdo_id) {
-                Ok(files) => {
-                    for file in files {
-                        if let Some(rel) = graph_file_to_rel(&file, &source_prefix) {
-                            rels.insert(rel);
-                        }
-                    }
-                }
+                Ok(found) => files.extend(found.into_iter().map(PathBuf::from)),
                 Err(e) => tracing::warn!(mdo = %mdo_id, "referencing-files lookup failed: {e}"),
             }
         }
-        rels
+        files
     }
 
     /// Re-mark every workspace `.bsl` dirty for the search overlay, then reconcile the
@@ -322,39 +501,31 @@ impl SharedState {
     /// must reconsider the whole tree. Marking alone only covers files that STILL exist; a
     /// file deleted during the lost window would keep its FTS rows and vectors forever, so
     /// the reconcile diffs the walked (present) set against the stored set and removes the
-    /// gone paths. The walk runs OUTSIDE the engine lock; the reconcile takes the lock only
-    /// for its bounded O(stored) store writes.
-    fn rewalk_workspace_bsl_dirty(engine: &SharedSearchEngine, watch_root: &Path) {
+    /// gone paths. The walk covers EVERY registered root, through the shared source-set walk,
+    /// and runs OUTSIDE the engine lock; the reconcile takes the lock only for its bounded
+    /// O(stored) store writes.
+    fn rewalk_workspace_bsl_dirty(engine: &SharedSearchEngine) {
+        let Some(declared) = Self::registered_roots(engine) else { return };
+        let set = project_model::SourceSet::scan(&declared);
         let mut present: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        let mut walk_errors = 0usize;
-        for file in walkdir::WalkDir::new(watch_root).follow_links(true) {
-            let file = match file {
-                Ok(file) => file,
-                Err(e) => {
-                    walk_errors += 1;
-                    tracing::warn!("search rescan walk error: {e}");
-                    continue;
-                }
-            };
-            if file.file_type().is_file() {
-                let path = file.path();
-                if path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
-                    present.insert(path.to_path_buf());
-                }
-                Self::mark_search_path_dirty(engine, path);
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
             }
+            present.insert(file.walked.clone());
+            Self::mark_search_path_dirty(engine, &file.walked);
         }
+        let incomplete = !set.clean();
         #[cfg(test)]
-        if FORCE_REWALK_WALK_ERROR.load(Ordering::SeqCst) {
-            walk_errors += 1;
-        }
-        // A partial walk (permission error, symlink loop, transient IO) is NOT authoritative:
-        // `present` is missing healthy files, so reconciling against it would delete them from
-        // the store. Only reconcile when the walk completed with zero errors; marking the found
-        // files dirty already happened above regardless.
-        if walk_errors > 0 {
+        let incomplete =
+            incomplete || FORCE_REWALK_WALK_ERROR.load(std::sync::atomic::Ordering::SeqCst);
+        // An incomplete scan is NOT authoritative: `present` is missing healthy files, so
+        // reconciling against it would delete them from the store. Marking the found files dirty
+        // already happened above regardless.
+        if incomplete {
             tracing::warn!(
-                walk_errors,
+                unreadable = set.unreadable,
+                canonical_fallbacks = set.canonical_fallbacks,
                 "search rescan walk incomplete; skipping reconcile to avoid deleting healthy files"
             );
             return;
@@ -375,6 +546,17 @@ impl SharedState {
         }
     }
 
+    /// The declared spelling of every root the engine indexes, read under a brief lock so the
+    /// walk itself runs with none held. Reading the table rather than a path captured at startup
+    /// is what keeps the walk and the store's keys speaking of the same universe: a walk narrower
+    /// than the table makes the reconcile below delete the roots it never visited.
+    fn registered_roots(engine: &SharedSearchEngine) -> Option<Vec<PathBuf>> {
+        let guard = engine.lock().ok()?;
+        let engine = guard.as_ref()?;
+        let roots = engine.workspace_roots()?;
+        Some(roots.entries().map(|(_, declared)| declared.to_path_buf()).collect())
+    }
+
     /// Reconcile the just-indexed workspace store against on-disk truth at BOOT, on the still-owned
     /// engine (no shared lock held), BEFORE the overlay-init decision is applied. A boot index step
     /// (`index_directory_deferred` / `index_directory_fts`, or a fused parse ingest) only re-ingests
@@ -393,37 +575,25 @@ impl SharedState {
     /// after a walk error, but a prime never ASSERTS a clean store the way `Clean` does — it only
     /// serves what it can see and hides the rest — so it is the strictly safer degraded default,
     /// matching the pre-existing behavior for a store that could not be reconciled.
-    pub(super) fn reconcile_boot_store_with_disk(
-        engine: &mut SearchEngine,
-        source_root: &Path,
-    ) -> bool {
-        let mut present: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        let mut walk_errors = 0usize;
-        for entry in walkdir::WalkDir::new(source_root).follow_links(true) {
-            match entry {
-                Ok(entry) => {
-                    if entry.file_type().is_file()
-                        && entry
-                            .path()
-                            .extension()
-                            .is_some_and(|ext| ext.eq_ignore_ascii_case("bsl"))
-                    {
-                        present.insert(entry.path().to_path_buf());
-                    }
-                }
-                Err(e) => {
-                    walk_errors += 1;
-                    tracing::warn!("search boot reconcile walk error: {e}");
-                }
-            }
-        }
+    pub(super) fn reconcile_boot_store_with_disk(engine: &mut SearchEngine) -> bool {
+        let Some(roots) = engine.workspace_roots() else { return false };
+        let declared: Vec<PathBuf> =
+            roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        let present: std::collections::HashSet<PathBuf> = set
+            .files
+            .iter()
+            .filter(|file| file.role == project_model::FileRole::Source)
+            .map(|file| file.walked.clone())
+            .collect();
+        let incomplete = !set.clean();
         #[cfg(test)]
-        if FORCE_REWALK_WALK_ERROR.load(Ordering::SeqCst) {
-            walk_errors += 1;
-        }
-        if walk_errors > 0 {
+        let incomplete =
+            incomplete || FORCE_REWALK_WALK_ERROR.load(std::sync::atomic::Ordering::SeqCst);
+        if incomplete {
             tracing::warn!(
-                walk_errors,
+                unreadable = set.unreadable,
+                canonical_fallbacks = set.canonical_fallbacks,
                 "search boot reconcile walk incomplete; priming the overlay instead of clean-init"
             );
             return false;
@@ -447,7 +617,7 @@ impl SharedState {
     /// Mark one path dirty in the search overlay if it is a `.bsl` file. Filtering
     /// on the consumer side keeps the hub itself extension-agnostic.
     fn mark_search_path_dirty(engine: &SharedSearchEngine, path: &Path) {
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+        if !project_model::is_bsl_source_path(path) {
             return;
         }
         if let Ok(guard) = engine.lock() {
@@ -474,17 +644,17 @@ impl SharedState {
 /// absent/loading, or a path it cannot serve, is simply missing from the map and the
 /// reindex disk-reads it — so search never regresses when the resident is unavailable.
 pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
-    let (source, workspace_root, dirty) = {
+    let (source, roots, dirty) = {
         let Ok(guard) = engine.lock() else { return };
         let Some(engine) = guard.as_ref() else { return };
         let Some(source) = engine.module_snapshot_source() else { return };
-        // The overlay keys dirty paths relative to THIS engine root (the project's — possibly
-        // nested — source root); resolving them for the resident needs the same root.
-        let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf) else {
+        // The overlay keys dirty files by (root, path relative to that root);
+        // resolving them for the resident needs the same table.
+        let Some(roots) = engine.workspace_roots().cloned() else {
             return;
         };
         match engine.workspace_overlay_dirty_paths() {
-            Ok(dirty) => (source, workspace_root, dirty),
+            Ok(dirty) => (source, roots, dirty),
             Err(e) => {
                 tracing::debug!("overlay dirty-path read failed: {e}");
                 return;
@@ -504,24 +674,26 @@ pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
 
     // Resident reads run OFF the engine lock. The `!Send` parses stay in this local map on
     // the calling thread and never cross a thread or an await boundary.
-    let mut snapshots: std::collections::HashMap<String, bsl_search::ModuleSnapshot> =
+    let mut snapshots: std::collections::HashMap<bsl_search::FileKey, bsl_search::ModuleSnapshot> =
         std::collections::HashMap::new();
     // Cap the per-query resident prefetch: a branch switch can dirty thousands of paths, and
     // fetching+reindexing them all on the query thread would be unbounded work. Serve at most
     // this many from the shared parse per query; the remainder STAY dirty and are picked up by
     // the query's own lazy disk refresh and by later queries' prefetches. The cap is the whole
     // budget — no separate time budget needed.
-    for rel_path in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
-        // Resolve the engine-relative dirty path to an ABSOLUTE path against the engine root
-        // before handing it to the resident: the resident is indexed under the OUTER workspace
-        // root, so a bare relative path would be re-joined against that root and silently miss
-        // on every nested config. The snapshot map stays keyed by the engine rel, which is
-        // what `reindex_dirty_from_snapshots` looks up.
-        let abs_path = workspace_root.join(rel_path);
+    for key in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
+        // Resolve the dirty key to an ABSOLUTE path through its own root before handing it to
+        // the resident: the resident is indexed under the OUTER workspace root, so a bare
+        // root-relative path would be re-joined against that root and silently miss on every
+        // nested config — and on every extension. The map stays keyed by the store key, which
+        // is what `reindex_dirty_from_snapshots` looks up.
+        let Some(abs_path) = roots.resolve(key) else {
+            continue;
+        };
         if let bsl_search::SnapshotFetch::Fetched(snapshot) =
             source.text_and_parse(&abs_path.to_string_lossy())
         {
-            snapshots.insert(rel_path.clone(), snapshot);
+            snapshots.insert(key.clone(), snapshot);
         }
     }
     if snapshots.is_empty() {
@@ -555,7 +727,7 @@ fn walk_bsl_files(dir: &Path) -> Vec<PathBuf> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(|e| e.path().to_path_buf())
-        .filter(|p| p.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
+        .filter(|p| project_model::is_bsl_source_path(p))
         .collect()
 }
 
@@ -573,40 +745,41 @@ fn xml_to_mdo_id(xml: &Path) -> Option<String> {
     Some(format!("mdo/{}/{name}", mdo_type.english_name()))
 }
 
-/// The canonical, `/`-normalised source prefix used to relativise a graph `nodes.file`
-/// (stored absolute + canonical by `enumerate_bsl_files`) into the `code` collection key,
-/// derived exactly as `FusedChunkWriter` derives its stored rel paths so the two agree.
-fn canonical_source_prefix(workspace_root: &Path) -> String {
-    workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| workspace_root.to_path_buf())
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
-/// Relativise an absolute, `/`-normalised graph `nodes.file` to the `code` collection key,
-/// mirroring `FusedChunkWriter`: strip the source prefix, require a path-separator boundary
-/// so a sibling root whose name merely starts with the prefix string is not mistaken for a
-/// child, then drop the leading `/`. `None` for a file outside the source root (an extension
-/// module the local index omits) or an empty remainder.
-fn graph_file_to_rel(file: &str, source_prefix: &str) -> Option<String> {
-    let prefix = source_prefix.trim_end_matches('/');
-    let rel =
-        file.strip_prefix(prefix).filter(|rest| rest.starts_with('/'))?.trim_start_matches('/');
-    (!rel.is_empty()).then(|| rel.to_owned())
-}
-
-/// Whether `xml` sits directly at the workspace root — any such descriptor
-/// (`Configuration.xml`, `ConfigDumpInfo.xml`, a plugin's root descriptor, …) can shift
-/// any module's context, so it is handled conservatively by marking the whole collection
-/// rather than a resolvable owned subtree. When the workspace root is unknown, fall back
-/// to the `Configuration.xml` name so the conservative branch still fires for the one
-/// descriptor guaranteed to live at the root.
-fn is_workspace_root_xml(xml: &Path, workspace_root: Option<&Path>) -> bool {
-    match workspace_root {
-        Some(root) => xml.parent() == Some(root),
-        None => xml.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Configuration.xml")),
+/// Whether `xml` is the root descriptor of a source tree — `Configuration.xml`,
+/// `ConfigDumpInfo.xml`, a plugin's own root descriptor. Such a change can shift ANY
+/// module's context, so it is answered conservatively with a whole-collection mark rather
+/// than a resolvable owned subtree.
+///
+/// Three independent signs, because no one of them covers the class:
+///
+/// - the path attributes to the TOP LEVEL of a registered root. Ranked by both spellings,
+///   so an aliased delivery answers the same as a canonical one; and it is the only sign
+///   that recognises a root which is not a 1C dump at all and therefore carries no
+///   `Configuration.xml`;
+/// - the descriptor's own directory CONTAINS a `Configuration.xml` — the same disk probe
+///   by which the project model tells an extension from an ordinary directory. The root
+///   table deliberately omits the roots it rejected (one inside the configuration, one
+///   whose identifier was taken), and a tree nobody declared is not in it either, so a
+///   question asked of the table alone leaves their descriptors unrecognised;
+/// - the file's own name is `Configuration.xml`. What is left when the descriptor itself
+///   is what vanished: the neighbour the sign above looks for is the file now gone.
+fn is_root_descriptor(roots: Option<&bsl_search::WorkspaceRoots>, xml: &Path) -> bool {
+    let at_root_of_a_registered_root = roots
+        .and_then(|roots| roots.key_of_path(xml))
+        .is_some_and(|key| Path::new(&key.path).components().count() == 1);
+    if at_root_of_a_registered_root {
+        return true;
     }
+    let beside_a_configuration_xml = xml.parent().is_some_and(|dir| {
+        bsl_conventions::find_child_ci(
+            dir,
+            bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+        )
+        .is_some_and(|found| found.is_file())
+    });
+    beside_a_configuration_xml
+        || xml.file_name().and_then(|n| n.to_str()).and_then(bsl_conventions::conventional_of)
+            == Some(bsl_conventions::ConventionalName::ConfigurationXml)
 }
 
 #[cfg(test)]
@@ -618,14 +791,276 @@ mod tests {
     use crate::state::types::OverlayInit;
     use bsl_search::{IndexedDocument, SearchEngine};
     use std::fs;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
 
     #[test]
+    fn root_transition_epoch_ignores_unrelated_files_and_tracks_keyspace_drift() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let graph = crate::graph::GraphState::for_workspace(root.clone());
+        let entry = |path: std::path::PathBuf, kind| crate::change_hub::ChangeEntry {
+            canonical: path.clone(),
+            raw: path,
+            kind,
+            seq: 1,
+        };
+
+        assert!(!SharedState::root_transition_relevant_drift(
+            &[entry(root.join("notes.txt"), crate::change_hub::ChangeKind::MaybeChanged)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("notes.txt"), crate::change_hub::ChangeKind::MaybeRemoved)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Module.bsl"), crate::change_hub::ChangeKind::MaybeChanged)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Configuration.xml"), crate::change_hub::ChangeKind::MaybeChanged,)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("Sub.v1"), crate::change_hub::ChangeKind::MaybeRemoved)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("bsl-analyzer.toml"), crate::change_hub::ChangeKind::MaybeChanged,)],
+            false,
+            &graph,
+        ));
+        assert!(SharedState::root_transition_relevant_drift(
+            &[entry(root.join("gone"), crate::change_hub::ChangeKind::SubtreeRemoved)],
+            false,
+            &graph,
+        ));
+    }
+
+    /// Entering the event stream costs the overlay nothing. The window a reconcile used to
+    /// pay for is not a window any more: the baseline is taken after the watch is up and the
+    /// cursor is older than both, so there is nothing for a rescan to recover — and a rescan
+    /// is not cheap. It re-walks every root, canonicalizes and stats every file, and marks
+    /// them all dirty, which a later refresh pays for by reading each one off disk in full.
+    #[test]
+    fn a_boot_entering_event_mode_does_not_rescan() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        // Written BEFORE the watch arms, so no event ever reports it: whatever ends up in the
+        // dirty set got there from a rescan and from nothing else.
+        fs::write(workspace.join("Module.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let (hub, hold) =
+            WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(workspace.clone())]);
+        let cursor = hub.subscribe();
+        hold.release();
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the watch must arm");
+        assert!(SharedState::spawn_search_sink(
+            hub.clone(),
+            cursor,
+            Arc::clone(&engine_arc),
+            crate::graph::GraphState::disabled(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+        ));
+        std::thread::sleep(Duration::from_millis(500));
+
+        let snapshot = {
+            let guard = engine_arc.lock().unwrap();
+            guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+        };
+        assert!(
+            snapshot.is_empty(),
+            "a start that observed nothing must cost the overlay nothing: {snapshot:?}",
+        );
+    }
+
+    /// The cursor is subscribed before the boot reads disk and long before there is an engine
+    /// to feed, so changes landing in between are not lost — they wait in the accumulator
+    /// until a sink exists to drain them. The sink applies everything to a published engine
+    /// or it does not exist: a drain into an absent engine no-ops path by path and the batch
+    /// is gone for good.
+    #[test]
+    fn an_event_before_the_engine_exists_still_reaches_the_overlay() {
+        use crate::change_hub::WorkspaceChangeHub;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the watch must arm");
+        let cursor = hub.subscribe();
+
+        // Happens while the boot would still be reading disk: no engine yet, and the only
+        // record of it is the cursor's own backlog.
+        fs::write(workspace.join("Module.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while hub.events_seen() == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hub.events_seen() > 0, "the hub observed the write");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        assert!(SharedState::spawn_search_sink(
+            hub.clone(),
+            cursor,
+            Arc::clone(&engine_arc),
+            crate::graph::GraphState::disabled(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut delivered = false;
+        while Instant::now() < deadline {
+            let snapshot = {
+                let guard = engine_arc.lock().unwrap();
+                guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
+            };
+            if snapshot.keys().any(|key| key.path.ends_with("Module.bsl")) {
+                delivered = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(delivered, "a change that predates the engine is still the overlay's to apply");
+    }
+
+    /// A workspace whose initial walk outlasts one slice of patience is an ordinary large
+    /// configuration, not a failure — and a boot that gave up on it would leave the search
+    /// overlay in scan mode for the whole life of the daemon.
+    #[test]
+    fn the_boot_keeps_waiting_while_the_hub_is_still_starting() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let releaser = {
+            let hold = hold.shared();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(100));
+                hold.release();
+            })
+        };
+        let started = Instant::now();
+        let armed = SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(5), Duration::from_secs(30)),
+        );
+        let waited = started.elapsed();
+        releaser.join().unwrap();
+
+        assert!(armed, "a hub that is merely slow to start must not be given up on");
+        assert!(
+            waited >= Duration::from_millis(100),
+            "the wait has to have crossed several expired slices to prove it resumed: {waited:?}"
+        );
+    }
+
+    /// The budget is what bounds the wait — not a count of slices, which is what a naive
+    /// "try twice" implementation would bound it by and which no test of mere termination
+    /// can tell apart. Measured with a slice far shorter than the budget, so an
+    /// implementation stopping after any small number of slices returns far too early.
+    #[test]
+    fn the_boot_gives_up_on_the_budget_and_not_before() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let (hub, hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let started = Instant::now();
+        let armed = SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(5), Duration::from_millis(400)),
+        );
+        let waited = started.elapsed();
+        hold.release();
+
+        assert!(!armed, "a hub that never arms must not hold the thread for ever");
+        assert!(
+            waited >= Duration::from_millis(400),
+            "giving up before the budget abandons a workspace that was merely slow: {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(10), "and it must give up: {waited:?}");
+    }
+
+    /// The budget is a ceiling on the whole wait, so the last slice is cut to whatever is
+    /// left of it. Asked for a full slice at the very end of one, the hub answers a slice
+    /// past the deadline the caller was promised — a minute, at the production slice, which
+    /// reads exactly like a hub that is still arming.
+    #[test]
+    fn the_wait_never_overshoots_its_budget_by_a_slice() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let (hub, _hold) = WorkspaceChangeHub::start_targets_held(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let started = Instant::now();
+        let armed = SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(400), Duration::from_millis(20)),
+        );
+        let waited = started.elapsed();
+
+        assert!(!armed, "the hub is held short of arming");
+        assert!(
+            waited < Duration::from_millis(200),
+            "a budget of 20ms must not be spent as a 400ms slice: {waited:?}"
+        );
+    }
+
+    /// A permanent failure is answered at once. Waiting out a ten-minute budget over a hub
+    /// that has already said it will never arm only delays a boot that has to happen anyway.
+    #[test]
+    fn the_boot_does_not_wait_out_a_permanent_failure() {
+        use crate::change_hub::{WatchTarget, WorkspaceChangeHub};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_with_unstartable_thread(vec![WatchTarget::recursive(
+            dir.path().to_path_buf(),
+        )]);
+
+        let started = Instant::now();
+        assert!(!SharedState::await_watch(
+            &hub,
+            super::WatchWaitPolicy::new(Duration::from_millis(50), Duration::from_secs(600))
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a permanent failure is not something to spend a budget on"
+        );
+    }
+
+    #[test]
     fn search_sink_marks_only_bsl_paths_dirty() {
         use crate::change_hub::WorkspaceChangeHub;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
 
         let dir = tempdir().unwrap();
@@ -641,22 +1076,17 @@ mod tests {
         // A second cursor observes the raw accumulator independently of the sink.
         let observer = hub.subscribe();
 
-        let watcher_ready = Arc::new(AtomicBool::new(false));
-        SharedState::spawn_search_sink(
+        // Subscribed by the caller, as the boot does: the sink is handed a cursor that
+        // already covers everything from here on.
+        let cursor = hub.subscribe();
+        assert!(SharedState::spawn_search_sink(
             hub.clone(),
+            cursor,
             Arc::clone(&engine_arc),
-            Arc::clone(&watcher_ready),
-            workspace.clone(),
             crate::graph::GraphState::disabled(),
-        );
-
-        // Wait deterministically for the sink to subscribe (observer + sink = 2
-        // cursors) before mutating the tree, so its cursor covers the changes below.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while hub.active_cursor_count() < 2 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(hub.active_cursor_count(), 2, "the sink subscribed its cursor");
+            None,
+            Arc::new(AtomicU64::new(0)),
+        ));
 
         let bsl = workspace.join("Module.bsl");
         std::fs::write(&bsl, "Процедура П()\nКонецПроцедуры").unwrap();
@@ -670,7 +1100,7 @@ mod tests {
                 let guard = engine_arc.lock().unwrap();
                 guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
             };
-            if snapshot.keys().any(|p| p.ends_with("Module.bsl")) {
+            if snapshot.keys().any(|key| key.path.ends_with("Module.bsl")) {
                 dirty_has_bsl = true;
                 break;
             }
@@ -683,10 +1113,14 @@ mod tests {
             guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
         };
         assert!(
-            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            !snapshot.keys().any(|key| key.path.ends_with("Configuration.xml")),
             "search ignores non-.bsl paths",
         );
-        assert!(watcher_ready.load(Ordering::SeqCst), "the sink publishes watcher readiness");
+        let watcher_mode = {
+            let guard = engine_arc.lock().unwrap();
+            guard.as_ref().unwrap().workspace_overlay_stats().unwrap().unwrap().watcher_mode
+        };
+        assert!(watcher_mode, "a running sink is what puts the overlay into watcher mode");
 
         // The hub itself accepted the .xml change; only the consumer filtered it.
         // The event is asynchronous, so poll the observer cursor until it lands.
@@ -729,17 +1163,190 @@ mod tests {
         fs::write(&b, "Процедура П()\nКонецПроцедуры").unwrap();
         fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
 
-        SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
 
         let snapshot = {
             let guard = engine_arc.lock().unwrap();
             guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap()
         };
-        assert!(snapshot.keys().any(|p| p.ends_with("A.bsl")), "top-level .bsl re-marked");
-        assert!(snapshot.keys().any(|p| p.ends_with("B.bsl")), "nested .bsl re-marked");
+        assert!(snapshot.keys().any(|key| key.path.ends_with("A.bsl")), "top-level .bsl re-marked");
+        assert!(snapshot.keys().any(|key| key.path.ends_with("B.bsl")), "nested .bsl re-marked");
         assert!(
-            !snapshot.keys().any(|p| p.ends_with("Configuration.xml")),
+            !snapshot.keys().any(|key| key.path.ends_with("Configuration.xml")),
             "non-.bsl paths are left alone",
+        );
+    }
+
+    /// The rescan walk feeds `reconcile_workspace_files`, which deletes every stored key it
+    /// does not find on disk. So a walk narrower than the engine's root table is not merely
+    /// incomplete — it is destructive: the first hub overflow would wipe every extension's rows
+    /// while the files sit untouched on disk. The walk must therefore cover the SAME roots the
+    /// table knows, and both halves are checked: the extension's file gets marked (the walk
+    /// reached it) and its row survives (the reconcile did not disown it).
+    #[test]
+    fn an_overflow_rescan_covers_every_registered_root() {
+        let dir = tempdir().unwrap();
+        // The extension lives OUTSIDE the workspace directory: a walk that quietly used the
+        // workspace instead of the root table would still cover an extension nested inside it,
+        // and the check would pass while covering nothing it claims to.
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(extension.join("B.bsl"), "Процедура Вторая()\nКонецПроцедуры").unwrap();
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let (roots, _rejected) = bsl_search::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        // A root outside the workspace is identified by its absolute spelling, so the expected
+        // key is read from the table rather than spelled out here.
+        let extension_key = roots
+            .root_of(&extension.join("B.bsl"), &extension.join("B.bsl").canonicalize().unwrap())
+            .expect("the extension's file has an owner");
+        engine.set_workspace_roots(roots);
+        engine.enable_workspace_watcher_mode();
+        // Seed both rows directly: the boot indexers cannot write an extension's row yet, and
+        // this test is about the WALK, not about who wrote the row.
+        engine.store().upsert_file("", "A.bsl", b"hash-a", "code").unwrap();
+        engine
+            .store()
+            .upsert_file(&extension_key.root_id, &extension_key.path, b"hash-b", "code")
+            .unwrap();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        let snapshot = engine.workspace_overlay_dirty_paths_snapshot().unwrap();
+        assert!(
+            snapshot.keys().any(|key| *key == extension_key),
+            "the rescan walk reaches the extension's file: {snapshot:?}",
+        );
+        let stored: Vec<String> = engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| format!("{}:{}", key.root_id, key.path))
+            .collect();
+        assert!(
+            stored
+                .iter()
+                .any(|row| *row == format!("{}:{}", extension_key.root_id, extension_key.path)),
+            "the reconcile keeps the extension's row: {stored:?}",
+        );
+        assert!(stored.iter().any(|row| row == ":A.bsl"), "and the configuration's: {stored:?}");
+    }
+
+    /// The walk reads the engine's root table at each call rather than a set captured when the
+    /// sink started. A captured copy would keep walking yesterday's roots for the daemon's whole
+    /// life, and — because the reconcile deletes stored keys the walk did not find — would erase
+    /// any root added to the table afterwards.
+    #[test]
+    fn the_rescan_walk_follows_the_table_rather_than_a_captured_root() {
+        let dir = tempdir().unwrap();
+        // The extension lives OUTSIDE the workspace directory: a walk that quietly used the
+        // workspace instead of the root table would still cover an extension nested inside it,
+        // and the check would pass while covering nothing it claims to.
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(extension.join("B.bsl"), "Процедура Вторая()\nКонецПроцедуры").unwrap();
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let (configuration_only, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &configuration, &[]);
+        engine.set_workspace_roots(configuration_only);
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
+        {
+            let guard = engine_arc.lock().unwrap();
+            let snapshot =
+                guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap();
+            assert!(
+                !snapshot.keys().any(|key| key.path.ends_with("B.bsl")),
+                "the undeclared tree is outside the walk while the table says so",
+            );
+        }
+
+        {
+            let mut guard = engine_arc.lock().unwrap();
+            let engine = guard.as_mut().unwrap();
+            let (both, _) = bsl_search::WorkspaceRoots::build(
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+            engine.set_workspace_roots(both);
+            engine.enable_workspace_watcher_mode();
+        }
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
+
+        let guard = engine_arc.lock().unwrap();
+        let snapshot = guard.as_ref().unwrap().workspace_overlay_dirty_paths_snapshot().unwrap();
+        assert!(
+            snapshot.keys().any(|key| key.path.ends_with("B.bsl")),
+            "the next walk covers the root the table gained: {snapshot:?}",
+        );
+    }
+
+    /// A root `.xml` descriptor can shift any module's graph context, so it marks the whole
+    /// collection. "Root" here means the CONFIGURATION's root — the base every stored relative
+    /// path is spelled against — and it is not the project directory: a configuration commonly
+    /// sits in a subdirectory of it. Comparing against the project directory instead leaves the
+    /// descriptor unrecognised and silently serves the stale context.
+    #[test]
+    fn a_root_xml_of_a_nested_configuration_marks_the_whole_collection() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let configuration = workspace.join("src").join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let module = configuration.join("CommonModules").join("Общий").join("Ext");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("Module.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+
+        let db_path = dir.path().join("search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(&workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.index_directory_fts(&configuration).unwrap();
+        assert!(engine.file_count().unwrap() > 0, "the fixture indexes a document");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let descriptor = configuration.join("Configuration.xml");
+        fs::write(&descriptor, "<Configuration/>").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: descriptor.clone(),
+                raw: descriptor.clone(),
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let marked = guard.as_ref().unwrap().store().context_dirty_paths("code").unwrap();
+        assert!(
+            !marked.is_empty(),
+            "the configuration's root descriptor marks every document's context",
         );
     }
 
@@ -760,6 +1367,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "Removed.bsl".to_owned(),
                     symbol_name: "УдаляемаяПроцедура".to_owned(),
                     kind: "procedure".to_owned(),
@@ -789,7 +1397,6 @@ mod tests {
         };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[entry],
             false,
             &crate::graph::GraphState::disabled(),
@@ -839,7 +1446,6 @@ mod tests {
         };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[entry],
             false,
             &crate::graph::GraphState::disabled(),
@@ -849,11 +1455,15 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Товары/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration(
+                "Catalogs/Товары/Ext/ObjectModule.bsl"
+            )),
             "the owned module is marked context-dirty: {dirty:?}",
         );
         assert!(
-            !dirty.contains("Catalogs/Другой/Ext/ObjectModule.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration(
+                "Catalogs/Другой/Ext/ObjectModule.bsl"
+            )),
             "an unrelated object's module is left untouched: {dirty:?}",
         );
         assert_eq!(dirty.len(), 1, "only the owned subtree is marked, not the whole tree");
@@ -884,6 +1494,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "CommonModules/А/Ext/Module.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -897,29 +1508,54 @@ mod tests {
             )
             .unwrap();
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+
+        let nested_toml = workspace.join("nested/bsl-analyzer.toml");
+        fs::create_dir_all(nested_toml.parent().unwrap()).unwrap();
+        fs::write(&nested_toml, "[source]\nroot = \".\"\n").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: nested_toml.clone(),
+                raw: nested_toml,
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            }],
+            false,
+            &graph,
+        );
+        assert!(
+            engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .is_empty(),
+            "a nested namesake config must not reshape the workspace root table",
+        );
 
         let toml = workspace.join("bsl-analyzer.toml");
         fs::write(&toml, "[source]\nroot = \".\"\n").unwrap();
-        let entry = ChangeEntry {
-            canonical: toml.clone(),
-            raw: toml,
-            kind: ChangeKind::MaybeChanged,
-            seq: 1,
-        };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
-            &[entry],
+            &[ChangeEntry {
+                canonical: toml.clone(),
+                raw: toml,
+                kind: ChangeKind::MaybeChanged,
+                seq: 2,
+            }],
             false,
-            &crate::graph::GraphState::disabled(),
+            &graph,
         );
 
         let guard = engine_arc.lock().unwrap();
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("CommonModules/А/Ext/Module.bsl"),
-            "a config edit must mark every indexed document context-dirty: {dirty:?}",
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/А/Ext/Module.bsl")),
+            "a root config edit must mark every indexed document context-dirty: {dirty:?}",
         );
     }
 
@@ -946,6 +1582,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -962,7 +1599,6 @@ mod tests {
 
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[],
             true,
             &crate::graph::GraphState::disabled(),
@@ -972,7 +1608,7 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "a rescan must conservatively mark every indexed document context-dirty: {dirty:?}",
         );
     }
@@ -982,7 +1618,7 @@ mod tests {
     /// through the persisted graph's inbound read edges. A module that references nothing about
     /// the object is left untouched.
     ///
-    /// Revert-proof: drop the `resolve_referencing_module_rels` call in
+    /// Revert-proof: drop the `resolve_referencing_module_files` call in
     /// `mark_xml_affected_context_dirty` and the referencing module `Б` is no longer marked —
     /// the referencing assertion fails.
     #[test]
@@ -1028,8 +1664,11 @@ mod tests {
         // Build + publish the graph so the reverse lookup has real inbound edges to read.
         let out = crate::cache::graph_db_path(&workspace);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let sync_project = crate::graph::ProjectSnapshot::load(&workspace);
+        let sync_universe = crate::graph::universe::ScannedUniverse::scan(&sync_project.scan_roots);
         let summary = crate::graph_db::build_graph_database(
-            &crate::graph::ProjectSnapshot::load(&workspace),
+            &sync_project,
+            &sync_universe,
             &out,
             100,
             &crate::graph_db::GraphMeta {
@@ -1041,7 +1680,7 @@ mod tests {
         )
         .expect("graph builds");
         let graph = crate::graph::GraphState::for_workspace(workspace.clone());
-        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules);
+        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
 
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace.clone());
@@ -1054,21 +1693,21 @@ mod tests {
             kind: ChangeKind::MaybeChanged,
             seq: 1,
         };
-        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        SharedState::apply_search_drift(&engine_arc, &[entry], false, &graph);
 
         let guard = engine_arc.lock().unwrap();
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("Catalogs/Х/Ext/ObjectModule.bsl")),
             "the owned module is marked context-dirty: {dirty:?}",
         );
         assert!(
-            dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "the referencing module (reads the catalog) is marked context-dirty: {dirty:?}",
         );
         assert!(
-            !dirty.contains("CommonModules/В/Ext/Module.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration("CommonModules/В/Ext/Module.bsl")),
             "a module that references nothing about the catalog is left untouched: {dirty:?}",
         );
     }
@@ -1113,17 +1752,17 @@ mod tests {
             kind: ChangeKind::MaybeChanged,
             seq: 1,
         };
-        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        SharedState::apply_search_drift(&engine_arc, &[entry], false, &graph);
 
         let guard = engine_arc.lock().unwrap();
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert!(
-            dirty.contains("Catalogs/Х/Ext/ObjectModule.bsl"),
+            dirty.contains(&bsl_search::FileKey::configuration("Catalogs/Х/Ext/ObjectModule.bsl")),
             "the owned module is still marked without a published graph: {dirty:?}",
         );
         assert!(
-            !dirty.contains("CommonModules/Б/Ext/Module.bsl"),
+            !dirty.contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")),
             "referencing resolution is skipped with no published graph: {dirty:?}",
         );
     }
@@ -1143,6 +1782,7 @@ mod tests {
         engine.set_workspace_root(workspace.clone());
         let doc = |path: &str, sym: &str| IndexedDocument {
             collection: "code".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             path: path.to_owned(),
             symbol_name: sym.to_owned(),
             kind: "procedure".to_owned(),
@@ -1172,7 +1812,6 @@ mod tests {
         };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[entry],
             false,
             &crate::graph::GraphState::disabled(),
@@ -1182,8 +1821,495 @@ mod tests {
         let engine = guard.as_ref().unwrap();
         let dirty = engine.context_dirty_paths("code").unwrap();
         assert_eq!(dirty.len(), 2, "a root .xml marks every indexed file: {dirty:?}");
-        assert!(dirty.contains("A.bsl") && dirty.contains("B.bsl"));
+        assert!(
+            dirty.contains(&bsl_search::FileKey::configuration("A.bsl"))
+                && dirty.contains(&bsl_search::FileKey::configuration("B.bsl"))
+        );
     }
+
+    /// Root descriptors of the roots other than the configuration's, and of the trees the
+    /// root table deliberately does not hold. A change to any of them can shift the graph
+    /// context of any module, and the modules of every root have been in the index since
+    /// the table gained them — so each must reach the whole collection.
+    mod root_descriptors {
+        use super::*;
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::FileKey;
+        use std::path::{Path, PathBuf};
+
+        /// Two documents, one per root, so a whole-collection mark is distinguishable from a
+        /// mark that reached one root only.
+        fn doc(root_id: &str, path: &str) -> IndexedDocument {
+            IndexedDocument {
+                collection: "code".to_owned(),
+                root_id: root_id.to_owned(),
+                path: path.to_owned(),
+                symbol_name: format!("Символ{path}"),
+                kind: "procedure".to_owned(),
+                line_start: 0,
+                line_end: 1,
+                text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                content_hash: "h".to_owned(),
+                graph_context: None,
+            }
+        }
+
+        fn engine_over(
+            db_path: &Path,
+            workspace: &Path,
+            configuration: &Path,
+            extensions: &[PathBuf],
+        ) -> (super::super::SharedSearchEngine, Vec<String>) {
+            let (roots, _) =
+                bsl_search::WorkspaceRoots::build(workspace, configuration, extensions);
+            let ids: Vec<String> = roots.ids().map(str::to_owned).collect();
+            let mut engine = SearchEngine::fts_only(db_path).unwrap();
+            engine.set_workspace_roots(roots);
+            let docs: Vec<IndexedDocument> =
+                ids.iter().map(|id| doc(id, "CommonModules/М/Ext/Module.bsl")).collect();
+            engine.sync_indexed_documents_in_collection("code", &docs, None).unwrap();
+            (Arc::new(Mutex::new(Some(engine))), ids)
+        }
+
+        fn drift(engine: &super::super::SharedSearchEngine, paths: &[&Path]) {
+            let entries: Vec<ChangeEntry> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, path)| ChangeEntry {
+                    canonical: path.to_path_buf(),
+                    raw: path.to_path_buf(),
+                    kind: ChangeKind::MaybeChanged,
+                    seq: i as u64 + 1,
+                })
+                .collect();
+            SharedState::apply_search_drift(
+                engine,
+                &entries,
+                false,
+                &crate::graph::GraphState::disabled(),
+            );
+        }
+
+        fn marks(engine: &super::super::SharedSearchEngine) -> std::collections::HashSet<FileKey> {
+            let guard = engine.lock().unwrap();
+            guard.as_ref().unwrap().context_dirty_paths("code").unwrap()
+        }
+
+        /// A dump root: the descriptor that makes the project model call a directory an
+        /// extension at all.
+        fn dump_root(at: &Path) -> PathBuf {
+            std::fs::create_dir_all(at).unwrap();
+            std::fs::write(at.join("Configuration.xml"), "<Configuration/>").unwrap();
+            at.to_path_buf()
+        }
+
+        /// The root descriptor of a REGISTERED extension root. Recognising only the
+        /// configuration's root left this one marking nothing at all.
+        #[test]
+        fn a_root_descriptor_of_an_extension_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            // Outside the workspace on purpose: an extension inside it is covered by the
+            // configuration walk by accident, and the fixture would prove nothing.
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let descriptor = extension.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            let dirty = marks(&engine);
+            assert_eq!(dirty.len(), ids.len(), "every root's documents are marked: {dirty:?}");
+        }
+
+        /// The same descriptor one level down is an ordinary metadata file: it owns at most
+        /// its own subtree and must not reach the collection. Without this the root branch
+        /// could be "always true" and the tests above would still pass.
+        #[test]
+        fn a_descriptor_below_a_root_marks_nothing() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let mut below = Vec::new();
+            for root in [&configuration, &extension] {
+                let deep = root.join("Catalogs");
+                std::fs::create_dir_all(&deep).unwrap();
+                let descriptor = deep.join("ConfigDumpInfo.xml");
+                std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+                below.push(descriptor);
+            }
+            drift(&engine, &below.iter().map(PathBuf::as_path).collect::<Vec<_>>());
+
+            assert!(marks(&engine).is_empty(), "a descriptor below a root marks nothing");
+        }
+
+        /// An extension canonically inside the configuration is REJECTED from the table
+        /// (its files carry the configuration's key), so no registered root sits at its
+        /// directory — the class the cut names as part of the rule, not an exception.
+        #[test]
+        fn a_configuration_xml_of_a_rejected_extension_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            drift(&engine, &[&nested.join("Configuration.xml")]);
+
+            assert!(!marks(&engine).is_empty(), "the rejected root's descriptor marks the tree");
+        }
+
+        /// The same rejected root, a descriptor NOT named `Configuration.xml`. The class is
+        /// every root-level descriptor, and a rule keyed on one file name would leave the
+        /// rest of it — `ConfigDumpInfo.xml`, a third-party dump's own descriptor — unmarked.
+        #[test]
+        fn a_root_descriptor_beside_a_configuration_xml_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            let descriptor = nested.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            assert!(!marks(&engine).is_empty(), "a descriptor beside a Configuration.xml marks");
+        }
+
+        /// The descriptor itself is what vanished, so the tree it stood in can no longer be
+        /// recognised by its neighbour — and a removal is exactly the change that shifts
+        /// every context.
+        #[test]
+        fn a_removed_configuration_xml_of_a_rejected_extension_still_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let nested = dump_root(&configuration.join("nested"));
+            let (engine, _) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&nested),
+            );
+
+            let descriptor = nested.join("Configuration.xml");
+            std::fs::remove_file(&descriptor).unwrap();
+            drift(&engine, &[&descriptor]);
+
+            assert!(!marks(&engine).is_empty(), "a removed root descriptor still marks the tree");
+        }
+
+        /// A root-level descriptor that also has a namesake subtree beside it. The two
+        /// answers are not alternatives: the owned subtree is a subset of the collection the
+        /// root descriptor reaches, and deciding by whichever branch runs first would leave
+        /// the rest of the tree stale.
+        #[test]
+        fn a_root_descriptor_with_a_namesake_subtree_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            let extension = dump_root(&dir.path().join("cfe"));
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let owned = extension.join("ConfigDumpInfo/Ext");
+            std::fs::create_dir_all(&owned).unwrap();
+            std::fs::write(owned.join("Module.bsl"), "Процедура П()\nКонецПроцедуры").unwrap();
+            let descriptor = extension.join("ConfigDumpInfo.xml");
+            std::fs::write(&descriptor, "<ConfigDumpInfo/>").unwrap();
+            drift(&engine, &[&descriptor]);
+
+            let dirty = marks(&engine);
+            for id in &ids {
+                assert!(
+                    dirty.contains(&FileKey::new(id, "CommonModules/М/Ext/Module.bsl")),
+                    "root {id:?} is marked despite the namesake subtree: {dirty:?}",
+                );
+            }
+        }
+
+        /// The event arrives spelled through an alias while the root is declared by its real
+        /// path. Attribution ranks roots by the canonical spelling, so both spellings answer
+        /// the same; comparing the delivered spelling alone would recognise neither.
+        #[cfg(unix)]
+        #[test]
+        fn a_root_descriptor_reached_through_an_alias_marks_the_whole_collection() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let configuration = dump_root(&workspace.join("cf"));
+            // No `Configuration.xml` in the extension root: with a neighbour present the
+            // structural probe would answer through the alias too, and the canonical
+            // attribution this pins would go untested.
+            let extension = dir.path().join("plain-root");
+            std::fs::create_dir_all(&extension).unwrap();
+            let alias = workspace.join("link");
+            std::os::unix::fs::symlink(&extension, &alias).unwrap();
+            let (engine, ids) = engine_over(
+                &dir.path().join("search.db"),
+                &workspace,
+                &configuration,
+                std::slice::from_ref(&extension),
+            );
+
+            let descriptor = extension.join("SomePlugin.xml");
+            std::fs::write(&descriptor, "<Root/>").unwrap();
+            drift(&engine, &[&alias.join("SomePlugin.xml")]);
+
+            let dirty = marks(&engine);
+            assert_eq!(dirty.len(), ids.len(), "the aliased spelling is attributed: {dirty:?}");
+        }
+    }
+    /// Marks that land on a module of an EXTENSION root. Its rows are keyed by that root,
+    /// so a mark spelled against the configuration would name a different file — or no
+    /// file at all.
+    mod extension_marks {
+        use super::*;
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::FileKey;
+        use std::path::{Path, PathBuf};
+
+        const MODULE_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><Name>{}</Name><Server>true</Server></Properties>
+    </CommonModule>
+</MetaDataObject>"#;
+
+        fn write(path: &Path, text: &str) {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+
+        fn common_module(root: &Path, name: &str, body: &str) {
+            write(&root.join(format!("CommonModules/{name}.xml")), &MODULE_XML.replace("{}", name));
+            write(&root.join(format!("CommonModules/{name}/Ext/Module.bsl")), body);
+        }
+
+        /// A configuration and an extension side by side, both declared to the project model.
+        /// The extension lies OUTSIDE the configuration root: one inside it is rejected from
+        /// the root table and its files carry the configuration's key, which would make the
+        /// fixture prove nothing.
+        fn two_root_workspace(workspace: &Path) -> (PathBuf, PathBuf) {
+            let configuration = workspace.join("cf");
+            let extension = workspace.join("cfe");
+            write(&configuration.join("Configuration.xml"), "<Configuration/>");
+            write(&extension.join("Configuration.xml"), "<Configuration/>");
+            fs::write(
+                workspace.join("bsl-analyzer.toml"),
+                "[source]\nroot = \"cf\"\nextensions = [{ name = \"a\", path = \"cfe\" }]\n",
+            )
+            .unwrap();
+            (configuration, extension)
+        }
+
+        fn engine_over(
+            db_path: &Path,
+            workspace: &Path,
+            configuration: &Path,
+            extension: &Path,
+        ) -> super::super::SharedSearchEngine {
+            let (roots, rejected) = bsl_search::WorkspaceRoots::build(
+                workspace,
+                configuration,
+                std::slice::from_ref(&extension.to_path_buf()),
+            );
+            assert!(rejected.is_empty(), "the extension is a root of its own: {rejected:?}");
+            let mut engine = SearchEngine::fts_only(db_path).unwrap();
+            engine.set_workspace_roots(roots);
+            // Rows keyed by the engine's own attribution: the mark is then compared against a
+            // key nobody spelled by hand.
+            engine.index_unindexed_roots_fts().unwrap();
+            engine.enable_workspace_watcher_mode();
+            Arc::new(Mutex::new(Some(engine)))
+        }
+
+        fn drift(
+            engine: &super::super::SharedSearchEngine,
+            xml: &Path,
+            graph: &crate::graph::GraphState,
+        ) {
+            SharedState::apply_search_drift(
+                engine,
+                &[ChangeEntry {
+                    canonical: xml.to_path_buf(),
+                    raw: xml.to_path_buf(),
+                    kind: ChangeKind::MaybeChanged,
+                    seq: 1,
+                }],
+                false,
+                graph,
+            );
+        }
+
+        /// A module of an extension that READS a configuration object. Its context embeds
+        /// that object's metadata, so a change to the object's descriptor makes it stale —
+        /// and the mark has to carry the extension's root, the one its row carries.
+        #[test]
+        fn a_referencing_module_of_an_extension_is_marked_under_its_own_root() {
+            let dir = tempdir().unwrap();
+            let marks = referencing_marks_in(dir.path(), &dir.path().join("ws"));
+            let reader = FileKey::new("cfe", "CommonModules/Б/Ext/Module.bsl");
+            assert!(
+                marks.dirty.contains(&reader),
+                "the extension's reader is marked under its own root: {marks:?}",
+            );
+            assert!(
+                !marks.dirty.contains(&FileKey::new("cfe", "CommonModules/В/Ext/Module.bsl")),
+                "a module that reads nothing about the object is untouched: {marks:?}",
+            );
+            assert!(
+                marks.rows.contains(&reader),
+                "the mark names the key the row lives under: {marks:?}",
+            );
+            for key in &marks.dirty {
+                assert!(
+                    marks.rows.contains(key),
+                    "no mark names a root the table does not hold: {key:?} vs {marks:?}",
+                );
+            }
+        }
+
+        /// Under a root directory holding bytes no `str` can carry, the graph — which keeps
+        /// its file paths as strings — hands back a rendering, and a rendering belongs to no
+        /// root. The reader keeps its stale context until a whole-collection mark, and that
+        /// is the deliberate answer: the alternative is a key guessed from a rendering that
+        /// several different roots fit, and the seam that key would travel is the one
+        /// removals resolve through.
+        #[cfg(unix)]
+        #[test]
+        fn a_referencing_module_under_an_unrepresentable_root_is_left_to_a_wider_mark() {
+            use std::os::unix::ffi::OsStringExt;
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join(std::ffi::OsString::from_vec(b"ws\xff".to_vec()));
+            let marks = referencing_marks_in(dir.path(), &workspace);
+            assert!(
+                marks.dirty.is_empty(),
+                "a rendering marks nothing rather than the wrong thing: {marks:?}",
+            );
+            assert!(!marks.rows.is_empty(), "the files themselves are indexed as always");
+        }
+
+        #[derive(Debug)]
+        struct Marks {
+            dirty: std::collections::HashSet<FileKey>,
+            rows: Vec<FileKey>,
+        }
+
+        fn referencing_marks_in(dir: &Path, workspace: &Path) -> Marks {
+            let (configuration, extension) = two_root_workspace(workspace);
+
+            let xml = configuration.join("Catalogs/Х.xml");
+            write(
+                &xml,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Catalog uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Х</Name><CodeLength>9</CodeLength></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+            );
+            common_module(
+                &extension,
+                "Б",
+                "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+            );
+            common_module(
+                &extension,
+                "В",
+                "&НаСервере\nПроцедура НичегоНеЧитает() Экспорт\nВозврат;\nКонецПроцедуры",
+            );
+
+            let out = crate::cache::graph_db_path(workspace);
+            fs::create_dir_all(out.parent().unwrap()).unwrap();
+            let project = crate::graph::ProjectSnapshot::load(workspace);
+            let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+            let summary = crate::graph_db::build_graph_database(
+                &project,
+                &universe,
+                &out,
+                100,
+                &crate::graph_db::GraphMeta {
+                    revision: 1,
+                    fingerprint: crate::graph_db::GraphFp::default(),
+                    files: 0,
+                    built_at: "t".to_owned(),
+                },
+            )
+            .expect("graph builds");
+            let graph = crate::graph::GraphState::for_workspace(workspace.to_path_buf());
+            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
+
+            let engine = engine_over(&dir.join("search.db"), workspace, &configuration, &extension);
+            drift(&engine, &xml, &graph);
+
+            let guard = engine.lock().unwrap();
+            let engine = guard.as_ref().unwrap();
+            Marks {
+                dirty: engine.context_dirty_paths("code").unwrap(),
+                rows: engine
+                    .store()
+                    .all_files_in_collection("code")
+                    .unwrap()
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect(),
+            }
+        }
+
+        /// The owned modules of an extension's own object: resolved by path convention, so no
+        /// graph is needed — but the key still has to be the extension's.
+        #[test]
+        fn an_owned_module_of_an_extension_is_marked_under_its_own_root() {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().join("ws");
+            let (configuration, extension) = two_root_workspace(&workspace);
+            let owned = extension.join("Catalogs/Т/Ext/ObjectModule.bsl");
+            write(&owned, "Процедура П()\nКонецПроцедуры");
+            let xml = extension.join("Catalogs/Т.xml");
+            write(&xml, "<MetaDataObject/>");
+
+            let engine =
+                engine_over(&dir.path().join("search.db"), &workspace, &configuration, &extension);
+            drift(&engine, &xml, &crate::graph::GraphState::disabled());
+
+            let guard = engine.lock().unwrap();
+            let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
+            assert!(
+                dirty.contains(&FileKey::new("cfe", "Catalogs/Т/Ext/ObjectModule.bsl")),
+                "the extension's owned module is marked under its own root: {dirty:?}",
+            );
+        }
+    }
+
     /// An `.xml` drift whose owned module is marked context-dirty must NUDGE the graph to
     /// catch up — otherwise a search-only user (who never triggers a `graph` tool freshness
     /// check) leaves the marks unresolved forever. Asserting the graph left `Idle` with NO
@@ -1218,7 +2344,7 @@ mod tests {
             kind: ChangeKind::MaybeChanged,
             seq: 1,
         };
-        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        SharedState::apply_search_drift(&engine_arc, &[entry], false, &graph);
 
         assert_ne!(
             graph.status(),
@@ -1226,6 +2352,693 @@ mod tests {
             "the xml drift nudged the graph to catch up without any graph tool call",
         );
     }
+    /// A batch that demands a full reconcile still carries the exact paths it knows about,
+    /// and the deletions among them are the one thing the re-walk cannot recover: an
+    /// incomplete walk skips the reconcile precisely so it does not evict healthy files,
+    /// leaving a deleted file in the index. Applying the delivered removals costs nothing
+    /// and is exact — including a vanished directory, whose descendants no drain can name.
+    #[test]
+    fn a_rescan_batch_removes_the_deletions_it_delivered_even_when_the_walk_is_incomplete() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        // Toggles the process-global `FORCE_REWALK_WALK_ERROR` seam; serialize against the
+        // other tests that read it.
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Gone.bsl", "Ушедшая");
+            index("Dropped/One.bsl", "ПерваяИзПоддерева");
+            index("Dropped/Two.bsl", "ВтораяИзПоддерева");
+            index("Kept.bsl", "Оставшаяся");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        assert_eq!(engine.file_count().unwrap(), 4, "all four files are indexed");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let gone = workspace.join("Gone.bsl");
+        let dropped = workspace.join("Dropped");
+        let entries = [
+            ChangeEntry {
+                canonical: gone.clone(),
+                raw: gone,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            },
+            ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 2,
+            },
+        ];
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &entries,
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        for token in ["Ушедшая", "ПерваяИзПоддерева", "ВтораяИзПоддерева"]
+        {
+            assert!(
+                engine.text_search(token, 10, Some("code")).unwrap().is_empty(),
+                "{token} was delivered as deleted and must not answer searches",
+            );
+        }
+        assert!(
+            !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
+            "a file nobody reported deleted is untouched",
+        );
+    }
+
+    /// An event says what was true when it fired, not what is true when it is consumed: a
+    /// directory removed and restored (a checkout, an editor's atomic replace) arrives as a
+    /// removal for a subtree that exists again. The classifier re-stats every path for this
+    /// reason, and a subtree removal must too — it deletes far more at once, and the walk
+    /// that would restore it is skipped exactly when it is incomplete.
+    #[test]
+    fn a_subtree_removal_for_a_directory_that_came_back_deletes_nothing() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        fs::create_dir_all(workspace.join("Restored")).unwrap();
+        fs::write(workspace.join("Restored/Alive.bsl"), "Процедура Живущая()\nКонецПроцедуры")
+            .unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Restored/Alive.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Живущая".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Живущая()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // The walk cannot vouch for anything, so nothing would restore a wrong deletion.
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let restored = workspace.join("Restored");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: restored.clone(),
+                raw: restored,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            !engine.text_search("Живущая", 10, Some("code")).unwrap().is_empty(),
+            "a directory that is on disk when the removal is applied keeps its files",
+        );
+    }
+
+    /// A vanished directory has to leave the index whether or not the batch also demanded a
+    /// full reconcile. The ordinary branch answers a subtree removal with a re-walk, and
+    /// that re-walk refuses to reconcile when it is incomplete — deliberately, so it cannot
+    /// evict healthy files. Then nothing removes the descendants: the classifier calls a
+    /// subtree removal structural and skips it, and no event ever names them.
+    #[test]
+    fn a_vanished_directory_leaves_the_index_when_the_ordinary_branch_cannot_walk() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        fs::write(workspace.join("Kept.bsl"), "Процедура Уцелевшая()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Dropped/One.bsl", "ПерваяУшедшая");
+            index("Kept.bsl", "Уцелевшая");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        assert_eq!(engine.file_count().unwrap(), 2, "both files are indexed");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        // The re-walk this branch performs cannot vouch for anything, so its reconcile —
+        // the only other thing that would remove the descendants — is skipped.
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let dropped = workspace.join("Dropped");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ПерваяУшедшая", 10, Some("code")).unwrap().is_empty(),
+            "the descendants of a vanished directory stop answering searches",
+        );
+        assert!(
+            !engine.text_search("Уцелевшая", 10, Some("code")).unwrap().is_empty(),
+            "and nothing else is touched",
+        );
+    }
+
+    /// The hub names a vanished path a subtree only when it has no extension — it cannot ask
+    /// a path that is gone what it used to be. A directory with a dot in its name therefore
+    /// arrives as an ordinary removal, and the classifier drops it for being neither `.bsl`
+    /// nor `.xml`. Its files would then have nobody to remove them.
+    #[test]
+    fn a_vanished_directory_with_a_dotted_name_still_loses_its_files() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Dropped.v1/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ИзВерсии".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ИзВерсии()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The hub calls this `MaybeRemoved`, because `Dropped.v1` looks like it has an
+        // extension — the one thing it can tell about a path that no longer exists.
+        let dropped = workspace.join("Dropped.v1");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ИзВерсии", 10, Some("code")).unwrap().is_empty(),
+            "a dotted directory name does not save its files from a deletion",
+        );
+    }
+
+    /// A directory whose name ends in `.bsl` looks exactly like a file to everything that
+    /// can only read the name — the hub, and any filter written in terms of extensions.
+    /// Deciding per KEY sidesteps the question: a real file simply has nothing under it.
+    #[test]
+    fn a_vanished_directory_named_like_a_module_still_loses_its_files() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Модули.bsl/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ИзПапкиМодули".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ИзПапкиМодули()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        let dropped = workspace.join("Модули.bsl");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: dropped.clone(),
+                raw: dropped,
+                kind: ChangeKind::MaybeRemoved,
+                seq: 1,
+            }],
+            false,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ИзПапкиМодули", 10, Some("code")).unwrap().is_empty(),
+            "a module-looking directory name does not save its files",
+        );
+    }
+
+    /// A directory that is back proves only that the NAME is taken again, not that the
+    /// files under it survived: a checkout can restore it with a different set entirely.
+    /// Judging the whole subtree by the directory keeps the ones that are truly gone.
+    #[test]
+    fn a_directory_that_came_back_with_other_files_loses_the_ones_that_did_not() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        let restored = workspace.join("Restored");
+        fs::create_dir_all(&restored).unwrap();
+        fs::write(restored.join("Stays.bsl"), "Процедура Оставшаяся()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        bsl_search::CONFIGURATION_ROOT_ID,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index("Restored/Stays.bsl", "Оставшаяся");
+            index("Restored/Gone.bsl", "Пропавшая");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: restored.clone(),
+                raw: restored,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("Пропавшая", 10, Some("code")).unwrap().is_empty(),
+            "the file that did not come back is gone from the index",
+        );
+        assert!(
+            !engine.text_search("Оставшаяся", 10, Some("code")).unwrap().is_empty(),
+            "the one that did is untouched",
+        );
+    }
+
+    /// A name taken by something that is not a directory is not the subtree coming back: a
+    /// file holds no files, so its descendants are gone as surely as if nothing were there.
+    #[test]
+    fn a_subtree_replaced_by_a_file_is_still_removed() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Replaced/One.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "ПодЗамену".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура ПодЗамену()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The directory is gone and a plain file now carries its name.
+        let replaced = workspace.join("Replaced");
+        fs::write(&replaced, "не каталог").unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: replaced.clone(),
+                raw: replaced,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("ПодЗамену", 10, Some("code")).unwrap().is_empty(),
+            "a name taken by a file cannot hold the subtree's files",
+        );
+    }
+
+    /// The hub decides a path vanished by following links, so a subtree reached through a
+    /// link whose target is deleted is gone as far as it is concerned. Asking about the link
+    /// itself would answer "still there" and silently drop the removal it delivered.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_reached_through_a_dangling_link_is_removed() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let outside = tempdir().unwrap();
+        let target = outside.path().join("real");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("A.bsl"), "Процедура Внешняя()\nКонецПроцедуры").unwrap();
+        let link = workspace.join("Linked");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let db_path = dir.path().join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Linked/A.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Внешняя".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Внешняя()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        // The target goes; the link stays behind, pointing at nothing.
+        fs::remove_dir_all(&target).unwrap();
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: link.clone(),
+                raw: link,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            engine.text_search("Внешняя", 10, Some("code")).unwrap().is_empty(),
+            "a subtree whose target is deleted stops answering searches",
+        );
+    }
+
+    /// "Could not check" is not "is gone". A subtree whose parent is momentarily unreadable
+    /// answers `PermissionDenied`, and treating that as proof of deletion clears rows,
+    /// overlay entries and vectors for files that are on disk — while the walk that would
+    /// restore them is skipped for exactly the same reason.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_removal_that_cannot_be_verified_deletes_nothing() {
+        use crate::change_hub::{ChangeEntry, ChangeKind};
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::os::unix::fs::PermissionsExt;
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let db_path = dir.path().join("search.db");
+        let blocked = workspace.join("Blocked");
+        fs::create_dir_all(blocked.join("Gone")).unwrap();
+        fs::write(blocked.join("Gone/A.bsl"), "Процедура Недоступная()\nКонецПроцедуры").unwrap();
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "Blocked/Gone/A.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Недоступная".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Недоступная()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        struct ResetWalkErr;
+        impl Drop for ResetWalkErr {
+            fn drop(&mut self) {
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _reset = ResetWalkErr;
+
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&blocked).is_ok() {
+            // Running as root: permissions cannot make the parent unreadable.
+            fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let gone = blocked.join("Gone");
+        SharedState::apply_search_drift(
+            &engine_arc,
+            &[ChangeEntry {
+                canonical: gone.clone(),
+                raw: gone,
+                kind: ChangeKind::SubtreeRemoved,
+                seq: 1,
+            }],
+            true,
+            &crate::graph::GraphState::disabled(),
+        );
+        fs::set_permissions(&blocked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let guard = engine_arc.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(
+            !engine.text_search("Недоступная", 10, Some("code")).unwrap().is_empty(),
+            "a subtree that could not be checked keeps its files",
+        );
+    }
+
     /// A partial rescan walk (an error mid-walk) must NOT reconcile: `present` is missing healthy
     /// files, so deleting stored files against it would evict live data. Only a clean walk
     /// reconciles. Reverting the walk-error guard deletes the stored file on the errored walk.
@@ -1243,6 +3056,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Gone.bsl",
                     b"ha",
                     &[Chunk {
@@ -1267,15 +3081,15 @@ mod tests {
         struct ResetWalkErr;
         impl Drop for ResetWalkErr {
             fn drop(&mut self) {
-                FORCE_REWALK_WALK_ERROR.store(false, super::Ordering::SeqCst);
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
 
         // Errored walk: reconcile is skipped, so the stored (disk-absent) file SURVIVES.
         {
-            FORCE_REWALK_WALK_ERROR.store(true, super::Ordering::SeqCst);
+            FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
             let _reset = ResetWalkErr;
-            SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+            SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
             assert_eq!(
                 engine_arc.lock().unwrap().as_ref().unwrap().file_count().unwrap(),
                 1,
@@ -1284,7 +3098,7 @@ mod tests {
         }
 
         // Clean walk: the stored-but-absent file is reconciled out.
-        SharedState::rewalk_workspace_bsl_dirty(&engine_arc, &workspace);
+        SharedState::rewalk_workspace_bsl_dirty(&engine_arc);
         assert_eq!(
             engine_arc.lock().unwrap().as_ref().unwrap().file_count().unwrap(),
             0,
@@ -1543,7 +3357,7 @@ mod tests {
         fs::remove_dir_all(workspace.join("CommonModules").join("Улетевший")).unwrap();
         fs::remove_file(workspace.join("CommonModules").join("Улетевший.xml")).unwrap();
 
-        let reconciled = SharedState::reconcile_boot_store_with_disk(&mut engine, &workspace);
+        let reconciled = SharedState::reconcile_boot_store_with_disk(&mut engine);
         assert!(reconciled, "a clean walk proves the store reconciled");
         assert_eq!(
             engine.file_count().unwrap(),
@@ -1555,7 +3369,7 @@ mod tests {
             .all_files_in_collection("code")
             .unwrap()
             .into_iter()
-            .map(|(path, _hash)| path)
+            .map(|(key, _hash)| key.path)
             .collect();
         assert!(
             files.iter().any(|p| p.contains("Постоянный")) && files.len() == 1,
@@ -1584,20 +3398,18 @@ mod tests {
             "Сервер",
             "&НаСервере\nФункция Ч() Экспорт Возврат 1; КонецФункции\n",
         );
-        let watcher_ready = Arc::new(AtomicBool::new(false));
-
         struct ResetWalkErr;
         impl Drop for ResetWalkErr {
             fn drop(&mut self) {
-                FORCE_REWALK_WALK_ERROR.store(false, super::Ordering::SeqCst);
+                FORCE_REWALK_WALK_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        FORCE_REWALK_WALK_ERROR.store(true, super::Ordering::SeqCst);
+        FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
         let _reset = ResetWalkErr;
 
         let init = SharedState::init_workspace_search_engine(
             &workspace,
-            &watcher_ready,
+            None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
             None,
             &crate::graph::GraphState::disabled(),

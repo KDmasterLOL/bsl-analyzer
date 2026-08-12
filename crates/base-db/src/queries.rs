@@ -247,3 +247,112 @@ pub fn resolve_vfs_path_query(
     let vfs_path = VfsPath::new(PathBuf::from(vfs_path_str));
     file_set.file_for_path(&vfs_path).copied()
 }
+
+/// Resolve a CONSTRUCTED candidate path whose trailing components may differ
+/// from the real spelling only by the caller-declared match modes. The exact
+/// spelling is tried first (a canonical tree pays one map lookup); on a miss,
+/// one scan of the file set compares componentwise: every leading component
+/// exactly (it came from a real path), the last `tail_modes.len()` components
+/// by their mode — object-name positions stay exact there too.
+pub fn resolve_vfs_path_ci_query(
+    db: &dyn salsa::Database,
+    source_root_input: SourceRootInput,
+    vfs_path_str: String,
+    tail_modes: &[bsl_conventions::SegmentMatch],
+) -> Option<FileId> {
+    if let Some(exact) = resolve_vfs_path_query(db, source_root_input, vfs_path_str.clone()) {
+        return Some(exact);
+    }
+    if tail_modes.is_empty() {
+        return None;
+    }
+    let candidate: Vec<String> =
+        vfs_path_str.replace('\\', "/").split('/').map(str::to_owned).collect();
+    let source_root = source_root_input.root(db);
+    let file_set = source_root.file_set();
+    for file in file_set.iter() {
+        let Some(path) = file_set.path_for_file(&file) else { continue };
+        let real_str = path.as_path().to_string_lossy().replace('\\', "/");
+        let real: Vec<&str> = real_str.split('/').collect();
+        if real.len() != candidate.len() {
+            continue;
+        }
+        let head = candidate.len() - tail_modes.len().min(candidate.len());
+        let head_ok = real[..head].iter().zip(&candidate[..head]).all(|(r, c)| *r == c);
+        if !head_ok {
+            continue;
+        }
+        let tail_ok = real[head..]
+            .iter()
+            .zip(&candidate[head..])
+            .zip(tail_modes)
+            .all(|((r, c), mode)| mode.matches(r, c));
+        if tail_ok {
+            return Some(file);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod ci_resolution_tests {
+    use super::*;
+    use bsl_conventions::SegmentMatch as M;
+    use vfs::file_set::FileSet;
+    use vfs::VfsPath;
+
+    #[salsa::db]
+    #[derive(Clone, Default)]
+    struct ResolveDb {
+        storage: salsa::Storage<Self>,
+    }
+
+    #[salsa::db]
+    impl salsa::Database for ResolveDb {}
+
+    fn db_with(paths: &[&str]) -> (ResolveDb, SourceRootInput) {
+        let db = ResolveDb::default();
+        let mut file_set = FileSet::default();
+        for (i, path) in paths.iter().enumerate() {
+            file_set.insert(vfs::FileId(i as u32), VfsPath::new(*path));
+        }
+        let input = SourceRootInput::new(&db, crate::SourceRoot::new_local(file_set));
+        (db, input)
+    }
+
+    #[test]
+    fn a_case_variant_tail_resolves_with_modes() {
+        let (db, root) = db_with(&["/w/cf/Roles/Admin.XML"]);
+        let found = resolve_vfs_path_ci_query(
+            &db,
+            root,
+            "/w/cf/Roles/Admin.xml".to_string(),
+            &[M::Ci, M::StemExactExtCi],
+        );
+        assert!(found.is_some(), "расширение регистронезависимо при точном стебле");
+    }
+
+    #[test]
+    fn an_object_stem_case_variant_never_resolves() {
+        let (db, root) = db_with(&["/w/cf/Roles/ADMIN.XML"]);
+        let found = resolve_vfs_path_ci_query(
+            &db,
+            root,
+            "/w/cf/Roles/Admin.xml".to_string(),
+            &[M::Ci, M::StemExactExtCi],
+        );
+        assert!(found.is_none(), "стебель — имя объекта, его регистр значим");
+    }
+
+    #[test]
+    fn head_components_outside_the_mask_stay_exact() {
+        let (db, root) = db_with(&["/w/CF/Roles/Admin.xml"]);
+        let found = resolve_vfs_path_ci_query(
+            &db,
+            root,
+            "/w/cf/Roles/Admin.xml".to_string(),
+            &[M::Ci, M::StemExactExtCi],
+        );
+        assert!(found.is_none(), "головные компоненты пришли из реального пути и точны");
+    }
+}

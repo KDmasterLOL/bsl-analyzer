@@ -1,0 +1,143 @@
+{
+  "runId": "db97f46a",
+  "agent": "scout",
+  "task": "Read-only reconnaissance for GitLab issue #209 in /home/itrous/src/tools_migration/lsp/bsl-analyzer at HEAD develop. Analyze bsl-search state that must transition atomically when WorkspaceRoots changes: store key carriers, overlay entries/hidden/dirty/unread/fingerprints/vectors, removed/reassigned/added roots, existing APIs and tests. Propose the narrowest lower-layer transition contract with file:line evidence and identify destructive setter behavior. Do not edit files or run subagents.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/outputs/db97f46a/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "processSignal": "SIGTERM",
+  "usage": {
+    "input": 47205,
+    "output": 3490,
+    "cacheRead": 90624,
+    "cacheWrite": 0,
+    "cost": 0.386037,
+    "turns": 5
+  },
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 47205,
+        "output": 3490,
+        "cacheRead": 90624,
+        "cacheWrite": 0,
+        "cost": 0.386037,
+        "turns": 5
+      }
+    }
+  ],
+  "durationMs": 88758,
+  "toolCount": 13,
+  "launchContractDigest": "189af448facffe0f042018ed607a04a472e76673ecb5c9b8089e2eed0c709373",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:e414f01f6029c834"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:e414f01f6029c834"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Concrete blocker and transition findings cite engine.rs:1299-1303, workspace_overlay.rs:349-360, store.rs:54-141, and sync.rs:1181-1228; residual risks are enumerated."
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "targeted repository find/grep/read inspection",
+          "result": "passed",
+          "summary": "Mapped WorkspaceRoots, engine setter, overlay carriers, persistent root-keyed tables, APIs, and relevant tests."
+        }
+      ],
+      "validationOutput": [
+        "Read-only reconnaissance; no source modifications or tests run."
+      ],
+      "residualRisks": [
+        "Alias/nested-root reassignment requires shared canonical attribution rules.",
+        "SQLite and live vector mutation need staging or rollback/rebuild to provide atomic observability.",
+        "Public destructive setter remains a bypass unless restricted."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "No code diff; wrote only the requested reconnaissance artifact.",
+      "reviewFindings": [
+        "blocker: crates/bsl-search/src/engine.rs:1299-1303 - set_workspace_roots publishes new roots, destructively clears only in-memory overlay state, and leaves persistent rows/live vectors under old keys.",
+        "high: crates/bsl-search/src/workspace_overlay.rs:349-360 - clear drops dirty and unread obligations rather than transitioning them.",
+        "high: crates/bsl-search/src/engine.rs:1301-1303 - cache lock poisoning is ignored, allowing roots and overlay cache to diverge.",
+        "medium: crates/mcp-server/src/state/sync.rs:1181-1228 - existing add-root test validates eventual rewalk only, not atomic transition or preservation."
+      ],
+      "manualNotes": "Recommended ownership is an engine-level transactional transition accepting an explicit per-file old/new key delta; a Store-only or MCP-only contract cannot coordinate every carrier."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/db97f46a_scout_0_transcript.jsonl",
+  "timestamp": 1786468415440
+}

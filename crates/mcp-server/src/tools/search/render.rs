@@ -11,15 +11,22 @@ use std::path::Path;
 /// regardless of root; form/command/file-module methods fall back to the
 /// `method/file/<rel>::<name>` id the graph also mints.
 ///
-/// The call graph keys file paths against `graph_root` (the repo root it was built from), but
-/// search hit paths are relative to `engine_root` (the configuration root, e.g. `src/cf`,
-/// nested under it). So we re-anchor the hit to an absolute path via `engine_root`, then let
-/// [`ide::method_graph_id`] strip `graph_root` back down — yielding the same `src/cf/…` prefix
-/// the graph minted, so a form/file method id resolves in `graph` instead of `not_found`.
-/// (Module-keyed ids are prefix-independent, so they are unaffected by the re-anchoring.)
+/// The call graph keys file paths against `graph_root` (the repo root it was built from), but a
+/// search hit's path is relative to the root that OWNS it — the configuration for most hits, an
+/// extension's own directory for the rest. So we re-anchor the hit to an absolute path through
+/// `roots`, then let [`ide::method_graph_id`] strip `graph_root` back down, yielding the same
+/// prefix the graph minted so a form/file method id resolves in `graph` instead of `not_found`.
+///
+/// Anchoring with one root for every hit — the configuration's — is what this replaced: under it
+/// an extension's file id named a path that exists in neither root.
+///
+/// (Module-keyed ids are prefix-independent, so re-anchoring does not touch them. They are also
+/// root-blind in the graph itself, which this cannot fix from here: the graph keys a common
+/// module by name, so a configuration module and an extension module of the same name share one
+/// id whatever path they were anchored with.)
 pub(super) fn graph_id_for_hit(
     hit: &SearchHit,
-    engine_root: Option<&Path>,
+    roots: Option<&bsl_search::WorkspaceRoots>,
     graph_root: Option<&Path>,
 ) -> Option<String> {
     if hit.symbol_name.is_empty() {
@@ -31,14 +38,19 @@ pub(super) fn graph_id_for_hit(
     if !is_method {
         return None;
     }
-    let hit_is_absolute = Path::new(&hit.file_path).is_absolute();
-    match engine_root {
-        Some(root) if !hit_is_absolute => {
-            let abs = root.join(&hit.file_path);
-            ide::method_graph_id(&abs.to_string_lossy(), &hit.symbol_name, graph_root)
-        }
-        _ if hit_is_absolute => ide::method_graph_id(&hit.file_path, &hit.symbol_name, graph_root),
-        _ => ide::method_graph_id(&hit.file_path, &hit.symbol_name, None)
+    if Path::new(&hit.file_path).is_absolute() {
+        return ide::method_graph_id(&hit.file_path, &hit.symbol_name, graph_root);
+    }
+    // Anchoring is possible only when the hit's own root is registered here. It need not be:
+    // a hit read from a shared baseline carries the identifier the PUBLISHER's table gave it,
+    // and that checkout may declare extensions this reader does not. Then the answer is the
+    // rootless one below — a module-keyed id, never a path-keyed one — because a path built
+    // from someone else's root is a wrong file dressed as a right one.
+    let anchored = roots
+        .and_then(|roots| roots.resolve(&bsl_search::FileKey::new(&hit.root_id, &hit.file_path)));
+    match anchored {
+        Some(abs) => ide::method_graph_id(&abs.to_string_lossy(), &hit.symbol_name, graph_root),
+        None => ide::method_graph_id(&hit.file_path, &hit.symbol_name, None)
             .filter(|id| !id.starts_with("method/file/")),
     }
 }
@@ -223,7 +235,7 @@ pub(super) fn no_hits_response(degraded: Option<&str>) -> CallToolResult {
 
 pub(super) fn format_code_hits(
     hits: &[FusedHit],
-    engine_root: Option<&Path>,
+    roots: Option<&bsl_search::WorkspaceRoots>,
     graph_root: Option<&Path>,
     max_output_tokens: usize,
 ) -> RenderedHits {
@@ -234,11 +246,19 @@ pub(super) fn format_code_hits(
             let rank = i + 1;
             let hit = &fused.hit;
             let mut text = String::new();
+            // An extension repeats the configuration's directory layout wholesale, so the same
+            // relative path under two roots is ordinary rather than exotic. The owning root is
+            // therefore part of a hit's identity, not decoration: without it two hits read
+            // identically and a caller cannot tell which file it is looking at. The
+            // configuration's id is the reserved empty string and prints nothing.
+            let root_marker =
+                if hit.root_id.is_empty() { String::new() } else { format!("[{}] ", hit.root_id) };
             let _ = writeln!(
                 text,
-                "#{} [{}] {}:{}-{} :: {} ({})",
+                "#{} [{}] {}{}:{}-{} :: {} ({})",
                 rank,
                 fused.modality.tag(),
+                root_marker,
                 hit.file_path,
                 hit.line_start + 1,
                 hit.line_end,
@@ -248,6 +268,7 @@ pub(super) fn format_code_hits(
             let mut json = json!({
                 "rank": rank,
                 "modality": fused.modality.tag(),
+                "root_id": hit.root_id,
                 "path": hit.file_path,
                 "line_start": hit.line_start + 1,
                 "line_end": hit.line_end,
@@ -256,7 +277,7 @@ pub(super) fn format_code_hits(
             if !hit.symbol_name.is_empty() {
                 json["symbol"] = json!(hit.symbol_name);
             }
-            if let Some(id) = graph_id_for_hit(hit, engine_root, graph_root) {
+            if let Some(id) = graph_id_for_hit(hit, roots, graph_root) {
                 let _ = writeln!(text, "  graph_id: {id}");
                 json["graph_id"] = json!(id);
             }
@@ -421,6 +442,33 @@ mod tests {
     }
 
     #[test]
+    fn hits_from_different_roots_are_told_apart() {
+        // A `cfe` extension repeats the configuration's directory layout wholesale, so the same
+        // relative path under two roots is the normal case, not a corner one. Two hits that read
+        // identically are two hits a caller cannot act on.
+        let mut configuration =
+            code_hit("CommonModules/Общий/Ext/Module.bsl", "Обработать", "procedure");
+        configuration.root_id = String::new();
+        let mut extension =
+            code_hit("CommonModules/Общий/Ext/Module.bsl", "Обработать", "procedure");
+        extension.root_id = "ext-a".to_owned();
+        let hits = vec![
+            FusedHit { hit: configuration, modality: Modality::Lexical },
+            FusedHit { hit: extension, modality: Modality::Lexical },
+        ];
+
+        let out = format_code_hits(&hits, None, None, usize::MAX);
+
+        assert_eq!(out.hits[0]["root_id"], "", "the configuration keeps the reserved empty id");
+        assert_eq!(out.hits[1]["root_id"], "ext-a", "the extension's hit names its root");
+        assert!(
+            out.text.contains("ext-a"),
+            "the human-readable listing distinguishes them too: {}",
+            out.text,
+        );
+    }
+
+    #[test]
     fn code_hit_structure_carries_every_field_the_listing_prints() {
         let mut hit = code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure");
         hit.text = (1..=7).map(|i| format!("строка {i}")).collect::<Vec<_>>().join("\n");
@@ -435,6 +483,7 @@ mod tests {
             json!({
                 "rank": 1,
                 "modality": "L",
+                "root_id": "",
                 "path": "CommonModules/Утилиты/Ext/Module.bsl",
                 "line_start": 181,
                 "line_end": 201,
@@ -474,6 +523,7 @@ mod tests {
             json!({
                 "rank": 1,
                 "modality": "S",
+                "root_id": "",
                 "path": "CommonModules/М/Ext/Module.bsl",
                 "line_start": 1,
                 "line_end": 1,
@@ -523,6 +573,7 @@ mod tests {
     fn doc_hit_structure_rounds_the_score_the_listing_prints() {
         let hits = vec![SearchHit {
             collection: "platform".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             file_path: "Массив.html".to_owned(),
             symbol_name: "Массив".to_owned(),
             kind: "type".to_owned(),
@@ -546,6 +597,7 @@ mod tests {
         // tie to even (0.062), arithmetic rounding breaks it away from zero (0.063).
         let hits = vec![SearchHit {
             collection: "platform".to_owned(),
+            root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
             file_path: "Массив.html".to_owned(),
             symbol_name: "Массив".to_owned(),
             kind: "type".to_owned(),
@@ -573,9 +625,109 @@ mod tests {
         assert!(body.get("budget_exhausted").is_none(), "nothing was cut: {body}");
     }
 
+    /// The table a workspace with one declared extension has. Built from paths that need not
+    /// exist: `resolve` answers from the DECLARED spellings, and the stand is about which root
+    /// a hit is anchored with, not about what is on disk.
+    fn roots_with_an_extension() -> bsl_search::WorkspaceRoots {
+        let (roots, rejected) = bsl_search::WorkspaceRoots::build(
+            Path::new("/repo"),
+            Path::new("/repo/src/cf"),
+            &[std::path::PathBuf::from("/repo/ext-a")],
+        );
+        assert!(rejected.is_empty(), "the extension is beside the configuration, not inside it");
+        roots
+    }
+
+    /// A file-keyed id carries the path, so it is the only place where anchoring is visible at
+    /// all — a module-keyed id looks the same whichever root it was built from, because the
+    /// graph keys common modules by name. Anchored with the configuration, an extension's form
+    /// module would be named `src/cf/<путь расширения>`: a path that exists in neither root.
+    #[test]
+    fn an_extension_hit_is_anchored_with_its_own_root() {
+        let roots = roots_with_an_extension();
+        let graph_root = Path::new("/repo");
+        let mut hit = code_hit(
+            "Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+            "ПриОткрытии",
+            "procedure",
+        );
+        hit.root_id = "ext-a".to_owned();
+
+        assert_eq!(
+            graph_id_for_hit(&hit, Some(&roots), Some(graph_root)),
+            Some(
+                "method/file/ext-a/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
+                    .to_owned()
+            ),
+        );
+    }
+
+    /// A hit whose root this workspace does not declare — the ordinary case when the baseline
+    /// was published from a checkout with more extensions. Anchoring it with the configuration
+    /// would mint a path-keyed id for a file that is not there; the honest answer is the same
+    /// one given with no table at all.
+    #[test]
+    fn a_hit_of_an_unregistered_root_is_not_anchored_at_all() {
+        let roots = roots_with_an_extension();
+        let graph_root = Path::new("/repo");
+        let mut form = code_hit(
+            "Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+            "ПриОткрытии",
+            "procedure",
+        );
+        form.root_id = "ext-неизвестное".to_owned();
+        let mut module =
+            code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure");
+        module.root_id = "ext-неизвестное".to_owned();
+
+        assert_eq!(
+            graph_id_for_hit(&form, Some(&roots), Some(graph_root)),
+            None,
+            "no path-keyed id is invented for a root this workspace has never seen",
+        );
+        assert_eq!(
+            graph_id_for_hit(&module, Some(&roots), Some(graph_root)),
+            Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
+            "the module-keyed id still resolves: it never depended on a root",
+        );
+    }
+
+    /// With no table — an external baseline serving while the engine is still building — both
+    /// arms answer exactly as they did before roots existed. This is a preserving guard, and it
+    /// guards a real loss: an absolute hit path yields a file-keyed id here, and folding that
+    /// arm into the rootless one would take it away.
+    #[test]
+    fn without_a_root_table_both_spellings_answer_as_before() {
+        let graph_root = Path::new("/repo");
+        let mut absolute = code_hit(
+            "/repo/src/cf/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl",
+            "ПриОткрытии",
+            "procedure",
+        );
+        absolute.root_id = "ext-a".to_owned();
+        let mut relative =
+            code_hit("CommonModules/Утилиты/Ext/Module.bsl", "ПроверитьИНН", "procedure");
+        relative.root_id = "ext-a".to_owned();
+
+        assert_eq!(
+            graph_id_for_hit(&absolute, None, Some(graph_root)),
+            Some(
+                "method/file/src/cf/Catalogs/Контрагенты/Forms/Форма/Ext/Form/Module.bsl::ПриОткрытии"
+                    .to_owned()
+            ),
+            "an absolute hit path names its own file and keeps its file-keyed id",
+        );
+        assert_eq!(
+            graph_id_for_hit(&relative, None, Some(graph_root)),
+            Some("method/common/Утилиты/ПроверитьИНН".to_owned()),
+            "and a relative one still gets the module-keyed id, with no path guessed",
+        );
+    }
+
     #[test]
     fn graph_id_bridges_method_hits_in_modules() {
-        let engine_root = Path::new("/repo/src/cf");
+        let roots = roots_with_an_extension();
+        let engine_root = &roots;
         let graph_root = Path::new("/repo");
 
         assert_eq!(

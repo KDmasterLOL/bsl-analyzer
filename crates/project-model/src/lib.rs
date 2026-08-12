@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub mod extension_topology;
 pub mod file_role;
+pub mod source_set;
+pub mod workspace_walk;
 pub use extension_topology::{
     ExtensionNode, ExtensionNodeSpec, ExtensionTopology, NodeId, TopologyError,
     TopologyFingerprint, TOPOLOGY_FORMAT_VERSION,
@@ -13,6 +15,10 @@ pub use extension_topology::{
 pub use file_role::{
     file_role, is_bsl_source_path, is_common_module_body_path, is_metadata_path,
     is_substrate_listed_body_path, FileRole, METADATA_WATCHED_EXTENSIONS, SOURCE_EXTENSIONS,
+};
+pub use source_set::SourceSet;
+pub use workspace_walk::{
+    path_crosses_a_link_cycle, walk_workspace_roots, WalkOutcome, WalkedFile,
 };
 
 /// A config file exists but cannot be read or parsed. Deliberately not folded
@@ -127,7 +133,7 @@ impl Project {
     fn discover_source_path(root: &Path, config: &ProjectConfig) -> Option<PathBuf> {
         if let Some(ref config_root) = config.configuration_root {
             let path = root.join(config_root);
-            if path.join("Configuration.xml").exists() {
+            if configuration_xml_in(&path).is_some() {
                 tracing::info!(?path, "found configuration from configurationRoot setting");
                 return Some(path);
             } else {
@@ -146,7 +152,7 @@ impl Project {
 
         for pattern in &["src/cf", "Configuration"] {
             let path = root.join(pattern);
-            if path.join("Configuration.xml").exists() {
+            if configuration_xml_in(&path).is_some() {
                 tracing::info!(?path, pattern, "found configuration using common pattern");
                 return Some(path);
             }
@@ -265,7 +271,7 @@ impl Project {
                             path,
                         });
                     }
-                    if !path.join("Configuration.xml").exists() {
+                    if configuration_xml_in(&path).is_none() {
                         return Err(TopologyError::StructuredNotAnExtension {
                             name: structured.name,
                             path,
@@ -317,7 +323,7 @@ impl Project {
             tracing::warn!(path = %path.display(), "extension path not found, skipping");
             return None;
         }
-        if !path.join("Configuration.xml").exists() {
+        if configuration_xml_in(&path).is_none() {
             tracing::warn!(
                 path = %path.display(),
                 "extension has no Configuration.xml, skipping"
@@ -418,7 +424,7 @@ fn search_configuration_xml_recursive(
         return None;
     }
 
-    if dir.join("Configuration.xml").exists() {
+    if configuration_xml_in(dir).is_some() {
         return Some(dir.to_path_buf());
     }
 
@@ -446,6 +452,142 @@ fn search_configuration_xml_recursive(
     None
 }
 
+/// What a `Configuration.xml`-bearing directory actually is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationKind {
+    /// A main configuration.
+    Configuration,
+    /// A configuration extension (CFE).
+    Extension,
+    /// No readable `Configuration.xml` at that path.
+    Unknown,
+}
+
+/// Backstop on how much of `Configuration.xml` is read looking for the marker.
+///
+/// The scan normally stops at `</Properties>`, a few kilobytes in, because the
+/// marker can only appear before it. This bound exists only so a malformed file
+/// with no closing tag cannot make project construction read a whole megabyte
+/// dump — it is not meant to be reached by any well-formed input.
+const CONFIGURATION_KIND_SCAN_CAP: u64 = 8 * 1024 * 1024;
+
+/// The element the platform writes only for an extension. Deliberately not
+/// `ConfigurationExtensionCompatibilityMode`, which a *main* configuration also
+/// carries — that one states which extensions it accepts, not that it is one.
+const EXTENSION_MARKER: &[u8] = b"<ConfigurationExtensionPurpose";
+
+/// Classifies a configuration root by its `Configuration.xml`.
+///
+/// Used to tell an operator that the directory handed to us is an extension
+/// analyzed without its main configuration — the state in which valid calls
+/// into the main configuration's exported common modules are reported as
+/// unresolved.
+/// The root's `Configuration.xml`, in whatever ASCII case the tree spells it.
+fn configuration_xml_in(dir: &Path) -> Option<PathBuf> {
+    bsl_conventions::find_child_ci(
+        dir,
+        bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+    )
+    .filter(|p| p.is_file())
+}
+
+pub fn configuration_kind(root: &Path) -> ConfigurationKind {
+    use std::io::Read as _;
+
+    // `is_file` before opening, not just to reject a directory: opening a FIFO
+    // with no writer blocks forever, and this runs on every project build —
+    // including LSP startup, which would never finish.
+    let Some(path) = configuration_xml_in(root) else {
+        return ConfigurationKind::Unknown;
+    };
+    let Ok(file) = std::fs::File::open(&path) else {
+        return ConfigurationKind::Unknown;
+    };
+
+    let mut reader = file.take(CONFIGURATION_KIND_SCAN_CAP);
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8 * 1024];
+    let mut scanned = 0usize;
+    loop {
+        match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(_) => return ConfigurationKind::Unknown,
+        }
+        // Re-scan from a little before the previous end so a marker straddling
+        // two reads is still seen.
+        let from = scanned.saturating_sub(EXTENSION_MARKER.len());
+        match scan_for_extension_marker(&buf[from..]) {
+            MarkerScan::Found => return ConfigurationKind::Extension,
+            MarkerScan::PropertiesClosed => return ConfigurationKind::Configuration,
+            MarkerScan::NeedMore => scanned = buf.len(),
+        }
+    }
+    ConfigurationKind::Configuration
+}
+
+enum MarkerScan {
+    Found,
+    /// `</Properties>` passed without a marker: it cannot appear later.
+    PropertiesClosed,
+    NeedMore,
+}
+
+/// Looks for the marker as an element, skipping comments.
+///
+/// A raw substring search would classify a main configuration as an extension
+/// when the marker merely appears inside `<!-- ... -->`, which is text and
+/// declares nothing.
+fn scan_for_extension_marker(head: &[u8]) -> MarkerScan {
+    const COMMENT_OPEN: &[u8] = b"<!--";
+    const COMMENT_CLOSE: &[u8] = b"-->";
+    const PROPERTIES_CLOSE: &[u8] = b"</Properties>";
+
+    let mut i = 0;
+    while i < head.len() {
+        let rest = &head[i..];
+        if rest.starts_with(COMMENT_OPEN) {
+            match find(&rest[COMMENT_OPEN.len()..], COMMENT_CLOSE) {
+                Some(end) => i += COMMENT_OPEN.len() + end + COMMENT_CLOSE.len(),
+                // Comment continues past what we have; nothing after it can be
+                // read as an element yet.
+                None => return MarkerScan::NeedMore,
+            }
+            continue;
+        }
+        if rest.starts_with(EXTENSION_MARKER) {
+            return MarkerScan::Found;
+        }
+        if rest.starts_with(PROPERTIES_CLOSE) {
+            return MarkerScan::PropertiesClosed;
+        }
+        i += 1;
+    }
+    MarkerScan::NeedMore
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Advisory for a root that is itself an extension, analyzed without the main
+/// configuration it extends. Returns `None` for anything else.
+///
+/// In that state the extension's calls into the main configuration's exported
+/// common modules cannot resolve, so the analyzer reports valid code as broken.
+/// Saying so beats letting the findings speak for themselves — from the outside
+/// they read as the analyzer being wrong.
+pub fn standalone_extension_notice(source_path: &Path) -> Option<String> {
+    (configuration_kind(source_path) == ConfigurationKind::Extension).then(|| {
+        format!(
+            "{} is a configuration extension analyzed without its main configuration. \
+             Calls into the main configuration will be reported as unresolved. \
+             Point --configuration-root at the main configuration, or declare it in [source].root.",
+            source_path.display()
+        )
+    })
+}
+
 /// One entry of the `extensions` list: either a bare path string (legacy,
 /// independent extension) or a structured entry with a stable name and
 /// declared dependencies.
@@ -460,6 +602,47 @@ pub struct StructuredExtensionDecl {
     pub name: String,
     pub path: String,
     pub depends_on: Vec<String>,
+}
+
+/// Source-set fields supplied outside the config file — today, by CLI flags.
+///
+/// Applied as a mutation of [`ProjectConfig`] rather than passed to a `Project`
+/// constructor, because the config is read by more than the constructors: the
+/// analyze path resolves `configuration_path` and loads metadata from the raw
+/// config before building the project, and that path feeds the interned
+/// configuration input used by diagnostics. An override living inside the
+/// constructor would leave those reads on the file-declared source set.
+///
+/// Fields override independently: a field that is set replaces the config's
+/// field outright, a field left unset keeps whatever the config declared. Paths
+/// are strings for the same reason the config stores them as strings — the
+/// whole model is string-based, so anything else would convert at every
+/// boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceSetOverride {
+    /// Replaces [`ProjectConfig::configuration_root`].
+    pub configuration_root: Option<String>,
+    /// Replaces [`ProjectConfig::extensions`], including the tri-state:
+    /// `Some(vec![])` is an explicit "no extensions", distinct from leaving the
+    /// field unset and inheriting discovery.
+    pub extensions: Option<Vec<ExtensionDecl>>,
+}
+
+impl SourceSetOverride {
+    /// True when nothing is overridden, i.e. applying this is a no-op.
+    pub fn is_empty(&self) -> bool {
+        self.configuration_root.is_none() && self.extensions.is_none()
+    }
+
+    /// Overwrites the config's source-set fields with the ones set here.
+    pub fn apply_to(&self, config: &mut ProjectConfig) {
+        if let Some(ref root) = self.configuration_root {
+            config.configuration_root = Some(root.clone());
+        }
+        if let Some(ref extensions) = self.extensions {
+            config.extensions = Some(extensions.clone());
+        }
+    }
 }
 
 impl From<&str> for ExtensionDecl {
@@ -560,6 +743,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub configuration_root: Option<String>,
+
+    #[serde(default, alias = "target_platform_version")]
+    pub target_platform_version: Option<String>,
 
     #[serde(default)]
     pub language: Option<String>,
@@ -1246,6 +1432,8 @@ struct TomlConfig {
     #[serde(default)]
     formatting: FormattingConfig,
     #[serde(default)]
+    target_platform_version: Option<String>,
+    #[serde(default)]
     search: TomlSearchConfig,
     #[serde(default)]
     features: FeaturesConfig,
@@ -1261,6 +1449,7 @@ impl Default for TomlConfig {
             diagnostics: default_toml_table(),
             code_lens: CodeLensConfig::default(),
             formatting: FormattingConfig::default(),
+            target_platform_version: None,
             search: TomlSearchConfig::default(),
             features: FeaturesConfig::default(),
             output: OutputConfig::default(),
@@ -1343,6 +1532,7 @@ impl From<TomlConfig> for ProjectConfig {
             code_lens: toml.code_lens,
             formatting: toml.formatting,
             configuration_root: toml.source.root,
+            target_platform_version: toml.target_platform_version,
             language: None,
             extensions: toml.source.extensions,
             analysis: AnalysisConfig {
@@ -1788,6 +1978,32 @@ fn validate_resolved_postgres_url(
 }
 
 #[cfg(test)]
+mod root_probe_case_tests {
+    use super::*;
+
+    #[test]
+    fn a_case_variant_configuration_xml_names_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let cf = dir.path().join("cf");
+        std::fs::create_dir_all(&cf).unwrap();
+        std::fs::write(
+            cf.join("CONFIGURATION.XML"),
+            "<Configuration><ConfigurationExtensionPurpose>Customization             </ConfigurationExtensionPurpose></Configuration>",
+        )
+        .unwrap();
+        assert_eq!(
+            configuration_kind(&cf),
+            ConfigurationKind::Extension,
+            "вид конфигурации читается из CONFIGURATION.XML"
+        );
+        assert!(
+            configuration_xml_in(&cf).is_some(),
+            "каталог с CONFIGURATION.XML опознаётся корнем"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, current_git_commit,
@@ -1796,8 +2012,9 @@ mod tests {
         FeaturesConfig, PostgresAccessMode, Project, ProjectConfig, ProjectError,
         ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
-        StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
+        SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
+    use super::{configuration_kind, ConfigurationKind};
     use chrono::{Duration, TimeZone, Utc};
     use std::fs;
     use tempfile::tempdir;
@@ -1823,6 +2040,26 @@ mod tests {
         assert!(!config.search.baseline.postgres.is_configured());
         assert!(config.search.baseline.workspace_code.branch.is_none());
         assert!(config.search.baseline.reference.snapshot_id.is_none());
+    }
+
+    #[test]
+    fn project_config_reads_target_platform_version_json() {
+        let config: ProjectConfig =
+            serde_json::from_str(r#"{"targetPlatformVersion":"8.3.27.1644"}"#).unwrap();
+        assert_eq!(config.target_platform_version.as_deref(), Some("8.3.27.1644"));
+
+        let snake: ProjectConfig =
+            serde_json::from_str(r#"{"target_platform_version":"8.3.27"}"#).unwrap();
+        assert_eq!(snake.target_platform_version.as_deref(), Some("8.3.27"));
+    }
+
+    #[test]
+    fn project_config_reads_target_platform_version_toml() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("bsl-analyzer.toml");
+        fs::write(&path, "target_platform_version = \"8.3.27.1644\"\n").unwrap();
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.target_platform_version.as_deref(), Some("8.3.27.1644"));
     }
 
     #[test]
@@ -2504,6 +2741,270 @@ extensions = [{ name = "T" }]
         let config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
         let resolved = Project::resolve_extensions(root, &config).unwrap();
         assert!(resolved.is_empty(), "explicit empty list must disable auto-discovery");
+    }
+
+    fn write_configuration_xml(root: &std::path::Path, body: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("Configuration.xml"), body).unwrap();
+    }
+
+    #[test]
+    fn an_extension_root_is_told_apart_from_a_main_configuration() {
+        let dir = tempdir().unwrap();
+
+        // A main configuration carries ConfigurationExtensionCompatibilityMode
+        // too, so that element cannot be the marker.
+        write_configuration_xml(
+            &dir.path().join("cf"),
+            "<MetaDataObject><Configuration><Properties>\
+             <ConfigurationExtensionCompatibilityMode>8.3.21</ConfigurationExtensionCompatibilityMode>\
+             </Properties></Configuration></MetaDataObject>",
+        );
+        write_configuration_xml(
+            &dir.path().join("cfe"),
+            "<MetaDataObject><Configuration><Properties>\
+             <ConfigurationExtensionCompatibilityMode>8.3.21</ConfigurationExtensionCompatibilityMode>\
+             <ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>\
+             </Properties></Configuration></MetaDataObject>",
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cf")), ConfigurationKind::Configuration);
+        assert_eq!(configuration_kind(&dir.path().join("cfe")), ConfigurationKind::Extension);
+        assert_eq!(configuration_kind(&dir.path().join("absent")), ConfigurationKind::Unknown);
+    }
+
+    #[test]
+    fn the_marker_is_found_past_a_realistic_amount_of_preamble() {
+        let dir = tempdir().unwrap();
+        // Real dumps put the marker about 3 KB in; pad well beyond that to show
+        // the probe window is not the binding constraint.
+        let padding = " ".repeat(64 * 1024);
+        write_configuration_xml(
+            &dir.path().join("cfe"),
+            &format!(
+                "<MetaDataObject>{padding}<Configuration><Properties>\
+                 <ConfigurationExtensionPurpose>Patch</ConfigurationExtensionPurpose>\
+                 </Properties></Configuration></MetaDataObject>"
+            ),
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cfe")), ConfigurationKind::Extension);
+    }
+
+    #[test]
+    fn the_marker_is_found_far_past_any_fixed_probe_window() {
+        let dir = tempdir().unwrap();
+        // Padding well past any fixed prefix bound: the scan is ended by
+        // `</Properties>`, not by a byte count.
+        let padding = "x".repeat(512 * 1024);
+        write_configuration_xml(
+            &dir.path().join("cfe"),
+            &format!(
+                "<MetaDataObject><Configuration><Properties><Comment>{padding}</Comment>\
+                 <ConfigurationExtensionPurpose>Patch</ConfigurationExtensionPurpose>\
+                 </Properties></Configuration></MetaDataObject>"
+            ),
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cfe")), ConfigurationKind::Extension);
+    }
+
+    #[test]
+    fn a_marker_inside_a_comment_declares_nothing() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(
+            &dir.path().join("cf"),
+            "<MetaDataObject><Configuration><Properties>\
+             <!-- <ConfigurationExtensionPurpose>fake</ConfigurationExtensionPurpose> -->\
+             </Properties></Configuration></MetaDataObject>",
+        );
+
+        assert_eq!(configuration_kind(&dir.path().join("cf")), ConfigurationKind::Configuration);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_named_configuration_xml_does_not_block_the_scan() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("weird");
+        std::fs::create_dir_all(&root).unwrap();
+        let fifo = root.join("Configuration.xml");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated string for the duration of
+        // the call, and mkfifo touches nothing else.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo failed");
+
+        // Opening a writer-less FIFO blocks forever, so the failure mode is a
+        // hang, not a wrong answer — a watchdog is the only way to see it fail
+        // instead of freezing the suite. The same call runs during LSP startup.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(configuration_kind(&root));
+        });
+
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(kind) => assert_eq!(kind, ConfigurationKind::Unknown),
+            Err(_) => panic!("configuration_kind blocked on a FIFO"),
+        }
+    }
+
+    #[test]
+    fn override_replaces_extensions_and_keeps_unset_root() {
+        let mut config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let over = SourceSetOverride {
+            extensions: Some(vec![structured("Flag", "vendor/flag", &[])]),
+            ..Default::default()
+        };
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root.as_deref(), Some("src/cf"), "root untouched");
+        assert_eq!(
+            config.extensions,
+            Some(vec![structured("Flag", "vendor/flag", &[])]),
+            "list replaced outright, not merged"
+        );
+    }
+
+    #[test]
+    fn override_replaces_root_and_keeps_unset_extensions() {
+        let mut config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let over =
+            SourceSetOverride { configuration_root: Some("other/cf".into()), ..Default::default() };
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root.as_deref(), Some("other/cf"));
+        assert_eq!(config.extensions, Some(vec!["src/cfe/FromConfig".into()]));
+    }
+
+    #[test]
+    fn empty_override_changes_nothing() {
+        let original = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        let mut config = original.clone();
+        let over = SourceSetOverride::default();
+        assert!(over.is_empty());
+
+        over.apply_to(&mut config);
+
+        assert_eq!(config.configuration_root, original.configuration_root);
+        assert_eq!(config.extensions, original.extensions);
+    }
+
+    #[test]
+    fn override_empty_list_opts_out_of_a_configured_list() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/FromConfig");
+
+        let mut config = ProjectConfig {
+            extensions: Some(vec!["src/cfe/FromConfig".into()]),
+            ..Default::default()
+        };
+        SourceSetOverride { extensions: Some(vec![]), ..Default::default() }.apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert!(resolved.is_empty(), "explicit empty override must drop the configured list");
+    }
+
+    #[test]
+    fn override_empty_list_opts_out_of_auto_discovery() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cfe/Discovered");
+
+        // Unset in the config would auto-discover `src/cfe/*`; the override must
+        // reach the same opt-out the config expresses as `extensions = []`.
+        let mut config = ProjectConfig::default();
+        SourceSetOverride { extensions: Some(vec![]), ..Default::default() }.apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert!(resolved.is_empty(), "explicit empty override must disable auto-discovery");
+    }
+
+    #[test]
+    fn override_list_beats_a_configured_opt_out() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "vendor/flag");
+
+        let mut config = ProjectConfig { extensions: Some(vec![]), ..Default::default() };
+        SourceSetOverride {
+            extensions: Some(vec![structured("Flag", "vendor/flag", &[])]),
+            ..Default::default()
+        }
+        .apply_to(&mut config);
+
+        let resolved = Project::resolve_extensions(root, &config).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].0, "Flag");
+    }
+
+    #[test]
+    fn same_source_set_from_config_and_from_override_share_a_fingerprint() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "src/cf");
+        touch_extension(root, "ext");
+
+        let from_config = ProjectConfig {
+            configuration_root: Some("src/cf".to_string()),
+            extensions: Some(vec!["ext".into()]),
+            ..Default::default()
+        };
+
+        // The flag spelling of the same set: a named entry whose derived name
+        // matches the directory the bare path resolves to.
+        let mut from_override = ProjectConfig::default();
+        SourceSetOverride {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("ext", "ext", &[])]),
+        }
+        .apply_to(&mut from_override);
+
+        let a = Project::with_config(root, from_config).unwrap();
+        let b = Project::with_config(root, from_override).unwrap();
+
+        assert_eq!(
+            a.extension_topology().fingerprint(),
+            b.extension_topology().fingerprint(),
+            "identical sets must share project identity regardless of how they were declared"
+        );
+    }
+
+    #[test]
+    fn override_root_reaches_configuration_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Negative control: without the override the config declares no root.
+        let bare = ProjectConfig::default();
+        assert_eq!(bare.configuration_path(root), None);
+
+        let mut config = ProjectConfig::default();
+        SourceSetOverride { configuration_root: Some("base".into()), ..Default::default() }
+            .apply_to(&mut config);
+
+        assert_eq!(
+            config.configuration_path(root),
+            Some(root.join("base")),
+            "the override must be visible to the config reads that happen before Project is built"
+        );
     }
 
     #[test]

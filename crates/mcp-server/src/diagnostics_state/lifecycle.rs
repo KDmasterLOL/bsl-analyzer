@@ -8,16 +8,13 @@ use std::time::{Duration, Instant};
 use vfs::{Vfs, VfsPath};
 
 use crate::change_hub::{Health, SinkCursor, WorkspaceChangeHub};
-use crate::graph::input::{
-    build_source_root, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
-};
-use crate::graph::scan::scan_stats_over_roots;
+use crate::graph::input::{build_source_root, db_for_files_lazy, ProjectSnapshot};
 
 use super::drift::{
     compute_freshness, config_identity, config_identity_now, reconcile_interval, ScanCache,
     DRIFT_CHECK_INTERVAL,
 };
-use super::resident::{canonical_key, DiagnosticsResident, ResidentVfs};
+use super::resident::{canonical_key, DiagnosticsResident, HoleOrigin, ResidentVfs};
 use super::types::{DiagnosticsStatus, ReloadState, ResidentOutcome, StatusReport, WatchReport};
 
 /// Drop the resident database after this long with no `diagnostics file` call, so a
@@ -37,6 +34,8 @@ struct ResidentBuild {
     scan_roots: Vec<PathBuf>,
     /// The build snapshot's topology hash, for the hub re-arm supersession guard.
     topology: u64,
+    /// Whether the walk this resident was built from could speak for the whole tree.
+    scan_clean: bool,
 }
 
 /// Everything mutable about the resident db, guarded by one `Mutex`. The lock is held
@@ -50,6 +49,13 @@ pub(super) struct Inner {
     /// Folded fingerprint of the analyzer config files, for config drift.
     pub(super) config_fp: u64,
     pub(super) generation: u64,
+    /// Bumped every time `stats` moves, under this same lock.
+    ///
+    /// A scan is a snapshot of disk paired with the baseline it was meant to be compared
+    /// against; once the baseline moves, the comparison is between two different worlds and
+    /// produces a diff that runs BACKWARDS — a file added since the snapshot looks deleted.
+    /// The snapshot carries the epoch it was taken at so the apply can refuse it.
+    pub(super) baseline_epoch: u64,
     pub(super) reload: ReloadState,
     /// When the current `Loading` build started, for the `status`/`loading` envelope's
     /// `elapsed_ms`. Set on `Idle → Loading`, cleared when the resident becomes `Ready`.
@@ -79,6 +85,10 @@ pub(crate) struct DiagnosticsState {
     /// Set by [`Self::force_rescan`]: forces the next poll onto the scan path even when
     /// the hub is healthy (the `metadata object` miss escape hatch).
     pub(super) force_scan: Arc<AtomicBool>,
+    /// When the hole retry list was last walked. Throttled on `drift_interval` like
+    /// the scan, because a retry reads each hole WHOLE off disk (`read_to_string`
+    /// fails UTF-8 only after reading), and `poll_drift` runs on every request.
+    pub(super) last_hole_retry: Arc<Mutex<Option<Instant>>>,
     /// When the reconciler last ran a watchdog scan.
     pub(super) last_reconcile: Arc<Mutex<Instant>>,
     pub(super) reconcile_interval: Duration,
@@ -88,9 +98,23 @@ pub(crate) struct DiagnosticsState {
     /// When the drift poll last compared the scope's resolved git refs, so the
     /// ref-only-movement check stays off the per-request hot path.
     pub(super) scope_ref_check_at: Arc<Mutex<Option<Instant>>>,
+    /// Full rebuilds STARTED — the operation itself, not one of its effects. A rebuild
+    /// that is declined at the swap leaves no trace in the resident, so nothing else can
+    /// tell "asked for and thrown away" from "never asked for".
+    #[cfg(test)]
+    pub(super) rebuilds_started: Arc<AtomicUsize>,
     /// One-shot test seam fired between the reconciler's first drain and its scan.
     #[cfg(test)]
     pub(super) reconcile_probe: ReconcileProbe,
+    /// One-shot test seam fired between the reconciler's scan and its second drain — the
+    /// only window in which an event can arrive that the scan's snapshot cannot contain.
+    #[cfg(test)]
+    pub(super) post_scan_probe: ReconcileProbe,
+    /// One-shot test seam fired between the read path's health decision and its drain.
+    /// A reconcile debt raised inside that window is the only way the drain returns one:
+    /// a debt visible earlier sends the read down the scan path instead.
+    #[cfg(test)]
+    pub(super) pre_drain_probe: ReconcileProbe,
 }
 
 /// A one-shot callback the reconciler fires between its first drain and its scan.
@@ -116,6 +140,7 @@ impl DiagnosticsState {
                 stats: HashMap::new(),
                 config_fp: 0,
                 generation: 0,
+                baseline_epoch: 0,
                 reload: ReloadState::Idle,
                 loading_since: None,
             })),
@@ -129,12 +154,19 @@ impl DiagnosticsState {
             change_hub: None,
             hub_cursor: Arc::new(Mutex::new(None)),
             force_scan: Arc::new(AtomicBool::new(false)),
+            last_hole_retry: Arc::new(Mutex::new(None)),
             last_reconcile: Arc::new(Mutex::new(Instant::now())),
             reconcile_interval: reconcile_interval(),
             scan_count: Arc::new(AtomicUsize::new(0)),
             scope_ref_check_at: Arc::new(Mutex::new(None)),
             #[cfg(test)]
+            rebuilds_started: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
             reconcile_probe: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            post_scan_probe: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            pre_drain_probe: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -179,6 +211,7 @@ impl DiagnosticsState {
             state,
             generation: inner.generation,
             files,
+            unread_files: inner.resident.as_ref().map(|r| r.unread_count()),
             reload: inner.reload.label(),
             error,
             elapsed_ms: inner.loading_since.map(|t| t.elapsed().as_millis() as u64),
@@ -253,8 +286,14 @@ impl DiagnosticsState {
         // to disk through the drain path, so freshness needs no scan — staleness reduces
         // to an in-flight reload. Only fall back to a freshness scan with no hub or a
         // degraded one (the scan path), keeping the healthy hot path free of a walk.
-        let hub_healthy =
-            matches!(&self.change_hub, Some(hub) if matches!(hub.health(), Health::Healthy));
+        // Asked about OUR cursor, like the drain decision above it: a debt belongs to the
+        // consumer that owes it, and a shared verdict would spend a walk here on somebody
+        // else's silence.
+        let cursor = *lock_recover(&self.hub_cursor);
+        let hub_healthy = matches!(
+            &self.change_hub,
+            Some(hub) if matches!(hub.health_for(cursor), Health::Healthy)
+        );
         let scan = if matches!(self.status(), DiagnosticsStatus::Ready { .. }) && !hub_healthy {
             self.workspace_root.as_deref().and_then(|root| self.throttled_scan(root))
         } else {
@@ -373,6 +412,7 @@ impl DiagnosticsState {
                     let mut inner = lock_recover(&self.inner);
                     inner.resident = Some(built.resident);
                     inner.stats = built.stats;
+                    inner.baseline_epoch += 1;
                     inner.config_fp = built.config_fp;
                     inner.generation += 1;
                     inner.reload = ReloadState::Idle;
@@ -416,15 +456,46 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.clone() else {
             return;
         };
+        #[cfg(test)]
+        self.rebuilds_started.fetch_add(1, Ordering::SeqCst);
         // Fresh cursor snapshot at rebuild start; events during the rebuild replay onto
         // the new resident, events before it are covered by the rebuild's baseline scan.
         self.resubscribe_cursor();
         match Self::catch_build(|| Self::build_resident(&root)) {
             Ok(built) => {
+                // A swap states outright which files exist, so a build that could not read
+                // the whole tree may not perform one: it would retire a serving resident in
+                // favour of a shorter universe, dropping live files — the same loss the
+                // incremental path refuses, arriving by the one route that bypasses it.
+                // The drift that asked for this rebuild is left unanswered on purpose; it
+                // is still on disk, so the next window asks again, and the request is
+                // granted the first time the tree can be read whole. A first build has no
+                // resident to protect and publishes regardless: half a universe beats none.
+                if !built.scan_clean && lock_recover(&self.inner).resident.is_some() {
+                    tracing::info!(
+                        "declining to swap in a resident built over a partially unreadable \
+                         tree; the pending drift is retried once the tree reads whole"
+                    );
+                    {
+                        let mut inner = lock_recover(&self.inner);
+                        inner.reload = ReloadState::Idle;
+                    }
+                    // This rebuild's cursor was resubscribed at its start, which advances
+                    // past every event the build was assumed to cover. Declining the build
+                    // makes that assumption false: those events are now recorded nowhere.
+                    // A scan re-derives them from disk, so route the next poll through one
+                    // instead of leaving them to the watchdog a minute and a half later.
+                    // What that scan may then apply is its own question — body text yes,
+                    // structure not until the tree reads whole.
+                    *lock_recover(&self.scan) = None;
+                    self.force_scan.store(true, Ordering::SeqCst);
+                    return;
+                }
                 let files = built.resident.file_count();
                 let mut inner = lock_recover(&self.inner);
                 inner.resident = Some(built.resident);
                 inner.stats = built.stats;
+                inner.baseline_epoch += 1;
                 inner.config_fp = built.config_fp;
                 inner.generation += 1;
                 inner.reload = ReloadState::Idle;
@@ -476,12 +547,23 @@ impl DiagnosticsState {
         // Load the project ONCE: the scan universe, the config roots (with their
         // dependency closures) and the `[diagnostics]` settings all derive from
         // this single snapshot, so a reload can never mix two project states.
-        let project = project_model::Project::new(root)
+        let project = crate::project::at(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
         let snapshot = ProjectSnapshot::from_project(&project);
-        let files = enumerate_bsl_files(&snapshot);
+        // Taken BEFORE the walk, because `WorkspaceRoots::build` canonicalises against the disk
+        // rather than reading the already-loaded project: built afterwards, it could describe a
+        // retargeted symlink the walk never saw, and then the table and `by_path` would be two
+        // snapshots instead of one.
+        let (workspace_roots, _rejected) = crate::project::workspace_roots(&project);
+        // ONE scan serves both the resident's file set and the drift baseline
+        // below: two walks here could disagree (a file deleted between them would
+        // sit in the resident forever, invisible to every later drift scan,
+        // because the baseline never contained it).
+        let universe = crate::graph::universe::ScannedUniverse::scan(&snapshot.scan_roots);
+        let scan_clean = universe.clean();
+        let files = &universe.files;
         // `ProjectSnapshot` already registers canonical roots, matching the
-        // canonical `.bsl` universe `enumerate_bsl_files` produces.
+        // canonical `.bsl` universe the scan produces.
         let configs = snapshot.configs.clone();
         let mut config = ide::DiagnosticsConfig::from_project_json(
             &project.config.diagnostics,
@@ -501,12 +583,21 @@ impl DiagnosticsState {
         // current HEAD; the drift poll rebuilds it when the refs move.
         let ignored_authors = project.config.analysis.ignored_authors.clone();
         let author_filter = super::resident::build_author_filter(root, &ignored_authors);
-        let source_root = build_source_root(&files);
+        let source_root = build_source_root(files);
         // Disk-backed: register each file's content revision and drop its text, so the
         // whole-workspace resident is not pinned as salsa inputs (which OOMs on a large
         // config). `file_text_query` re-reads on demand under its LRU cap — the same
         // model the LSP server and CLI `analyze` use.
-        let mut db = db_for_files_lazy(&source_root, &files, &configs, None);
+        let crate::graph::input::BatchLoad { mut db, unread } =
+            db_for_files_lazy(&source_root, files, &configs, None);
+        // A file whose bytes could not be read is NOT served: it is held out of
+        // `by_path` and answered as "known but unreadable", and the retry list
+        // re-reads it every window. Its baseline fingerprint stays — the scan did
+        // parse this state of the disk, so re-adding it every window would storm.
+        // Build holes are `Admitted`: the build IS the admission for the configuration
+        // it was started for.
+        let holes: HashMap<String, HoleOrigin> =
+            unread.iter().map(|p| (canonical_key(p), HoleOrigin::Admitted)).collect();
 
         // Pre-seed the VFS with the SAME FileIds the source root uses for each `.bsl`,
         // in enumerate order, so the interner assigns id `i` to `files[i]`. The metadata
@@ -516,7 +607,7 @@ impl DiagnosticsState {
         let vfs = ResidentVfs(RefCell::new(Vfs::default()));
         {
             let mut guard = vfs.0.borrow_mut();
-            for (file_id, path) in &files {
+            for (file_id, path) in files {
                 let allocated = guard.alloc_file_id(VfsPath::new(path.clone()));
                 // A hard check, not `debug_assert`: this is a one-time O(n) pass at
                 // resident build (not a hot path), and a release-mode misalignment
@@ -527,23 +618,25 @@ impl DiagnosticsState {
                 );
             }
         }
+        // Runs AFTER every file is registered, so the unreadable ones already carry
+        // their mark: the substrate asks the database per body, and a body asked too
+        // early would get a back-link to text nobody could read.
         ide_host_core::bootstrap_metadata_substrate(&mut db, &vfs);
 
         let mut by_path = HashMap::with_capacity(files.len());
-        for (file_id, path) in &files {
-            by_path.insert(canonical_key(path), *file_id);
+        for (file_id, path) in files {
+            let key = canonical_key(path);
+            if holes.contains_key(&key) {
+                continue;
+            }
+            by_path.insert(key, *file_id);
         }
-        // The drift baseline and the config identity derive from the SAME snapshot
-        // that built the resident — a re-derived project here could reflect a
-        // topology edit that landed mid-build, and comparing later scans against
-        // that newer baseline would report the stale resident as fresh forever.
-        let stats: HashMap<String, u64> = scan_stats_over_roots(&snapshot.scan_roots)
-            .into_iter()
-            .map(|s| {
-                let fp = s.fingerprint();
-                (s.path, fp)
-            })
-            .collect();
+        // The drift baseline derives from the SAME scan that gave the resident its
+        // files (and the config identity from the same snapshot) — a fresh walk
+        // here could reflect a change that landed mid-build, and comparing later
+        // scans against that newer baseline would hide the drift forever.
+        let stats: HashMap<String, u64> =
+            universe.stats.iter().map(|s| (s.path.clone(), s.fingerprint())).collect();
         let config_fp = config_identity(config_files_fp, &snapshot.configs);
 
         let topology = crate::graph::scan::topology_u64(&snapshot.configs);
@@ -552,8 +645,10 @@ impl DiagnosticsState {
                 db,
                 vfs,
                 by_path,
+                holes,
                 config,
                 workspace_root: root.to_path_buf(),
+                workspace_roots,
                 diff_base,
                 scope_identity,
                 ignored_authors,
@@ -563,6 +658,7 @@ impl DiagnosticsState {
             config_fp,
             scan_roots: snapshot.scan_roots,
             topology,
+            scan_clean,
         })
     }
 
@@ -656,6 +752,7 @@ impl DiagnosticsState {
             }
             inner.resident = None;
             inner.stats.clear();
+            inner.baseline_epoch += 1;
             inner.status = DiagnosticsStatus::Idle;
             drop(inner);
             *lock_recover(&state.scan) = None;
@@ -675,4 +772,32 @@ impl DiagnosticsState {
 /// full rebuild because it can alter the project's extension set and thus the db inputs.
 pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics_state::test_support::sample_workspace;
+
+    /// One resident build is exactly ONE traversal: the file set and the drift
+    /// baseline are projections of the same scan. Historically this path walked
+    /// twice, and a file deleted between the walks stayed in the resident forever —
+    /// the baseline never contained it, so no later drift scan could evict it.
+    #[test]
+    fn a_resident_build_walks_the_tree_exactly_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        let built = DiagnosticsState::build_resident(root).expect("resident builds");
+        let walks = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert!(walks > 0, "a zero count means the instrumentation broke");
+        assert_eq!(walks, 1, "files and drift baseline come from the one scan");
+        assert!(
+            built.stats.keys().any(|k| k.ends_with("Module.bsl")),
+            "the baseline describes the scanned universe"
+        );
+    }
 }

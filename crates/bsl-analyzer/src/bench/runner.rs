@@ -37,6 +37,42 @@ use crate::smoke::{bootstrap_smoke, Budgets, Scenario, SmokeArgs};
 pub const DEFAULT_WARM_ITERATIONS: usize = 20;
 pub const DEFAULT_BOOT_BUDGET_MS: u64 = 120_000;
 
+#[cfg(test)]
+#[path = "unread_module_tests.rs"]
+mod unread_module_tests;
+
+// Arms one action for the single instant a test cannot reach from outside: after
+// the index is built, before the observation reopens the batches. Every other
+// instant is reachable by calling `boot`, `resolve_target` and `execute_once` in
+// sequence, so this is the only stage the seam offers.
+//
+// One-shot by construction: the call takes the action out and never puts it back.
+// There is no standing registration, so there is nothing to leak, replace, restore
+// or carry across a thread — a seam that kept one had to answer all four, and none
+// of those questions has a caller here.
+//
+// An armed action is spent by the very call it was armed for — arming sits
+// immediately before that call, so there is no window in which one can be left
+// over. Thread-local storage is the second line rather than the first: libtest
+// gives each test its own thread even under `--test-threads=1`.
+#[cfg(test)]
+thread_local! {
+    static BETWEEN_INDEX_PASSES: std::cell::Cell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn arm_between_index_passes(action: impl FnOnce() + 'static) {
+    BETWEEN_INDEX_PASSES.with(|slot| slot.set(Some(Box::new(action))));
+}
+
+#[cfg(test)]
+fn run_between_index_passes_hook() {
+    if let Some(action) = BETWEEN_INDEX_PASSES.with(std::cell::Cell::take) {
+        action();
+    }
+}
+
 #[derive(Debug)]
 pub enum RunError {
     /// Manifest unreadable / invalid / point id unknown → CLI exit 2.
@@ -152,6 +188,9 @@ struct CallHierarchyBuildContext {
     config_paths: Vec<(Option<String>, PathBuf)>,
     config_cache: Arc<ide::GraphConfigCache>,
     workspace_root: PathBuf,
+    /// Modules no pass could read. Non-empty fails the run: a measurement over a
+    /// silently smaller graph is not a measurement of this workspace.
+    unread: Arc<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>>,
 }
 
 pub(crate) fn boot(source_dir: &Path, boot_budget_ms: u64) -> Result<BenchEnv, RunError> {
@@ -1007,7 +1046,22 @@ pub(crate) fn execute_once(
             )
             .map_err(|err| RunError::Other(format!("call hierarchy index build failed: {err}")))?;
             let build_duration_ns = built.elapsed.as_nanos() as u64;
+            #[cfg(test)]
+            run_between_index_passes_hook();
             let observation = call_hierarchy_index_observation(&built, &context, *batch_size)?;
+            // Checked AFTER both passes, so a file that became unreadable between them
+            // fails the run exactly like one that was unreadable from the start.
+            let unread = context.unread.lock().expect("bench unread set is never poisoned");
+            if !unread.is_empty() {
+                return Err(RunError::Other(format!(
+                    "call hierarchy index build read {} module(s) as empty because their bytes \
+                     could not be read; the measurement would cover a smaller graph than the \
+                     workspace: {}",
+                    unread.len(),
+                    unread.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )));
+            }
+            drop(unread);
             Ok((build_duration_ns, observation))
         }
         FeatureSpec::InlayHints { range } => {
@@ -1189,9 +1243,19 @@ fn call_hierarchy_build_context(
         config_paths: db.all_config_paths(),
         config_cache: Arc::new(ide::GraphConfigCache::default()),
         workspace_root: env.workspace_root.clone(),
+        unread: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
     })
 }
 
+/// Opens one batch and RECORDS the modules whose bytes could not be read, into the
+/// shared set on `context`.
+///
+/// A module registered with empty text lowers to no methods at all, so a measurement
+/// taken over it silently reports a smaller, faster graph than the workspace really
+/// has — the run would look better precisely because it analysed less. The set is
+/// shared rather than returned because both passes open batches (the build closure
+/// and the observation below), and a per-pass report would miss whichever pass the
+/// file became unreadable in.
 fn open_call_hierarchy_batch(
     context: &CallHierarchyBuildContext,
     batch: &[ide::ModuleId],
@@ -1203,10 +1267,14 @@ fn open_call_hierarchy_batch(
     let mut db = ide::RootDatabaseImpl::default();
     db.set_graph_config_cache(Arc::clone(&context.config_cache));
     db.set_source_root(context.source_root_id, context.source_root.clone());
-    let _unreadable =
+    let unreadable =
         ide_host_core::register_files_disk_backed(&mut db, context.source_root_id, &batch_files);
+    if !unreadable.is_empty() {
+        let mut seen = context.unread.lock().expect("bench unread set is never poisoned");
+        seen.extend(unreadable.into_iter().map(|(path, _err)| path));
+    }
     db.set_all_config_paths(context.config_paths.clone());
-    ide::warm_batch_config_roots(&db, &batch_files, &context.config_paths);
+    ide::warm_batch_config_roots(&db, &batch_files);
     db
 }
 

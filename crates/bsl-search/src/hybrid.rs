@@ -11,6 +11,7 @@
 //! to the top, a natural-language query falls straight through to semantic order, with no
 //! classifier and one rule.
 
+use crate::workspace_roots::FileKey;
 use std::collections::{HashMap, HashSet};
 
 use crate::engine::SearchHit;
@@ -47,12 +48,12 @@ pub struct FusedHit {
 
 /// A hit's identity across modalities: the same chunk found by lexical and semantic search
 /// must collapse to one fused result. Mirrors [`crate::merge`]'s dedup key.
-type FusionKey = (String, String, String, u32, u32);
+type FusionKey = (String, FileKey, String, u32, u32);
 
 fn fusion_key(hit: &SearchHit) -> FusionKey {
     (
         hit.collection.clone(),
-        hit.file_path.clone(),
+        FileKey::new(&hit.root_id, &hit.file_path),
         hit.symbol_name.clone(),
         hit.line_start,
         hit.line_end,
@@ -230,6 +231,7 @@ mod tests {
     fn lexical(path: &str, symbol: &str) -> SearchHit {
         SearchHit {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             file_path: path.to_owned(),
             symbol_name: symbol.to_owned(),
             kind: "procedure".to_owned(),

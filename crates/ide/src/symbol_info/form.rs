@@ -108,3 +108,30 @@ fn is_form_marker(s: &str) -> bool {
 fn is_common_form_keyword(s: &str) -> bool {
     name_eq(s, "ОбщаяФорма") || name_eq(s, "CommonForm")
 }
+
+#[cfg(test)]
+mod form_path_mirror_tests {
+    /// Зеркальность двух форменных классификаторов: hir-def и ide-db обязаны
+    /// принимать и отвергать ОДНИ И ТЕ ЖЕ пути — иначе форма распознаётся там,
+    /// где её метаданные не загрузятся (или наоборот).
+    #[test]
+    fn the_two_form_classifiers_agree_on_every_spelling() {
+        let paths = [
+            "Catalogs/C/Forms/F/Ext/Form/Module.bsl",
+            "Catalogs/C/Forms/F/EXT/FORM/MODULE.BSL",
+            "CATALOGS/C/FORMS/F/EXT/FORM/MODULE.BSL",
+            "CommonForms/Ф/Ext/Form/Module.bsl",
+            "Catalogs/C/Ext/ObjectModule.bsl",
+            "CommonModules/X/Ext/Module.bsl",
+            "Catalogs/C/Forms/F/Ext/Form/Другой.bsl",
+            "tmp/forms/X/Ext/Form/Module.bsl",
+        ];
+        for path in paths {
+            let hir_says = hir::parse_form_module_path(path).is_some();
+            let ide_db_says = ide_db::metadata::get_module_type_from_uri(path)
+                == Some(bsl_metadata::ModuleType::FormModule);
+            assert_eq!(hir_says, ide_db_says, "зеркала разошлись на {path}");
+        }
+        assert!(hir::parse_form_module_path("Catalogs/C/Forms/F/EXT/FORM/MODULE.BSL").is_some());
+    }
+}

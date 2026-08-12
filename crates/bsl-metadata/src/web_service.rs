@@ -25,6 +25,12 @@ impl WebService {
         &self.operations
     }
 
+    /// Rewrite the module URI from the REAL on-disk spelling the loader found —
+    /// the parser constructs the canonical spelling before the probe has run.
+    pub(crate) fn set_uri(&mut self, uri: String) {
+        self.uri = Some(uri);
+    }
+
     pub fn uri(&self) -> Option<&str> {
         self.uri.as_deref()
     }

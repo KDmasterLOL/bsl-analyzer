@@ -9,7 +9,9 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
+bsl-conventions.workspace = true
 code-chunk.workspace = true
+project-model.workspace = true
 syntax.workspace = true
 
 rusqlite.workspace = true
@@ -36,6 +38,5 @@ walkdir.workspace = true
 [dev-dependencies]
 expect-test.workspace = true
 parser.workspace = true
-project-model.workspace = true
 tempfile.workspace = true
 tracing-subscriber.workspace = true

@@ -5,7 +5,7 @@ fn main() {
     let mut sizes: Vec<(usize, String, String)> = Vec::new();
 
     for entry in walkdir::WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
-        if entry.path().extension().is_none_or(|e| e != "bsl") {
+        if !bsl_conventions::has_extension(entry.path(), bsl_conventions::BSL_EXTENSION) {
             continue;
         }
         let content = match std::fs::read_to_string(entry.path()) {

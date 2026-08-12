@@ -49,10 +49,13 @@ pub use hir::{BinaryOp, Binding, Expr, IfStmt, Literal, Stmt, UnaryOp};
 pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
-pub use configs::ConfigsDatabase;
+pub use configs::{
+    ApplicationModuleKind, BodySearch, CommonModuleBodies, CommonModuleBody, ConfigsDatabase,
+};
 pub use item_tree::ItemTree;
 pub use module_index::{
-    module_key_for_path, parse_form_module_path, FormKey, ModuleIndex, ModuleKey,
+    module_key_for_path, module_path_segment_modes, parse_form_module_path, FormKey, ModuleIndex,
+    ModuleKey,
 };
 pub use name::Name;
 pub use name_usage_index::{

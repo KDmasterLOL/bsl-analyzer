@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "runId": "c2d80c34",
+  "mode": "parallel",
+  "source": "foreground",
+  "cwd": "/home/itrous/src/tools_migration/lsp/bsl-analyzer",
+  "createdAt": 1786479965588,
+  "updatedAt": 1786479965588,
+  "groups": [
+    {
+      "stepIndex": 0,
+      "baseCommit": "4b703bd1f55875a658c807cb2582af0701813f02",
+      "repoRoot": "/home/itrous/src/tools_migration/lsp/bsl-analyzer",
+      "children": [],
+      "cleanup": {
+        "state": "partial",
+        "pruned": false,
+        "tasks": [
+          {
+            "index": 0,
+            "path": "/tmp/pi-worktree-c2d80c34-0",
+            "branch": "pi-parallel-c2d80c34-0",
+            "worktreeRemoved": false,
+            "branchRemoved": false,
+            "preserved": true,
+            "reason": "cleanup pending durable handoff capture"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -204,35 +204,30 @@ pub fn bare_global_name_claim(
 /// object type, so member access such as `ВидДвиженияБухгалтерии.Дебет` resolves
 /// against the enum's members.
 ///
-/// System enums are the platform types that may be referenced directly by name
-/// as a value: they have no constructor and no methods, and their members are
-/// enum values — modelled as properties that carry **no declared type** (a value
-/// like `Дебет` simply *is* the enum). Constructible value types
-/// (`ТаблицаЗначений`, `Массив`, …) carry a constructor and instance methods, and
-/// property-bearing objects (`ПолеНастройки`, `ПараметрыОбменаДанными`) have
-/// members with concrete types; both are excluded, since a bare type name is not
-/// a value for them.
+/// Membership is taken from the exact, versioned EDT `SystemEnums.type`
+/// manifest. It is deliberately not inferred from constructors/member shapes:
+/// that heuristic both admitted metadata-only enum classes and missed valid
+/// compatibility entries.
 pub fn resolve_platform_system_enum_type(db: &dyn TypeKernelDb, name: &Name) -> Option<TypeId> {
-    let platform = bsl_platform::PlatformDataInner::instance();
-    let ty = platform.get_type(name.as_str())?;
-    let english = ty.english_name.as_str();
-
-    if !platform.get_constructors(english).is_empty() {
+    let symbol = bsl_platform::PlatformGlobalCatalog::instance().lookup(name.as_str())?;
+    if symbol.kind != bsl_platform::PlatformGlobalKind::SystemEnum {
         return None;
     }
-    if !platform.get_type_methods(english).is_empty() {
-        return None;
-    }
-
-    let members = platform.get_type_properties(english);
-    if members.is_empty() {
-        return None;
-    }
-    if members.iter().any(|m| !m.property_types.is_empty()) {
-        return None;
-    }
-
-    Some(db.platform_object(ty.name.to_string()))
+    Some(
+        db.platform_object(
+            symbol
+                .value_type
+                .as_deref()
+                .unwrap_or_else(|| {
+                    if symbol.canonical_ru.is_empty() {
+                        symbol.canonical_en.as_str()
+                    } else {
+                        symbol.canonical_ru.as_str()
+                    }
+                })
+                .to_string(),
+        ),
+    )
 }
 
 #[cfg(test)]

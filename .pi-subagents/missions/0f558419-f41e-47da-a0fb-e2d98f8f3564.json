@@ -1,0 +1,221 @@
+{
+  "schemaVersion": 1,
+  "id": "0f558419-f41e-47da-a0fb-e2d98f8f3564",
+  "title": "Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review.",
+  "objective": "Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review.\nConfirmed HIGH: production refresh_search_roots_after_graph calls apply_workspace_roots_transition under SharedSearchEngine mutex, and apply performs a second full SourceSet scan plus fs::read/hash for every file, blocking searches.\nRedesign the core API so expensive second validation happens off the outer MCP engine mutex, for example a public revalidate/validated-plan phase. Guarded apply under mutex must do only in-memory epoch/cache checks plus SQLite/cache/vector atomic mutation. Preserve a standalone safe API if needed, but production must use validated apply.\nDocument watcher-backed race semantics: the hub is rearmed before the hook; any create/modify/delete after off-lock validation is queued and, after apply, attributed via new roots. Add a deterministic test proving filesystem scan/read validation does not execute while the outer engine mutex is held, using a test seam/barrier/counter rather than sleeps.\nAlso address related review findings correctly: unchanged-root provider replacement must fence old overlay plans; do not silently swap provider. On incomplete scan keep last-known-good and retry via the existing obligation, without a busy loop. Preserve pending embedding signals even if provider installation fails after an Applied transition.\nCritically inspect current replace_published_graph_context_provider design: stable overlay entries need not be discarded lexically, but stale semantic plans must be fenced and future point refreshes must use the new provider. Add focused tests.\nRun cargo fmt, cargo test -p bsl-search, targeted/full cargo test -p mcp-server, and clippy with -D warnings as practical. Leave diff uncommitted for OneCPI rerun. Do not use wt/worktree or nested agents.",
+  "status": "completed",
+  "createdAt": "2026-08-12T08:55:14.801Z",
+  "updatedAt": "2026-08-12T09:18:10.304Z",
+  "runs": [
+    {
+      "runId": "call_F7HjV1thmEDtq3zCJlZ3dpM3|fc_00cb2b9ffd5becd8016a7c34e99ae08191abc6659925a6e601",
+      "mode": "workflow",
+      "agent": "worker",
+      "status": "completed",
+      "startedAt": "2026-08-12T09:18:10.304Z",
+      "completedAt": "2026-08-12T09:18:10.304Z",
+      "usage": {
+        "tokens": 573821
+      }
+    }
+  ],
+  "workflowChildren": [
+    {
+      "workflowRunId": "call_F7HjV1thmEDtq3zCJlZ3dpM3|fc_00cb2b9ffd5becd8016a7c34e99ae08191abc6659925a6e601",
+      "key": "fix-lock-review",
+      "status": "completed",
+      "startedAt": "2026-08-12T08:55:14.826Z",
+      "updatedAt": "2026-08-12T09:18:10.296Z",
+      "artifactPaths": [
+        "/home/itrous/.pi/agent/sessions/--home-itrous-src-tools_migration-lsp-bsl-analyzer--/2026-08-12T08-55-14-846Z_019ff52e-d49e-79bd-9c70-d374f37cbab8.jsonl"
+      ],
+      "runId": "debb4580",
+      "agent": "worker",
+      "task": "Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review.\nConfirmed HIGH: production refresh_search_roots_after_graph calls apply_workspace_roots_transition under SharedSearchEngine mutex, and apply performs a second full SourceSet scan plus fs::read/hash for every file, blocking searches.\nRedesign the core API so expensive second validation happens off the outer MCP engine mutex, for example a public revalidate/validated-plan phase. Guarded apply under mutex must do only in-memory epoch/cache checks plus SQLite/cache/vector atomic mutation. Preserve a standalone safe API if needed, but production must use validated apply.\nDocument watcher-backed race semantics: the hub is rearmed before the hook; any create/modify/delete after off-lock validation is queued and, after apply, attributed via new roots. Add a deterministic test proving filesystem scan/read validation does not execute while the outer engine mutex is held, using a test seam/barrier/counter rather than sleeps.\nAlso address related review findings correctly: unchanged-root provider replacement must fence old overlay plans; do not silently swap provider. On incomplete scan keep last-known-good and retry via the existing obligation, without a busy loop. Preserve pending embedding signals even if provider installation fails after an Applied transition.\nCritically inspect current replace_published_graph_context_provider design: stable overlay entries need not be discarded lexically, but stale semantic plans must be fenced and future point refreshes must use the new provider. Add focused tests.\nRun cargo fmt, cargo test -p bsl-search, targeted/full cargo test -p mcp-server, and clippy with -D warnings as practical. Leave diff uncommitted for OneCPI rerun. Do not use wt/worktree or nested agents.",
+      "completedAt": "2026-08-12T09:18:10.296Z",
+      "sessionPath": "/home/itrous/.pi/agent/sessions/--home-itrous-src-tools_migration-lsp-bsl-analyzer--/2026-08-12T08-55-14-846Z_019ff52e-d49e-79bd-9c70-d374f37cbab8.jsonl",
+      "heartbeat": {
+        "updatedAt": "2026-08-12T09:18:10.296Z",
+        "status": "completed"
+      }
+    }
+  ],
+  "decisions": [],
+  "artifacts": [
+    {
+      "kind": "output",
+      "path": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/debb4580_worker_0_output.md"
+    },
+    {
+      "kind": "other",
+      "path": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/debb4580_worker_0_transcript.jsonl",
+      "description": "Child transcript"
+    }
+  ],
+  "receipts": [],
+  "cwd": "/home/itrous/src/tools_migration/lsp/bsl-analyzer",
+  "ownerSessionId": "/home/itrous/.pi/agent/sessions/--home-itrous-src-tools_migration-lsp-bsl-analyzer--/2026-08-11T16-56-01-712Z_019ff1c0-a3b0-721b-9877-80bd2c0f5039.jsonl",
+  "summary": "Workflow completed.\n\nReturn:\n{\n  \"key\": \"fix-lock-review\",\n  \"ok\": true,\n  \"agent\": \"worker\",\n  \"runId\": \"debb4580\",\n  \"output\": \"Implemented off-lock validation for issue #209 integration.\\n\\nChanged files:\\n- `crates/bsl-search/src/engine.rs`\\n- `crates/bsl-search/src/lib.rs`\\n- `crates/bsl-search/src/workspace_overlay.rs`\\n- `crates/mcp-server/src/state/embed.rs`\\n- Existing integration changes remain in bootstrap, status, and baseline publisher.\\n\\nKey fixes:\\n- Added `WorkspaceRootsTransitionPlan::revalidate()` and opaque validated-plan type.\\n- Guarded apply no longer performs filesystem scans or reads.\\n- Production validates before acquiring `SharedSearchEngine`.\\n- Documented watcher-backed post-validation race handling.\\n- Provider replacement now preserves lexical entries but advances wholesale fence.\\n- Applied transitions retain embedding signals even if provider installation fails.\\n- Incomplete validation retains last-known-good state and existing root-only retry obligation.\\n- Added deterministic mutex-observer test.\\n\\nValidation:\\n- `cargo test -p bsl-search --lib`: 374 passed, 28 ignored.\\n- `cargo test -p mcp-server`: 700 tests passed, 1 ignored across unit/integration suites.\\n- `cargo clippy -p bsl-search -p mcp-server --all-targets --all-features -- -D warnings`: passed.\\n- Formatting and `git diff --check`: passed.\\n- No files staged or committed.\\n\\nOpen risk: live PostgreSQL tests still require `BSL_TEST_PG_URL`.\",\n  \"artifactPaths\": [\n    \"/home/itrous/.pi/agent/sessions/--home-itrous-src-tools_migration-lsp-bsl-analyzer--/2026-08-12T08-55-14-846Z_019ff52e-d49e-79bd-9c70-d374f37cbab8.jsonl\"\n  ],\n  \"results\": [\n    {\n      \"index\": 0,\n      \"agent\": \"worker\",\n      \"task\": \"[Read from: /home/itrous/src/tools_migration/lsp/bsl-analyzer/context.md, /home/itrous/src/tools_migration/lsp/bsl-analyzer/plan.md]\\n\\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, ...",
+  "acceptance": {
+    "status": "checked",
+    "evidenceStatus": "checked",
+    "explicit": true,
+    "effectiveAcceptance": {
+      "level": "checked",
+      "explicit": true,
+      "inferredReason": [
+        "write-capable worker/task"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Implement the requested change without widening scope",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "residual-risks",
+            "no-staged-files",
+            "validation-output"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "residual-risks",
+        "no-staged-files",
+        "validation-output"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "write-capable worker/task"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Implement the requested change without widening scope",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "residual-risks",
+          "no-staged-files",
+          "validation-output"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "criterion:criterion-1",
+        "status": "passed",
+        "message": "Required criterion 'criterion-1' satisfied."
+      },
+      {
+        "id": "evidence:changed-files",
+        "status": "passed",
+        "message": "changed-files evidence present."
+      },
+      {
+        "id": "evidence:tests-added",
+        "status": "passed",
+        "message": "tests-added evidence present."
+      },
+      {
+        "id": "evidence:commands-run",
+        "status": "passed",
+        "message": "commands-run evidence present."
+      },
+      {
+        "id": "evidence:residual-risks",
+        "status": "passed",
+        "message": "residual-risks evidence present."
+      },
+      {
+        "id": "evidence:no-staged-files",
+        "status": "passed",
+        "message": "no-staged-files evidence present."
+      },
+      {
+        "id": "evidence:validation-output",
+        "status": "passed",
+        "message": "validation-output evidence present."
+      },
+      {
+        "id": "no-staged-files",
+        "status": "passed",
+        "message": "No staged files detected."
+      }
+    ],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Filesystem revalidation now occurs through WorkspaceRootsTransitionPlan::revalidate before the MCP outer engine mutex is acquired; guarded apply accepts only an opaque validated plan and performs no SourceSet scan or file reads."
+        }
+      ],
+      "changedFiles": [
+        "crates/bsl-analyzer/src/bin/cli/search_baseline/documents.rs",
+        "crates/bsl-search/src/engine.rs",
+        "crates/bsl-search/src/lib.rs",
+        "crates/bsl-search/src/workspace_overlay.rs",
+        "crates/mcp-server/src/state/bootstrap.rs",
+        "crates/mcp-server/src/state/embed.rs",
+        "crates/mcp-server/src/tools/search/status.rs"
+      ],
+      "testsAddedOrUpdated": [
+        "bsl-search transition create/modify/delete revalidation tests",
+        "workspace overlay provider-fence and lexical-preservation test",
+        "mcp-server production_root_validation_runs_off_the_engine_mutex",
+        "mcp-server production_publish_hook_transitions_live_search_roots"
+      ],
+      "commandsRun": [
+        {
+          "command": "cargo test -p bsl-search --lib",
+          "result": "passed",
+          "summary": "374 passed, 28 ignored"
+        },
+        {
+          "command": "cargo test -p mcp-server",
+          "result": "passed",
+          "summary": "669 unit tests and all integration suites passed; 1 ignored"
+        },
+        {
+          "command": "cargo clippy -p bsl-search -p mcp-server --all-targets --all-features -- -D warnings",
+          "result": "passed",
+          "summary": "No warnings or clippy errors"
+        },
+        {
+          "command": "cargo fmt --all && git diff --check",
+          "result": "passed",
+          "summary": "Formatting and whitespace checks passed"
+        }
+      ],
+      "validationOutput": [
+        "Deterministic test observes both validation edges and proves SharedSearchEngine::try_lock succeeds throughout the validation bracket.",
+        "Validated apply contains only epoch/manifest/cache guards plus SQLite/cache/vector mutation.",
+        "Provider-only replacement preserves stable lexical entries and advances the wholesale fence."
+      ],
+      "residualRisks": [
+        "Live PostgreSQL-backed ignored tests require BSL_TEST_PG_URL.",
+        "Final OneCPI rerun remains for the parent session."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Split expensive root transition validation from guarded apply, fenced provider replacement, preserved semantic retry signals, and added production mutex/race regressions.",
+      "reviewFindings": [
+        "fixed blocker: crates/mcp-server/src/state/embed.rs - full filesystem validation no longer runs under SharedSearchEngine mutex",
+        "fixed: unchanged-root provider replacement now fences stale semantic plans without discarding lexical entries",
+        "fixed: incomplete validation uses existing bounded root-only retry obligation",
+        "fixed: Applied embedding signals survive provider installation failure"
+      ],
+      "manualNotes": "Requested context.md and plan.md were absent at the supplied paths; implementation followed the explicit task contract and current branch diff."
+    }
+  }
+}

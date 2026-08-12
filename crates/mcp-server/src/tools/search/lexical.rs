@@ -14,7 +14,6 @@ use bsl_search::{
 };
 use rmcp::ErrorData as McpError;
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -55,7 +54,7 @@ pub(super) fn lexical_code_hits(
                         // with no reachable workspace root. Module-keyed methods still get a
                         // graph_id (root-independent); a path-fallback hit would be dropped,
                         // which is fine here — baseline paths are relative, not absolute.
-                        return Ok(CodeHits::Ready { hits, workspace_root: None });
+                        return Ok(CodeHits::Ready { hits, roots: None });
                     }
                     DirectResult::Terminal(error) => {
                         return Err(external_baseline_mcp_error(&error));
@@ -145,8 +144,8 @@ pub(super) fn lexical_code_hits(
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
-    let workspace_root = guard.as_ref().and_then(|e| e.workspace_root()).map(Path::to_path_buf);
-    Ok(CodeHits::Ready { hits, workspace_root })
+    let roots = guard.as_ref().and_then(|engine| engine.workspace_roots().cloned());
+    Ok(CodeHits::Ready { hits, roots })
 }
 
 fn try_direct_lexical_code_no_overlay(
@@ -212,7 +211,7 @@ fn try_direct_lexical_code(
 
 fn merge_direct_lexical_with_refill<F>(
     overlay_hits: &[LexicalHit],
-    hidden_paths: &HashSet<String>,
+    hidden_paths: &HashSet<bsl_search::FileKey>,
     limit: usize,
     mut fetch_baseline: F,
 ) -> DirectResult
@@ -280,15 +279,15 @@ mod tests {
     #[test]
     fn direct_lexical_refill_recovers_results_hidden_by_overlay() {
         let hidden_paths = HashSet::from([
-            "src/hidden1.bsl".to_owned(),
-            "src/hidden2.bsl".to_owned(),
-            "src/hidden3.bsl".to_owned(),
-            "src/hidden4.bsl".to_owned(),
-            "src/hidden5.bsl".to_owned(),
-            "src/hidden6.bsl".to_owned(),
-            "src/hidden7.bsl".to_owned(),
-            "src/hidden8.bsl".to_owned(),
-            "src/hidden9.bsl".to_owned(),
+            bsl_search::FileKey::configuration("src/hidden1.bsl"),
+            bsl_search::FileKey::configuration("src/hidden2.bsl"),
+            bsl_search::FileKey::configuration("src/hidden3.bsl"),
+            bsl_search::FileKey::configuration("src/hidden4.bsl"),
+            bsl_search::FileKey::configuration("src/hidden5.bsl"),
+            bsl_search::FileKey::configuration("src/hidden6.bsl"),
+            bsl_search::FileKey::configuration("src/hidden7.bsl"),
+            bsl_search::FileKey::configuration("src/hidden8.bsl"),
+            bsl_search::FileKey::configuration("src/hidden9.bsl"),
         ]);
         let baseline = vec![
             lexical_hit("src/hidden1.bsl", "Hidden1", 100.0),
@@ -329,6 +328,7 @@ mod tests {
             vec![
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "A.bsl".to_owned(),
                     symbol_name: "НайтиПроцедуру".to_owned(),
                     kind: "procedure".to_owned(),
@@ -340,6 +340,7 @@ mod tests {
                 },
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "B.bsl".to_owned(),
                     symbol_name: "Другая".to_owned(),
                     kind: "procedure".to_owned(),

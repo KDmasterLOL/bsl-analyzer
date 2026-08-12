@@ -20,6 +20,163 @@ impl ide_host_core::VfsWrite for ResidentVfs {
     }
 }
 
+/// Retract everything a path's registration owns: its text input, its file-set entry
+/// and its `by_path` back-link. Returns whether the file set moved.
+///
+/// Where the id lives depends on whether the path was still serving, and the two
+/// removal routes disagree about that: the retry list owns paths that left `by_path`
+/// the moment they stopped serving, while the drift classifier hands over paths that
+/// may still be in it. Keying on `by_path` alone therefore reads an `Admitted` hole as
+/// "never indexed" and retracts nothing — the file set keeps mapping the deleted file's
+/// id, so `module_index_query` holds it as an empty module while the hole count drops
+/// to zero and the workspace calls itself fresh.
+///
+/// `registered` is what makes the interner safe to ask: `Vfs` keeps a `FileId` forever,
+/// so a path it merely REMEMBERS from an earlier life looks exactly like one this
+/// resident registered. Only the caller knows which it is.
+fn retire_registration(
+    resident: &mut DiagnosticsResident,
+    file_set: &mut vfs::FileSet,
+    key: &str,
+    registered: bool,
+) -> bool {
+    use ide_host_core::{set_file_text_source, FileTextSource, VfsWrite};
+
+    let file_id = match resident.by_path.get(key) {
+        Some(&file_id) => Some(file_id),
+        None if registered => {
+            resident.vfs.with_write(|vfs| vfs.file_id(&VfsPath::new(PathBuf::from(key))))
+        }
+        None => None,
+    };
+    let Some(file_id) = file_id else { return false };
+    set_file_text_source(&mut resident.db, file_id, FileTextSource::Deleted);
+    resident.by_path.remove(key);
+    if file_set.path_for_file(&file_id).is_some() {
+        file_set.remove(file_id);
+        return true;
+    }
+    false
+}
+
+/// Re-read every held hole. Returns `(healed, vanished)` by canonical key, so the
+/// caller can move each one's baseline entry and bump what a baseline move obliges.
+///
+/// The full add sequence runs for EVERY heal, never a shortened "it was registered
+/// before, just re-register the text" path. `Vfs` keeps a `FileId` forever while a
+/// removal drops the file-set entry, so a deleted-then-recreated path is
+/// indistinguishable from one that never left — and the short path would leave it
+/// with an id no `path_for_file` can resolve. Every step is idempotent, so paying the
+/// whole sequence costs nothing but is safe on the case that cannot be detected.
+pub(super) fn retry_resident_holes(
+    resident: &mut DiagnosticsResident,
+    config_is_current: bool,
+) -> (Vec<(String, Option<u64>)>, Vec<String>) {
+    use base_db::{SourceDatabase, SourceRoot};
+    use ide_host_core::{set_file_text_source, FileTextSource, VfsWrite};
+
+    let mut healed = Vec::new();
+    let mut vanished = Vec::new();
+    let candidates: Vec<(String, HoleOrigin)> =
+        resident.holes.iter().map(|(k, o)| (k.clone(), *o)).collect();
+
+    let mut file_set = {
+        let db = &resident.db;
+        db.source_root_input(crate::graph::input::GRAPH_SOURCE_ROOT).root(db).file_set().clone()
+    };
+    let mut file_set_modified = false;
+
+    for (key, origin) in candidates {
+        let path = Path::new(&key);
+        // Stat BEFORE the read, the same order every other applier uses. The baseline
+        // must describe the bytes actually applied: stat-after-read would record a
+        // write that landed between the two, so the baseline would match a disk state
+        // whose text was never served, no scan would ever see drift again, and the
+        // file would serve the older text at `stale: false` forever.
+        let fp_before = crate::graph::scan::file_fingerprint(path);
+        // Absence is established by trying to open the file, not by its absence from
+        // someone else's listing — an incomplete walk must not retire a hole.
+        match base_db::read_disk_text(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Gone. For a path that was serving, this is a removal and owes
+                // everything the ordinary removal branch does — otherwise the
+                // metadata back-link keeps pointing at a tombstoned FileId.
+                file_set_modified |= retire_registration(
+                    resident,
+                    &mut file_set,
+                    &key,
+                    origin == HoleOrigin::Admitted,
+                );
+                resident.holes.remove(&key);
+                vanished.push(key);
+            }
+            Err(_) => {} // still unreadable → stays a hole
+            Ok(text) => {
+                // Returning a NEW path to service asserts it belongs to the
+                // configuration being served, which is the one thing the retry list
+                // must not assume: it is memory, and the gate is deliberately asked
+                // of the disk. A path that was already serving is not re-admitted.
+                if origin == HoleOrigin::Pending && !config_is_current {
+                    continue;
+                }
+                let vfs_path = VfsPath::new(path.to_path_buf());
+                let file_id = resident.vfs.with_write(|vfs| vfs.alloc_file_id(vfs_path.clone()));
+                resident.db.set_file_source_root(file_id, crate::graph::input::GRAPH_SOURCE_ROOT);
+                set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text));
+                if file_set.path_for_file(&file_id).is_none() {
+                    file_set.insert(file_id, vfs_path);
+                    file_set_modified = true;
+                }
+                resident.by_path.insert(key.clone(), file_id);
+                resident.holes.remove(&key);
+                healed.push((key, fp_before));
+            }
+        }
+    }
+
+    // The clone is published ONCE, after the loop — the same shape the add/remove
+    // branches use. An insert that never reaches the db leaves `path_for_file` empty
+    // and the first query panics.
+    if file_set_modified {
+        resident.db.set_source_root(
+            crate::graph::input::GRAPH_SOURCE_ROOT,
+            SourceRoot::new_local(file_set),
+        );
+    }
+
+    // The substrate is re-issued for every transition, not just for paths that were
+    // never registered. Whether a module's back-link is currently `None` depends on
+    // whether a NEIGHBOUR in the same config root drifted while the hole was held —
+    // which no per-hole flag can know. Skipping it would leave a healed common module
+    // serving ordinary findings forever while its module-level diagnostics stay mute.
+    let touched: Vec<PathBuf> = healed
+        .iter()
+        .map(|(key, _)| key)
+        .chain(&vanished)
+        .map(PathBuf::from)
+        .filter(|p| project_model::is_substrate_listed_body_path(p))
+        .collect();
+    if !touched.is_empty() {
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &touched);
+    }
+
+    (healed, vanished)
+}
+
+/// Whether a hole's path was already admitted into the resident that owns it.
+///
+/// Healing an `Admitted` hole returns a file whose membership in this configuration
+/// was already asserted; healing a `Pending` one asserts it for the first time and is
+/// therefore an admission, gated on the configuration still being current. The
+/// distinction is RECORDED when the hole is created because it cannot be derived
+/// later: `Vfs` keeps a `FileId` forever, so a deleted-then-recreated path looks
+/// exactly like one that was never removed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum HoleOrigin {
+    Admitted,
+    Pending,
+}
+
 /// The built resident database plus the path→FileId index needed to resolve a request
 /// path to the Salsa input it set. Held behind the [`std::sync::Mutex`]; reads borrow it,
 /// a reload mutates `db` in place.
@@ -30,8 +187,18 @@ pub(crate) struct DiagnosticsResident {
     /// substrate refresh can intern new composing files onto the same id space without
     /// rebuilding it.
     pub(super) vfs: ResidentVfs,
-    /// Canonical-path string → FileId for every resident `.bsl`.
+    /// Canonical-path string → FileId for every SERVED resident `.bsl`. A file whose
+    /// bytes could not be read is absent here even though it exists on disk — see
+    /// `holes`.
     pub(super) by_path: HashMap<String, FileId>,
+    /// Workspace `.bsl` files that exist but could not be read, by the same canonical
+    /// key as `by_path`. Doubles as the RETRY LIST: every reconciliation window tries
+    /// to re-read them, which is what makes healing independent of both the drift
+    /// fingerprint (only `(mtime, len)`) and hub health (a healthy hub runs no scan).
+    /// The value records whether the path was ever admitted into THIS resident —
+    /// re-admission has to ask the configuration gate, a return to service does not,
+    /// and the VFS interner cannot tell the two apart because it never forgets an id.
+    pub(super) holes: HashMap<String, HoleOrigin>,
     /// The project's effective diagnostics settings, loaded from `bsl-analyzer.toml` /
     /// `.bsl-analyzer.json` the same way LSP and CLI do — so `file`/`workspace` honour
     /// the project's disabled rules and thresholds, not analyzer defaults.
@@ -40,6 +207,16 @@ pub(crate) struct DiagnosticsResident {
     /// uses (`source_dir`), so an absolute finding path strips to the graph encoder's rel
     /// and the `method/file/<rel>::<name>` graph bridge resolves.
     pub(super) workspace_root: PathBuf,
+    /// The registered source roots, built from the SAME project read that gave this
+    /// resident its file universe. A request path is relative to the root that owns it,
+    /// and only this table can say which directory that is.
+    ///
+    /// It is held here, rather than read from the search engine, because the two must not
+    /// be able to disagree: the engine's copy is published only after a full cold index
+    /// (and never at all if that fails), while `by_path` exists from the moment the
+    /// resident does. A table from the other subsystem could name a root whose files this
+    /// resident never enumerated — resolution would then point at a file it cannot serve.
+    pub(super) workspace_roots: bsl_search::WorkspaceRoots,
     /// `[analysis].diff_base` from the project config; drives the drift-time
     /// rescope so the vendor-diff filter tracks the moving working copy.
     pub(super) diff_base: Option<String>,
@@ -54,7 +231,127 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
+/// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
+/// that cannot be resolved and a pair resolved against some other root are indistinguishable
+/// to the caller, and the second is a wrong answer wearing the shape of a right one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootedPathError {
+    /// No root is registered under this id. It is the caller's spelling that is wrong, or
+    /// the workspace declares a different set of extensions than the index the caller read.
+    RootNotRegistered(String),
+    /// An absolute path carries its own root, and a second one cannot be honoured: joining a
+    /// root with an absolute path discards the root silently, so the pair would be answered
+    /// from whichever file the path alone names.
+    AbsolutePathWithRootId(String),
+    /// The path is not a plain relative name under the root: it carries `..`, `.`, a leading
+    /// separator or a drive. Each of those is a way of naming something the root does not
+    /// contain — `Path::join` replaces its base outright for the last two — and `..` cannot be
+    /// resolved here at all, because the kernel collapses it only after dereferencing each
+    /// component, so any answer computed here would disagree with the file that opens.
+    PathIsNotPlainRelative(String),
+}
+
+impl RootedPathError {
+    /// The in-band error code. Two different facts never share one code: an unregistered root
+    /// and a pair that cannot be honoured call for different corrections, and one name for
+    /// both would send the reader looking for the wrong thing.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::RootNotRegistered(_) => "unknown_root",
+            Self::AbsolutePathWithRootId(_) => "absolute_path_under_root",
+            Self::PathIsNotPlainRelative(_) => "path_not_relative_to_root",
+        }
+    }
+}
+
+impl std::fmt::Display for RootedPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootNotRegistered(root_id) => write!(
+                f,
+                "no source root is registered under '{root_id}'; \
+                 `search` reports the roots this workspace knows"
+            ),
+            Self::AbsolutePathWithRootId(root_id) => write!(
+                f,
+                "an absolute path already names its file, so it cannot also be read under \
+                 root '{root_id}'; pass the path relative to that root, or drop `root_id`"
+            ),
+            Self::PathIsNotPlainRelative(root_id) => write!(
+                f,
+                "a path read against root '{root_id}' has to be plain relative names — no `..`, \
+                 no `.`, no leading separator and no drive; spell the file as the hit does"
+            ),
+        }
+    }
+}
+
 impl DiagnosticsResident {
+    /// The file a request names, given the root its path is spelled against.
+    ///
+    /// A search hit's path is relative to ITS OWN root, so the pair is what identifies the
+    /// file; the path alone is ambiguous the moment an extension repeats the configuration's
+    /// layout. Resolution goes through the root table's own [`bsl_search::WorkspaceRoots::resolve`]
+    /// rather than by rebuilding the directory from `root_id`: the identifier is derived from
+    /// the CANONICAL spelling while the file is read back through the DECLARED one, and
+    /// reconstructing it here would be a second attribution procedure to keep in agreement
+    /// with the first.
+    ///
+    /// `None` for `root_id` means the caller said nothing about roots, and the path keeps
+    /// today's reading. An empty `root_id` is not that — it names the configuration, and
+    /// resolving it is what makes a hit's path work when the configuration sits in a
+    /// subdirectory of the workspace.
+    pub(crate) fn resolve_rooted_path(
+        &self,
+        root_id: Option<&str>,
+        path: &Path,
+    ) -> Result<PathBuf, RootedPathError> {
+        let Some(root_id) = root_id else {
+            return Ok(path.to_path_buf());
+        };
+        if path.is_absolute() {
+            return if root_id.is_empty() {
+                Ok(path.to_path_buf())
+            } else {
+                Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
+            };
+        }
+        if !self.workspace_roots.contains_id(root_id) {
+            // Asked FIRST, so a caller with two wrong halves is told about the one that will
+            // still be wrong after fixing the other.
+            return Err(RootedPathError::RootNotRegistered(root_id.to_owned()));
+        }
+        // One rule, and it is about the SPELLING: every component must be a plain name.
+        //
+        // That covers more than `..`. On Windows neither a leading separator (`\Windows\M.bsl`)
+        // nor a drive-relative spelling (`C:M.bsl`) counts as absolute, yet `join` throws the
+        // base away for both — so a rule written against `..` alone lets exactly the escape
+        // this exists to stop back in through a platform difference. `.` is refused for a
+        // smaller reason: it survives into the graph id, and the graph was built from paths
+        // that never had one.
+        //
+        // `..` in particular is refused rather than resolved. The kernel collapses it only
+        // after dereferencing each component, so a `..` behind a directory link lands where no
+        // textual fold predicts; folding it here would be a second, wrong procedure for naming
+        // files. Two attempts to be cleverer failed on exactly that — one comparing the
+        // canonical target against the root, one asking the table who owned it.
+        //
+        // The cost is nothing real: a key is built by a walk INSIDE its root, so no producer
+        // of `(root_id, path)` emits any of these, and the same file is always reachable by
+        // its plain spelling.
+        if path.components().any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(RootedPathError::PathIsNotPlainRelative(root_id.to_owned()));
+        }
+        // What follows from stopping here: a link sitting inside a root is a file OF that root,
+        // and reading it yields its target, exactly as it would for anything else opening that
+        // path. The pair names one file; it does not promise the bytes live in this tree.
+        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+        self.workspace_roots
+            .resolve(&key)
+            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
+    }
+
     /// Resolve a request path to the resident FileId, canonicalising it the same way
     /// the loader did. A relative path is resolved against the workspace root (not the
     /// process CWD), so `diagnostics file` works regardless of where the server was
@@ -68,6 +365,56 @@ impl DiagnosticsResident {
             &resolved
         };
         self.by_path.get(&canonical_key(abs)).copied()
+    }
+
+    /// Whether `path` is a workspace `.bsl` that exists but could not be read.
+    ///
+    /// Callers that get `None` from [`Self::file_id_for`] must ask this before
+    /// answering "not a workspace file": for a hole that answer is a lie about an
+    /// existing file, and replacing the old lie ("the file is clean") with a new one
+    /// is not the point of holding it out of service.
+    pub(crate) fn is_unread(&self, path: &Path) -> bool {
+        let resolved;
+        let abs: &Path = if path.is_absolute() {
+            path
+        } else {
+            resolved = self.workspace_root.join(path);
+            &resolved
+        };
+        self.holes.contains_key(&canonical_key(abs))
+    }
+
+    /// How many workspace `.bsl` files exist but could not be read.
+    pub(crate) fn unread_count(&self) -> usize {
+        self.holes.len()
+    }
+
+    /// Whether the VFS interner already holds an id for `path`.
+    ///
+    /// Test-only, and deliberately so: it is the ONLY way to tell "not registered"
+    /// from "registered but filtered out downstream", and those two states differ by
+    /// whether a later query panics.
+    #[cfg(test)]
+    pub(super) fn vfs_file_id_for_test(&self, path: &Path) -> Option<FileId> {
+        use ide_host_core::VfsWrite;
+        self.vfs.with_write(|vfs| vfs.file_id(&VfsPath::new(path.to_path_buf())))
+    }
+
+    /// Whether the source root still maps `file_id` to a path.
+    ///
+    /// Test-only. The file-set entry is what a removal must actually retract: the
+    /// interner keeps the id regardless, and a deleted file disappears from metadata
+    /// discovery on its own — so neither of those can tell a complete removal from a
+    /// partial one.
+    #[cfg(test)]
+    pub(super) fn file_set_has_for_test(&self, file_id: FileId) -> bool {
+        use base_db::SourceDatabase;
+        let db = &self.db;
+        db.source_root_input(crate::graph::input::GRAPH_SOURCE_ROOT)
+            .root(db)
+            .file_set()
+            .path_for_file(&file_id)
+            .is_some()
     }
 
     /// The workspace root the resident was built against (the graph's `source_dir`),
@@ -266,7 +613,11 @@ impl DiagnosticsResident {
             }
         }
         files.sort_by_key(|f| f.0);
-        let files_total = self.by_path.len();
+        // Holes stay in the DENOMINATOR. They are not served, so they cannot be swept,
+        // but shrinking the total would make an existing workspace file simply absent
+        // from the coverage bookkeeping — the one thing `files_out_of_scope` exists to
+        // prevent for the skips beside it.
+        let files_total = self.by_path.len() + self.holes.len();
         let in_scope = files.len();
         let truncated = in_scope > opts.max_files;
         let swept = &files[..opts.max_files.min(in_scope)];
@@ -373,6 +724,7 @@ impl DiagnosticsResident {
             files_swept,
             files_total,
             files_out_of_scope,
+            files_unread: self.holes.len(),
             findings_ignored_by_author: author_ignored.load(std::sync::atomic::Ordering::Relaxed),
             author_head: author_filter.map(|f| f.short_identity()),
             truncated,
@@ -460,6 +812,20 @@ pub(super) fn apply_resident_changes(
         if fp_of(path).is_none() && !Path::new(path).is_file() {
             continue;
         }
+        // Read BEFORE interning. A file that cannot be read is not registered at all,
+        // and "at all" has to include the VFS: `alloc_file_id` used to run first, so
+        // skipping only from the read onwards would leave a `FileId` with no file-set
+        // entry, which the next query resolves into a `path_for_file` panic.
+        let text = match base_db::read_disk_text(Path::new(path)) {
+            Ok(text) => text,
+            Err(_) => {
+                // Never admitted into this resident, so healing it later must ask the
+                // configuration gate first.
+                resident.holes.insert(path.clone(), HoleOrigin::Pending);
+                moved = true;
+                continue;
+            }
+        };
         let vfs_path = VfsPath::new(path.clone());
         let file_id = resident.vfs.with_write(|vfs| vfs.alloc_file_id(vfs_path.clone()));
         if let Some(&known) = resident.by_path.get(path.as_str()) {
@@ -470,12 +836,7 @@ pub(super) fn apply_resident_changes(
             }
         }
         resident.db.set_file_source_root(file_id, crate::graph::input::GRAPH_SOURCE_ROOT);
-        match base_db::read_disk_text(Path::new(path)) {
-            Ok(text) => {
-                set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
-            }
-            Err(_) => set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone),
-        }
+        set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text));
         if file_set.path_for_file(&file_id).is_none() {
             file_set.insert(file_id, vfs_path);
             file_set_modified = true;
@@ -484,18 +845,34 @@ pub(super) fn apply_resident_changes(
         // scan-universe canonicalisation), so insert it verbatim — re-canonicalising
         // here could diverge on a path that vanished between classify and apply.
         resident.by_path.insert(path.clone(), file_id);
+        // A path returning to service leaves the hole list, whichever branch brings it
+        // back. `by_path` and `holes` must not intersect: the workspace denominator is
+        // their sum, and the hole list drives the retry pass — a served path left in it
+        // would be re-read from disk every drift window for nothing.
+        resident.holes.remove(path.as_str());
         moved = true;
     }
     for path in removed_bsl {
-        // Never indexed → nothing to unregister (an untracked removal is not drift).
-        let Some(&file_id) = resident.by_path.get(path.as_str()) else { continue };
-        set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone);
-        if file_set.path_for_file(&file_id).is_some() {
-            file_set.remove(file_id);
-            file_set_modified = true;
-        }
-        resident.by_path.remove(path.as_str());
-        moved = true;
+        // A deleted file is no longer a hole either: the retry list must not keep
+        // probing a path the workspace no longer has, and leaving it there would
+        // report a phantom in `unread_files` for as long as it is never recreated.
+        // The origin decides whether anything was ever registered under this path —
+        // a hole is not always the retry list's to retire, because the retry window
+        // is throttled and `reconcile_tick` never opens it at all.
+        let was_hole = resident.holes.remove(path.as_str());
+        let registered = was_hole == Some(HoleOrigin::Admitted);
+        // The resident moved if the removal changed anything the workspace REPORTS,
+        // and the hole list is reported: it is `unread_files`, it is half of
+        // `files_total`, and a non-empty one is what makes the answer stale. A
+        // `Pending` hole has no registration by construction, so counting only
+        // registrations would let all three change under an unmoved generation — the
+        // same `result_id` answering "unreadable" and then "not in workspace". The
+        // creation of that hole bumps the generation; its removal owes the same.
+        // Never indexed and never a hole → nothing moved (an untracked removal is not
+        // drift).
+        let moved_here = was_hole.is_some() || resident.by_path.contains_key(path.as_str());
+        file_set_modified |= retire_registration(resident, &mut file_set, path, registered);
+        moved |= moved_here;
     }
     if file_set_modified {
         resident.db.set_source_root(
@@ -529,23 +906,56 @@ pub(super) fn apply_resident_changes(
 
     // `.bsl` bodies: disk-backed re-key. A body already at its on-disk fingerprint (a
     // racing caller beat us) is skipped.
+    let mut became_holes: Vec<PathBuf> = Vec::new();
     for path in modified_bsl {
         let Some(fp) = fp_of(path) else { continue };
         if stats.get(path).copied() == Some(fp) {
             continue;
         }
         let Some(&file_id) = resident.by_path.get(path) else {
+            // A path already held as a hole is not "never indexed": the retry cycle
+            // owns it, and healing it HERE would be wrong twice over — the file set
+            // was already published above, so the insert would not reach the db, and
+            // an admission would slip past the configuration gate.
+            if resident.holes.contains_key(path) {
+                continue;
+            }
             return (true, moved); // a modified `.bsl` we never indexed → structural
         };
         match base_db::read_disk_text(Path::new(path)) {
             Ok(text) => {
                 set_file_text_source(&mut resident.db, file_id, FileTextSource::Disk(&text))
             }
-            // Unreadable now: an empty overlay so a later query yields `""` instead of
-            // panicking on the disk re-read, matching the load path.
-            Err(_) => set_file_text_source(&mut resident.db, file_id, FileTextSource::Tombstone),
+            Err(_) => {
+                // Unreadable now. The empty overlay is mandatory (a disk-backed re-read
+                // would panic), but it is no longer passed off as content: the file
+                // leaves service and joins the retry list, so consumers see "known
+                // but unreadable" instead of an empty module. `Admitted` — it was
+                // already serving under this configuration.
+                set_file_text_source(&mut resident.db, file_id, FileTextSource::Unreadable);
+                resident.by_path.remove(path);
+                resident.holes.insert(path.clone(), HoleOrigin::Admitted);
+                became_holes.push(PathBuf::from(path));
+            }
         }
         moved = true;
+    }
+
+    // A body that just became a hole has to LOSE its `module_file` back-link, and the
+    // substrate pass above already ran — it keys off `added_bsl`/`removed_bsl`, and
+    // this transition is neither. Without re-issuing it here, the same disk state
+    // answers differently depending on WHEN the file became unreadable: at build time
+    // the back-link is `None`, at drift time it still points at the tombstoned FileId.
+    // Consumers of a non-empty back-link over an empty symbol tree conclude the module
+    // has no API and emit blocking findings ("create procedure …") against innocent
+    // files, where `None` makes them return silently.
+    let became_holes: Vec<PathBuf> = became_holes
+        .into_iter()
+        .filter(|p| project_model::is_substrate_listed_body_path(p))
+        .filter(|p| config_roots.iter().any(|(_, root)| p.starts_with(root)))
+        .collect();
+    if !became_holes.is_empty() {
+        ide_host_core::refresh_metadata_substrate(&mut resident.db, &resident.vfs, &became_holes);
     }
 
     (false, moved)
@@ -676,6 +1086,296 @@ mod tests {
             }
             _ => panic!("expected Ready"),
         }
+    }
+
+    /// An absolute path already names one file, so a root cannot also be honoured: joining
+    /// them keeps the absolute path and drops the root SILENTLY, which is how a request
+    /// naming an extension gets answered from the configuration. The refusal is what keeps
+    /// that from happening, and it names which of the two facts was the problem — an
+    /// unregistered root calls for a different correction than a self-contradicting pair.
+    #[test]
+    fn a_rooted_pair_is_refused_rather_than_resolved_against_the_wrong_root() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let outcome = state.read(|resident, _| {
+            let absolute = workspace.join(SHARED_MODULE_REL);
+            (
+                resident.resolve_rooted_path(Some(&root_id), &absolute),
+                resident.resolve_rooted_path(Some("нет-такого"), Path::new(SHARED_MODULE_REL)),
+                resident.resolve_rooted_path(Some(""), &absolute),
+                resident.resolve_rooted_path(None, Path::new(SHARED_MODULE_REL)),
+                resident.resolve_rooted_path(Some(&root_id), Path::new(SHARED_MODULE_REL)),
+            )
+        });
+        let ResidentOutcome::Ready((absolute_under_root, unknown, empty_root, no_root, rooted), _) =
+            outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert_eq!(
+            absolute_under_root,
+            Err(RootedPathError::AbsolutePathWithRootId(root_id.clone())),
+            "an absolute path under a root is refused, not silently read as itself",
+        );
+        assert_eq!(
+            unknown,
+            Err(RootedPathError::RootNotRegistered("нет-такого".to_owned())),
+            "an unregistered root is refused by its own name",
+        );
+        assert_eq!(
+            empty_root.as_deref(),
+            Ok(workspace.join(SHARED_MODULE_REL).as_path()),
+            "the configuration's id over an absolute path is not a contradiction",
+        );
+        assert_eq!(
+            no_root.as_deref(),
+            Ok(Path::new(SHARED_MODULE_REL)),
+            "saying nothing about roots keeps the path exactly as it came",
+        );
+        assert_eq!(
+            rooted.as_deref(),
+            Ok(extension.join(SHARED_MODULE_REL).as_path()),
+            "and the pair resolves through the root's own declared spelling",
+        );
+    }
+
+    /// A request path is read against a root, so it has to stay inside it. `Path::join` keeps
+    /// `..` and the lookup canonicalises afterwards, so without the check the pair
+    /// (extension root, `../ws/<модуль>`) resolves to the CONFIGURATION's module — the same
+    /// silent mis-answer this node exists to prevent, arriving through the other half of the
+    /// pair.
+    #[test]
+    fn a_path_that_climbs_out_of_its_root_is_refused() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let escaping = format!("../ws/{SHARED_MODULE_REL}");
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(&escaping)),
+                // The stand is only honest if that spelling really does reach a served file:
+                // refusing a path that resolves to nothing would prove nothing at all.
+                resident.file_id_for(&extension.join(&escaping)),
+                resident.file_id_for(&workspace.join(SHARED_MODULE_REL)),
+            )
+        });
+        let ResidentOutcome::Ready((refused, escaped_to, configuration), _) = outcome else {
+            panic!("expected Ready");
+        };
+
+        assert!(
+            escaped_to.is_some() && escaped_to == configuration,
+            "the stand is real: joined and canonicalised, that spelling names the \
+             configuration's module — a file the resident serves, under the other root",
+        );
+        assert_eq!(refused, Err(RootedPathError::PathIsNotPlainRelative(root_id)));
+    }
+
+    /// Two spellings that look like corner cases and are decided by one rule. `..` is refused
+    /// whether or not it would have come back inside the root — resolving it is the kernel's
+    /// job, and no producer of keys emits it. A link is not refused at all: it sits inside the
+    /// root, so it is a file of that root, and it reads as its target the way it would for
+    /// anything else opening that path.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_root_is_its_file_while_any_dotdot_is_refused() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        // A link inside the extension pointing at the configuration's module: no `..`, and the
+        // lookup canonicalises straight into the other root.
+        let alias = extension.join("Alias.bsl");
+        std::os::unix::fs::symlink(workspace.join(SHARED_MODULE_REL), &alias).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let detour = "CommonModules/Общий/../Общий/Ext/Module.bsl";
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(detour)),
+                resident.resolve_rooted_path(Some(&root_id), Path::new("Alias.bsl")),
+                resident.file_id_for(&workspace.join(SHARED_MODULE_REL)),
+                resident.file_id_for(&alias),
+            )
+        });
+        let ResidentOutcome::Ready((detour, aliased, configuration, through_alias), _) = outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert_eq!(
+            detour,
+            Err(RootedPathError::PathIsNotPlainRelative(root_id.clone())),
+            "`..` is refused by its name, not by where it would have landed: the same file is \
+             reachable by its plain spelling, and that is the one to send",
+        );
+        assert!(
+            through_alias.is_some() && through_alias == configuration,
+            "the stand is real: followed, the link reaches the configuration's module",
+        );
+        // A link sitting in the extension is a file of the extension, and reading it yields
+        // its target — the same answer any tool opening that path gives. The pair still names
+        // one file; what it does not promise is that the bytes live in this directory tree.
+        assert_eq!(
+            aliased.as_deref(),
+            Ok(extension.join("Alias.bsl").as_path()),
+            "a name that stays inside its root is honoured, link or not",
+        );
+    }
+
+    /// An escape does not have to land in ANOTHER root to be an escape. Asking who owns the
+    /// landing place misses exactly this: the target belongs to no root canonically, so the
+    /// attribution falls back to the walked spelling — which is this very join — and the root
+    /// the caller named matches itself, `..` and all. The question that catches it is asked of
+    /// the name, not of the destination.
+    #[cfg(unix)]
+    #[test]
+    fn an_escape_into_ground_no_root_owns_is_still_an_escape() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, write, SHARED_MODULE_REL,
+        };
+        let (dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        // Served by the resident, under the configuration, but canonically outside every root.
+        let outside = dir.path().join("served-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        write(
+            &outside,
+            SHARED_MODULE_REL,
+            "&НаСервере\nФункция Наружная() Экспорт Возврат 1; КонецФункции\n",
+        );
+        std::os::unix::fs::symlink(&outside, workspace.join("Linked")).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let escaping = format!("../ws/Linked/{SHARED_MODULE_REL}");
+        let outcome = state.read(|resident, _| {
+            (
+                resident.resolve_rooted_path(Some(&root_id), Path::new(&escaping)),
+                resident.file_id_for(&outside.join(SHARED_MODULE_REL)).is_some(),
+            )
+        });
+        let ResidentOutcome::Ready((refused, served), _) = outcome else {
+            panic!("expected Ready")
+        };
+
+        assert!(served, "the stand is real: that file is one the resident serves");
+        assert_eq!(refused, Err(RootedPathError::PathIsNotPlainRelative(root_id)));
+    }
+
+    /// The rule is about the SPELLING, and every way of spelling something the root does not
+    /// contain is refused by it — not just `..`. The Windows cases are the reason it is written
+    /// that way: neither a leading separator nor a drive-relative name counts as absolute
+    /// there, so the earlier `..`-only rule let both through, and `join` throws the base away
+    /// for each. Checked here on every platform, because it is the spelling that is rejected,
+    /// not the filesystem's reading of it.
+    #[test]
+    fn only_plain_relative_names_are_read_against_a_root() {
+        use super::super::test_support::{
+            extension_root_id, workspace_with_an_outside_extension, SHARED_MODULE_REL,
+        };
+        let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+        let root_id = extension_root_id(&workspace, &extension);
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let refused = |resident: &DiagnosticsResident, spelling: &str| {
+            resident.resolve_rooted_path(Some(&root_id), Path::new(spelling))
+                == Err(RootedPathError::PathIsNotPlainRelative(root_id.clone()))
+        };
+        let outcome = state.read(|resident, _| {
+            (
+                refused(resident, "../ws/CommonModules/Общий/Ext/Module.bsl"),
+                refused(resident, "./CommonModules/Общий/Ext/Module.bsl"),
+                // Parsed as a root and a drive only on Windows; on Unix a backslash is an
+                // ordinary character, so these are plain file names that stay inside the root.
+                // The rule reads COMPONENTS for exactly that reason — the hazard is in how the
+                // platform splits a path, not in the characters.
+                cfg!(windows) == refused(resident, "\\Windows\\M.bsl"),
+                cfg!(windows) == refused(resident, "C:M.bsl"),
+                resident.resolve_rooted_path(Some(&root_id), Path::new(SHARED_MODULE_REL)),
+                // An unregistered root is named FIRST: fixing the path would not help.
+                resident.resolve_rooted_path(Some("нет-такого"), Path::new("../M.bsl")),
+            )
+        });
+        let ResidentOutcome::Ready((climbing, dotted, rooted, drive, plain, unknown), _) = outcome
+        else {
+            panic!("expected Ready");
+        };
+
+        assert!(climbing, "`..` cannot be resolved here, so it is not read at all");
+        assert!(dotted, "`.` survives into the graph id, which was built without one");
+        assert!(rooted, "a leading separator is refused wherever the platform reads it as one");
+        assert!(drive, "and so is a drive-relative spelling, absolute or not");
+        assert_eq!(
+            plain.as_deref(),
+            Ok(extension.join(SHARED_MODULE_REL).as_path()),
+            "while a plain name — the only shape a key is ever built in — resolves",
+        );
+        assert_eq!(unknown, Err(RootedPathError::RootNotRegistered("нет-такого".to_owned())));
+    }
+
+    /// The table keeps a file that lies outside every root under the root the walk reached it
+    /// through, and the index hands out exactly such keys: a directory link out of the tree is
+    /// walked (the enumerator follows links), so the hit reads `(configuration, Linked/M.bsl)`
+    /// while the file itself canonicalises far away. A test for containment would refuse the
+    /// index's own key — asking the table who OWNS the path accepts it and still refuses the
+    /// escapes.
+    #[cfg(unix)]
+    #[test]
+    fn a_key_of_a_file_reached_through_a_link_out_of_the_tree_still_resolves() {
+        use super::super::test_support::{sample_workspace, write};
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let outside = dir.path().join("outside-tree");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        sample_workspace(&workspace);
+        write(
+            &outside,
+            "CommonModules/Связанный/Ext/Module.bsl",
+            "&НаСервере\nФункция Связанная() Экспорт Возврат 1; КонецФункции\n",
+        );
+        std::os::unix::fs::symlink(&outside, workspace.join("Linked")).unwrap();
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let through_the_link = "Linked/CommonModules/Связанный/Ext/Module.bsl";
+        let outcome = state.read(|resident, _| {
+            let resolved = resident.resolve_rooted_path(Some(""), Path::new(through_the_link));
+            let served = resolved.as_ref().ok().and_then(|path| resident.file_id_for(path));
+            (resolved.is_ok(), served.is_some())
+        });
+        let ResidentOutcome::Ready((accepted, served), _) = outcome else {
+            panic!("expected Ready")
+        };
+
+        assert!(accepted, "the configuration's key for a linked file is not an escape");
+        assert!(served, "and it names a file this resident serves");
     }
 
     /// The resident's metadata substrate resolves a common module's `Ext/Module.bsl`

@@ -6,18 +6,20 @@ use crate::local_baseline::LocalStoreBaselineAdapter;
 use crate::ports::{ModuleSnapshot, ModuleSnapshotSource, SnapshotCatalog, SnapshotContentStore};
 use crate::publish::EmbeddingExecutionPolicy;
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
-use crate::store::Store;
+use crate::store::{Store, WorkspaceStoreTransition, WorkspaceTransitionFile};
 use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
-    RefreshMode, RefreshPlan, WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
+    PublicationBaseline, PublishOutcome, RefreshMode, RefreshPlan, WorkspaceOverlayCache,
+    WorkspaceOverlayIndex, WorkspaceOverlayStats, WorkspaceTransitionOverlayFile,
 };
+use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
 use crate::{
     semantic_key_for_indexed_document, semantic_text_for_indexed_document,
     BaselineOverlaySearchService, BaselineRef, CorpusId,
 };
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
@@ -69,6 +71,8 @@ pub struct SearchConfig {
 #[derive(Debug, Clone)]
 pub struct SearchHit {
     pub collection: String,
+    /// The source root the file belongs to; see [`crate::DocumentPath::root_id`].
+    pub root_id: String,
     pub file_path: String,
     pub symbol_name: String,
     pub kind: String,
@@ -82,6 +86,7 @@ impl SearchHit {
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
         Self {
             collection: hit.collection.clone(),
+            root_id: hit.root_id.clone(),
             file_path: hit.path.clone(),
             symbol_name: hit.symbol_name.clone(),
             kind: hit.kind.clone(),
@@ -95,6 +100,7 @@ impl SearchHit {
     pub fn to_lexical(&self) -> crate::domain::LexicalHit {
         crate::domain::LexicalHit {
             collection: self.collection.clone(),
+            root_id: self.root_id.clone(),
             path: self.file_path.clone(),
             symbol_name: self.symbol_name.clone(),
             kind: self.kind.clone(),
@@ -108,6 +114,7 @@ impl SearchHit {
     pub fn to_semantic(&self) -> crate::domain::SemanticHit {
         crate::domain::SemanticHit {
             collection: self.collection.clone(),
+            root_id: self.root_id.clone(),
             path: self.file_path.clone(),
             symbol_name: self.symbol_name.clone(),
             kind: self.kind.clone(),
@@ -120,6 +127,7 @@ impl SearchHit {
     pub fn from_merged(hit: crate::merge::MergedHit) -> Self {
         Self {
             collection: hit.collection,
+            root_id: hit.root_id,
             file_path: hit.path,
             symbol_name: hit.symbol_name,
             kind: hit.kind,
@@ -131,6 +139,257 @@ impl SearchHit {
     }
 }
 
+// Test seam: force the vector eviction of a removal to count as failed, so a test can assert
+// that a removal whose vectors stayed in the live index is not reported as a success — and
+// that the store row it is selected by outlives the failure. The live index rejects nothing
+// on its own: removing an id it does not hold is a no-op there.
+#[cfg(test)]
+thread_local! {
+    // Thread-local on purpose: tests run in parallel, and a process-wide flag would fail
+    // removals in whichever unrelated test happened to be running at the time.
+    static FORCE_VECTOR_REMOVE_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Cheap state captured under the live engine lock before a root-transition plan scans disk.
+pub struct WorkspaceRootsTransitionSeed {
+    epoch: u64,
+    overlay_epoch: u64,
+    old_roots: WorkspaceRoots,
+    next_roots: WorkspaceRoots,
+    serves_external_baseline: bool,
+    manifest: HashMap<FileKey, String>,
+    graph_context_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct WorkspaceTransitionFileIdentity {
+    abs_path: PathBuf,
+    canonical: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    read: WorkspaceTransitionReadState,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+enum WorkspaceTransitionReadState {
+    Readable(Vec<u8>),
+    InvalidUtf8(Vec<u8>),
+    ReadFailed,
+}
+
+struct PlannedWorkspaceFile {
+    key: FileKey,
+    identity: WorkspaceTransitionFileIdentity,
+    content_hash: Vec<u8>,
+    chunks: Vec<crate::Chunk>,
+    graph_contexts: Vec<Option<String>>,
+    documents: Vec<crate::IndexedDocument>,
+    embedding_inputs: Vec<String>,
+    manifest_fingerprint: String,
+}
+
+struct PlannedUnreadWorkspaceFile {
+    key: FileKey,
+    identity: WorkspaceTransitionFileIdentity,
+}
+
+/// Off-lock result of scanning and preparing the complete next root universe.
+pub struct WorkspaceRootsTransitionPlan {
+    epoch: u64,
+    overlay_epoch: u64,
+    old_roots: WorkspaceRoots,
+    next_roots: WorkspaceRoots,
+    serves_external_baseline: bool,
+    manifest: HashMap<FileKey, String>,
+    files: Vec<PlannedWorkspaceFile>,
+    unread_files: Vec<PlannedUnreadWorkspaceFile>,
+}
+
+/// A prepared transition whose filesystem snapshot was checked immediately before apply.
+///
+/// Construction is intentionally available only through
+/// [`WorkspaceRootsTransitionPlan::revalidate`]. This separates the expensive second walk and
+/// content reads from [`SearchEngine::apply_validated_workspace_roots_transition`], whose caller
+/// may hold the live engine mutex.
+pub struct ValidatedWorkspaceRootsTransitionPlan(WorkspaceRootsTransitionPlan);
+
+/// Observable result of applying a prepared root transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceRootsTransitionOutcome {
+    Unchanged,
+    Applied {
+        removed: usize,
+        rebuilt: usize,
+        added: usize,
+        pending_collection_embeddings: bool,
+        pending_overlay_embeddings: bool,
+    },
+    /// The live roots or filesystem moved past the plan. Nothing was changed.
+    Superseded,
+}
+
+impl WorkspaceRootsTransitionSeed {
+    /// Render newly built documents with the graph artifact paired with the root snapshot.
+    /// The live engine may still carry the previous publication's provider while this plan is
+    /// prepared off-lock, so the orchestrator supplies the just-published provider explicitly.
+    pub fn with_graph_context_provider(
+        mut self,
+        provider: Arc<dyn crate::ports::GraphContextProvider>,
+    ) -> Self {
+        self.graph_context_provider = Some(provider);
+        self
+    }
+
+    /// Scan and prepare all lexical documents without borrowing the live engine.
+    pub fn plan(self) -> Result<WorkspaceRootsTransitionPlan, SearchError> {
+        let declared: Vec<PathBuf> =
+            self.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        if !set.clean() {
+            return Err(SearchError::Index(format!(
+                "workspace root transition scan is incomplete: unreadable={}, canonical_fallbacks={}",
+                set.unreadable, set.canonical_fallbacks
+            )));
+        }
+
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
+        let mut unread_files = Vec::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = self.next_roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            let bytes = std::fs::read(&file.walked);
+            let read = match &bytes {
+                Ok(bytes) if std::str::from_utf8(bytes).is_ok() => {
+                    WorkspaceTransitionReadState::Readable(blake3::hash(bytes).as_bytes().to_vec())
+                }
+                Ok(bytes) => WorkspaceTransitionReadState::InvalidUtf8(
+                    blake3::hash(bytes).as_bytes().to_vec(),
+                ),
+                Err(_) => WorkspaceTransitionReadState::ReadFailed,
+            };
+            let identity = WorkspaceTransitionFileIdentity {
+                abs_path: file.walked.clone(),
+                canonical: file.canonical.clone(),
+                len: file.metadata.len(),
+                modified: file.metadata.modified().ok(),
+                read,
+            };
+            let Ok(bytes) = bytes else {
+                unread_files.push(PlannedUnreadWorkspaceFile { key, identity });
+                continue;
+            };
+            let Ok(content) = std::str::from_utf8(&bytes) else {
+                unread_files.push(PlannedUnreadWorkspaceFile { key, identity });
+                continue;
+            };
+            let chunks = Chunker::chunk(content);
+            let documents: Vec<crate::IndexedDocument> = chunks
+                .iter()
+                .map(|chunk| {
+                    crate::document::indexed_document_for_chunk(
+                        &key,
+                        chunk,
+                        self.graph_context_provider.as_deref(),
+                    )
+                })
+                .collect();
+            let graph_contexts = documents.iter().map(|doc| doc.graph_context.clone()).collect();
+            let embedding_inputs =
+                documents.iter().map(crate::document::semantic_text_for_indexed_document).collect();
+            files.push(PlannedWorkspaceFile {
+                key: key.clone(),
+                identity,
+                content_hash: blake3::hash(content.as_bytes()).as_bytes().to_vec(),
+                chunks,
+                graph_contexts,
+                documents,
+                embedding_inputs,
+                manifest_fingerprint: crate::workspace_overlay::fingerprint_content(
+                    content, &key.path,
+                ),
+            });
+        }
+
+        Ok(WorkspaceRootsTransitionPlan {
+            epoch: self.epoch,
+            overlay_epoch: self.overlay_epoch,
+            old_roots: self.old_roots,
+            next_roots: self.next_roots,
+            serves_external_baseline: self.serves_external_baseline,
+            manifest: self.manifest,
+            files,
+            unread_files,
+        })
+    }
+}
+
+impl WorkspaceRootsTransitionPlan {
+    /// Re-scan and re-read the planned universe without borrowing a live engine.
+    ///
+    /// `Ok(None)` means create/modify/delete/retarget or a read-state change moved the filesystem
+    /// past the plan. An incomplete scan is an error so orchestration keeps the last-known-good
+    /// roots and its retry obligation. A clean scan may still contain individually unread files;
+    /// their identity and read state are compared without pretending their content was rebuilt.
+    pub fn revalidate(self) -> Result<Option<ValidatedWorkspaceRootsTransitionPlan>, SearchError> {
+        let declared: Vec<PathBuf> =
+            self.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
+        let set = project_model::SourceSet::scan(&declared);
+        if !set.clean() {
+            return Err(SearchError::Index(format!(
+                "workspace root transition validation scan is incomplete: unreadable={}, canonical_fallbacks={}",
+                set.unreadable, set.canonical_fallbacks
+            )));
+        }
+        let mut validation = HashMap::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = self.next_roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            validation.entry(key).or_insert_with(|| {
+                let read = match std::fs::read(&file.walked) {
+                    Ok(bytes) if std::str::from_utf8(&bytes).is_ok() => {
+                        WorkspaceTransitionReadState::Readable(
+                            blake3::hash(&bytes).as_bytes().to_vec(),
+                        )
+                    }
+                    Ok(bytes) => WorkspaceTransitionReadState::InvalidUtf8(
+                        blake3::hash(&bytes).as_bytes().to_vec(),
+                    ),
+                    Err(_) => WorkspaceTransitionReadState::ReadFailed,
+                };
+                WorkspaceTransitionFileIdentity {
+                    abs_path: file.walked.clone(),
+                    canonical: file.canonical.clone(),
+                    len: file.metadata.len(),
+                    modified: file.metadata.modified().ok(),
+                    read,
+                }
+            });
+        }
+        if validation.len() != self.files.len() + self.unread_files.len() {
+            return Ok(None);
+        }
+        let matches = self
+            .files
+            .iter()
+            .map(|file| (&file.key, &file.identity))
+            .chain(self.unread_files.iter().map(|file| (&file.key, &file.identity)))
+            .all(|(key, identity)| validation.get(key) == Some(identity));
+        Ok(matches.then_some(ValidatedWorkspaceRootsTransitionPlan(self)))
+    }
+}
+
 pub struct SearchEngine {
     store: Store,
     embedder: Option<Embedder>,
@@ -138,9 +397,15 @@ pub struct SearchEngine {
     dim: usize,
     batch_size: usize,
     concurrency: usize,
-    workspace_root: Option<std::path::PathBuf>,
+    workspace_roots: Option<WorkspaceRoots>,
+    workspace_roots_epoch: u64,
     workspace_overlay_cache: Mutex<WorkspaceOverlayCache>,
     workspace_baseline_hash_mode: BaselineHashMode,
+    /// Whether this engine serves an EXTERNAL (remote) baseline through the persisted
+    /// manifest. The manifest is a persistent warm-cache that deliberately survives a mode
+    /// switch, so its mere presence proves nothing: every manifest-path dispatch and every
+    /// baseline-evidence decision must consult this flag, not the table.
+    serves_external_baseline: bool,
     /// Optional graph-context provider (dependency-inverted via
     /// [`crate::ports::GraphContextProvider`]). When set, code chunks are enriched
     /// with their outbound graph context before embedding. `None` keeps embeddings
@@ -151,6 +416,31 @@ pub struct SearchEngine {
     /// chunks the resident's shared parse instead of parsing the file itself. `None` keeps the
     /// pure disk read+parse path.
     module_snapshot_source: Option<Arc<dyn ModuleSnapshotSource>>,
+}
+
+/// The overlay retry driver's condition signals, read without side effects by
+/// [`SearchEngine::workspace_overlay_retry_signals`]. Any nonzero/true field means the
+/// overlay owes another Embed pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayRetrySignals {
+    pub initialized: bool,
+    pub needs_full_rescan: bool,
+    pub pending_dirty_paths: usize,
+    pub unembedded_entries: usize,
+    pub unread_keys: usize,
+}
+
+impl OverlayRetrySignals {
+    /// Whether any signal demands a pass: the first pass has not happened, removals were
+    /// withheld or a persist failed, marks await re-embedding, entries lack vectors, or
+    /// proven-present files stayed unread.
+    pub fn demands_a_pass(&self) -> bool {
+        !self.initialized
+            || self.needs_full_rescan
+            || self.pending_dirty_paths > 0
+            || self.unembedded_entries > 0
+            || self.unread_keys > 0
+    }
 }
 
 /// Outcome of [`SearchEngine::refresh_dirty_contexts`]: how many context-dirty paths
@@ -186,9 +476,11 @@ impl SearchEngine {
             dim,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -277,9 +569,11 @@ impl SearchEngine {
             dim,
             batch_size: EmbeddingExecutionPolicy::default().batch_size(),
             concurrency: EmbeddingExecutionPolicy::default().concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -304,9 +598,11 @@ impl SearchEngine {
             dim,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
-            workspace_root: None,
+            workspace_roots: None,
+            workspace_roots_epoch: 0,
             workspace_overlay_cache: Mutex::new(WorkspaceOverlayCache::default()),
             workspace_baseline_hash_mode: BaselineHashMode::RawFileBytes,
+            serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
         })
@@ -339,6 +635,24 @@ impl SearchEngine {
         self.graph_context_provider = Some(provider);
     }
 
+    /// Install the provider of an already-verified graph publication without invalidating stable
+    /// lexical overlay entries. The cache raises its wholesale fence so plans prepared with the
+    /// previous semantic source cannot publish; keeping both pointers together ensures later
+    /// watcher point refreshes do not render against the graph file current at daemon boot.
+    pub fn replace_published_graph_context_provider(
+        &mut self,
+        provider: Arc<dyn crate::ports::GraphContextProvider>,
+    ) -> Result<(), SearchError> {
+        self.workspace_overlay_cache
+            .lock()
+            .map_err(|error| {
+                SearchError::Index(format!("workspace overlay cache lock error: {error}"))
+            })?
+            .replace_graph_context_provider(provider.clone());
+        self.graph_context_provider = Some(provider);
+        Ok(())
+    }
+
     /// Inject the resident-host snapshot source (dependency-inverted). Once set, the overlay's
     /// incremental reindex prefers the resident's shared parse. Does not touch cached entries:
     /// the source changes only HOW a file is read+parsed, never the chunk output.
@@ -354,7 +668,7 @@ impl SearchEngine {
 
     /// The overlay paths currently marked dirty, so the caller can prefetch resident snapshots
     /// for them off-lock and feed them back through [`Self::reindex_dirty_from_snapshots`].
-    pub fn workspace_overlay_dirty_paths(&self) -> Result<Vec<String>, SearchError> {
+    pub fn workspace_overlay_dirty_paths(&self) -> Result<Vec<FileKey>, SearchError> {
         let cache = self
             .workspace_overlay_cache
             .lock()
@@ -379,9 +693,9 @@ impl SearchEngine {
     /// touches the resident host, keeping the resident and engine locks strictly disjoint.
     pub fn reindex_dirty_from_snapshots(
         &self,
-        snapshots: &HashMap<String, ModuleSnapshot>,
+        snapshots: &HashMap<FileKey, ModuleSnapshot>,
     ) -> Result<(), SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        let Some(roots) = &self.workspace_roots else {
             return Ok(());
         };
         let mut cache = self
@@ -389,8 +703,9 @@ impl SearchEngine {
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.reindex_dirty_from_snapshots(
-            workspace_root,
+            roots,
             &self.store,
+            self.serves_external_baseline,
             self.batch_size,
             self.workspace_baseline_hash_mode,
             snapshots,
@@ -402,12 +717,7 @@ impl SearchEngine {
         root: &Path,
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
 
         info!(total_files = bsl_files.len(), "scanning BSL files");
 
@@ -420,7 +730,7 @@ impl SearchEngine {
         let mut tasks: Vec<FileTask> = Vec::new();
         let mut total_chunks = 0usize;
 
-        for file_path in &bsl_files {
+        for (key, file_path) in &bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -430,10 +740,8 @@ impl SearchEngine {
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
 
-            if let Some(stored_hash) = self.store.file_hash(&rel_path)? {
+            if let Some(stored_hash) = self.store.file_hash(&key.root_id, &key.path)? {
                 if stored_hash == hash.as_bytes() {
                     continue;
                 }
@@ -447,7 +755,7 @@ impl SearchEngine {
             let provider = self.graph_context_provider.as_deref();
             let docs: Vec<crate::IndexedDocument> = chunks
                 .iter()
-                .map(|c| crate::document::indexed_document_for_chunk(&rel_path, c, provider))
+                .map(|c| crate::document::indexed_document_for_chunk(key, c, provider))
                 .collect();
             let texts: Vec<String> =
                 docs.iter().map(crate::document::semantic_text_for_indexed_document).collect();
@@ -456,7 +764,7 @@ impl SearchEngine {
 
             total_chunks += chunks.len();
             tasks.push(FileTask {
-                rel_path,
+                key: key.clone(),
                 hash: hash.as_bytes().to_vec(),
                 chunks,
                 texts,
@@ -524,7 +832,7 @@ impl SearchEngine {
                         }
 
                         let _ = tx.send(FileResult {
-                            rel_path: task.rel_path,
+                            key: task.key,
                             hash: task.hash,
                             chunks: task.chunks,
                             graph_contexts: task.graph_contexts,
@@ -555,17 +863,18 @@ impl SearchEngine {
             match result.embeddings {
                 Ok(embeddings) => {
                     self.store.reindex_file_with_context(
-                        &result.rel_path,
+                        &result.key.root_id,
+                        &result.key.path,
                         &result.hash,
                         &result.chunks,
                         Some(&embeddings),
                         Some(&result.graph_contexts),
                     )?;
                     indexed += 1;
-                    debug!(file = %result.rel_path, chunks = result.chunks.len(), "file indexed");
+                    debug!(file = %result.key.path, chunks = result.chunks.len(), "file indexed");
                 }
                 Err(e) => {
-                    warn!(file = %result.rel_path, "embedding failed after retries, skipping: {e}");
+                    warn!(file = %result.key.path, "embedding failed after retries, skipping: {e}");
                     errors += 1;
                 }
             }
@@ -603,12 +912,19 @@ impl SearchEngine {
     /// parsing or graph round-trip happens here — this is purely the storage write.
     pub fn ingest_fused_file(
         &mut self,
-        rel_path: &str,
+        key: &FileKey,
         hash: &[u8],
         chunks: &[crate::Chunk],
         graph_contexts: &[Option<String>],
     ) -> Result<(), SearchError> {
-        self.store.reindex_file_with_context(rel_path, hash, chunks, None, Some(graph_contexts))?;
+        self.store.reindex_file_with_context(
+            &key.root_id,
+            &key.path,
+            hash,
+            chunks,
+            None,
+            Some(graph_contexts),
+        )?;
         Ok(())
     }
 
@@ -798,6 +1114,113 @@ impl SearchEngine {
         Ok(index)
     }
 
+    /// The files a boot ingest must write, each under the key the store knows it by.
+    ///
+    /// With a root table configured, the universe is EVERY registered root, walked once through
+    /// the shared source-set walk, and the key is decided by the same attribution every other
+    /// path uses — the longest matching prefix, not the root the walk entered through. Keying by
+    /// the entered root would give a file under a configuration that some extension contains a
+    /// second row under that extension's id. De-duplication by key is what keeps one file one
+    /// row when roots nest and the walk reaches it twice.
+    ///
+    /// Without a table the caller is not a workspace daemon but a one-shot indexer (the baseline
+    /// publisher, a reference corpus). The contract it gets is the same one stated by
+    /// [`Self::set_workspace_root`] — everything found belongs to the configuration — and it is
+    /// honoured by giving that caller a one-root table rather than a second way to walk. A walk
+    /// of its own would answer "which file is this" differently from the daemon that later reads
+    /// the rows: attribution ranks the CANONICAL spelling first, so two names for one file inside
+    /// the root are one key to the reader and would have been two to a writer keying by the name
+    /// it walked through.
+    fn boot_ingest_files(&self, root: &Path) -> Vec<(FileKey, std::path::PathBuf)> {
+        let walked: Option<Vec<std::path::PathBuf>> = self
+            .workspace_roots
+            .as_ref()
+            .map(|roots| roots.entries().map(|(_, declared)| declared.to_path_buf()).collect());
+        self.boot_ingest_files_over(root, walked.as_deref())
+    }
+
+    /// The same projection over a chosen subset of the roots to WALK. Attribution still consults
+    /// the whole table: roots may nest, so a file found while walking one root can belong to
+    /// another, and keying it by the root the walk entered through would give it a second row.
+    fn boot_ingest_files_over(
+        &self,
+        root: &Path,
+        walk: Option<&[std::path::PathBuf]>,
+    ) -> Vec<(FileKey, std::path::PathBuf)> {
+        let ephemeral;
+        let roots = match self.workspace_roots.as_ref() {
+            Some(roots) => roots,
+            None => {
+                ephemeral = WorkspaceRoots::build(root, root, &[]).0;
+                &ephemeral
+            }
+        };
+        let owned: Vec<std::path::PathBuf>;
+        let declared: &[std::path::PathBuf] = match walk {
+            Some(walk) => walk,
+            None => {
+                owned = roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
+                &owned
+            }
+        };
+        let set = project_model::SourceSet::scan(declared);
+        Self::files_from_scan(roots, &set)
+    }
+
+    /// The corpus a walk describes: every source file it reached, under the key its owning root
+    /// gives it. Pure — it reaches no further than the set handed in, so the files it names and
+    /// the completeness its caller reads off that same set always describe one traversal.
+    ///
+    /// De-duplication is by key, and that is what keeps one file one row when roots nest and the
+    /// walk arrives twice. It does NOT merge two spellings of one file that attribution keeps
+    /// apart: a link leaving every root keeps the name it was walked through, because that name
+    /// is the only handle its root has on it.
+    fn files_from_scan(
+        roots: &WorkspaceRoots,
+        set: &project_model::SourceSet,
+    ) -> Vec<(FileKey, std::path::PathBuf)> {
+        let mut seen = HashSet::new();
+        let mut files = Vec::new();
+        for file in &set.files {
+            if file.role != project_model::FileRole::Source {
+                continue;
+            }
+            let Some(key) = roots.root_of(&file.walked, &file.canonical) else {
+                continue;
+            };
+            if !seen.insert(key.clone()) {
+                continue;
+            }
+            files.push((key, file.walked.clone()));
+        }
+        files
+    }
+
+    /// Ingest the corpus of a walk the CALLER performed, for a caller that must also judge that
+    /// walk's completeness — the baseline publisher, which may not ship a corpus built from a
+    /// tree it could not read whole.
+    ///
+    /// Taking the scan itself, rather than a ready list of files, is the point: a list could have
+    /// come from any traversal, and then the verdict its holder consulted would answer for a
+    /// corpus some other traversal produced. Here the files are derived from the very value whose
+    /// completeness the caller read.
+    pub fn ingest_scanned_fts(
+        &mut self,
+        set: &project_model::SourceSet,
+    ) -> Result<FtsIngest, SearchError> {
+        let files = {
+            let Some(roots) = self.workspace_roots.as_ref() else {
+                return Err(SearchError::Index(
+                    "ingesting a scanned source set needs a root table: without one there is no \
+                     way to say which root a file belongs to"
+                        .into(),
+                ));
+            };
+            Self::files_from_scan(roots, set)
+        };
+        self.ingest_files_fts(&files)
+    }
+
     /// Index workspace files for *deferred* embedding: chunk each changed file, attach
     /// its graph context via the configured provider, and persist chunk + FTS rows with a
     /// NULL embedding. The vectors are filled later by
@@ -807,18 +1230,13 @@ impl SearchEngine {
     /// the synchronous [`Self::index_directory`] would have produced, without blocking on
     /// the embed. Returns the number of files (re)indexed.
     pub fn index_directory_deferred(&mut self, root: &Path) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
 
         info!(total_files = bsl_files.len(), "scanning BSL files (deferred embedding)");
 
         let provider = self.graph_context_provider.as_deref();
         let mut indexed = 0;
-        for file_path in &bsl_files {
+        for (key, file_path) in &bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
@@ -828,10 +1246,9 @@ impl SearchEngine {
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+            let rel_path = key.path.clone();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(&key.root_id, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -851,7 +1268,7 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(&key.root_id, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
@@ -860,12 +1277,12 @@ impl SearchEngine {
             let graph_contexts: Vec<Option<String>> = chunks
                 .iter()
                 .map(|c| {
-                    crate::document::indexed_document_for_chunk(&rel_path, c, provider)
-                        .graph_context
+                    crate::document::indexed_document_for_chunk(key, c, provider).graph_context
                 })
                 .collect();
 
             self.store.reindex_file_with_context(
+                &key.root_id,
                 &rel_path,
                 hash.as_bytes(),
                 &chunks,
@@ -880,30 +1297,70 @@ impl SearchEngine {
     }
 
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
-        let bsl_files: Vec<std::path::PathBuf> = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")))
-            .map(|e| e.into_path())
-            .collect();
+        let bsl_files = self.boot_ingest_files(root);
+        // The daemon does not act on unread files here: its own boot decides completeness with
+        // `reconcile_boot_store_with_disk`, which asks its own scan and falls back to priming
+        // the overlay rather than asserting a clean store.
+        Ok(self.ingest_files_fts(&bsl_files)?.indexed)
+    }
 
+    /// Index only the registered roots that have no rows at all yet.
+    ///
+    /// A warm store skips re-indexing to keep a restart cheap, but "warm" is a per-ROOT fact: a
+    /// root declared while the daemon was down has nothing stored, and skipping it would leave it
+    /// out of the index until someone edited a file in it. Roots that already have rows are not
+    /// walked, read or hashed here, so the restart stays as cheap as it was.
+    pub fn index_unindexed_roots_fts(&mut self) -> Result<usize, SearchError> {
+        let indexed_roots: HashSet<String> = self
+            .store
+            .all_files_in_collection("code")?
+            .into_iter()
+            .map(|(key, _hash)| key.root_id)
+            .collect();
+        let Some(roots) = self.workspace_roots.as_ref() else { return Ok(0) };
+        // Only the unindexed roots are WALKED: a warm root must not be traversed, canonicalised
+        // or stat-ed at all, or the per-root skip would cost exactly what it exists to avoid.
+        let cold: Vec<std::path::PathBuf> = roots
+            .entries()
+            .filter(|(id, _)| !indexed_roots.contains(*id))
+            .map(|(_, declared)| declared.to_path_buf())
+            .collect();
+        if cold.is_empty() {
+            return Ok(0);
+        }
+        let files: Vec<(FileKey, std::path::PathBuf)> = self
+            .boot_ingest_files_over(Path::new(""), Some(&cold))
+            .into_iter()
+            .filter(|(key, _)| !indexed_roots.contains(&key.root_id))
+            .collect();
+        if files.is_empty() {
+            return Ok(0);
+        }
+        Ok(self.ingest_files_fts(&files)?.indexed)
+    }
+
+    fn ingest_files_fts(
+        &mut self,
+        bsl_files: &[(FileKey, std::path::PathBuf)],
+    ) -> Result<FtsIngest, SearchError> {
         info!(total_files = bsl_files.len(), "scanning BSL files (FTS-only)");
 
         let mut indexed = 0;
-        for file_path in &bsl_files {
+        let mut unread = 0;
+        for (key, file_path) in bsl_files {
             let content = match std::fs::read_to_string(file_path) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(?file_path, "failed to read file: {e}");
+                    unread += 1;
                     continue;
                 }
             };
 
             let hash = blake3::hash(content.as_bytes());
-            let rel_path =
-                file_path.strip_prefix(root).unwrap_or(file_path).to_string_lossy().to_string();
+            let rel_path = key.path.clone();
 
-            let had_prior = match self.store.file_hash(&rel_path)? {
+            let had_prior = match self.store.file_hash(&key.root_id, &rel_path)? {
                 Some(stored_hash) => {
                     if stored_hash == hash.as_bytes() {
                         continue;
@@ -923,18 +1380,18 @@ impl SearchEngine {
                 // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
                 // so only prior-stored files are touched.
                 if had_prior {
-                    self.store.remove_file(&rel_path, "code")?;
+                    self.store.remove_file(&key.root_id, &rel_path, "code")?;
                     indexed += 1;
                 }
                 continue;
             }
 
-            self.store.reindex_file(&rel_path, hash.as_bytes(), &chunks, None)?;
+            self.store.reindex_file(&key.root_id, &rel_path, hash.as_bytes(), &chunks, None)?;
             indexed += 1;
         }
 
-        info!(indexed, total_chunks = self.store.chunk_count()?, "FTS indexing complete");
-        Ok(indexed)
+        info!(indexed, unread, total_chunks = self.store.chunk_count()?, "FTS indexing complete");
+        Ok(FtsIngest { indexed, unread })
     }
 
     pub fn index_documents(
@@ -945,7 +1402,7 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
-        if let Some(stored_hash) = self.store.file_hash(virtual_path)? {
+        if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
                 return Ok(0);
@@ -1077,15 +1534,270 @@ impl SearchEngine {
         embedder.embed(query)
     }
 
-    pub fn workspace_root(&self) -> Option<&std::path::Path> {
-        self.workspace_root.as_deref()
+    /// The CONFIGURATION root: the directory every stored path with the reserved
+    /// configuration id is spelled against, and the base a caller resolves a hit's relative path
+    /// with. Deliberately not the workspace directory of the root table — a configuration
+    /// commonly sits in a subdirectory of the project, and the table's workspace exists to make
+    /// root identifiers relative, not to resolve paths.
+    pub fn configuration_root(&self) -> Option<&std::path::Path> {
+        self.workspace_roots.as_ref().and_then(WorkspaceRoots::configuration)
     }
 
+    /// The engine's root table, for a caller that must scan or resolve keys off
+    /// the engine lock (the standalone overlay prime).
+    pub fn workspace_roots(&self) -> Option<&WorkspaceRoots> {
+        self.workspace_roots.as_ref()
+    }
+
+    /// Point the engine at a workspace whose only source root is the workspace
+    /// directory itself. Every file found under it is the configuration's, which
+    /// is what a caller with no project model to consult can honestly say.
     pub fn set_workspace_root(&mut self, workspace_root: impl Into<std::path::PathBuf>) {
-        self.workspace_root = Some(workspace_root.into());
-        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
-            cache.clear();
+        let workspace_root = workspace_root.into();
+        let (roots, _) = WorkspaceRoots::build(&workspace_root, &workspace_root, &[]);
+        self.set_workspace_roots(roots);
+    }
+
+    /// Install the complete root table during boot. Live callers must use the transition API;
+    /// silently assigning another table would leave every root-keyed carrier behind.
+    pub fn initialize_workspace_roots(&mut self, roots: WorkspaceRoots) -> Result<(), SearchError> {
+        if self.workspace_roots.is_some() {
+            return Err(SearchError::Index(
+                "workspace roots are already initialized; use a live transition".to_owned(),
+            ));
         }
+        self.workspace_roots = Some(roots);
+        self.workspace_roots_epoch = 1;
+        Ok(())
+    }
+
+    /// Compatibility entry point for boot and test callers being migrated to the explicit
+    /// two-phase API. A live replacement is best-effort: any incomplete scan, superseded plan or
+    /// apply failure leaves the old observable state serving and is logged rather than panicking
+    /// the daemon. Production live orchestration uses [`Self::workspace_roots_transition_seed`]
+    /// directly so it can retain and retry the obligation and act on embedding signals.
+    pub fn set_workspace_roots(&mut self, roots: WorkspaceRoots) {
+        if self.workspace_roots.is_none() {
+            if let Err(error) = self.initialize_workspace_roots(roots) {
+                warn!("failed to initialize compatibility workspace roots: {error}");
+            }
+            return;
+        }
+        let plan = match self
+            .workspace_roots_transition_seed(roots)
+            .and_then(WorkspaceRootsTransitionSeed::plan)
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!("compatibility workspace root transition was not planned: {error}");
+                return;
+            }
+        };
+        let validated = match plan.revalidate() {
+            Ok(Some(validated)) => validated,
+            Ok(None) => {
+                warn!("compatibility workspace root transition was superseded; old roots retained");
+                return;
+            }
+            Err(error) => {
+                warn!("compatibility workspace root transition validation failed: {error}");
+                return;
+            }
+        };
+        match self.apply_validated_workspace_roots_transition(validated) {
+            Ok(WorkspaceRootsTransitionOutcome::Applied {
+                pending_collection_embeddings,
+                pending_overlay_embeddings,
+                ..
+            }) => {
+                if pending_collection_embeddings || pending_overlay_embeddings {
+                    warn!(
+                        pending_collection_embeddings,
+                        pending_overlay_embeddings,
+                        "compatibility workspace root transition requires an embedding pass; \
+                         live orchestration must consume the explicit transition outcome"
+                    );
+                }
+            }
+            Ok(WorkspaceRootsTransitionOutcome::Unchanged) => {}
+            Ok(WorkspaceRootsTransitionOutcome::Superseded) => {
+                warn!("compatibility workspace root transition was superseded; old roots retained");
+            }
+            Err(error) => {
+                warn!(
+                    "compatibility workspace root transition failed; old roots retained: {error}"
+                );
+            }
+        }
+    }
+
+    /// Capture the cheap inputs of a two-phase live root transition.
+    pub fn workspace_roots_transition_seed(
+        &self,
+        next_roots: WorkspaceRoots,
+    ) -> Result<WorkspaceRootsTransitionSeed, SearchError> {
+        let old_roots = self.workspace_roots.clone().ok_or_else(|| {
+            SearchError::Index("workspace roots must be initialized before transition".to_owned())
+        })?;
+        let manifest = if self.serves_external_baseline {
+            self.dispatched_manifest_fingerprints()?.unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        let overlay_epoch = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|error| {
+                SearchError::Index(format!("workspace overlay cache lock error: {error}"))
+            })?
+            .transition_epoch();
+        Ok(WorkspaceRootsTransitionSeed {
+            epoch: self.workspace_roots_epoch,
+            overlay_epoch,
+            old_roots,
+            next_roots,
+            serves_external_baseline: self.serves_external_baseline,
+            manifest,
+            graph_context_provider: self.graph_context_provider.clone(),
+        })
+    }
+
+    /// Atomically publish a filesystem-validated root transition. This method performs no
+    /// filesystem walk or file read: production calls it under the outer engine mutex, so only
+    /// cheap in-memory fences and the atomic SQLite/cache/vector mutation may happen here.
+    pub fn apply_validated_workspace_roots_transition(
+        &mut self,
+        validated: ValidatedWorkspaceRootsTransitionPlan,
+    ) -> Result<WorkspaceRootsTransitionOutcome, SearchError> {
+        let plan = validated.0;
+        if self.workspace_roots_epoch != plan.epoch
+            || self.workspace_roots.as_ref() != Some(&plan.old_roots)
+            || self.serves_external_baseline != plan.serves_external_baseline
+        {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        }
+        if plan.old_roots == plan.next_roots {
+            return Ok(WorkspaceRootsTransitionOutcome::Unchanged);
+        }
+        if plan.serves_external_baseline {
+            let live_manifest = self.dispatched_manifest_fingerprints()?.unwrap_or_default();
+            if live_manifest != plan.manifest {
+                return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+            }
+        }
+        let carriers = self.carrier_keys()?;
+        let mut cache = self.workspace_overlay_cache.lock().map_err(|error| {
+            SearchError::Index(format!("workspace overlay cache lock error: {error}"))
+        })?;
+        if cache.transition_epoch() != plan.overlay_epoch {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        }
+
+        let mut known = carriers.all_keys();
+        known.extend(cache.root_keyed_keys());
+        let changed_ids = plan.old_roots.changed_root_ids(&plan.next_roots);
+        let readable_keys: HashSet<FileKey> =
+            plan.files.iter().map(|file| file.key.clone()).collect();
+        let unread_keys: HashSet<FileKey> =
+            plan.unread_files.iter().map(|file| file.key.clone()).collect();
+        let present_keys: HashSet<FileKey> = readable_keys.union(&unread_keys).cloned().collect();
+
+        let mut cleanup: HashSet<FileKey> = known
+            .iter()
+            .filter(|key| changed_ids.contains(&key.root_id) || !present_keys.contains(*key))
+            .cloned()
+            .collect();
+        let mut affected_files = Vec::new();
+        let mut rebuilt = 0;
+        let mut added = 0;
+        for file in &plan.files {
+            let old_owner =
+                plan.old_roots.root_of(&file.identity.abs_path, &file.identity.canonical);
+            if changed_ids.contains(&file.key.root_id)
+                || old_owner.as_ref() != Some(&file.key)
+                || !known.contains(&file.key)
+            {
+                cleanup.insert(file.key.clone());
+                affected_files.push(file);
+                if plan.old_roots.contains_id(&file.key.root_id) && known.contains(&file.key) {
+                    rebuilt += 1;
+                } else {
+                    added += 1;
+                }
+            }
+        }
+
+        let obsolete: HashSet<FileKey> =
+            cleanup.iter().filter(|key| !present_keys.contains(*key)).cloned().collect();
+        let obsolete_baseline: HashSet<FileKey> =
+            obsolete.iter().filter(|key| plan.manifest.contains_key(*key)).cloned().collect();
+
+        let upserts: Vec<WorkspaceTransitionFile> = if plan.serves_external_baseline {
+            Vec::new()
+        } else {
+            affected_files
+                .iter()
+                .map(|file| WorkspaceTransitionFile {
+                    key: file.key.clone(),
+                    hash: file.content_hash.clone(),
+                    chunks: file.chunks.clone(),
+                    graph_contexts: file.graph_contexts.clone(),
+                })
+                .collect()
+        };
+        let overlay_files: Vec<WorkspaceTransitionOverlayFile> = if plan.serves_external_baseline {
+            affected_files
+                .iter()
+                .map(|file| {
+                    let baseline = plan.manifest.get(&file.key);
+                    WorkspaceTransitionOverlayFile {
+                        key: file.key.clone(),
+                        len: file.identity.len,
+                        modified: file.identity.modified,
+                        canonical: file.identity.canonical.clone(),
+                        file_hash: normalized_file_hash_for_indexed_documents(&file.documents),
+                        lexical_documents: file.documents.clone(),
+                        embedding_inputs: file.embedding_inputs.clone(),
+                        has_baseline: baseline.is_some(),
+                        baseline_equal: baseline
+                            .is_some_and(|fingerprint| fingerprint == &file.manifest_fingerprint),
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let next_index = self.store.apply_workspace_roots_transition(WorkspaceStoreTransition {
+            changed_root_ids: &changed_ids,
+            cleanup: &cleanup,
+            tombstones: &obsolete_baseline,
+            upserts: &upserts,
+            dimension: self.dim,
+        })?;
+        cache.transition_roots(
+            &changed_ids,
+            &cleanup,
+            &obsolete_baseline,
+            &unread_keys,
+            overlay_files,
+        );
+        self.index = next_index;
+        self.workspace_roots = Some(plan.next_roots);
+        self.workspace_roots_epoch += 1;
+
+        let pending_collection_embeddings = !plan.serves_external_baseline
+            && self.embedder.is_some()
+            && upserts.iter().any(|file| !file.chunks.is_empty());
+        let pending_overlay_embeddings = plan.serves_external_baseline
+            && (!unread_keys.is_empty() || (self.embedder.is_some() && !affected_files.is_empty()));
+        Ok(WorkspaceRootsTransitionOutcome::Applied {
+            removed: obsolete.len(),
+            rebuilt,
+            added,
+            pending_collection_embeddings,
+            pending_overlay_embeddings,
+        })
     }
 
     pub fn enable_workspace_watcher_mode(&mut self) {
@@ -1105,45 +1817,52 @@ impl SearchEngine {
         &self,
         path: impl AsRef<std::path::Path>,
     ) -> Result<bool, SearchError> {
-        let workspace_root = match &self.workspace_root {
-            Some(root) => root,
-            None => return Ok(false),
-        };
-        let path = path.as_ref();
-        let rel_path = if path.is_absolute() {
-            match path.strip_prefix(workspace_root) {
-                Ok(rel) => rel,
-                Err(_) => return Ok(false),
-            }
-        } else {
-            path
-        };
-
-        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
-        }
-
-        let rel_path = rel_path.to_string_lossy().to_string();
+        };
         let mut cache = self
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.enable_watcher_mode();
-        cache.mark_dirty_path(rel_path);
+        cache.mark_dirty_path(key);
         Ok(true)
     }
 
-    /// Strip `path` to a workspace-relative `.bsl` path (the spelling the `code`
-    /// collection is keyed by), or `None` when it is not an absolute path under the
-    /// workspace root or not a `.bsl`. Shared by the workspace point-update entry points.
-    fn workspace_rel_bsl(&self, path: &Path) -> Option<String> {
-        let workspace_root = self.workspace_root.as_ref()?;
-        let rel_path =
-            if path.is_absolute() { path.strip_prefix(workspace_root).ok()? } else { path };
-        if !rel_path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("bsl")) {
+    /// The store key of a workspace `.bsl` file, or `None` when it is not a
+    /// `.bsl` or lies outside every registered root. Shared by the workspace
+    /// point-update entry points.
+    ///
+    /// A relative path is taken as configuration-relative — that is the only reading
+    /// available, and the callers that pass one have already stripped the prefix
+    /// themselves. The canonical spelling is what attribution ranks roots by, which
+    /// is why [`WorkspaceRoots::root_of`] takes two; both come from the one procedure
+    /// [`WorkspaceRoots::spellings_of`], so a `.bsl` and a descriptor cannot be
+    /// attributed by different rules.
+    fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
+        let roots = self.workspace_roots.as_ref()?;
+        if !bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION) {
             return None;
         }
-        Some(rel_path.to_string_lossy().to_string())
+        let (walked, canonical) = roots.spellings_of(path);
+        // A `.bsl`-spelled link may resolve to a non-source target — by role, or by not being
+        // a regular file at all (a directory spelled `.bsl`). A key under such a target's root
+        // would be one that is FORBIDDEN to exist (the walk drops such files), so canonical
+        // attribution is meaningless there; the walked spelling is the only key the file could
+        // ever have been indexed under — the key a removal must reach. A GONE target still
+        // attributes canonically: it was a file if it was anything, and the tombstone path
+        // needs the last known spelling.
+        let target_is_source = project_model::file_role(&canonical)
+            == project_model::FileRole::Source
+            && match std::fs::metadata(&canonical) {
+                Ok(metadata) => metadata.is_file(),
+                Err(_) => true,
+            };
+        if target_is_source {
+            roots.root_of(&walked, &canonical)
+        } else {
+            roots.root_of_declared(&walked)
+        }
     }
 
     /// Mark one workspace `.bsl` file's stored graph context stale, so a later
@@ -1154,10 +1873,10 @@ impl SearchEngine {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<bool, SearchError> {
-        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
-        self.store.mark_context_dirty("code", &rel)?;
+        self.store.mark_context_dirty("code", &key.root_id, &key.path)?;
         Ok(true)
     }
 
@@ -1178,7 +1897,7 @@ impl SearchEngine {
     }
 
     /// The set of paths currently marked context-dirty in `collection`.
-    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<FileKey>, SearchError> {
         self.store.context_dirty_paths(collection)
     }
 
@@ -1203,58 +1922,311 @@ impl SearchEngine {
     /// deliberately does NOT reload every embedding or re-persist the sidecar. Returns
     /// whether the path was a workspace `.bsl`.
     pub fn remove_workspace_path(&mut self, path: impl AsRef<Path>) -> Result<bool, SearchError> {
-        let Some(rel) = self.workspace_rel_bsl(path.as_ref()) else {
+        let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
-        // Collect the chunk ids before deleting the rows so the exact vectors can be
-        // evicted from the live index without a full reload.
-        let chunk_ids = self.store.chunk_ids_for_file("code", &rel)?;
-        self.store.remove_file(&rel, "code")?;
-        self.store.insert_overlay_tombstone(&rel, "code")?;
-        if let Ok(mut cache) = self.workspace_overlay_cache.lock() {
-            cache.enable_watcher_mode();
-            cache.mark_dirty_path(rel.clone());
-        }
-        for id in chunk_ids {
-            if let Err(e) = self.index.remove(id) {
-                tracing::debug!(id, "vector index removal skipped: {e}");
-            }
-        }
+        self.remove_workspace_key(&key)?;
         Ok(true)
     }
 
+    /// [`Self::remove_workspace_path`] for a caller that already holds the store
+    /// key. A key read back from the store must NOT be re-attributed: its path is
+    /// relative to its own root, and re-deriving it from the workspace would hand
+    /// an extension's file to the configuration and leave the real row in place.
+    pub fn remove_workspace_key(&mut self, key: &FileKey) -> Result<(), SearchError> {
+        // A manifest this engine cannot read is not evidence of "no baseline copy": guessing
+        // `false` would skip the hiding that stops the copy from being served.
+        let has_baseline =
+            self.dispatched_manifest_fingerprints()?.is_some_and(|m| m.contains_key(key));
+        self.remove_workspace_key_with(key, has_baseline)
+    }
+
+    /// Drop the indexed files under `dirs` that are no longer on disk, across every carrier.
+    ///
+    /// A vanished directory arrives as ONE event naming the directory itself, while the files
+    /// that went with it are never named — the walk that would have enumerated them is
+    /// exactly what is no longer possible. Point removal cannot express this: it keys through
+    /// [`Self::workspace_file_key`], which answers `None` for anything that is not a `.bsl`,
+    /// so a call on a directory is silently a no-op.
+    ///
+    /// Each candidate key is then checked against disk INDIVIDUALLY rather than trusting the
+    /// event or the state of the directory itself. Both of those are too coarse to be
+    /// trusted with a whole subtree: an event says what was true when it fired, and a
+    /// directory that is back says nothing about which of its files came back with it. The
+    /// key's own file is the only thing that answers the question actually being asked.
+    /// Anything that is not a proven absence — a permission error, a race — keeps its key.
+    ///
+    /// Callers pass every path a batch reported gone, not just the ones that look like
+    /// directories: the answer for a path that really was a file is simply an empty
+    /// candidate set, since no key lives strictly under it. Taking them together is what
+    /// keeps this to ONE reading of the carriers per batch.
+    ///
+    /// Candidates come from every carrier for the same reason a reconcile does (see
+    /// [`Self::carrier_keys`]): against a remote baseline there are no local rows at all.
+    /// Returns the number of removed keys.
+    pub fn remove_vanished_under(&mut self, dirs: &[PathBuf]) -> Result<usize, SearchError> {
+        let Some(roots) = self.workspace_roots.as_ref() else {
+            return Ok(0);
+        };
+        // Attributed by the DECLARED spellings alone: the directory is gone, so there is
+        // nothing left on disk to canonicalise, and its keys were spelled the way the walk
+        // reached it.
+        //
+        // Two kinds of key go with a directory, and attribution alone finds only the first.
+        // It answers "which root owns this file", and a root owns no file at its own path,
+        // so a directory that IS a root — an extension deleted whole, a configuration that
+        // is the workspace — attributes to nothing at all. Its keys are its root's.
+        let mut prefixes: Vec<FileKey> = Vec::new();
+        let mut swallowed_roots: HashSet<String> = HashSet::new();
+        for dir in dirs {
+            let walked = if dir.is_absolute() {
+                dir.clone()
+            } else {
+                roots.configuration().unwrap_or_else(|| roots.workspace()).join(dir)
+            };
+            // Both spellings, for the same reason point removal canonicalises: a root
+            // declared through a link owns the files physically under its target, and the
+            // declared path alone would hand the subtree to the enclosing alias root —
+            // whose keys are not the ones in the store.
+            let canonical = crate::workspace_roots::canonical_spelling(&walked);
+            prefixes.extend(roots.root_of_declared(&walked));
+            prefixes.extend(roots.root_of(&walked, &canonical));
+            swallowed_roots.extend(
+                roots
+                    .entries()
+                    .filter(|(_, declared)| {
+                        declared.starts_with(&walked) || declared.starts_with(&canonical)
+                    })
+                    .map(|(id, _)| id.to_owned()),
+            );
+        }
+        if prefixes.is_empty() && swallowed_roots.is_empty() {
+            return Ok(0);
+        }
+        let carriers = self.carrier_keys()?;
+        let hidden = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache.hidden_keys(),
+            Err(error) => {
+                tracing::warn!("failed to read overlay hidings for a subtree removal: {error}");
+                HashSet::new()
+            }
+        };
+        let candidates = carriers
+            .all_keys()
+            .into_iter()
+            .filter(|key| {
+                swallowed_roots.contains(&key.root_id)
+                    || prefixes.iter().any(|prefix| key.is_under(prefix))
+            })
+            .filter(|key| {
+                self.workspace_roots
+                    .as_ref()
+                    .and_then(|roots| roots.resolve(key))
+                    .is_some_and(|path| proven_absent(&path))
+            })
+            .collect();
+        let batch = self.remove_key_batch(candidates, &carriers, &hidden);
+        if let Some(error) = batch.first_error {
+            return Err(SearchError::Index(format!(
+                "subtree removal cleared {} keys and failed on {}; first failure: {error}",
+                batch.removed, batch.failed
+            )));
+        }
+        Ok(batch.removed)
+    }
+
+    /// [`Self::remove_workspace_key`] with the baseline evidence already resolved, so a batch
+    /// caller loads the manifest once instead of once per key.
+    ///
+    /// The store row goes LAST, after every step that can fail. That row is what a reconcile
+    /// selects the key by, so dropping it first would turn any later failure into a silent
+    /// loss: the retry mark reaches the overlay alone, and the chunk ids the vector eviction
+    /// needs come from the row itself. Leaving it in place instead makes the very next
+    /// reconcile pick the key up exactly where this pass left it.
+    ///
+    /// One window stays open and is accepted knowingly: if the final row delete fails after
+    /// the vectors are out, a file that turns out to still exist (a removal event that lied,
+    /// or a delete-and-recreate) keeps its row and loses its vectors until a rebuild — the
+    /// point refresh finds it equal to the baseline and reindexes nothing. Closing it needs
+    /// atomicity between an in-memory index and SQLite, which does not exist here; every
+    /// other order merely moves the window (evicting after the row delete strands vectors
+    /// with no row left to find them by).
+    fn remove_workspace_key_with(
+        &mut self,
+        key: &FileKey,
+        has_baseline: bool,
+    ) -> Result<(), SearchError> {
+        // The retry obligation comes FIRST: every operation below can fail, and returning
+        // early without the mark would leave no signal for the point path — while the rows
+        // still tell the old story. A poisoned lock is a dead process, not a key state, but
+        // it does mean the obligation was not recorded, so it is not a success either.
+        {
+            let mut cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
+            cache.enable_watcher_mode();
+            cache.mark_dirty_path(key.clone());
+        }
+        // Collected before the row goes, because the row is where they live.
+        let chunk_ids = self.store.chunk_ids_for_file("code", &key.root_id, &key.path)?;
+        self.store.insert_overlay_tombstone(&key.root_id, &key.path, "code")?;
+        // The dead file's fingerprint row must not survive it: the dirty mark dies with the
+        // process, and a namesake recreated at the same (len, mtime, canonical) would inherit
+        // the "verified" claim across a restart.
+        self.store.delete_overlay_fingerprint_entries(std::slice::from_ref(key))?;
+        {
+            // The deletion is proven, so drop the overlay entry at once — the point refresh
+            // would read a root that vanished WITH the file as "unreachable, retry" and leave
+            // a ghost entry. The mark still re-checks the disk: if the event lied, the next
+            // point pass republishes the live file.
+            let mut cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
+            cache.remove_known_deleted(key, has_baseline);
+        }
+        // Second to last, right before the row that names the chunks: evicting earlier would
+        // strip a file of its vectors on any LATER failure, and a removal event that turns out
+        // to have lied leaves the file unchanged on disk — so the point refresh settles it as
+        // equal to the baseline, reindexes nothing, and the vectors never come back.
+        for id in chunk_ids {
+            #[cfg(test)]
+            if FORCE_VECTOR_REMOVE_ERROR.with(std::cell::Cell::get) {
+                return Err(SearchError::Index("forced vector removal failure".to_owned()));
+            }
+            self.index.remove(id)?;
+        }
+        self.store.remove_file(&key.root_id, &key.path, "code")?;
+        Ok(())
+    }
+
+    /// One reading of every carrier that can still know about a workspace file, taken once
+    /// per operation: each carrier costs a load, and asking per key would turn a reconcile
+    /// into a query per stored file.
+    ///
+    /// A carrier that cannot be read is left EMPTY rather than guessed at, and the two cases
+    /// mean different things. The manifest is empty whenever this engine does not serve an
+    /// external baseline — its rows deliberately survive a mode switch, so a local engine
+    /// must not read them as evidence. The overlay is empty only if its lock is poisoned,
+    /// which is a dead process rather than a key state.
+    fn carrier_keys(&self) -> Result<crate::key_carriers::CarrierKeys, SearchError> {
+        let mut carriers = crate::key_carriers::CarrierKeys {
+            store_rows: self
+                .store
+                .all_files_in_collection("code")?
+                .into_iter()
+                .map(|(key, _hash)| key)
+                .collect(),
+            ..Default::default()
+        };
+        {
+            // A carrier that could not be read leaves its keys out of the reconcile entirely,
+            // so a silent empty set would report a full sweep that never looked here.
+            let cache = self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })?;
+            let (entries, unread) = cache.known_keys();
+            carriers.overlay_entries = entries;
+            carriers.unread = unread;
+        }
+        // Keys only, without a snapshot id: the snapshot-aware load clears the table when the
+        // rows belong to another snapshot, and it would need the manifest header — making a
+        // reconcile of a LOCAL index fail on a carrier that mode does not even serve.
+        carriers.fingerprints = self.store.overlay_fingerprint_keys()?;
+        carriers.manifest =
+            self.dispatched_manifest_fingerprints()?.unwrap_or_default().into_keys().collect();
+        Ok(carriers)
+    }
+
     /// Reconcile the workspace `code` collection against the set of `.bsl` files actually
-    /// present on disk (`present_abs`, absolute paths from a fresh walk): every stored path
-    /// no longer present is removed via [`Self::remove_workspace_path`] (tombstone + overlay
-    /// dirty + incremental vector eviction). This closes the gap where a file deleted during
-    /// a lost watch window (change-hub overflow or a structural subtree rescan) keeps its FTS
-    /// rows and vectors forever, because the ordinary drift path only marks files that still
-    /// exist. Bounded O(stored files) and driven only on the rare rescan branch; the caller
-    /// walks the tree OUTSIDE the engine lock and passes the result here. Returns the number
-    /// of removed paths.
+    /// present on disk (`present_abs`, absolute paths from a fresh walk): every key no longer
+    /// present is removed via [`Self::remove_workspace_key_with`] (tombstone + overlay dirty +
+    /// incremental vector eviction). This closes the gap where a file deleted during a lost
+    /// watch window (change-hub overflow or a structural subtree rescan) keeps its rows and
+    /// vectors forever, because the ordinary drift path only marks files that still exist.
+    ///
+    /// Candidates come from EVERY carrier (see [`Self::carrier_keys`]), not from the store
+    /// rows alone: those rows are a snapshot of the boot walk, so a file indexed afterwards
+    /// has no row at all, and against a remote baseline there are no local rows whatsoever.
+    /// Bounded O(known keys) and driven only on the rare rescan branch; the caller walks the
+    /// tree OUTSIDE the engine lock and passes the result here. Returns the number of removed
+    /// keys.
     pub fn reconcile_workspace_files(
         &mut self,
         present_abs: &HashSet<std::path::PathBuf>,
     ) -> Result<usize, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(0);
         }
-        // Rel spellings of the present files, matching the `code` collection's keying.
-        let present_rel: HashSet<String> =
-            present_abs.iter().filter_map(|p| self.workspace_rel_bsl(p)).collect();
-        let stored: Vec<String> = self
-            .store
-            .all_files_in_collection("code")?
-            .into_iter()
-            .map(|(path, _hash)| path)
-            .collect();
-        let mut removed = 0;
-        for path in stored {
-            if !present_rel.contains(&path) && self.remove_workspace_path(&path)? {
-                removed += 1;
+        // The present files under the same keying the `code` collection uses, so
+        // a file of one root never answers for the same relative path in another.
+        let present: HashSet<FileKey> =
+            present_abs.iter().filter_map(|p| self.workspace_file_key(p)).collect();
+        let carriers = self.carrier_keys()?;
+        // A manifest-only key survives its own removal — the row belongs to someone else's
+        // corpus and only its hiding is ours to write — so without this the next reconcile
+        // would select it again, and every pass would report a removal that changes nothing.
+        // Read once, and only for that case: hiding elsewhere proves absence from disk, not
+        // a settled key (a clean full pass hides a baseline key while its row lives on).
+        let hidden = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache.hidden_keys(),
+            Err(error) => {
+                tracing::warn!("failed to read overlay hidings for a reconcile: {error}");
+                HashSet::new()
+            }
+        };
+        let candidates =
+            carriers.all_keys().into_iter().filter(|key| !present.contains(key)).collect();
+        let batch = self.remove_key_batch(candidates, &carriers, &hidden);
+        if let Some(error) = batch.first_error {
+            return Err(SearchError::Index(format!(
+                "reconcile removed {} keys and failed on {}; first failure: {error}",
+                batch.removed, batch.failed
+            )));
+        }
+        Ok(batch.removed)
+    }
+
+    /// Remove a chosen set of keys, with the carrier reading and the hiding reading already
+    /// taken once for the whole batch.
+    ///
+    /// Shared by every batch removal so the rules that make one correct — skip a key whose
+    /// removal would be a no-op, resolve baseline evidence per key, survive a single key's
+    /// failure — live in one place rather than being restated per caller.
+    fn remove_key_batch(
+        &mut self,
+        candidates: Vec<FileKey>,
+        carriers: &crate::key_carriers::CarrierKeys,
+        hidden: &HashSet<FileKey>,
+    ) -> RemovedBatch {
+        // Sorted so a batch removes in a stable order regardless of hash iteration.
+        let mut candidates = candidates;
+        candidates.sort();
+        let mut batch = RemovedBatch::default();
+        for key in candidates {
+            // A manifest-only key survives its own removal — the row belongs to someone else's
+            // corpus and only its hiding is ours to write — so without this the next pass would
+            // select it again and report a removal that changes nothing.
+            if carriers.manifest_is_sole_carrier(&key) && hidden.contains(&key) {
+                continue;
+            }
+            let has_baseline = carriers.manifest.contains(&key);
+            // A key that cannot be removed does not cost the rest of the batch its pass: each
+            // key's carriers are independent, and aborting here would strand every key after
+            // the first fault until some later rescan happens to run.
+            match self.remove_workspace_key_with(&key, has_baseline) {
+                Ok(()) => batch.removed += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %key.root_id,
+                        path = %key.path,
+                        "failed to remove a deleted file from the index: {error}"
+                    );
+                    batch.failed += 1;
+                    batch.first_error.get_or_insert(error);
+                }
             }
         }
-        Ok(removed)
+        batch
     }
 
     /// Re-render the stored `graph_context` of every chunk whose owning file was marked
@@ -1279,7 +2251,7 @@ impl SearchEngine {
         seq_bound: i64,
     ) -> Result<ContextRefreshStats, SearchError> {
         let mut stats = ContextRefreshStats::default();
-        for path in self.store.context_dirty_paths_bounded("code", seq_bound)? {
+        for key in self.store.context_dirty_paths_bounded("code", seq_bound)? {
             // A render error for ANY method of this path keeps the mark: the failure is
             // transient (the graph DB could not be read), so the next publish must retry
             // the whole path rather than clearing it against a half-failed render. A
@@ -1287,9 +2259,9 @@ impl SearchEngine {
             // gone from the graph) is not an error and clears normally.
             let mut render_failed = false;
             for (id, symbol_name, kind, stored) in
-                self.store.chunks_with_context_for_file("code", &path)?
+                self.store.chunks_with_context_for_file("code", &key.root_id, &key.path)?
             {
-                match provider.try_graph_context(&path, &symbol_name, &kind) {
+                match provider.try_graph_context(&key.path, &symbol_name, &kind) {
                     Ok(rendered) => {
                         if rendered.as_deref() != stored.as_deref() {
                             self.store.set_chunk_graph_context(id, rendered.as_deref())?;
@@ -1301,7 +2273,8 @@ impl SearchEngine {
                     Err(e) => {
                         render_failed = true;
                         tracing::warn!(
-                            path = %path,
+                            root = %key.root_id,
+                            path = %key.path,
                             method = %symbol_name,
                             "graph context render failed; keeping dirty mark for retry: {e}"
                         );
@@ -1311,14 +2284,67 @@ impl SearchEngine {
             if render_failed {
                 continue;
             }
-            self.store.clear_context_dirty_bounded("code", &path, seq_bound)?;
+            self.store.clear_context_dirty_bounded("code", &key.root_id, &key.path, seq_bound)?;
             stats.paths_cleared += 1;
         }
         Ok(stats)
     }
 
+    /// Declare whether this engine serves an external (remote) baseline. `false`
+    /// additionally clears the persisted overlay fingerprint rows: a row claims "verified
+    /// against the manifest", and the raw local mode can neither re-verify nor honour that
+    /// claim — a file changed at the same stat during the local period would be suppressed by
+    /// the inherited row after a switch back. Rows live only under the mode that wrote them.
+    pub fn set_serves_external_baseline(&mut self, serves: bool) -> Result<(), SearchError> {
+        self.serves_external_baseline = serves;
+        if !serves {
+            self.store.clear_overlay_fingerprint_cache()?;
+        }
+        Ok(())
+    }
+
+    /// The manifest fingerprints IF this engine serves an external baseline, `None` otherwise.
+    /// Every manifest-vs-raw dispatch goes through here: the persisted manifest is a
+    /// warm-cache that survives a mode switch, and dispatching on its presence would pin a
+    /// local engine to another mode's baseline.
+    fn dispatched_manifest_fingerprints(
+        &self,
+    ) -> Result<Option<HashMap<FileKey, String>>, SearchError> {
+        if !self.serves_external_baseline {
+            return Ok(None);
+        }
+        self.store.load_baseline_manifest_fingerprints("code")
+    }
+
+    /// How many overlay keys are proven present but unread — the durable retry signal that
+    /// outlives the bounded point budget (see `WorkspaceOverlayCache::unread_keys_count`).
+    pub fn workspace_overlay_unread_count(&self) -> Result<usize, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.unread_keys_count())
+    }
+
+    /// The retry driver's condition signals, read STRICTLY without side effects: unlike
+    /// [`Self::workspace_overlay_stats`], no refresh runs — a condition check that drained
+    /// marks or touched the store would itself violate the ownership discipline it serves.
+    pub fn workspace_overlay_retry_signals(&self) -> Result<OverlayRetrySignals, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(OverlayRetrySignals {
+            initialized: cache.is_initialized(),
+            needs_full_rescan: cache.needs_full_rescan(),
+            pending_dirty_paths: cache.dirty_paths_snapshot().len(),
+            unembedded_entries: cache.unembedded_entry_count(),
+            unread_keys: cache.unread_keys_count(),
+        })
+    }
+
     pub fn workspace_overlay_stats(&self) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        let Some(roots) = &self.workspace_roots else {
             return Ok(None);
         };
         let mut cache = self
@@ -1327,12 +2353,10 @@ impl SearchEngine {
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         // `search status` is a read-only display; it must never trigger the cold full-tree scan,
         // so it uses the same non-cold-scan path as interactive queries.
-        if let Some(manifest_fingerprints) =
-            self.store.load_baseline_manifest_fingerprints("code")?
-        {
+        if let Some(manifest_fingerprints) = self.dispatched_manifest_fingerprints()? {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
-                workspace_root,
+                roots,
                 None,
                 self.batch_size,
                 &self.store,
@@ -1341,7 +2365,7 @@ impl SearchEngine {
         } else {
             cache.refresh(
                 &self.store,
-                workspace_root,
+                roots,
                 None,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
@@ -1351,12 +2375,23 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// Whether the overlay's last full publication ran over an incomplete scan and withheld its
+    /// removals, so only a future clean full scan can catch up. Read-only: takes the cache lock,
+    /// refreshes nothing.
+    pub fn workspace_overlay_needs_full_rescan(&self) -> Result<bool, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.needs_full_rescan())
+    }
+
     /// In-engine overlay prime that may embed inline (holds the engine lock for its duration).
     /// Reserved for the no-baseline / local paths and tests; the PostgresRemoteOverlay warmup must
     /// NOT use this (it would serialize all search behind a multi-minute embed) and instead drives
     /// the lock-free [`Self::prime_workspace_overlay_standalone`] + [`Self::publish_workspace_overlay`].
     pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(());
         }
         let _ = self.workspace_overlay_snapshot(RefreshMode::Embed)?;
@@ -1371,7 +2406,7 @@ impl SearchEngine {
     /// reconciled invariant directly rather than re-deriving it. Flips the same `initialized` flag a
     /// prime would, so the resident-fed incremental reindex (inert until initialized) goes live.
     pub fn initialize_workspace_overlay_clean(&self) -> Result<(), SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(());
         }
         let mut cache = self
@@ -1423,12 +2458,17 @@ impl SearchEngine {
     pub fn prime_workspace_overlay_standalone(
         db_path: &Path,
         embedder_config: EmbedderConfig,
-        workspace_root: &Path,
+        roots: &WorkspaceRoots,
         warm_embeddings: HashMap<String, Vec<f32>>,
         graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+        should_continue: &dyn Fn() -> bool,
+        distrusted: &HashSet<FileKey>,
     ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
         let batch_size = EmbeddingExecutionPolicy::default().batch_size();
-        let store = Store::open(db_path)?;
+        // `open_existing`, not `open`: this standalone pass runs while another daemon may own
+        // the workspace, and the migrating constructor could wipe and recreate the owner's
+        // tables on a schema mismatch. A pass has no business migrating anything.
+        let store = Store::open_existing(db_path)?;
         let embedder = Embedder::new(embedder_config);
 
         // Seed the warm cache from the persisted overlay embedding cache so a restart reuses
@@ -1454,10 +2494,11 @@ impl SearchEngine {
 
         let plan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest_fingerprints,
-            workspace_root,
+            roots,
             &store,
             &warm_embeddings,
             graph_provider.as_deref(),
+            distrusted,
         )?;
 
         let mut new_embeddings = Self::embed_missing_overlay_chunks(
@@ -1465,6 +2506,7 @@ impl SearchEngine {
             &embedder,
             plan.missing_embeddings(),
             batch_size,
+            should_continue,
         )?;
 
         // Include the warm-reused vectors for the plan's chunks in the published set so Phase C
@@ -1492,6 +2534,7 @@ impl SearchEngine {
         embedder: &Embedder,
         missing: &HashMap<String, String>,
         batch_size: usize,
+        should_continue: &dyn Fn() -> bool,
     ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
         if missing.is_empty() {
             return Ok(HashMap::new());
@@ -1501,6 +2544,14 @@ impl SearchEngine {
         let mut new_embeddings = HashMap::with_capacity(missing.len());
 
         for batch in pairs.chunks(batch_size.max(1)) {
+            // Checked between batches, like the collection embed pass: each batch persists
+            // vectors to the shared store, and a caller that lost the workspace lease must
+            // stop writing over the new owner's rows.
+            if !should_continue() {
+                return Err(SearchError::Embedder(
+                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
+                ));
+            }
             let inputs: Vec<&str> = batch.iter().map(|(_, input)| input.as_str()).collect();
             let embeddings = embedder.embed_batch_interactive(&inputs)?;
 
@@ -1508,6 +2559,15 @@ impl SearchEngine {
             for ((embedding_key, _), embedding) in batch.iter().zip(embeddings) {
                 batch_persist.insert((*embedding_key).clone(), embedding.clone());
                 new_embeddings.insert((*embedding_key).clone(), embedding);
+            }
+            // Re-checked AFTER the embed round-trip too: ownership (or the driver itself) may
+            // have gone away while the request was in flight, and the save below writes the
+            // shared table. The residual sub-batch window is the accepted vector-row trade —
+            // a re-embed replaces a vector, unlike a fingerprint row it cannot lie durably.
+            if !should_continue() {
+                return Err(SearchError::Embedder(
+                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
+                ));
             }
             // Persist to the standalone store (NOT the live engine) so partial progress survives
             // a mid-pass failure. The shared live cache is touched only once, in Phase C.
@@ -1524,17 +2584,31 @@ impl SearchEngine {
     /// Phase C: merge the plan and Phase-B embeddings into the live overlay cache under a brief
     /// inner-cache lock, swapping the entry/hidden-path set atomically so a concurrent reader
     /// never sees a half-embedded file. Never holds the lock across an embed.
+    /// Returns how many marked keys the plan's gate skipped unread — see
+    /// [`WorkspaceOverlayCache::publish_plan`].
     pub fn publish_workspace_overlay(
         &self,
         plan: RefreshPlan,
         new_embeddings: HashMap<String, Vec<f32>>,
-        dirty_before: &HashMap<String, u64>,
-    ) -> Result<(), SearchError> {
+        baseline: &PublicationBaseline,
+    ) -> Result<PublishOutcome, SearchError> {
         let mut cache = self
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        cache.publish_plan(plan, new_embeddings, dirty_before, self.embedder.as_ref(), &self.store)
+        cache.publish_plan(plan, new_embeddings, baseline, self.embedder.as_ref(), &self.store)
+    }
+
+    /// The atomic pre-plan snapshot (live marks + freshness fence) a planned publication is
+    /// judged against; captured under the cache lock before the lock-free Phase A/B.
+    pub fn workspace_overlay_publication_baseline(
+        &self,
+    ) -> Result<PublicationBaseline, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.publication_baseline())
     }
 
     /// Snapshot the overlay dirty-path set (path -> mark sequence). Taken under the cache lock
@@ -1542,7 +2616,7 @@ impl SearchEngine {
     /// the flags that pass supersedes, never one the watcher re-marked while the embed was in flight.
     pub fn workspace_overlay_dirty_paths_snapshot(
         &self,
-    ) -> Result<HashMap<String, u64>, SearchError> {
+    ) -> Result<HashMap<FileKey, u64>, SearchError> {
         let cache = self
             .workspace_overlay_cache
             .lock()
@@ -1554,8 +2628,8 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
@@ -1570,8 +2644,8 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         let Some(embedder) = &self.embedder else {
@@ -1596,8 +2670,8 @@ impl SearchEngine {
         &self,
         query_embedding: &[f32],
         limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<String>), SearchError> {
-        if self.workspace_root.is_none() {
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
         if self.embedder.is_none() {
@@ -1629,7 +2703,7 @@ impl SearchEngine {
         C: SnapshotCatalog,
         S: SnapshotContentStore,
     {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1647,7 +2721,7 @@ impl SearchEngine {
         baseline: BaselineRef,
         baseline_documents: Vec<crate::IndexedDocument>,
     ) -> Result<Option<ResolvedView>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1740,6 +2814,7 @@ impl SearchEngine {
                 }
                 hits.push(SearchHit {
                     collection: info.collection,
+                    root_id: info.root_id,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,
@@ -1759,7 +2834,7 @@ impl SearchEngine {
         query: &str,
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
         let Some(embedder) = &self.embedder else {
@@ -1775,7 +2850,9 @@ impl SearchEngine {
         let query_embedding = embedder.embed(query)?;
         let mut combined =
             self.search_persisted_with_embedding(&query_embedding, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(semantic_hits(&overlay, &query_embedding, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1789,7 +2866,7 @@ impl SearchEngine {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        if self.workspace_root.is_none() {
+        if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
@@ -1801,7 +2878,9 @@ impl SearchEngine {
 
         let mut combined =
             self.search_persisted_with_embedding(query_embedding, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(semantic_hits(&overlay, query_embedding, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1844,6 +2923,7 @@ impl SearchEngine {
                 let score = 1.0 - 1.0 / (1.0 - result.rank as f32);
                 hits.push(SearchHit {
                     collection: info.collection,
+                    root_id: info.root_id,
                     file_path: info.file_path,
                     symbol_name: info.symbol_name,
                     kind: info.kind,
@@ -1863,18 +2943,19 @@ impl SearchEngine {
         query: &str,
         limit: usize,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
-        let Some(workspace_root) = &self.workspace_root else {
+        if self.workspace_roots.is_none() {
             return Ok(None);
-        };
+        }
 
-        let _ = workspace_root;
         let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
         if overlay.is_empty() {
             return Ok(None);
         }
 
         let mut combined = self.text_search_persisted(query, limit * 3, Some("code"))?;
-        combined.retain(|hit| !overlay.hidden_paths.contains(&hit.file_path));
+        combined.retain(|hit| {
+            !overlay.hidden_paths.contains(&FileKey::new(&hit.root_id, &hit.file_path))
+        });
         combined.extend(lexical_hits(&overlay, query, limit));
         combined.sort_by(|lhs, rhs| rhs.score.total_cmp(&lhs.score));
         combined.truncate(limit);
@@ -1892,8 +2973,8 @@ impl SearchEngine {
         &self,
         mode: RefreshMode,
     ) -> Result<WorkspaceOverlayIndex, SearchError> {
-        let workspace_root = self
-            .workspace_root
+        let roots = self
+            .workspace_roots
             .as_ref()
             .ok_or_else(|| SearchError::Index("workspace root is not configured".to_owned()))?;
         let embedder = match mode {
@@ -1907,12 +2988,10 @@ impl SearchEngine {
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
-        if let Some(manifest_fingerprints) =
-            self.store.load_baseline_manifest_fingerprints("code")?
-        {
+        if let Some(manifest_fingerprints) = self.dispatched_manifest_fingerprints()? {
             cache.refresh_with_manifest(
                 &manifest_fingerprints,
-                workspace_root,
+                roots,
                 embedder,
                 self.batch_size,
                 &self.store,
@@ -1921,7 +3000,7 @@ impl SearchEngine {
         } else {
             cache.refresh(
                 &self.store,
-                workspace_root,
+                roots,
                 embedder,
                 self.batch_size,
                 self.workspace_baseline_hash_mode,
@@ -1951,15 +3030,18 @@ impl SearchEngine {
     ) -> Result<usize, SearchError> {
         use std::collections::{BTreeMap, HashSet};
 
-        let mut grouped = BTreeMap::<String, Vec<crate::IndexedDocument>>::new();
+        let mut grouped = BTreeMap::<FileKey, Vec<crate::IndexedDocument>>::new();
         for document in documents {
-            grouped.entry(document.path.clone()).or_default().push(document.clone());
+            grouped
+                .entry(FileKey::new(&document.root_id, &document.path))
+                .or_default()
+                .push(document.clone());
         }
 
-        let desired_paths: HashSet<&str> = grouped.keys().map(String::as_str).collect();
-        for (existing_path, _) in self.store.all_files_in_collection(collection)? {
-            if !desired_paths.contains(existing_path.as_str()) {
-                self.store.remove_file(&existing_path, collection)?;
+        let desired: HashSet<&FileKey> = grouped.keys().collect();
+        for (existing, _) in self.store.all_files_in_collection(collection)? {
+            if !desired.contains(&existing) {
+                self.store.remove_file(&existing.root_id, &existing.path, collection)?;
             }
         }
 
@@ -1974,7 +3056,7 @@ impl SearchEngine {
         }
 
         let mut indexed = 0usize;
-        for (path, mut file_documents) in grouped {
+        for (key, mut file_documents) in grouped {
             file_documents.sort_by(|lhs, rhs| {
                 (lhs.line_start, lhs.line_end, lhs.symbol_name.as_str()).cmp(&(
                     rhs.line_start,
@@ -1984,7 +3066,9 @@ impl SearchEngine {
             });
 
             let file_hash = normalized_file_hash_for_indexed_documents(&file_documents);
-            if self.store.file_hash(&path)?.as_deref() == Some(file_hash.as_slice()) {
+            if self.store.file_hash(&key.root_id, &key.path)?.as_deref()
+                == Some(file_hash.as_slice())
+            {
                 continue;
             }
 
@@ -2030,7 +3114,8 @@ impl SearchEngine {
             };
 
             self.store.reindex_indexed_documents_in_collection(
-                &path,
+                &key.root_id,
+                &key.path,
                 &file_hash,
                 collection,
                 &file_documents,
@@ -2082,14 +3167,50 @@ impl SearchEngine {
     }
 
     pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
-        self.store.remove_file(rel_path, collection)?;
+        self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
 }
 
+/// Whether this path is PROVEN to be gone, as opposed to merely unreadable.
+///
+/// Following links, because a link whose target is deleted is deleted as far as anything
+/// reading the file is concerned. `NotADirectory` counts too: a path whose parent is a file
+/// cannot exist. Everything else — a permission error, a momentary race — is an unanswered
+/// question, and an unanswered question is not evidence of deletion.
+fn proven_absent(path: &Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(_) => false,
+        Err(err) => {
+            matches!(err.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory)
+        }
+    }
+}
+
+/// What a batch removal did: the count each caller reports, and the first fault, kept so a
+/// batch can finish every independent key and still fail as a whole.
+#[derive(Default)]
+struct RemovedBatch {
+    removed: usize,
+    failed: usize,
+    first_error: Option<SearchError>,
+}
+
+/// What one FTS ingest did, and what it could not do.
+///
+/// `unread` counts files the WALK reached and classified as source but whose bytes could not be
+/// read — a permission change, a file removed between the walk and the read, bytes that are not
+/// UTF-8. The walk's own counters cannot see this: `stat` needs no read permission, so such a
+/// file is enumerated and counted as healthy. A caller that must not stand behind an incomplete
+/// corpus has to ask separately, which is why the count travels instead of only being logged.
+pub struct FtsIngest {
+    pub indexed: usize,
+    pub unread: usize,
+}
+
 struct FileTask {
-    rel_path: String,
+    key: FileKey,
     hash: Vec<u8>,
     chunks: Vec<code_chunk::Chunk>,
     texts: Vec<String>,
@@ -2099,7 +3220,7 @@ struct FileTask {
 }
 
 struct FileResult {
-    rel_path: String,
+    key: FileKey,
     hash: Vec<u8>,
     chunks: Vec<code_chunk::Chunk>,
     graph_contexts: Vec<Option<String>>,
@@ -2107,13 +3228,48 @@ struct FileResult {
 }
 
 #[cfg(test)]
+mod walk_ownership {
+    /// The engine must not walk the tree itself. The walk policy — which links are followed,
+    /// how an error is classified, which spelling a file is keyed by — lives in `project-model`
+    /// and `WorkspaceRoots`, and a private traversal here diverges from it silently: the corpus
+    /// it produces answers to a completeness verdict some other traversal computed.
+    ///
+    /// The ban names the traversal APIs rather than the word, so a mention in prose cannot fail
+    /// the gate, and it covers `read_dir` as well as the walk crate: a hand-rolled recursion is
+    /// the same divergence wearing different letters.
+    #[test]
+    fn the_engine_does_not_carry_its_own_tree_walk() {
+        let source = include_str!("engine.rs");
+        // Test code walks legitimately (a stand has to build and probe trees), so the ban
+        // covers production only. The cut is asserted below: a marker that stopped matching
+        // would shrink the scanned region to nothing and quietly pass everything.
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        assert!(
+            production.contains("fn ingest_scanned_fts"),
+            "the production/test cut moved; this gate scans only what it can prove it scanned"
+        );
+        for needle in [["walk", "dir::Walk", "Dir"].concat(), ["read", "_dir("].concat()] {
+            assert!(
+                !production.contains(&needle),
+                "engine.rs must reach the filesystem through project_model::SourceSet::scan, \
+                 not through its own traversal ({needle})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
-    use super::SearchEngine;
+    use super::{SearchEngine, FORCE_VECTOR_REMOVE_ERROR};
+    use crate::key_carriers::KeyCarrier;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
+    use crate::workspace_overlay::RefreshMode;
+    use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[derive(Default)]
@@ -2304,6 +3460,7 @@ mod tests {
             vec![
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "ChangedModule.bsl".to_owned(),
                     symbol_name: "БазоваяВерсия".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2315,6 +3472,7 @@ mod tests {
                 },
                 IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "StableModule.bsl".to_owned(),
                     symbol_name: "СтабильноИзBaseline".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2349,12 +3507,14 @@ mod tests {
         let db_path = workspace.join("bsl-search.db");
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: crate::workspace_overlay::fingerprint_content(
@@ -2383,12 +3543,14 @@ mod tests {
         let db_path = workspace.join("bsl-search.db");
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: "different-fingerprint".to_owned(),
@@ -2405,7 +3567,7 @@ mod tests {
             engine.workspace_overlay_lexical_hits("ЛокальнаяПроцедура", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].symbol_name, "ЛокальнаяПроцедура");
-        assert!(hidden_paths.contains("CommonModule.bsl"));
+        assert!(hidden_paths.contains(&FileKey::configuration("CommonModule.bsl")));
     }
 
     #[test]
@@ -2461,10 +3623,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 
@@ -2517,12 +3691,14 @@ mod tests {
         };
         let mut engine = SearchEngine::semantic_overlay_only(&db_path, config).unwrap();
         engine.set_workspace_root(workspace);
+        engine.set_serves_external_baseline(true).unwrap();
         engine
             .store()
             .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
                 snapshot_id: "snap-1".to_owned(),
                 snapshot_fingerprint: Some("fp-1".to_owned()),
                 files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "CommonModule.bsl".to_owned(),
                     file_fingerprint: "different-fingerprint".to_owned(),
@@ -2542,14 +3718,19 @@ mod tests {
         let plan =
             crate::workspace_overlay::WorkspaceOverlayCache::plan_full_refresh_from_manifest(
                 &manifest,
-                workspace,
+                &crate::WorkspaceRoots::build(workspace, workspace, &[]).0,
                 engine.store(),
                 &std::collections::HashMap::new(),
                 None,
+                &std::collections::HashSet::new(),
             )
             .unwrap();
         engine
-            .publish_workspace_overlay(plan, std::collections::HashMap::new(), &HashMap::new())
+            .publish_workspace_overlay(
+                plan,
+                std::collections::HashMap::new(),
+                &engine.workspace_overlay_publication_baseline().unwrap(),
+            )
             .unwrap();
 
         // Lexical overlay still sees the change without any embedding round-trip.
@@ -2605,6 +3786,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[chunk("Изменённая")],
@@ -2614,6 +3796,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Stable.bsl",
                     b"h2",
                     &[chunk("Стабильная")],
@@ -2624,8 +3807,8 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
-        engine.store().mark_context_dirty("code", "Stable.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Stable.bsl").unwrap();
         let gen_before = engine.store().embedding_generation().unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Stub, i64::MAX).unwrap();
@@ -2680,6 +3863,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -2698,14 +3882,17 @@ mod tests {
         }
 
         let engine = SearchEngine::fts_only(&db_path).unwrap();
-        engine.store().mark_context_dirty("code", "Owned.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
 
         let stats = engine.refresh_dirty_contexts(&Failing, i64::MAX).unwrap();
         assert_eq!(stats.paths_cleared, 0, "a failed render clears no path");
         assert_eq!(stats.chunks_updated, 0);
         assert_eq!(stats.cleared_embeddings, 0);
         assert!(
-            engine.context_dirty_paths("code").unwrap().contains("Owned.bsl"),
+            engine
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&FileKey::configuration("Owned.bsl")),
             "the mark survives a render failure so the next publish retries it",
         );
     }
@@ -2730,9 +3917,9 @@ mod tests {
 
         // A build captures its start-seq AFTER the first drift marked A, but BEFORE a second
         // drift marks B (as if B's `.xml` landed while this build was already reading disk).
-        engine.store().mark_context_dirty("code", "A.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap();
         let build_start_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
-        engine.store().mark_context_dirty("code", "B.bsl").unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap();
         let next_build_seq = engine.mark_seq_handle().load(std::sync::atomic::Ordering::SeqCst);
         assert!(next_build_seq > build_start_seq, "the later mark got a higher seq");
 
@@ -2741,8 +3928,14 @@ mod tests {
         let stats = engine.refresh_dirty_contexts(&NoContext, build_start_seq).unwrap();
         assert_eq!(stats.paths_cleared, 1, "only the mark at or below the bound is consumed");
         let dirty = engine.context_dirty_paths("code").unwrap();
-        assert!(!dirty.contains("A.bsl"), "A was within the bound and is cleared");
-        assert!(dirty.contains("B.bsl"), "B was stamped after build start and survives");
+        assert!(
+            !dirty.contains(&FileKey::configuration("A.bsl")),
+            "A was within the bound and is cleared"
+        );
+        assert!(
+            dirty.contains(&FileKey::configuration("B.bsl")),
+            "B was stamped after build start and survives"
+        );
 
         // The next build's start-seq covers B, so its publish consumes it.
         let stats = engine.refresh_dirty_contexts(&NoContext, next_build_seq).unwrap();
@@ -2780,6 +3973,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Gone.bsl",
                     b"ha",
                     &[chunk("Ушедшая")],
@@ -2788,6 +3982,7 @@ mod tests {
                 .unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "Kept.bsl",
                     b"hb",
                     &[chunk("Оставшаяся")],
@@ -2827,7 +4022,11 @@ mod tests {
             "the surviving file is intact",
         );
         assert!(
-            engine.store().overlay_tombstone_paths("code").unwrap().contains("Gone.bsl"),
+            engine
+                .store()
+                .overlay_tombstone_paths("code")
+                .unwrap()
+                .contains(&FileKey::configuration("Gone.bsl")),
             "a tombstone blocks a baseline hit from resurrecting the gone file",
         );
         // The gone file's vector answers nothing; the survivor's still does.
@@ -2835,6 +4034,863 @@ mod tests {
         assert!(
             hits.iter().all(|h| h.symbol_name != "Ушедшая"),
             "the reconciled file's vector is evicted from the live index: {hits:?}",
+        );
+    }
+
+    /// Indexed files with their store rows, as a boot walk would have left them. Seeded in
+    /// ONE call: the collection sync is a whole-collection operation, so a second call would
+    /// evict what the first one wrote.
+    fn seed_rows(engine: &mut SearchEngine, paths: &[&str]) {
+        let documents: Vec<IndexedDocument> = paths
+            .iter()
+            .map(|path| IndexedDocument {
+                collection: "code".to_owned(),
+                root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                path: (*path).to_owned(),
+                symbol_name: "П".to_owned(),
+                kind: "procedure".to_owned(),
+                line_start: 0,
+                line_end: 1,
+                text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                content_hash: "h".to_owned(),
+                graph_context: None,
+            })
+            .collect();
+        engine.sync_indexed_documents_in_collection("code", &documents, None).unwrap();
+    }
+
+    /// The store row is what a reconcile sees a key by, so it must be the LAST thing a
+    /// removal drops: a failure after it would leave nothing to select the key again, and
+    /// the retry mark reaches the overlay only. Checked on the tombstone, whose write has
+    /// always been fallible and has always run after the row.
+    #[test]
+    fn a_denied_tombstone_leaves_the_store_row_as_evidence() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_tombstone BEFORE INSERT ON overlay_tombstones \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the denial surfaces");
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+
+        saboteur.execute_batch("DROP TRIGGER deny_tombstone").unwrap();
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "once the fault clears, the key is still there to remove",
+        );
+    }
+
+    /// Retracting the fingerprint row used to be best effort: its failure was logged and the
+    /// removal reported success, leaving a row that claims the file was verified — enough for
+    /// a namesake at the same size and mtime to inherit the claim across a restart.
+    #[test]
+    fn a_denied_fingerprint_retraction_fails_the_removal() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    FileKey::configuration("Removed.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("Removed.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_fp_delete BEFORE DELETE ON overlay_fingerprint_cache \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(
+            engine.reconcile_workspace_files(&HashSet::new()).is_err(),
+            "a carrier left populated is not a successful removal",
+        );
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+    }
+
+    /// Evicting the dead file's vectors is the one step whose retry dies with the store row:
+    /// the chunk ids come from that row, and the dirty mark only ever reaches the overlay.
+    /// The seam fires BEFORE the eviction, so the test states what a real failure leaves —
+    /// the vector still answering — instead of asserting it after the vectors are already out.
+    #[test]
+    fn a_failed_vector_eviction_fails_the_removal_and_keeps_the_row() {
+        use crate::embedder::EmbedderConfig;
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let vector = vec![1.0f32, 0.0, 0.0];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "Removed.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Ушедшая".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Ушедшая()\nКонецПроцедуры".to_owned(),
+                    }],
+                    Some(std::slice::from_ref(&vector)),
+                )
+                .unwrap();
+        }
+        let config = crate::SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "test-model".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: crate::EmbeddingExecutionPolicy::default(),
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
+        engine.set_workspace_root(workspace);
+
+        FORCE_VECTOR_REMOVE_ERROR.with(|flag| flag.set(true));
+        let outcome = engine.reconcile_workspace_files(&HashSet::new());
+        FORCE_VECTOR_REMOVE_ERROR.with(|flag| flag.set(false));
+
+        assert!(outcome.is_err(), "a vector left in the live index is not a successful removal");
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survives as evidence for a retry");
+        assert!(
+            engine
+                .search_with_embedding(&vector, 5, None)
+                .unwrap()
+                .iter()
+                .any(|hit| hit.symbol_name == "Ушедшая"),
+            "the failure left the vector in the live index — which is what makes it a failure",
+        );
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "the retry finds the key exactly where the failed pass left it",
+        );
+        assert!(
+            engine
+                .search_with_embedding(&vector, 5, None)
+                .unwrap()
+                .iter()
+                .all(|hit| hit.symbol_name != "Ушедшая"),
+            "and the successful retry evicts it",
+        );
+    }
+
+    /// A carrier that could not be READ leaves its keys out of the sweep entirely, so the
+    /// reading must fail loudly: reporting a clean reconcile after skipping a carrier is worse
+    /// than reporting nothing.
+    #[test]
+    fn an_unreadable_overlay_fails_the_reconcile_instead_of_sweeping_without_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("AfterBoot.bsl");
+        fs::write(&file, "Процедура ПослеСтарта()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = engine.workspace_overlay_cache.lock().unwrap();
+            panic!("poison the overlay lock");
+        }));
+        std::panic::set_hook(hook);
+
+        fs::remove_file(&file).unwrap();
+        assert!(
+            engine.reconcile_workspace_files(&HashSet::new()).is_err(),
+            "a sweep that could not read a carrier is not a successful sweep",
+        );
+    }
+
+    /// The manifest is a carrier only where it is served, so a local reconcile must not
+    /// depend on it: an inherited header left broken on disk would otherwise block the sweep
+    /// of the carriers this mode does have.
+    #[test]
+    fn a_local_reconcile_ignores_an_unreadable_inactive_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Gone.bsl"]);
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest").unwrap();
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "the local carriers are swept whatever state an unserved manifest is in",
+        );
+    }
+
+    /// A manifest header this engine cannot read is not an absent header. Reading the
+    /// fingerprint rows under the empty id that an absent header yields would treat every
+    /// existing row as another snapshot's and CLEAR the cache — the reconcile would destroy
+    /// the evidence a retry needs while reporting a failure.
+    #[test]
+    fn an_unreadable_manifest_header_leaves_the_fingerprint_rows_alone() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "A.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "snap",
+                &HashMap::from([(
+                    FileKey::configuration("A.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("A.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest").unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the failure is told");
+        let surviving: i64 = saboteur
+            .query_row("SELECT COUNT(*) FROM overlay_fingerprint_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(surviving, 1, "the fingerprint row a retry needs was not swept away");
+    }
+
+    /// A manifest that cannot be read is not evidence that there is no baseline copy. Taken
+    /// as one, the removal would skip the hiding and the copy would keep being served — while
+    /// the caller was told the file is gone.
+    #[test]
+    fn an_unreadable_manifest_fails_the_removal() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Removed.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["Removed.bsl"]);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur.execute_batch("DROP TABLE baseline_manifest_files").unwrap();
+
+        fs::remove_file(&file).unwrap();
+        assert!(
+            engine.remove_workspace_path(&file).is_err(),
+            "a removal that could not weigh the baseline is not a success",
+        );
+    }
+
+    /// A reconcile is a batch: one key it cannot remove must not cost the others their pass.
+    /// The failure is still reported — it just no longer strands the tail.
+    #[test]
+    fn a_reconcile_batch_outlives_a_failing_key() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        seed_rows(&mut engine, &["AFailing.bsl", "BHealthy.bsl"]);
+
+        // Denied for exactly one key, so the batch has both a failing and a healthy member.
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_one_tombstone BEFORE INSERT ON overlay_tombstones \
+                 WHEN NEW.path = 'AFailing.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+
+        assert!(engine.reconcile_workspace_files(&HashSet::new()).is_err(), "the failure is told");
+        assert_eq!(
+            engine.file_count().unwrap(),
+            1,
+            "the healthy key was removed despite the earlier failure",
+        );
+        assert!(
+            engine
+                .store()
+                .all_files_in_collection("code")
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key.path == "AFailing.bsl"),
+            "and the failing one is the one left behind",
+        );
+    }
+
+    /// A file indexed AFTER boot lives in the overlay alone — the store rows stop growing
+    /// once the daemon is up — so a reconcile that walks the rows cannot see it, and its
+    /// entry keeps serving a file that is gone from disk.
+    #[test]
+    fn a_reconcile_removes_a_key_known_only_to_the_overlay() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("AfterBoot.bsl");
+        fs::write(&file, "Процедура ПослеСтарта()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        let key = FileKey::configuration("AfterBoot.bsl");
+        assert_eq!(engine.file_count().unwrap(), 0, "no boot walk ever wrote a row");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).contains(&KeyCarrier::OverlayEntry),
+            "the overlay is the only carrier that knows this file",
+        );
+
+        fs::remove_file(&file).unwrap();
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the overlay-only key is reconciled out");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// The fingerprint row outlives its entry: an entry that matched the baseline is dropped
+    /// while its row stays behind asserting the file was verified. Left alone, that row lets
+    /// a namesake recreated at the same size and mtime inherit the claim across a restart.
+    #[test]
+    fn a_reconcile_removes_a_key_known_only_to_the_fingerprint_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        let key = FileKey::configuration("OnlyFingerprint.bsl");
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    key.clone(),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("OnlyFingerprint.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+        assert_eq!(
+            engine.carrier_keys().unwrap().carriers_of(&key),
+            vec![KeyCarrier::FingerprintRow],
+            "the fingerprint row is the only carrier",
+        );
+
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the fingerprint-only key is reconciled out");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// Against a remote baseline the local rows are cleared on boot, so the manifest is the
+    /// only carrier there is. A reconcile blind to it removes nothing at all, and a file
+    /// deleted locally keeps arriving from the baseline.
+    #[test]
+    fn a_reconcile_hides_a_key_known_only_to_the_served_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Deleted.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let key = FileKey::configuration("Deleted.bsl");
+
+        let removed = engine.reconcile_workspace_files(&HashSet::new()).unwrap();
+
+        assert_eq!(removed, 1, "the manifest-only key is reconciled out");
+        assert!(
+            engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
+            "removing a manifest-only key is expressed by hiding its baseline copy",
+        );
+    }
+
+    /// A vanished directory takes its files with it, whichever carrier happens to know
+    /// them — and takes nothing that merely starts with the same text. `Dir2` is not
+    /// inside `Dir`, so a removal comparing paths as text instead of components would
+    /// erase a directory nobody touched.
+    #[test]
+    fn removing_a_subtree_clears_its_carriers_and_spares_a_namesake_directory() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        fs::create_dir(workspace.join("Dir")).unwrap();
+        fs::create_dir(workspace.join("Dir2")).unwrap();
+        let chunk = |name: &str| Chunk {
+            kind: ChunkKind::Procedure,
+            name: name.to_owned(),
+            is_export: true,
+            annotations: vec![],
+            line_start: 0,
+            line_end: 1,
+            text: format!("Процедура {name}()\nКонецПроцедуры"),
+        };
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file(CONFIGURATION_ROOT_ID, "Dir/Row.bsl", b"ha", &[chunk("Строка")], None)
+                .unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "Dir2/Keep.bsl",
+                    b"hb",
+                    &[chunk("Соседка")],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        // One key per carrier, so a removal that walks a single carrier cannot pass.
+        let live = workspace.join("Dir/Live.bsl");
+        fs::write(&live, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&live).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    FileKey::configuration("Dir/Print.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 7,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: workspace.join("Dir/Print.bsl").display().to_string(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let row = FileKey::configuration("Dir/Row.bsl");
+        let overlay = FileKey::configuration("Dir/Live.bsl");
+        let fingerprint = FileKey::configuration("Dir/Print.bsl");
+        let beside = FileKey::configuration("Dir2/Keep.bsl");
+        let carriers = engine.carrier_keys().unwrap();
+        assert!(carriers.carriers_of(&row).contains(&KeyCarrier::StoreRow));
+        assert!(carriers.carriers_of(&overlay).contains(&KeyCarrier::OverlayEntry));
+        assert!(carriers.carriers_of(&fingerprint).contains(&KeyCarrier::FingerprintRow));
+
+        // The directory is what vanished; the removal answers per key, so its one file that
+        // existed has to go with it.
+        fs::remove_dir_all(workspace.join("Dir")).unwrap();
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
+
+        assert_eq!(removed, 3, "every carrier under the directory gave up its key");
+        let carriers = engine.carrier_keys().unwrap();
+        for key in [&row, &overlay, &fingerprint] {
+            assert!(carriers.carriers_of(key).is_empty(), "{key:?} is still known to a carrier");
+        }
+        assert!(!carriers.carriers_of(&beside).is_empty(), "the namesake directory is untouched");
+        assert!(
+            !engine.text_search("Соседка", 10, Some("code")).unwrap().is_empty(),
+            "and its file still answers searches",
+        );
+    }
+
+    /// A root can vanish as a whole — an extension directory deleted, a configuration that
+    /// IS the workspace. Attribution answers "which root owns this file", and a root owns no
+    /// file at its own path, so asking it about the root itself yields nothing: the removal
+    /// has to take the root's own keys, not just the keys under some enclosing root.
+    #[test]
+    fn removing_a_registered_root_clears_the_files_it_held() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("src/cf");
+        let extension = workspace.join("ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        assert!(rejected.is_empty(), "both roots are registered");
+        let extension_id = roots
+            .entries()
+            .find(|(_, declared)| *declared == extension)
+            .map(|(id, _)| id.to_owned())
+            .expect("the extension root is registered");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            let mut index = |root_id: &str, path: &str, name: &str| {
+                store
+                    .reindex_file(
+                        root_id,
+                        path,
+                        b"h",
+                        &[Chunk {
+                            kind: ChunkKind::Procedure,
+                            name: name.to_owned(),
+                            is_export: true,
+                            annotations: vec![],
+                            line_start: 0,
+                            line_end: 1,
+                            text: format!("Процедура {name}()\nКонецПроцедуры"),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            };
+            index(&extension_id, "A.bsl", "ИзРасширения");
+            index(CONFIGURATION_ROOT_ID, "B.bsl", "ИзКонфигурации");
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_roots(roots);
+
+        fs::remove_dir_all(&extension).unwrap();
+        let removed = engine.remove_vanished_under(std::slice::from_ref(&extension)).unwrap();
+
+        assert_eq!(removed, 1, "the vanished root gave up its file");
+        assert!(
+            engine.text_search("ИзРасширения", 10, Some("code")).unwrap().is_empty(),
+            "a root that vanished stops answering searches",
+        );
+        assert!(
+            !engine.text_search("ИзКонфигурации", 10, Some("code")).unwrap().is_empty(),
+            "the other root is untouched",
+        );
+    }
+
+    /// A file proven present but unreadable leaves only an obligation to re-read it. If the
+    /// directory it lived in is gone, that obligation is for a file that no longer exists —
+    /// and nothing else records the key at all.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_subtree_clears_an_obligation_to_re_read_a_file_under_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::create_dir(workspace.join("Dir")).unwrap();
+        let unread = workspace.join("Dir/Unread.bsl");
+        fs::write(&unread, "Процедура Непрочтённая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&unread).unwrap());
+        fs::set_permissions(&unread, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read(&unread).is_ok() {
+            // Running as root: permissions cannot make the file unreadable.
+            fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
+
+        let key = FileKey::configuration("Dir/Unread.bsl");
+        assert_eq!(
+            engine.carrier_keys().unwrap().carriers_of(&key),
+            vec![KeyCarrier::UnreadObligation],
+            "the standing obligation is the only carrier",
+        );
+
+        // The obligation outlives the file: the directory goes, and with it any hope of
+        // ever re-reading what was owed.
+        fs::remove_dir_all(workspace.join("Dir")).unwrap();
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
+
+        assert_eq!(removed, 1, "the obligation-only key is removed with its directory");
+        assert!(
+            engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "no carrier still knows it",
+        );
+    }
+
+    /// Against a remote baseline the manifest is the only carrier there is, and a removal
+    /// there is expressed by hiding rather than by deleting someone else's row.
+    #[test]
+    fn removing_a_subtree_hides_the_baseline_copies_under_it() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        engine.set_workspace_root(workspace);
+        let baseline_file = |path: &str, id: &str| crate::BaselineManifestFile {
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+            collection: "code".to_owned(),
+            path: path.to_owned(),
+            file_fingerprint: "fp-file".to_owned(),
+            document_count: 1,
+            file_object_id: id.to_owned(),
+        };
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![
+                    baseline_file("Dir/Deleted.bsl", "obj-1"),
+                    baseline_file("Dir2/Kept.bsl", "obj-2"),
+                ],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        let removed = engine.remove_vanished_under(&[workspace.join("Dir")]).unwrap();
+
+        assert_eq!(removed, 1, "only the baseline copy under the directory is removed");
+        let hidden = engine.workspace_overlay_cache.lock().unwrap().hidden_keys();
+        assert!(
+            hidden.contains(&FileKey::configuration("Dir/Deleted.bsl")),
+            "the baseline copy under the gone directory stops being served",
+        );
+        assert!(
+            !hidden.contains(&FileKey::configuration("Dir2/Kept.bsl")),
+            "the namesake directory's baseline copy is untouched",
+        );
+    }
+
+    /// The manifest deliberately survives a mode switch, so its rows prove nothing to an
+    /// engine that does not serve it. Reading them anyway would make a local engine remove
+    /// ghosts of another mode's corpus.
+    #[test]
+    fn an_inherited_manifest_yields_no_candidates_in_the_local_mode() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Ghost.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            0,
+            "an inherited manifest is not evidence in the local mode",
+        );
+        // The positive control: the very same rows DO yield a candidate once served, so the
+        // assertion above cannot be satisfied by never reading the manifest at all.
+        engine.set_serves_external_baseline(true).unwrap();
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "served, the same manifest yields its key",
+        );
+    }
+
+    /// Removing a manifest-only key cannot delete its row — the manifest is a snapshot of
+    /// someone else's corpus — so the key survives its own removal. Re-selecting it every
+    /// time would grow the removal count and the retry obligations without a single change
+    /// to what search serves.
+    #[test]
+    fn a_second_reconcile_over_an_unchanged_tree_removes_nothing() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Deleted.bsl".to_owned(),
+                    file_fingerprint: "fp-file".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        assert_eq!(engine.reconcile_workspace_files(&HashSet::new()).unwrap(), 1);
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            0,
+            "the second pass has nothing left to do",
+        );
+    }
+
+    /// Hiding proves a file is absent from disk, NOT that its carriers were cleared: a clean
+    /// full pass hides a baseline key it did not see without touching the store row. Treating
+    /// a hidden key as already settled would leave that row, its chunks and its vectors alive
+    /// for good.
+    #[test]
+    fn a_hidden_key_whose_row_survives_is_still_a_candidate() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Hidden.bsl");
+        fs::write(&file, "Процедура Спрятанная()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        let key = FileKey::configuration("Hidden.bsl");
+        assert_eq!(engine.file_count().unwrap(), 1, "the boot walk wrote its row");
+
+        // A clean full pass over a tree the file has left: it hides the baseline key and
+        // leaves the row exactly as it was.
+        fs::remove_file(&file).unwrap();
+        engine.workspace_overlay_snapshot(RefreshMode::Embed).unwrap();
+        assert!(
+            engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
+            "the clean pass hid the vanished baseline key",
+        );
+        assert_eq!(engine.file_count().unwrap(), 1, "the row survived the pass untouched");
+
+        assert_eq!(
+            engine.reconcile_workspace_files(&HashSet::new()).unwrap(),
+            1,
+            "hiding does not excuse the row from reconciliation",
+        );
+        assert_eq!(engine.file_count().unwrap(), 0, "the row is gone");
+    }
+
+    /// The reconcile grew its candidate set, so what it must NOT do grew with it: a file
+    /// present on disk stays, however many carriers know about it.
+    #[test]
+    fn a_reconcile_keeps_an_overlay_only_file_that_is_still_on_disk() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Alive.bsl");
+        fs::write(&file, "Процедура Живая()\nКонецПроцедуры").unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        let key = FileKey::configuration("Alive.bsl");
+
+        let present = HashSet::from([file.clone()]);
+        assert_eq!(
+            engine.reconcile_workspace_files(&present).unwrap(),
+            0,
+            "a file the walk found is never removed",
+        );
+        assert!(
+            !engine.carrier_keys().unwrap().carriers_of(&key).is_empty(),
+            "its overlay entry is intact",
         );
     }
 
@@ -2852,6 +4908,7 @@ mod tests {
                 "code",
                 &[IndexedDocument {
                     collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     path: "Removed.bsl".to_owned(),
                     symbol_name: "П".to_owned(),
                     kind: "procedure".to_owned(),
@@ -2869,8 +4926,103 @@ mod tests {
 
         let tombstones = engine.store().overlay_tombstone_paths("code").unwrap();
         assert!(
-            tombstones.contains("Removed.bsl"),
+            tombstones.contains(&FileKey::configuration("Removed.bsl")),
             "the deleted path is tombstoned so a baseline hit stays hidden: {tombstones:?}",
+        );
+    }
+
+    /// Two roots whose declared nesting is the reverse of their canonical one: an
+    /// outer root reached through an alias, and an inner root registered under the
+    /// alias's real path. A file deleted there cannot be canonicalized, and ranking
+    /// the roots by their declared spellings alone would pick the outer one — so the
+    /// removal would tombstone a key nobody ever wrote and leave the real row serving
+    /// a dead hit.
+    #[cfg(unix)]
+    #[test]
+    fn a_deletion_reached_through_an_alias_removes_the_row_the_file_lived_under() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let outer = outside.path().join("outer");
+        let inner = outer.join("inner");
+        fs::create_dir_all(&inner).unwrap();
+        let alias = workspace.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).unwrap();
+
+        let file = inner.join("X.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            &[alias.clone(), inner.clone()],
+        );
+        assert!(rejected.is_empty(), "both roots register: {rejected:?}");
+        engine.set_workspace_roots(roots);
+
+        // The file is stored under the root it physically lives in, which is what
+        // the walk would have attributed it to.
+        let lived_under =
+            engine.workspace_file_key(&file).expect("a live file attributes to its own root");
+        engine.store().upsert_file(&lived_under.root_id, &lived_under.path, b"h", "code").unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(alias.join("inner/X.bsl")).unwrap());
+
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the row of the root the file lived under is the one removed",
+        );
+    }
+
+    /// The same argument one level up: a DIRECTORY removed through an alias must reach the
+    /// keys of the root its files physically lived under. Declared spellings alone hand the
+    /// subtree to the alias root, whose keys are not the ones in the store.
+    #[cfg(unix)]
+    #[test]
+    fn a_subtree_removed_through_an_alias_clears_the_root_it_lived_under() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let outer = outside.path().join("outer");
+        let inner = outer.join("inner");
+        let gone = inner.join("Gone");
+        fs::create_dir_all(&gone).unwrap();
+        let alias = workspace.join("alias");
+        std::os::unix::fs::symlink(&outer, &alias).unwrap();
+
+        let file = gone.join("A.bsl");
+        fs::write(&file, "Процедура ЧерезАлиас()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, rejected) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            &[alias.clone(), inner.clone()],
+        );
+        assert!(rejected.is_empty(), "both roots register: {rejected:?}");
+        engine.set_workspace_roots(roots);
+
+        let lived_under =
+            engine.workspace_file_key(&file).expect("a live file attributes to its own root");
+        engine.store().upsert_file(&lived_under.root_id, &lived_under.path, b"h", "code").unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1);
+
+        fs::remove_dir_all(&gone).unwrap();
+        let removed = engine.remove_vanished_under(&[alias.join("inner/Gone")]).unwrap();
+
+        assert_eq!(removed, 1, "the subtree is found through the alias");
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the row of the root the files lived under is the one cleared",
         );
     }
 
@@ -2937,10 +5089,22 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             store
-                .reindex_file("a.bsl", b"ha", &[chunk("Альфа")], Some(std::slice::from_ref(&vec_a)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "a.bsl",
+                    b"ha",
+                    &[chunk("Альфа")],
+                    Some(std::slice::from_ref(&vec_a)),
+                )
                 .unwrap();
             store
-                .reindex_file("b.bsl", b"hb", &[chunk("Бета")], Some(std::slice::from_ref(&vec_b)))
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "b.bsl",
+                    b"hb",
+                    &[chunk("Бета")],
+                    Some(std::slice::from_ref(&vec_b)),
+                )
                 .unwrap();
         }
 
@@ -2975,5 +5139,1266 @@ mod tests {
         );
         let hits_b = engine.search_with_embedding(&vec_b, 5, None).unwrap();
         assert_eq!(hits_b.first().map(|h| h.symbol_name.as_str()), Some("Бета"));
+    }
+
+    /// A `.bsl`-spelled link resolving to a non-source target keeps its key under the WALKED
+    /// spelling: a key under the target's root is forbidden to exist (the walk drops such
+    /// files), and the walked key is the only one the file could have been indexed under — the
+    /// one a removal must reach.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_non_source_target_keys_by_its_walked_spelling() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let target = extension.join("Target.txt");
+        fs::write(&target, "не исходник").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        let key = engine.workspace_file_key(&alias).expect("the walked spelling is a .bsl");
+        assert_eq!(
+            (key.root_id.as_str(), key.path.as_str()),
+            (crate::CONFIGURATION_ROOT_ID, "Alias.bsl"),
+            "attribution must not follow the non-source target into its root"
+        );
+    }
+
+    /// Walked-spelling attribution must rank the DECLARED roots: for a root declared through a
+    /// link, the walked path also lies under the enclosing root's canonical spelling, and a
+    /// canonical-ranked lookup would hand the key to the wrong root — missing the row the
+    /// removal must reach.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_source_target_under_a_linked_root_keys_by_the_declared_root() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        let real_ext = outside.path().join("ext");
+        fs::create_dir_all(&real_ext).unwrap();
+        let ext_link = configuration.join("ext");
+        std::os::unix::fs::symlink(&real_ext, &ext_link).unwrap();
+        let source = outside.path().join("Source.bsl");
+        fs::write(&source, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+        let alias = real_ext.join("Alias.bsl");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&ext_link),
+        );
+        engine.set_workspace_roots(roots);
+        let walked_alias = ext_link.join("Alias.bsl");
+        let old_key = engine.workspace_file_key(&walked_alias).unwrap();
+        engine.store().upsert_file(&old_key.root_id, &old_key.path, b"h", "code").unwrap();
+
+        let foreign = outside.path().join("Foreign.txt");
+        fs::write(&foreign, "не исходник").unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&foreign, &alias).unwrap();
+        assert!(engine.remove_workspace_path(&walked_alias).unwrap());
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "the removal must reach the key the file was indexed under"
+        );
+    }
+
+    /// A directory spelled `.bsl` must not pass for a source target: extension-only role
+    /// classification would attribute the key to the DIRECTORY'S root, and the stale row under
+    /// the walked key would never be reached.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_target_spelled_bsl_keys_by_the_walked_spelling() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let source = outside.path().join("Source.bsl");
+        fs::write(&source, "Процедура Настоящая()\nКонецПроцедуры").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        let old_key = engine.workspace_file_key(&alias).unwrap();
+        engine.store().upsert_file(&old_key.root_id, &old_key.path, b"h", "code").unwrap();
+
+        fs::create_dir(extension.join("Target.bsl")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(extension.join("Target.bsl"), &alias).unwrap();
+        assert!(engine.remove_workspace_path(&alias).unwrap());
+        assert_eq!(
+            engine.file_count().unwrap(),
+            0,
+            "a live directory target is not a source; the walked key owns the row"
+        );
+    }
+
+    /// A deletion PROVEN by the removal channel must drop the cached overlay entry even when
+    /// the whole root vanished with the file: the point refresh would read the dead root as
+    /// "unreachable, retry" and leave a ghost entry serving hits forever.
+    #[test]
+    fn removing_a_file_under_a_vanished_root_drops_its_overlay_entry() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("A.bsl"), "Процедура Локальная()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        assert_eq!(engine.text_search("Локальная", 10, Some("code")).unwrap().len(), 1);
+
+        fs::rename(&configuration, workspace.join("cf.saved")).unwrap();
+        engine.remove_workspace_path(configuration.join("A.bsl")).unwrap();
+        let hits = engine.text_search("Локальная", 10, Some("code")).unwrap();
+        assert!(hits.is_empty(), "a proven removal must not leave a ghost entry: {hits:?}");
+    }
+
+    /// The proven-removal channel must retract the persisted fingerprint row too: the dirty
+    /// mark dies with the process, and a namesake recreated at the same `(len, mtime,
+    /// canonical)` would inherit the dead file's "verified" claim across a restart.
+    #[test]
+    fn a_proven_removal_retracts_the_fingerprint_row() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("A.bsl");
+        fs::write(&file, "Процедура Локальная()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let key = engine.workspace_file_key(&file).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "",
+                &HashMap::from([(
+                    key.clone(),
+                    crate::store::PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 2,
+                        file_mtime_nanos: 3,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: "/spelled".to_owned(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        fs::remove_file(&file).unwrap();
+        engine.remove_workspace_path(&file).unwrap();
+        assert!(
+            !engine
+                .store()
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .contains_key(&key),
+            "the dead file's row must not vouch for a future namesake"
+        );
+    }
+
+    /// A symlink spelled `.bsl` whose target is not a BSL source is not a source
+    /// file: the graph walk drops it because the roles of the two spellings
+    /// disagree, and the overlay must agree with that universe.
+    #[cfg(unix)]
+    #[test]
+    fn probe_a_symlink_to_a_non_bsl_target_is_not_indexed() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let target = extension.join("Target.txt");
+        fs::write(&target, "Процедура ТолькоЧерезСсылку()\nКонецПроцедуры").unwrap();
+        let alias = configuration.join("Alias.bsl");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let before = engine.text_search("ТолькоЧерезСсылку", 10, Some("code")).unwrap();
+        assert!(before.is_empty(), "a .txt is not a BSL source file: {before:?}");
+    }
+
+    /// End-to-end through a REAL walk: a subtree that loses read permission
+    /// makes the scan unclean, and the indexed file inside it survives instead
+    /// of being read as deleted. The policy and the walker are each tested on
+    /// their own; this leg catches the adapter between them dropping a counter.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_subtree_does_not_erase_its_indexed_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let closed = workspace.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::write(closed.join("Hidden.bsl"), "Процедура ЗаЗакрытымКаталогом()\nКонецПроцедуры")
+            .unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        engine.prime_workspace_overlay().unwrap();
+        let hits = engine.text_search("ЗаЗакрытымКаталогом", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1, "the file is indexed while readable");
+
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            // Running as root: permissions cannot make the subtree unreadable.
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let rescan = engine.prime_workspace_overlay();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        rescan.unwrap();
+
+        let hits = engine.text_search("ЗаЗакрытымКаталогом", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1, "an unreadable subtree is not evidence of deletion");
+        assert!(
+            engine.workspace_overlay_needs_full_rescan().unwrap(),
+            "the unclean prime leaves the overlay waiting for a clean rescan"
+        );
+    }
+
+    /// A cold overlay prime is exactly one walk of the workspace, and an
+    /// initialized watcher-mode engine performs none: the walk count is the
+    /// observable proving every overlay pass shares the one common scan instead
+    /// of a private traversal with its own symlink and error policy.
+    #[test]
+    fn a_cold_prime_walks_the_workspace_exactly_once() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        fs::write(workspace.join("M.bsl"), "Процедура Раз()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        engine.prime_workspace_overlay().unwrap();
+        let walked = project_model::source_set::scans_performed_on_thread() - before;
+        assert_eq!(walked, 1, "one cold prime is one walk");
+
+        engine.enable_workspace_watcher_mode();
+        let before = project_model::source_set::scans_performed_on_thread();
+        engine.prime_workspace_overlay().unwrap();
+        let walked = project_model::source_set::scans_performed_on_thread() - before;
+        assert_eq!(walked, 0, "an initialized watcher-mode cache must not rescan");
+    }
+
+    /// The removal's retry obligation (the dirty mark) must be set BEFORE the fallible store
+    /// operations: an early failure would otherwise leave no signal anywhere while the rows
+    /// still tell the old story.
+    #[test]
+    fn a_failed_removal_still_leaves_the_retry_mark() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    symbol_name: "П".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 1,
+                    text: "Процедура П()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+
+        let saboteur = rusqlite::Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_tombstone BEFORE INSERT ON overlay_tombstones \
+                 BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        let result = engine.remove_workspace_path(workspace.join("Removed.bsl"));
+        assert!(result.is_err(), "the denied tombstone surfaces as an error");
+        assert!(
+            engine
+                .workspace_overlay_dirty_paths_snapshot()
+                .unwrap()
+                .contains_key(&FileKey::configuration("Removed.bsl")),
+            "the retry mark was set before the store failed"
+        );
+    }
+
+    /// An INHERITED manifest (a warm-cache left by a Postgres period) is not baseline
+    /// evidence for a LOCAL engine: a removal must not hide anything on its account.
+    #[test]
+    fn a_local_removal_ignores_an_inherited_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("Removed.bsl");
+        let content = "Процедура П()\nКонецПроцедуры";
+        fs::write(&file, content).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Removed.bsl".to_owned(),
+                    file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                        content,
+                        "Removed.bsl",
+                    ),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        fs::remove_file(&file).unwrap();
+        assert!(engine.remove_workspace_path(workspace.join("Removed.bsl")).unwrap());
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.deleted_files, 0, "an inherited manifest proves no baseline copy to hide");
+    }
+
+    /// A LOCAL engine's dirty-path refresh reads its edits against the local store rows, not
+    /// against an inherited manifest: an edit that happens to equal the STALE manifest
+    /// fingerprint must still become an overlay entry.
+    #[test]
+    fn a_local_point_refresh_ignores_an_inherited_manifest() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        let local = "Процедура Локальная()\nКонецПроцедуры";
+        let edited = "Процедура Правка()\nКонецПроцедуры";
+        fs::write(&file, local).unwrap();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.enable_workspace_watcher_mode();
+        engine.prime_workspace_overlay().unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "stale-snap".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: "CommonModule.bsl".to_owned(),
+                    file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                        edited,
+                        "CommonModule.bsl",
+                    ),
+                    document_count: 1,
+                    file_object_id: "obj-1".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        fs::write(&file, edited).unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(
+            stats.overlay_files, 1,
+            "the edit differs from the LOCAL baseline and must serve as an overlay entry \
+             even though it equals the stale manifest fingerprint"
+        );
+    }
+
+    /// Declaring the local mode clears inherited fingerprint rows: they claim "verified
+    /// against the manifest", and the raw mode can neither honour nor refresh that claim —
+    /// a same-stat edit during the local period would be suppressed by the row after a
+    /// switch back to the remote mode.
+    #[test]
+    fn declaring_the_local_mode_clears_inherited_fingerprint_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let db_path = workspace.join("bsl-search.db");
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .store()
+            .save_overlay_fingerprint_cache(
+                "snap-1",
+                &HashMap::from([(
+                    FileKey::configuration("A.bsl"),
+                    crate::store::PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 1,
+                        file_mtime_nanos: 0,
+                        content_fingerprint: "fp".to_owned(),
+                        canonical: String::new(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        engine.set_serves_external_baseline(false).unwrap();
+        let rows = engine
+            .store()
+            .load_overlay_fingerprint_cache("snap-1")
+            .unwrap_or(None)
+            .unwrap_or_default();
+        assert!(rows.is_empty(), "the local mode owns no manifest-verified rows");
+    }
+    /// A warm root must not be walked when only the cold ones need ingesting: the per-root skip
+    /// exists to keep a restart cheap, and walking everything and filtering afterwards spends
+    /// exactly what it was meant to save. Attribution still consults the whole table, so a file
+    /// found under one root but owned by another keeps its owner's key.
+    #[test]
+    fn a_subset_walk_visits_only_the_roots_it_was_given() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(configuration.join("Тёплый.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(extension.join("Холодный.bsl"), "Процедура Вторая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        engine.set_workspace_roots(roots);
+
+        let all = engine.boot_ingest_files(&configuration);
+        assert_eq!(all.len(), 2, "the full walk covers both roots: {all:?}");
+
+        let cold_only = engine.boot_ingest_files_over(
+            std::path::Path::new(""),
+            Some(std::slice::from_ref(&extension)),
+        );
+        let names: Vec<String> = cold_only.iter().map(|(key, _)| key.path.clone()).collect();
+        assert_eq!(names, vec!["Холодный.bsl".to_owned()], "only the given root is walked");
+    }
+    /// A relative path handed to the engine is spelled against the CONFIGURATION root — that is
+    /// how every stored path with the reserved id is spelled, and what callers strip before
+    /// handing one over (the graph bridge strips the configuration prefix). Resolving it against
+    /// the table's workspace instead points one directory too high whenever the configuration
+    /// sits in a subdirectory, and the key is then silently not found: the mark is dropped and
+    /// the stale graph context is served on.
+    #[test]
+    fn a_relative_path_is_spelled_against_the_configuration_root() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("src").join("cf");
+        let module = configuration.join("CommonModules").join("Б").join("Ext");
+        fs::create_dir_all(&module).unwrap();
+        fs::write(module.join("Module.bsl"), "Процедура Первая()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _) = crate::WorkspaceRoots::build(&workspace, &configuration, &[]);
+        engine.set_workspace_roots(roots);
+        engine.index_directory_fts(&configuration).unwrap();
+        assert_eq!(engine.file_count().unwrap(), 1, "the fixture indexes the module");
+
+        let marked = engine
+            .mark_workspace_path_context_dirty("CommonModules/Б/Ext/Module.bsl")
+            .expect("marking a workspace path is not an error");
+        assert!(marked, "a configuration-relative path resolves to its stored key");
+    }
+
+    fn write_transition_module(root: &std::path::Path, procedure: &str) {
+        let path = root.join("CommonModules/Один/Ext/Module.bsl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("Процедура {procedure}() Экспорт\nКонецПроцедуры")).unwrap();
+    }
+
+    #[test]
+    fn live_root_transition_adds_and_removes_an_extension_with_a_namesake_path() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let configuration_only = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(configuration_only.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied { added: 1, .. }
+        ));
+        let extension_hits = engine.text_search("Расширение", 10, Some("code")).unwrap();
+        assert_eq!(extension_hits.len(), 1);
+        assert_eq!(extension_hits[0].root_id, "cfe/one");
+        assert_eq!(
+            engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(),
+            1,
+            "the same relative path in the stable configuration survives"
+        );
+
+        let plan =
+            engine.workspace_roots_transition_seed(configuration_only).unwrap().plan().unwrap();
+        let outcome = engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied { removed: 1, .. }
+        ));
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+        assert_eq!(engine.file_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_stable_root_does_not_block_adding_an_extension() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Сохранена");
+        write_transition_module(&extension, "Расширение");
+        let stable_file = configuration.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        fs::write(&stable_file, [0xcf, 0xf0, 0xee, 0xf6]).unwrap();
+
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied { rebuilt: 0, added: 1, .. }
+        ));
+        assert_eq!(engine.text_search("Сохранена", 10, Some("code")).unwrap().len(), 1);
+        assert_eq!(engine.text_search("Расширение", 10, Some("code")).unwrap().len(), 1);
+        assert_eq!(engine.workspace_overlay_unread_count().unwrap(), 1);
+        assert!(engine
+            .workspace_overlay_dirty_paths()
+            .unwrap()
+            .contains(&FileKey::configuration("CommonModules/Один/Ext/Module.bsl")));
+    }
+
+    #[test]
+    fn unread_surviving_remote_overlay_entry_is_preserved() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "ЛокальнаяПравка");
+        write_transition_module(&extension, "Расширение");
+        let stable_file = configuration.join("CommonModules/Один/Ext/Module.bsl");
+        let relative = "CommonModules/Один/Ext/Module.bsl";
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: None,
+                files: vec![crate::BaselineManifestFile {
+                    root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                    collection: "code".to_owned(),
+                    path: relative.to_owned(),
+                    file_fingerprint: "remote-version".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj".to_owned(),
+                }],
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial).unwrap();
+        engine.prime_workspace_overlay().unwrap();
+        assert_eq!(engine.text_search("ЛокальнаяПравка", 10, Some("code")).unwrap().len(), 1);
+        fs::write(&stable_file, [0xcf, 0xf0, 0xee, 0xf6]).unwrap();
+
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        assert_eq!(engine.text_search("ЛокальнаяПравка", 10, Some("code")).unwrap().len(), 1);
+        assert_eq!(engine.workspace_overlay_stats().unwrap().unwrap().overlay_files, 2);
+        assert!(
+            engine
+                .workspace_overlay_cache
+                .lock()
+                .unwrap()
+                .hidden_keys()
+                .contains(&FileKey::configuration(relative)),
+            "the preserved local entry must keep hiding its remote baseline twin"
+        );
+        assert_eq!(engine.workspace_overlay_unread_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_new_root_is_unread_not_deleted_and_later_heals() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        let extension_file = extension.join("Broken.bsl");
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(&extension_file, [0xcf, 0xf0, 0xee, 0xf6]).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied {
+                added: 0,
+                pending_overlay_embeddings: false,
+                ..
+            }
+        ));
+        let key = FileKey::new("cfe/one", "Broken.bsl");
+        assert_eq!(engine.workspace_overlay_unread_count().unwrap(), 1);
+        assert!(engine.workspace_overlay_dirty_paths().unwrap().contains(&key));
+        assert!(engine.store().overlay_tombstone_paths("code").unwrap().is_empty());
+
+        fs::write(&extension_file, "Процедура Исцелена()\nКонецПроцедуры").unwrap();
+        let text: Arc<str> = Arc::from(fs::read_to_string(&extension_file).unwrap());
+        let root = parser::parse(&text).syntax_node();
+        engine
+            .reindex_dirty_from_snapshots(&HashMap::from([(
+                key.clone(),
+                crate::ports::ModuleSnapshot { text, root },
+            )]))
+            .unwrap();
+        assert_eq!(engine.workspace_overlay_unread_count().unwrap(), 0);
+        assert!(!engine.workspace_overlay_dirty_paths().unwrap().contains(&key));
+        assert_eq!(engine.text_search("Исцелена", 10, Some("code")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn unread_present_remote_baseline_is_not_hidden_or_tombstoned() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(extension.join("Broken.bsl"), [0xcf, 0xf0, 0xee, 0xf6]).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: None,
+                files: vec![crate::BaselineManifestFile {
+                    root_id: "cfe/one".to_owned(),
+                    collection: "code".to_owned(),
+                    path: "Broken.bsl".to_owned(),
+                    file_fingerprint: "baseline".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj".to_owned(),
+                }],
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial).unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.hidden_paths, 0);
+        assert_eq!(stats.deleted_files, 0);
+        assert_eq!(engine.workspace_overlay_unread_count().unwrap(), 1);
+        assert!(engine.store().overlay_tombstone_paths("code").unwrap().is_empty());
+    }
+
+    #[test]
+    fn unread_file_becoming_readable_during_validation_supersedes_the_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        fs::create_dir_all(&extension).unwrap();
+        let broken = extension.join("Broken.bsl");
+        fs::write(&broken, [0xcf, 0xf0, 0xee, 0xf6]).unwrap();
+        let engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        let mut engine = engine;
+        engine.initialize_workspace_roots(initial).unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        fs::write(&broken, "Процедура Исцелена()\nКонецПроцедуры").unwrap();
+        assert!(plan.revalidate().unwrap().is_none());
+    }
+
+    #[test]
+    fn changing_the_configuration_directory_rebuilds_the_stable_empty_root_id() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let old_configuration = workspace.join("old-cf");
+        let new_configuration = workspace.join("new-cf");
+        write_transition_module(&old_configuration, "Старая");
+        write_transition_module(&new_configuration, "Новая");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let old = crate::WorkspaceRoots::build(&workspace, &old_configuration, &[]).0;
+        engine.initialize_workspace_roots(old).unwrap();
+        engine.index_directory_fts(&old_configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(&workspace, &new_configuration, &[]).0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        assert!(engine.text_search("Старая", 10, Some("code")).unwrap().is_empty());
+        let hits = engine.text_search("Новая", 10, Some("code")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].root_id, CONFIGURATION_ROOT_ID);
+        assert_eq!(engine.configuration_root(), Some(new_configuration.as_path()));
+    }
+
+    #[test]
+    fn an_incomplete_transition_scan_keeps_the_last_known_good_roots() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let missing_extension = workspace.join("missing-extension");
+        write_transition_module(&configuration, "Конфигурация");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&missing_extension),
+        )
+        .0;
+
+        assert!(engine.workspace_roots_transition_seed(next).unwrap().plan().is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_file_change_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "До");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::write(&extension_file, "Процедура После()\nКонецПроцедуры").unwrap();
+
+        assert!(
+            plan.revalidate().unwrap().is_none(),
+            "the changed bytes supersede the plan before the engine is borrowed"
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert!(engine.text_search("После", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_overlay_transition_is_lexical_without_embedding_and_hides_removed_baseline() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "ЛокальнаяПравка");
+        let relative = "CommonModules/Один/Ext/Module.bsl";
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-1".to_owned(),
+                snapshot_fingerprint: Some("fp".to_owned()),
+                files: vec![
+                    crate::BaselineManifestFile {
+                        root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                        collection: "code".to_owned(),
+                        path: relative.to_owned(),
+                        file_fingerprint: crate::workspace_overlay::fingerprint_content(
+                            &fs::read_to_string(configuration.join(relative)).unwrap(),
+                            relative,
+                        ),
+                        document_count: 1,
+                        file_object_id: "obj-cf".to_owned(),
+                    },
+                    crate::BaselineManifestFile {
+                        root_id: "cfe/one".to_owned(),
+                        collection: "code".to_owned(),
+                        path: relative.to_owned(),
+                        file_fingerprint: "remote-version".to_owned(),
+                        document_count: 1,
+                        file_object_id: "obj-1".to_owned(),
+                    },
+                ],
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(both).unwrap().plan().unwrap();
+        let outcome = engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::WorkspaceRootsTransitionOutcome::Applied {
+                pending_overlay_embeddings: false,
+                ..
+            }
+        ));
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 1);
+        assert_eq!(stats.hidden_paths, 1, "the local replacement hides its baseline twin");
+
+        let plan = engine.workspace_roots_transition_seed(initial).unwrap().plan().unwrap();
+        engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+        let stats = engine.workspace_overlay_stats().unwrap().unwrap();
+        assert_eq!(stats.overlay_files, 0);
+        assert_eq!(stats.deleted_files, 1, "the removed baseline key remains hidden");
+        assert!(engine
+            .store()
+            .overlay_tombstone_paths("code")
+            .unwrap()
+            .contains(&FileKey::new("cfe/one", relative)));
+    }
+
+    #[test]
+    fn a_store_failure_keeps_the_old_root_table_and_rows() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        let saboteur = rusqlite::Connection::open(engine.db_path()).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_transition BEFORE INSERT ON files
+                 WHEN NEW.root_id <> '' BEGIN SELECT RAISE(ABORT, 'denied'); END;",
+            )
+            .unwrap();
+
+        assert!(engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.file_count().unwrap(), 1);
+        assert_eq!(engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_file_created_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::write(extension.join("Created.bsl"), "Процедура Создана()\nКонецПроцедуры").unwrap();
+
+        assert!(
+            plan.revalidate().unwrap().is_none(),
+            "the created key supersedes the plan before the engine is borrowed"
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_file_deleted_between_plan_and_apply_supersedes_the_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        fs::remove_file(extension_file).unwrap();
+
+        assert!(
+            plan.revalidate().unwrap().is_none(),
+            "the deleted key supersedes the plan before the engine is borrowed"
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn a_removed_root_drops_a_dirty_only_key() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let both = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        engine.initialize_workspace_roots(both).unwrap();
+        engine.mark_workspace_path_dirty(&extension_file).unwrap();
+        let obsolete = FileKey::new("cfe/one", "CommonModules/Один/Ext/Module.bsl");
+        assert!(engine.workspace_overlay_dirty_paths().unwrap().contains(&obsolete));
+
+        let configuration_only = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        let plan =
+            engine.workspace_roots_transition_seed(configuration_only).unwrap().plan().unwrap();
+        engine
+            .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+            .unwrap();
+
+        assert!(!engine.workspace_overlay_dirty_paths().unwrap().contains(&obsolete));
+    }
+
+    #[test]
+    fn a_vector_candidate_failure_rolls_back_sql_and_keeps_the_live_index() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let vectors_before = engine.vector_count();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+
+        crate::store::FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(|flag| flag.set(true));
+        let result =
+            engine.apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap());
+        crate::store::FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(|flag| flag.set(false));
+
+        assert!(result.is_err());
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.vector_count(), vectors_before);
+        assert_eq!(engine.file_count().unwrap(), 1, "the inserted extension row was rolled back");
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn compatibility_root_replacement_keeps_serving_when_the_scan_is_incomplete() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        write_transition_module(&configuration, "Конфигурация");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let missing = workspace.join("missing-extension");
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&missing),
+        )
+        .0;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            engine.set_workspace_roots(next);
+        }));
+
+        assert!(result.is_ok(), "the compatibility path must not panic on a live failure");
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.text_search("Конфигурация", 10, Some("code")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_baseline_mode_change_supersedes_a_prepared_root_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine.set_serves_external_baseline(false).unwrap();
+
+        assert_eq!(
+            engine
+                .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+                .unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_manifest_change_supersedes_a_prepared_root_plan() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let relative = "CommonModules/Один/Ext/Module.bsl";
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-before".to_owned(),
+                snapshot_fingerprint: Some("before".to_owned()),
+                files: Vec::new(),
+            })
+            .unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap-after".to_owned(),
+                snapshot_fingerprint: Some("after".to_owned()),
+                files: vec![crate::BaselineManifestFile {
+                    root_id: "cfe/one".to_owned(),
+                    collection: "code".to_owned(),
+                    path: relative.to_owned(),
+                    file_fingerprint: "remote-version".to_owned(),
+                    document_count: 1,
+                    file_object_id: "obj-extension".to_owned(),
+                }],
+            })
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+                .unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
+        assert_eq!(engine.workspace_overlay_stats().unwrap().unwrap().overlay_files, 0);
+    }
+
+    #[test]
+    fn a_semantic_source_change_supersedes_a_prepared_root_plan() {
+        struct Provider;
+        impl crate::ports::GraphContextProvider for Provider {
+            fn graph_context(
+                &self,
+                _rel_path: &str,
+                _symbol_name: &str,
+                _kind: &str,
+            ) -> Option<String> {
+                Some("new graph".to_owned())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        write_transition_module(&extension, "Расширение");
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let plan = engine.workspace_roots_transition_seed(next).unwrap().plan().unwrap();
+        engine.set_graph_context_provider(Arc::new(Provider));
+
+        assert_eq!(
+            engine
+                .apply_validated_workspace_roots_transition(plan.revalidate().unwrap().unwrap())
+                .unwrap(),
+            super::WorkspaceRootsTransitionOutcome::Superseded
+        );
+        assert_eq!(engine.workspace_roots(), Some(&initial));
     }
 }

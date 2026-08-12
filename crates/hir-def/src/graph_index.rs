@@ -29,7 +29,7 @@ use crate::{
         ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
     },
     call_hierarchy_index::MethodCallPair,
-    configs::ConfigsDatabase,
+    configs::{BodySearch, ConfigsDatabase},
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
@@ -45,6 +45,11 @@ struct ModuleMethods {
     by_name: FxHashMap<String, MethodRef>,
     /// Every method in declaration order (the index is the `local_id`).
     all: Vec<GraphMethodEntry>,
+    /// Whether this module's body could be read, as answered by the database that
+    /// actually read it. Recorded here because the index is what the batches share:
+    /// a batch database registers inputs only for its own files, so asking IT about
+    /// a module from another batch gets "readable" for everything.
+    unread: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -93,8 +98,8 @@ impl GraphIndex {
     /// so building the whole index batch-by-batch in fresh databases keeps peak RAM
     /// bounded.
     pub fn add_module(&mut self, db: &dyn ConfigsDatabase, module: ModuleId) {
-        let (all, module_dispatch) = Self::extract_module_data(db, module);
-        self.insert_module_data(module, all, module_dispatch);
+        let (all, module_dispatch, unread) = Self::extract_module_data(db, module);
+        self.insert_module_data(module, all, module_dispatch, unread);
     }
 
     /// Add a whole batch's modules, lowering each module's item tree + metadata in
@@ -111,8 +116,8 @@ impl GraphIndex {
         let extracted = parallel_per_module(pool, db, batch, |db, module| {
             (module, Self::extract_module_data(db, module))
         });
-        for (module, (all, module_dispatch)) in extracted {
-            self.insert_module_data(module, all, module_dispatch);
+        for (module, (all, module_dispatch, unread)) in extracted {
+            self.insert_module_data(module, all, module_dispatch, unread);
         }
     }
 
@@ -142,8 +147,9 @@ impl GraphIndex {
         &mut self,
         extraction: ModuleIndexExtraction,
     ) -> (ModuleId, crate::call_graph::ModuleCallSummary) {
-        let ModuleIndexExtraction { module, entries, module_dispatch, pair_intents } = extraction;
-        self.insert_module_data(module, entries, module_dispatch);
+        let ModuleIndexExtraction { module, entries, module_dispatch, unread, pair_intents } =
+            extraction;
+        self.insert_module_data(module, entries, module_dispatch, unread);
         (module, pair_intents)
     }
 
@@ -153,14 +159,14 @@ impl GraphIndex {
     fn extract_module_data(
         db: &dyn ConfigsDatabase,
         module: ModuleId,
-    ) -> (Vec<GraphMethodEntry>, Option<MethodDispatch>) {
+    ) -> (Vec<GraphMethodEntry>, Option<MethodDispatch>, bool) {
         let item_tree = db.item_tree(module.file_id);
         let all = crate::call_graph::extract_graph_methods(&item_tree);
         let module_dispatch = db
             .module_metadata(module)
             .execution_context
             .and_then(MethodDispatch::from_execution_context);
-        (all, module_dispatch)
+        (all, module_dispatch, db.file_is_unread(module.file_id))
     }
 
     /// The mutating half of [`Self::add_module`]: fold one module's extracted methods
@@ -170,6 +176,7 @@ impl GraphIndex {
         module: ModuleId,
         all: Vec<GraphMethodEntry>,
         module_dispatch: Option<MethodDispatch>,
+        unread: bool,
     ) {
         // First-wins lowercased map, matching `SymbolTree::find_method`.
         let mut by_name = FxHashMap::default();
@@ -183,7 +190,7 @@ impl GraphIndex {
                 module_dispatch.unwrap_or(entry.dispatch),
             );
         }
-        self.methods.insert(module, ModuleMethods { by_name, all });
+        self.methods.insert(module, ModuleMethods { by_name, all, unread });
     }
 
     /// The declaration facts (name, export, dispatch, ranges) for a method, for
@@ -197,9 +204,12 @@ impl GraphIndex {
     /// declaration order. This is exactly the cross-module resolution + identity
     /// surface — `find_method` resolves on the name, callers' edges/boundary flags
     /// depend on `is_export` + effective dispatch, and the durable method id embeds
-    /// the original name spelling. So if this hash is unchanged across an edit, no
-    /// caller's resolved edge or stored node row can change and only this module's own
-    /// rows need reprojecting. Deliberately excludes source ranges (they shift on any
+    /// the original name spelling. Readability is hashed alongside them for the same
+    /// reason: an unread body bars callers from resolving into any body behind it, and
+    /// an empty readable body declares exactly the same nothing an unread one does — so
+    /// without it the transition between them looks like no change at all. So if this
+    /// hash is unchanged across an edit, no caller's resolved edge or stored node row
+    /// can change and only this module's own rows need reprojecting. Deliberately excludes source ranges (they shift on any
     /// text edit) and bodies (a body edit not touching a signature keeps it stable).
     /// `None` if the module is not indexed.
     ///
@@ -213,6 +223,7 @@ impl GraphIndex {
 
         let methods = self.methods.get(&module)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        methods.unread.hash(&mut hasher);
         for entry in &methods.all {
             entry.name.as_str().hash(&mut hasher);
             entry.is_export.hash(&mut hasher);
@@ -234,15 +245,20 @@ impl GraphIndex {
 
     /// A body-free resident layout hash of one module's methods: the ordered
     /// (`local_id`, original-spelling name, `is_export`, effective dispatch) of every
-    /// method in declaration order. It deliberately includes the top-level position
-    /// encoded in `local_id`, unlike [`Self::module_sig_hash`], so resident identity
-    /// can detect declaration-layout shifts without widening the durable contract.
+    /// method in declaration order, plus readability. It deliberately includes the
+    /// top-level position encoded in `local_id`, unlike [`Self::module_sig_hash`], so
+    /// resident identity can detect declaration-layout shifts without widening the
+    /// durable contract. Readability is in it because the call-hierarchy catch-up
+    /// treats an unchanged hash as proof that the resident index still resolves other
+    /// modules' calls the same way, and crossing the unread barrier breaks exactly
+    /// that.
     /// Excludes source ranges and bodies. `None` if the module is not indexed.
     pub fn module_layout_hash(&self, module: ModuleId) -> Option<u64> {
         use std::hash::{Hash, Hasher};
 
         let methods = self.methods.get(&module)?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        methods.unread.hash(&mut hasher);
         for entry in &methods.all {
             entry.local_id.hash(&mut hasher);
             entry.name.as_str().hash(&mut hasher);
@@ -294,6 +310,17 @@ impl GraphIndex {
     /// reconstructed `MethodId` is identical.
     fn find_method(&self, target: ModuleId, name: &Name) -> Option<MethodRef> {
         self.methods.get(&target)?.by_name.get(&name.as_str().fold_lower()).copied()
+    }
+
+    /// Whether `target`'s body could be read, as recorded by the database that indexed
+    /// it — `None` for a module this index never covered.
+    ///
+    /// The batched build asks this instead of the database it happens to hold: that
+    /// database registered inputs only for its own batch, so it reports every module
+    /// from another batch as readable, and resolution would depend on how the build
+    /// was split rather than on the source root and configuration alone.
+    pub fn is_unread(&self, target: ModuleId) -> Option<bool> {
+        self.methods.get(&target).map(|m| m.unread)
     }
 
     /// Resident per-node dispatch — the same value the fold's seeded graph returns
@@ -353,14 +380,18 @@ pub fn resolve_summary_via_index(
                 edge.kind,
             ),
             CallTarget::QualifiedModule { module_name, method_name } => {
-                match resolver.locate_common_module_candidates(db, module_name) {
-                    // Base body first, then the caller's own extension body —
-                    // the first hit mirrors `resolve_qualified_method`.
+                match resolver
+                    .locate_common_module_candidates(db, module_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
+                {
+                    // Base body first, then the caller's own extension body, stopping
+                    // where `resolve_qualified_method` stops — including at an unread
+                    // body, or this route would resolve what the Salsa fold leaves
+                    // unresolved on the same input.
                     Ok(candidates) => match candidates
-                        .iter()
-                        .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                        .search(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
                     {
-                        Some((target_module, m)) if m.is_export => (
+                        BodySearch::Found((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
                                 module: target_module,
                                 local_id: m.local_id,
@@ -369,13 +400,14 @@ pub fn resolve_summary_via_index(
                             edge.kind,
                         ),
                         // Found but not exported → visible-but-unreachable.
-                        Some(_) => (
+                        BodySearch::Found(_) => (
                             ResolvedTarget::Unresolved(edge.target.clone()),
                             EdgeProvenance::VisibilityBlocked,
                             edge.kind,
                         ),
-                        // Module located but method absent.
-                        None => (
+                        // Method absent from every readable body, or a body ahead of
+                        // it could not be read at all.
+                        BodySearch::Absent | BodySearch::Unread => (
                             ResolvedTarget::Unresolved(edge.target.clone()),
                             EdgeProvenance::Unresolved,
                             edge.kind,
@@ -399,7 +431,7 @@ pub fn resolve_summary_via_index(
                     object_name: object_name.clone(),
                 };
                 match resolver.locate_manager_module(db, *manager_type, object_name) {
-                    Ok(target_module) => match index.find_method(target_module, method_name) {
+                    Ok(located) => match index.find_method(located.module, method_name) {
                         // A user manager-module method on a fully-literal
                         // `Коллекция.Объект.Метод()` path: the object name is a token and its
                         // manager module is uniquely determined, so locating the exported method
@@ -407,7 +439,7 @@ pub fn resolve_summary_via_index(
                         // call. The edge is about the method.
                         Some(m) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
-                                module: target_module,
+                                module: located.module,
                                 local_id: m.local_id,
                             }),
                             EdgeProvenance::Resolved,
@@ -481,20 +513,22 @@ pub fn resolve_summary_via_index(
     let find_qualified =
         |module_name: &crate::name::Name, method_name: &crate::name::Name| match resolver
             .locate_common_module_candidates(db, module_name)
+            .map(|c| c.reflagged(|m| index.is_unread(m)))
         {
-            Ok(candidates) => match candidates
-                .iter()
-                .find_map(|&m| index.find_method(m, method_name).map(|hit| (m, hit)))
-            {
-                Some((target_module, m)) if m.is_export => {
-                    crate::queries::QualifiedLookup::Resolved(MethodId {
-                        module: target_module,
-                        local_id: m.local_id,
-                    })
+            Ok(candidates) => {
+                match candidates.search(|m| index.find_method(m, method_name).map(|hit| (m, hit))) {
+                    BodySearch::Found((target_module, m)) if m.is_export => {
+                        crate::queries::QualifiedLookup::Resolved(MethodId {
+                            module: target_module,
+                            local_id: m.local_id,
+                        })
+                    }
+                    BodySearch::Found(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
+                    BodySearch::Absent | BodySearch::Unread => {
+                        crate::queries::QualifiedLookup::Absent
+                    }
                 }
-                Some(_) => crate::queries::QualifiedLookup::VisibilityBlocked,
-                None => crate::queries::QualifiedLookup::Absent,
-            },
+            }
             Err(_) => crate::queries::QualifiedLookup::Absent,
         };
     let global_modules = resolver.global_common_module_names(db);
@@ -548,6 +582,7 @@ pub struct ModuleIndexExtraction {
     pub module: ModuleId,
     entries: Vec<GraphMethodEntry>,
     module_dispatch: Option<MethodDispatch>,
+    unread: bool,
     pair_intents: crate::call_graph::ModuleCallSummary,
 }
 
@@ -561,9 +596,9 @@ pub fn extract_batch_index_and_pair_intents<DB: ConfigsDatabase + Clone + Send>(
     batch: &[ModuleId],
 ) -> Vec<ModuleIndexExtraction> {
     parallel_per_module(pool, db, batch, |db, module| {
-        let (entries, module_dispatch) = GraphIndex::extract_module_data(db, module);
+        let (entries, module_dispatch, unread) = GraphIndex::extract_module_data(db, module);
         let pair_intents = db.module_call_summary(module).method_pair_subset();
-        ModuleIndexExtraction { module, entries, module_dispatch, pair_intents }
+        ModuleIndexExtraction { module, entries, module_dispatch, unread, pair_intents }
     })
 }
 
@@ -579,8 +614,8 @@ pub fn project_method_pairs_from_intents<DB: ConfigsDatabase + Clone + Send>(
     index: &GraphIndex,
     intents: &[(ModuleId, crate::call_graph::ModuleCallSummary)],
 ) -> Vec<(ModuleId, Vec<MethodCallPair>)> {
-    let warm = intents.first().map(|&(module, _)| module);
-    parallel_per_item(pool, db, intents, warm, |db, (module, summary)| {
+    let warm: Vec<ModuleId> = intents.iter().map(|&(module, _)| module).collect();
+    parallel_per_item(pool, db, intents, &warm, |db, (module, summary)| {
         let resolved = resolve_summary_via_index(db, *module, summary, index);
         (*module, resolved_summary_method_pairs(&resolved))
     })
@@ -738,13 +773,14 @@ pub fn extract_unresolved_refs(
     for edge in &summary.call_edges {
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
-                if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
-                    // No candidate resolves the call: track every body so adding
-                    // the method to either (base or own extension) reprojects.
-                    if candidates.iter().all(|&m| unresolved(index.find_method(m, method_name))) {
-                        for target in candidates {
-                            out.push((target, method_name.as_str().fold_lower()));
-                        }
+                if let Ok(candidates) = resolver
+                    .locate_common_module_candidates(db, module_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
+                {
+                    for target in
+                        reference_targets(&candidates, |m| index.find_method(m, method_name))
+                    {
+                        out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
             }
@@ -753,9 +789,15 @@ pub fn extract_unresolved_refs(
                 object_name,
                 method_name: Some(method_name),
             } => {
-                if let Ok(target) = resolver.locate_manager_module(db, *manager_type, object_name) {
-                    if unresolved(index.find_method(target, method_name)) {
-                        out.push((target, method_name.as_str().fold_lower()));
+                if let Ok(located) = resolver.locate_manager_module(db, *manager_type, object_name)
+                {
+                    // An unread manager module is tracked unconditionally, for the same
+                    // reason as an unread common-module body: its surface is unknown, so
+                    // becoming readable can add the method, and without the reference the
+                    // caller is never reprojected.
+                    if located.unread || unresolved(index.find_method(located.module, method_name))
+                    {
+                        out.push((located.module, method_name.as_str().fold_lower()));
                     }
                 }
             }
@@ -769,17 +811,46 @@ pub fn extract_unresolved_refs(
     // `module_call_summary` invalidation.
     for reg in &summary.notify_regs {
         if let crate::call_graph::NotifyTarget::Module(module_name) = &reg.target {
-            if let Ok(candidates) = resolver.locate_common_module_candidates(db, module_name) {
-                if candidates.iter().all(|&m| unresolved(index.find_method(m, &reg.callback_name)))
+            if let Ok(candidates) = resolver
+                .locate_common_module_candidates(db, module_name)
+                .map(|c| c.reflagged(|m| index.is_unread(m)))
+            {
+                for target in
+                    reference_targets(&candidates, |m| index.find_method(m, &reg.callback_name))
                 {
-                    for target in candidates {
-                        out.push((target, reg.callback_name.as_str().fold_lower()));
-                    }
+                    out.push((target, reg.callback_name.as_str().fold_lower()));
                 }
             }
         }
     }
     out
+}
+
+/// The bodies of `candidates` that must hold a reverse reference to a call for `probe`.
+///
+/// A call nobody answers tracks EVERY body, so that declaring the method in any of them
+/// — or making an unread one readable — reprojects the caller.
+///
+/// An ANSWERED call tracks nothing. Priority order already settled it: every body ahead
+/// of the answer was readable and did not have the method, and a body behind it loses to
+/// the answer whatever it later turns out to declare. Tracking those trailing bodies
+/// would fan a healed sibling out over every caller that was never going to change.
+fn reference_targets(
+    candidates: &crate::resolver::CommonModuleCandidates,
+    mut probe: impl FnMut(ModuleId) -> Option<MethodRef>,
+) -> Vec<ModuleId> {
+    // The walk stops at the first body that DECLARES the name, exported or not — that
+    // is where resolution stops too, and a non-exported declaration is an answer of its
+    // own (`VisibilityBlocked`), not a reason to keep looking. Filtering by export
+    // inside the walk would step over it, find a lower body's export, and call the
+    // call answered — leaving no reverse reference for the day the winning declaration
+    // gains `Экспорт`.
+    let answered = matches!(candidates.search(&mut probe), BodySearch::Found(hit) if hit.is_export);
+    if answered {
+        Vec::new()
+    } else {
+        candidates.all_for_reference().collect()
+    }
 }
 
 /// A batch's call/manager edge projection plus the module-located-but-unresolved call
@@ -937,17 +1008,18 @@ where
     R: Send,
     F: Fn(&DB, ModuleId) -> R + Sync + Send,
 {
-    parallel_per_item(pool, db, batch, batch.first().copied(), |db, &module| f(db, module))
+    parallel_per_item(pool, db, batch, batch, |db, &module| f(db, module))
 }
 
 /// The generic core of [`parallel_per_module`]: run `f` over arbitrary
-/// module-keyed items. `warm` must name a module of the workspace (any one) so the
-/// pre-pool warm-up can seed the configuration loader (see the comment below).
+/// module-keyed items. `warm` names the modules the items will resolve against,
+/// so the pre-pool warm-up can seed the configuration loader for every root they
+/// reach (see the comment below).
 fn parallel_per_item<DB, T, R, F>(
     pool: &rayon::ThreadPool,
     db: &DB,
     items: &[T],
-    warm: Option<ModuleId>,
+    warm: &[ModuleId],
     f: F,
 ) -> Vec<R>
 where
@@ -963,16 +1035,20 @@ where
     // `load_configuration` query) fans out over its own `rayon::scope`; if it ran
     // inside a parallel job, a free worker could steal a sibling job — carrying a
     // different `db` clone — into that scope and attach a second database to a thread
-    // mid-query, which Salsa forbids. `configurations` loads EVERY config root (it
-    // iterates all config paths through the shared loader), so this single call
-    // memoises the loader for all roots — base config plus extensions. The clones
-    // share the `Zalsa`, so the per-module jobs below find the loader cached and
-    // never open a nested scope; their own per-file metadata/visibility work runs in
-    // the pool. It is the only internally parallel query the build reaches (no type
-    // inference), so this one warm-up closes the window.
-    if let Some(first) = warm {
+    // mid-query, which Salsa forbids. The clones share the `Zalsa`, so the per-module
+    // jobs below find the loader cached and never open a nested scope; their own
+    // per-file metadata/visibility work runs in the pool. It is the only internally
+    // parallel query the build reaches (no type inference), so this warm-up closes
+    // the window.
+    //
+    // Two disjoint root sets have to be covered. `configurations_inventory` loads the
+    // DECLARED roots, which is what the resolvers' visibility path reads. That leaves
+    // the roots the items' own files attribute to on disk — the same set only when
+    // discovery declared every configuration present, and short by exactly the nested
+    // ones when it did not.
+    if !warm.is_empty() {
         let _ = db.configurations_inventory();
-        let _ = db.module_metadata(first);
+        db.warm_config_roots(warm);
     }
 
     let seed = db.clone();
@@ -2434,17 +2510,77 @@ mod module_layout_hash_tests {
     use super::*;
 
     fn hashes(source: &str) -> (u64, u64) {
+        hashes_marked(source, false)
+    }
+
+    fn hashes_marked(source: &str, unread: bool) -> (u64, u64) {
         let module = ModuleId::new(FileId(0));
         let parse = parser::parse(source);
         let methods =
             crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
         let mut index = GraphIndex::new();
-        index.insert_module_data(module, methods, None);
+        index.insert_module_data(module, methods, None, unread);
 
         (
             index.module_sig_hash(module).expect("indexed module has a signature hash"),
             index.module_layout_hash(module).expect("indexed module has a layout hash"),
         )
+    }
+
+    /// A call blocked by a non-exported declaration is not answered — it resolves to
+    /// nothing, and adding `Экспорт` to that very declaration makes an edge appear. The
+    /// reverse references are the only index able to find its callers then, so the walk
+    /// that decides whether to record them has to stop where resolution stops: at the
+    /// first DECLARATION, not at the first exported one.
+    #[test]
+    fn a_call_blocked_by_a_non_exported_declaration_keeps_its_reverse_references() {
+        fn targets(base_source: &str) -> Vec<ModuleId> {
+            let base = ModuleId::new(FileId(0));
+            let ext = ModuleId::new(FileId(1));
+            let mut index = GraphIndex::new();
+            for (module, source) in
+                [(base, base_source), (ext, "Процедура П() Экспорт КонецПроцедуры")]
+            {
+                let parse = parser::parse(source);
+                let methods =
+                    crate::call_graph::extract_graph_methods(&crate::ItemTree::from_parse(&parse));
+                index.insert_module_data(module, methods, None, false);
+            }
+            let candidates = crate::resolver::CommonModuleCandidates::new(
+                vec![(base, false), (ext, false)],
+                false,
+            );
+            let name = Name::new("П");
+            super::reference_targets(&candidates, |m| index.find_method(m, &name))
+        }
+
+        // Control: a base body that exports the name really does answer the call, and
+        // an answered call owes nobody a reference.
+        assert_eq!(targets("Процедура П() Экспорт КонецПроцедуры"), Vec::<ModuleId>::new());
+
+        let base = ModuleId::new(FileId(0));
+        let ext = ModuleId::new(FileId(1));
+        assert_eq!(
+            targets("Процедура П() КонецПроцедуры"),
+            vec![base, ext],
+            "a non-exported declaration blocks the call, so both bodies stay tracked"
+        );
+    }
+
+    /// Both hashes are read as proof that other modules' calls still resolve the same
+    /// way. An unread body bars callers from any body behind it, so crossing that
+    /// barrier has to move them — and it is invisible to everything else they hash,
+    /// because an unread body and an empty readable one declare the same nothing.
+    #[test]
+    fn both_hashes_move_when_a_body_crosses_the_unread_barrier() {
+        let readable = hashes_marked("", false);
+        let unread = hashes_marked("", true);
+        assert_ne!(readable.0, unread.0, "signature identity must see the barrier");
+        assert_ne!(readable.1, unread.1, "resident layout identity must see it too");
+
+        // Control: everything else about the two indexed modules is identical, so the
+        // inequality above is the flag speaking and not two unrelated modules.
+        assert_eq!(readable, hashes_marked("", false));
     }
 
     #[test]

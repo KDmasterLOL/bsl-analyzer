@@ -1,4 +1,13 @@
-pub const SCHEMA_VERSION_CURRENT: i32 = 1;
+/// Version 3 keys a file by `(collection, root_id, path)` in EVERY carrier, semantic included.
+///
+/// Each bump is deliberate and its cost is a hard stop for older builds: a column added to a
+/// table is invisible to them, but the DATA is not. Once a build that knows roots publishes an
+/// extension, an older one on the same schema folds two files sharing a relative path into one
+/// key and silently serves one of them. The choice was never "hard stop versus rolling upgrade"
+/// — it was a hard stop versus losing a live file in silence. Version 2 brought the three
+/// mandatory carriers, and 3 brings `serving_semantic`, where the same two files would otherwise
+/// collide on one primary key.
+pub const SCHEMA_VERSION_CURRENT: i32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SearchError {
@@ -23,8 +32,21 @@ pub enum SearchError {
     #[error("storage_not_initialized: PostgreSQL baseline storage has not been initialized (schema: {schema}); run `admin migrate` first")]
     StorageNotInitialized { schema: String },
 
-    #[error("schema_version_mismatch: expected {expected}, got {actual:?}")]
-    SchemaVersionMismatch { expected: i32, actual: Option<i32> },
+    #[error(
+        "schema_version_mismatch: schema {schema} is at version {}, and this build needs \
+         {expected}; {}",
+        .actual.map_or_else(|| "none".to_owned(), |version| version.to_string()),
+        // The two directions need opposite advice, and only one of them is the common case.
+        // A schema NEWER than the build cannot be migrated forward — `admin migrate` is exactly
+        // the command that just refused it — so telling the operator to run it again sends them
+        // in a loop.
+        if .actual.is_some_and(|version| version > *.expected) {
+            "upgrade this build to one that knows that version"
+        } else {
+            "run `admin migrate` to bring it forward"
+        }
+    )]
+    SchemaVersionMismatch { expected: i32, actual: Option<i32>, schema: String },
 }
 
 impl SearchError {
@@ -45,13 +67,19 @@ impl SearchError {
         }
     }
 
+    /// Builds a named refusal whose name the classifier is guaranteed to recognise.
+    ///
+    /// For refusals whose name is decided at run time. A name written as a literal at the
+    /// construction site can be read there and checked against the vocabulary; one that arrives
+    /// through a binding cannot, so it comes from a [`ReasonCode`] instead.
+    pub(crate) fn named(reason: ReasonCode, detail: impl std::fmt::Display) -> Self {
+        Self::ExternalBaseline(format!("{}: {detail}", reason.as_str()))
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::StorageNotInitialized { .. } | Self::SchemaVersionMismatch { .. } => false,
-            Self::ExternalBaseline(message) => matches!(
-                external_baseline_reason_code(message),
-                Some("postgres_connect_failed" | "postgres_auth_failed")
-            ),
+            Self::ExternalBaseline(message) => message_names(message, RETRYABLE_REASONS),
             Self::Postgres(error) => postgres_error_is_retryable(error),
             Self::Io(_) => true,
             Self::Embedder(_) | Self::Index(_) => false,
@@ -69,38 +97,88 @@ impl SearchError {
         ) || matches!(self, Self::Postgres(error) if !postgres_error_is_retryable(error))
             || matches!(
                 self,
-                Self::ExternalBaseline(message)
-                    if !matches!(
-                        external_baseline_reason_code(message),
-                        Some(
-                            "postgres_connect_failed"
-                                | "postgres_auth_failed"
-                                | "serving_lexical_unavailable"
-                                | "serving_semantic_unavailable"
-                        )
-                    )
+                Self::ExternalBaseline(message) if !message_names(message, NON_TERMINAL_REASONS)
             )
     }
 }
 
-fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
-    const KNOWN_REASON_CODES: &[&str] = &[
-        "helper_spawn_failed",
-        "helper_timeout",
-        "helper_protocol_error",
-        "helper_rejected",
-        "resolved_target_mismatch",
-        "missing_config",
-        "postgres_connect_failed",
-        "postgres_auth_failed",
-        "refresh_retry_exhausted",
-        "serving_lexical_unavailable",
-        "serving_semantic_unavailable",
-    ];
+/// A refusal name the classifier is guaranteed to know.
+///
+/// The inner string is unreachable outside this module, so a helper cannot hand
+/// [`SearchError::named`] a name of its own invention: the only names that exist are the
+/// constants below. A code spelled twice — once where the refusal is built, once where it is
+/// classified — is a code that can drift apart, and the drift is silent, because a refusal whose
+/// name nobody recognises is simply an unnamed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReasonCode(&'static str);
 
+impl ReasonCode {
+    pub(crate) const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+pub(crate) mod reason {
+    use super::ReasonCode;
+
+    pub(crate) const HELPER_SPAWN_FAILED: ReasonCode = ReasonCode("helper_spawn_failed");
+    pub(crate) const HELPER_TIMEOUT: ReasonCode = ReasonCode("helper_timeout");
+    pub(crate) const HELPER_PROTOCOL_ERROR: ReasonCode = ReasonCode("helper_protocol_error");
+    pub(crate) const HELPER_REJECTED: ReasonCode = ReasonCode("helper_rejected");
+    pub(crate) const RESOLVED_TARGET_MISMATCH: ReasonCode = ReasonCode("resolved_target_mismatch");
+    pub(crate) const MISSING_CONFIG: ReasonCode = ReasonCode("missing_config");
+    pub(crate) const POSTGRES_CONNECT_FAILED: ReasonCode = ReasonCode("postgres_connect_failed");
+    pub(crate) const POSTGRES_AUTH_FAILED: ReasonCode = ReasonCode("postgres_auth_failed");
+    pub(crate) const REFRESH_RETRY_EXHAUSTED: ReasonCode = ReasonCode("refresh_retry_exhausted");
+    pub(crate) const SERVING_LEXICAL_UNAVAILABLE: ReasonCode =
+        ReasonCode("serving_lexical_unavailable");
+    pub(crate) const SERVING_SEMANTIC_UNAVAILABLE: ReasonCode =
+        ReasonCode("serving_semantic_unavailable");
+    pub(crate) const ROOT_ID_NOT_PORTABLE: ReasonCode = ReasonCode("root_id_not_portable");
+    pub(crate) const SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING: ReasonCode =
+        ReasonCode("snapshot_republished_while_publishing");
+    pub(crate) const SCHEMA_NAME_TOO_LONG: ReasonCode = ReasonCode("schema_name_too_long");
+}
+
+/// The whole vocabulary. A code missing from here is not a named refusal at all.
+const KNOWN_REASON_CODES: &[ReasonCode] = &[
+    reason::HELPER_SPAWN_FAILED,
+    reason::HELPER_TIMEOUT,
+    reason::HELPER_PROTOCOL_ERROR,
+    reason::HELPER_REJECTED,
+    reason::RESOLVED_TARGET_MISMATCH,
+    reason::MISSING_CONFIG,
+    reason::POSTGRES_CONNECT_FAILED,
+    reason::POSTGRES_AUTH_FAILED,
+    reason::REFRESH_RETRY_EXHAUSTED,
+    reason::SERVING_LEXICAL_UNAVAILABLE,
+    reason::SERVING_SEMANTIC_UNAVAILABLE,
+    reason::ROOT_ID_NOT_PORTABLE,
+    reason::SNAPSHOT_REPUBLISHED_WHILE_PUBLISHING,
+    reason::SCHEMA_NAME_TOO_LONG,
+];
+
+/// Refusals the caller may retry: the corpus is intact, the way to it was not.
+const RETRYABLE_REASONS: &[ReasonCode] =
+    &[reason::POSTGRES_CONNECT_FAILED, reason::POSTGRES_AUTH_FAILED];
+
+/// Refusals that may yet resolve on their own — serving tables are filled by a later publish.
+const NON_TERMINAL_REASONS: &[ReasonCode] = &[
+    reason::POSTGRES_CONNECT_FAILED,
+    reason::POSTGRES_AUTH_FAILED,
+    reason::SERVING_LEXICAL_UNAVAILABLE,
+    reason::SERVING_SEMANTIC_UNAVAILABLE,
+];
+
+fn message_names(message: &str, codes: &[ReasonCode]) -> bool {
+    external_baseline_reason_code(message)
+        .is_some_and(|named| codes.iter().any(|code| code.as_str() == named))
+}
+
+fn external_baseline_reason_code(message: &str) -> Option<&'static str> {
     KNOWN_REASON_CODES
         .iter()
-        .copied()
+        .map(|code| code.as_str())
         .find(|code| message.strip_prefix(code).is_some_and(|rest| rest.starts_with(':')))
 }
 
@@ -139,7 +217,11 @@ mod tests {
 
     #[test]
     fn schema_version_mismatch_is_not_retryable() {
-        let err = SearchError::SchemaVersionMismatch { expected: 1, actual: Some(0) };
+        let err = SearchError::SchemaVersionMismatch {
+            expected: 1,
+            actual: Some(0),
+            schema: "bsl_search".to_owned(),
+        };
         assert!(err.is_schema_version_mismatch());
         assert!(!err.is_retryable());
     }
@@ -152,6 +234,110 @@ mod tests {
             assert!(!err.is_retryable());
             assert!(err.is_terminal());
         }
+    }
+
+    /// A code that exists as a constant is a code the classifier knows.
+    ///
+    /// The other half of the same drift: a refusal built through `SearchError::named` can only
+    /// name a `reason::` constant, but a constant left out of `KNOWN_REASON_CODES` classifies as
+    /// nothing at all — the refusal comes out unnamed, and only a caller reading `reason_code()`
+    /// would ever notice. Counted out of the source so declaring a code and registering it
+    /// cannot become two separate acts.
+    #[test]
+    fn every_declared_reason_code_is_in_the_vocabulary() {
+        // Spelled in halves so this needle does not count itself: the scan reads the very file
+        // it lives in. Matched on the declaration's type, not on its initialiser, which rustfmt
+        // is free to wrap onto the next line.
+        let declared = include_str!("error.rs").matches(concat!(": ReasonCode", " =")).count();
+
+        assert_eq!(
+            declared,
+            KNOWN_REASON_CODES.len(),
+            "{declared} reason codes are declared but {} are registered; a code outside \
+             KNOWN_REASON_CODES names nothing",
+            KNOWN_REASON_CODES.len()
+        );
+    }
+
+    /// Every named refusal in the storage adapter is recognised by the classifier.
+    ///
+    /// Read out of the SOURCE rather than from a list written here. The previous version of this
+    /// gate was a third hand-written copy of the same names — it could not fail on the drift it
+    /// was written for, because adding a refusal without touching `KNOWN_REASON_CODES` also
+    /// leaves the test's own list untouched. A gate that restates the thing it guards is not a
+    /// gate.
+    #[test]
+    fn every_named_refusal_in_the_adapter_has_a_reason_code() {
+        let source = include_str!("external_baseline/postgres.rs");
+        let production = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+
+        let mut checked = 0usize;
+        for occurrence in production.split("ExternalBaseline(").skip(1) {
+            // The refusal's name is the prefix before the first colon of its message, whether the
+            // message is a literal or a `format!`.
+            let window: String = occurrence.chars().take(200).collect();
+            let Some(quote) = window.find('"') else { continue };
+            let rest = &window[quote + 1..];
+            // A name that arrives through a binding is invisible to a reader AND to this scan,
+            // which used to skip such a site in silence — leaving the drift it guards against
+            // free to happen on exactly the refusals it could not read. Those go through
+            // `SearchError::named`, where the name can only be a declared code.
+            assert!(
+                !rest.starts_with('{'),
+                "this refusal interpolates its name, so nothing here can check it against the \
+                 classifier; construct it with SearchError::named and a `reason::` constant: {rest}"
+            );
+            let Some(colon) = rest.find(':') else { continue };
+            let name = &rest[..colon];
+            if name.is_empty()
+                || !name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                || name.contains('\n')
+            {
+                continue;
+            }
+            let error = SearchError::ExternalBaseline(format!("{name}: something went wrong"));
+            assert_eq!(
+                error.reason_code(),
+                Some(name),
+                "the adapter names this refusal, but the classifier does not know it"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked >= 4,
+            "the scan found only {checked} named refusals; it stopped matching the source"
+        );
+    }
+
+    /// The advice matches the DIRECTION of the mismatch.
+    ///
+    /// One message served both directions, and for a schema newer than the build it named the
+    /// very command that had just refused it.
+    #[test]
+    fn the_version_mismatch_advises_by_direction() {
+        let behind = SearchError::SchemaVersionMismatch {
+            expected: 2,
+            actual: Some(1),
+            schema: "bsl_search".to_owned(),
+        }
+        .to_string();
+        assert!(behind.contains("admin migrate"), "a schema behind the build migrates: {behind}");
+
+        let ahead = SearchError::SchemaVersionMismatch {
+            expected: 2,
+            actual: Some(3),
+            schema: "bsl_search".to_owned(),
+        }
+        .to_string();
+        assert!(
+            ahead.contains("upgrade this build"),
+            "a schema ahead of the build cannot be migrated forward: {ahead}"
+        );
+        assert!(
+            !ahead.contains("admin migrate"),
+            "advising the command that just refused sends the operator in a loop: {ahead}"
+        );
     }
 
     #[test]
@@ -242,7 +428,12 @@ mod tests {
         assert!(
             SearchError::StorageNotInitialized { schema: "bsl_search".to_owned() }.is_terminal()
         );
-        assert!(SearchError::SchemaVersionMismatch { expected: 1, actual: Some(0) }.is_terminal());
+        assert!(SearchError::SchemaVersionMismatch {
+            expected: 1,
+            actual: Some(0),
+            schema: "bsl_search".to_owned(),
+        }
+        .is_terminal());
         assert!(SearchError::ExternalBaseline("refresh failed".to_owned()).is_terminal());
         assert!(SearchError::Embedder("timeout".to_owned()).is_terminal());
         assert!(SearchError::Index("corrupted".to_owned()).is_terminal());

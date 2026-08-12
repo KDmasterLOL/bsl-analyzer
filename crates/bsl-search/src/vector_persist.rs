@@ -230,6 +230,7 @@ fn unique_temp(target: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_roots::CONFIGURATION_ROOT_ID;
     use code_chunk::{Chunk, ChunkKind};
 
     const DIM: usize = 8;
@@ -255,7 +256,7 @@ mod tests {
         let mut store = Store::open(&dir.join("search.db")).unwrap();
         let chunks: Vec<Chunk> = (0..n).map(|i| chunk(&format!("P{i}"))).collect();
         let embs: Vec<Vec<f32>> = (0..n).map(|i| emb(i as f32)).collect();
-        store.reindex_file("f.bsl", b"h0", &chunks, Some(&embs)).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "f.bsl", b"h0", &chunks, Some(&embs)).unwrap();
         store
     }
 
@@ -323,7 +324,9 @@ mod tests {
 
         // A new embedded chunk in another file advances the generation even though the existing
         // rows are untouched, so the persisted index (missing the new vector) is rebuilt.
-        store.reindex_file("g.bsl", b"h1", &[chunk("New")], Some(&[emb(7.0)])).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "g.bsl", b"h1", &[chunk("New")], Some(&[emb(7.0)]))
+            .unwrap();
         assert!(try_load(&store, &key(&store)).is_none());
     }
 
@@ -336,7 +339,7 @@ mod tests {
 
         // Deleting the file cascades to its chunks; `files_gen_del` advances the generation so the
         // index built over the now-deleted vectors is rejected.
-        store.remove_file("f.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "f.bsl", "code").unwrap();
         assert!(try_load(&store, &key(&store)).is_none());
     }
 

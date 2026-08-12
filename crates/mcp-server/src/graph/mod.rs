@@ -17,8 +17,9 @@ pub(crate) mod scan;
 mod snapshot;
 mod state;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod types;
+pub(crate) mod universe;
 
 #[allow(
     unused_imports,
@@ -30,8 +31,7 @@ pub(crate) use build::{read_stored_fingerprints, read_stored_sig_hashes};
     reason = "the stable graph facade preserves crate::graph helper paths while leaf consumers import directly"
 )]
 pub(crate) use input::{
-    build_source_root, db_for_files, db_for_files_lazy, enumerate_bsl_files, ProjectSnapshot,
-    GRAPH_SOURCE_ROOT,
+    build_source_root, db_for_files, db_for_files_lazy, ProjectSnapshot, GRAPH_SOURCE_ROOT,
 };
 #[allow(
     unused_imports,
@@ -49,5 +49,6 @@ pub(crate) use state::GraphState;
     reason = "the stable graph facade preserves crate::graph lifecycle paths"
 )]
 pub(crate) use types::{
-    Freshness, FusedStartup, GraphPublishSignal, GraphStatus, GraphStatusReport, NudgeOutcome,
+    Freshness, FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus,
+    GraphStatusReport, NudgeOutcome,
 };

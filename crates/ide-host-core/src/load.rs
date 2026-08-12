@@ -28,10 +28,18 @@ pub enum FileTextSource<'a> {
     /// re-read on demand under the salsa LRU). The caller passes the text it already
     /// read; the revision is derived here so callers cannot diverge on the hash.
     Disk(&'a str),
-    /// A deleted or unreadable file: an empty overlay so a later query yields `""`
-    /// instead of panicking on a disk re-read. FileSet removal (if any) stays with
-    /// the driver — this only sets the text state.
-    Tombstone,
+    /// A deleted file: an empty overlay so a later query yields `""` instead of
+    /// panicking on a disk re-read. FileSet removal (if any) stays with the driver —
+    /// this only sets the text state.
+    Deleted,
+    /// A file that is still there but whose bytes could not be read: the same empty
+    /// overlay, plus the mark that says the emptiness is ignorance.
+    ///
+    /// Split from [`Deleted`](Self::Deleted) because one variant cannot carry two
+    /// meanings and still be written down: name resolution has to tell "this module
+    /// has no API" from "nobody could read this module's API", and both arrive here
+    /// as the same empty text.
+    Unreadable,
 }
 
 /// Apply one file's [`FileTextSource`] to `db`. A leaf salsa mutation only: it does
@@ -46,7 +54,8 @@ pub fn set_file_text_source(
         FileTextSource::Disk(text) => {
             db.set_file_revision_from_disk(file_id, content_revision(text))
         }
-        FileTextSource::Tombstone => db.set_file_text(file_id, ""),
+        FileTextSource::Deleted => db.set_file_text(file_id, ""),
+        FileTextSource::Unreadable => db.set_file_unreadable(file_id),
     }
 }
 
@@ -82,7 +91,7 @@ pub fn register_files_disk_backed(
             Ok(text) => set_file_text_source(db, *file_id, FileTextSource::Disk(&text)),
             Err(e) => {
                 tracing::warn!(path = %path.display(), "resident load: read failed: {e}");
-                set_file_text_source(db, *file_id, FileTextSource::Tombstone);
+                set_file_text_source(db, *file_id, FileTextSource::Unreadable);
                 unreadable.push((path.clone(), e));
             }
         }
@@ -140,8 +149,14 @@ mod tests {
         assert!(db.try_file_text(FileId(0)).is_none(), "disk-backed is not pinned");
         assert_eq!(&*read(&db), "Текст");
 
-        // Tombstone: empty overlay.
-        set_file_text_source(&mut db, FileId(0), FileTextSource::Tombstone);
+        // Deleted: empty overlay, and the emptiness stands for content.
+        set_file_text_source(&mut db, FileId(0), FileTextSource::Deleted);
         assert_eq!(&*read(&db), "");
+        assert!(!db.file_is_unread(FileId(0)), "a deleted file is not an unread one");
+
+        // Unreadable: the same empty overlay, marked.
+        set_file_text_source(&mut db, FileId(0), FileTextSource::Unreadable);
+        assert_eq!(&*read(&db), "");
+        assert!(db.file_is_unread(FileId(0)));
     }
 }

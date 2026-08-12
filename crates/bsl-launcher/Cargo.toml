@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 reqwest = { version = "0.13", features = ["blocking", "rustls"], default-features = false }
+webpki-root-certs = "1"
 dirs = "6"
 anyhow = "1.0"
 ed25519-dalek = "2.2"

@@ -1,0 +1,224 @@
+{
+  "runId": "5b96fdd5",
+  "agent": "worker",
+  "task": "[Read from: /home/itrous/src/tools_migration/lsp/bsl-analyzer/context.md, /home/itrous/src/tools_migration/lsp/bsl-analyzer/plan.md]\n\nYou are a delegated subagent running from a fork of the parent session. Treat the inherited conversation as reference-only context, not a live thread to continue. Do not continue or answer prior messages as if they are waiting for a reply. Your sole job is to execute the task below and return a focused result for that task using your tools.\n\nTask:\nFix the confirmed final OneCPI HIGH on the current issue #209 branch: one invalid-UTF8 or otherwise unreadable .bsl returned by a clean SourceSet scan must not abort the entire root transition forever.\nDesign a truthful partial-file contract: scan completeness and per-file read failure are distinct. The transition may publish the new root table while preserving any old carrier for an unread surviving key when safely attributable, and must create a durable dirty/unread retry obligation for a newly added or rebound unread key so watcher/overlay retry can heal it. It must not treat unread content as deletion, must not tombstone/hide a present unread baseline file, and must not claim its lexical/semantic content rebuilt.\nExtend WorkspaceRootsTransitionPlan and cache/store transition inputs as needed with unread keys. Revalidation must compare the complete key set including unread files and distinguish a still-unread same file from create/delete/retarget. A read that heals or changes between plan and validation should supersede/retry from fresh bytes.\nAdd deterministic tests for invalid UTF-8 in a stable configuration file while adding an extension, invalid UTF-8 in the newly added root, preservation of an existing row/overlay entry for unread surviving keys, no baseline hiding/tombstone for unread-present, and later successful dirty refresh clearing the obligation.\nDo not broaden into HNSW or selective-scan optimization unless required. Run fmt, bsl-search tests, mcp-server tests and clippy -D warnings. Leave changes uncommitted for review. No worktree/nested agents.",
+  "exitCode": 0,
+  "usage": {
+    "input": 117490,
+    "output": 21620,
+    "cacheRead": 3120640,
+    "cacheWrite": 0,
+    "cost": 2.796369999999999,
+    "turns": 54
+  },
+  "model": "openai-codex/gpt-5.6-sol:high",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 117490,
+        "output": 21620,
+        "cacheRead": 3120640,
+        "cacheWrite": 0,
+        "cost": 2.796369999999999,
+        "turns": 54
+      }
+    }
+  ],
+  "durationMs": 993816,
+  "toolCount": 64,
+  "launchContractDigest": "629d2810c855efe911bf97cffeb6c2b23ec389ad41f39ffb4d27f0291b9d13d4",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:e414f01f6029c834"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:e414f01f6029c834"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "checked",
+    "evidenceStatus": "checked",
+    "explicit": true,
+    "effectiveAcceptance": {
+      "level": "checked",
+      "explicit": true,
+      "inferredReason": [
+        "write-capable worker/task"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Implement the requested change without widening scope",
+          "evidence": [
+            "changed-files",
+            "tests-added",
+            "commands-run",
+            "residual-risks",
+            "no-staged-files",
+            "validation-output"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "changed-files",
+        "tests-added",
+        "commands-run",
+        "residual-risks",
+        "no-staged-files",
+        "validation-output"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "write-capable worker/task"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Implement the requested change without widening scope",
+        "evidence": [
+          "changed-files",
+          "tests-added",
+          "commands-run",
+          "residual-risks",
+          "no-staged-files",
+          "validation-output"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [
+      {
+        "id": "criterion:criterion-1",
+        "status": "passed",
+        "message": "Required criterion 'criterion-1' satisfied."
+      },
+      {
+        "id": "evidence:changed-files",
+        "status": "passed",
+        "message": "changed-files evidence present."
+      },
+      {
+        "id": "evidence:tests-added",
+        "status": "passed",
+        "message": "tests-added evidence present."
+      },
+      {
+        "id": "evidence:commands-run",
+        "status": "passed",
+        "message": "commands-run evidence present."
+      },
+      {
+        "id": "evidence:residual-risks",
+        "status": "passed",
+        "message": "residual-risks evidence present."
+      },
+      {
+        "id": "evidence:no-staged-files",
+        "status": "passed",
+        "message": "no-staged-files evidence present."
+      },
+      {
+        "id": "evidence:validation-output",
+        "status": "passed",
+        "message": "validation-output evidence present."
+      },
+      {
+        "id": "no-staged-files",
+        "status": "passed",
+        "message": "No staged files detected."
+      }
+    ],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Root transitions now distinguish clean scan coverage from per-file read failure, preserve stable unread carriers, create durable dirty/unread obligations, avoid tombstones/hiding for unread-present files, and supersede when read state or bytes change during revalidation."
+        }
+      ],
+      "changedFiles": [
+        "crates/bsl-search/src/engine.rs",
+        "crates/bsl-search/src/workspace_overlay.rs"
+      ],
+      "testsAddedOrUpdated": [
+        "invalid_utf8_in_a_stable_root_does_not_block_adding_an_extension",
+        "unread_surviving_remote_overlay_entry_is_preserved",
+        "invalid_utf8_in_a_new_root_is_unread_not_deleted_and_later_heals",
+        "unread_present_remote_baseline_is_not_hidden_or_tombstoned",
+        "unread_file_becoming_readable_during_validation_supersedes_the_plan",
+        "workspace_overlay root-transition call sites updated for unread-present input"
+      ],
+      "commandsRun": [
+        {
+          "command": "cargo fmt --all -- --check",
+          "result": "passed",
+          "summary": "Formatting is clean."
+        },
+        {
+          "command": "cargo test -p bsl-search --lib",
+          "result": "passed",
+          "summary": "379 passed, 28 ignored."
+        },
+        {
+          "command": "cargo test -p mcp-server",
+          "result": "passed",
+          "summary": "669 unit plus 31 integration tests passed; 1 ignored."
+        },
+        {
+          "command": "cargo clippy --all-targets --all-features -- -D warnings",
+          "result": "passed",
+          "summary": "Workspace clippy completed without errors."
+        },
+        {
+          "command": "git diff --check",
+          "result": "passed",
+          "summary": "No whitespace errors."
+        }
+      ],
+      "validationOutput": [
+        "bsl-search test result: 379 passed; 0 failed; 28 ignored.",
+        "mcp-server validation: 700 passed; 0 failed; 1 ignored.",
+        "Clippy finished successfully with warnings denied.",
+        "Focused invalid-UTF8, carrier-preservation, baseline-hiding, healing, and revalidation tests passed."
+      ],
+      "residualRisks": [
+        "Live PostgreSQL tests require BSL_TEST_PG_URL and were not run.",
+        "context.md and plan.md requested by the task were not present at the supplied paths."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "Adds readable/invalid-UTF8/read-failed file identities to transition planning and revalidation; includes unread keys in the complete next universe; preserves safe stable carriers; records dirty/unread retry debt; excludes unread-present keys from deletion, hiding, tombstones, and rebuilt counts.",
+      "reviewFindings": [
+        "no blockers found by implementation validation; independent OneCPI rerun remains the recommended next step"
+      ],
+      "manualNotes": "Scope was limited to the confirmed unread-file HIGH; HNSW and selective-scan findings were not addressed."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "observed",
+      "expected": true,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/5b96fdd5_worker_0_transcript.jsonl",
+  "timestamp": 1786531199882
+}

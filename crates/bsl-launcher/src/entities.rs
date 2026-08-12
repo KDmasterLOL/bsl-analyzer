@@ -27,6 +27,34 @@ pub struct ReleaseConfig {
     pub repo: Option<String>,
 }
 
+/// Launcher artifact for the running platform, the counterpart of
+/// [`get_platform_binary`] for the thin wrapper rather than the app.
+pub fn get_platform_launcher() -> &'static str {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "bsl-analyzer-linux-amd64";
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "bsl-analyzer-linux-arm64";
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "bsl-analyzer-darwin-amd64";
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "bsl-analyzer-darwin-arm64";
+
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "bsl-analyzer-windows-amd64.exe";
+
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64"),
+    )))]
+    compile_error!("Unsupported platform");
+}
+
 pub fn get_platform_binary() -> &'static str {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return "bsl-analyzer-app-linux-amd64";

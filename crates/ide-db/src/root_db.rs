@@ -56,10 +56,27 @@ pub trait RootDatabase:
         module_file_id: FileId,
     ) -> Option<Arc<bsl_metadata::IntegrationService>>;
 
-    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
-    /// `file_id` (base + the file's own extension). For method/parameter validation
-    /// that must read the module body, scoped extension-private like the metadata.
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId>;
+    /// The `Ext/Module.bsl` bodies of the common module `name` visible to `file_id`
+    /// (base + the file's own extension), each carrying whether its bytes could be
+    /// read. For method/parameter validation that must read the module body, scoped
+    /// extension-private like the metadata.
+    ///
+    /// The composition rather than a plain list of files, because a consumer that
+    /// cannot see an unread body decides "the module has no such method" from bodies
+    /// that were never entitled to answer.
+    ///
+    /// This is the MERGED surface, ordered extension-first — not priority order. Walk
+    /// it with [`hir::CommonModuleBodies::search_merged_surface`]; `search` would stop
+    /// at "the first" unread body, and in this order the unread one can be last.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies;
+
+    /// Uncached application-host path lookup used only behind the tracked
+    /// `application_module_files_query` aggregation.
+    fn resolve_application_module_files_uncached(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies>;
 
     fn all_sdbl_in_file(
         &self,

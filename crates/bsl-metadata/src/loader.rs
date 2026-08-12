@@ -13,21 +13,19 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     let path = path.as_ref();
     let _span = tracing::info_span!("load_from_directory", ?path).entered();
 
-    // This load fans out over a `rayon::scope` on the CURRENT pool. Under an
-    // exclusive-pool job (a graph-build worker) that nesting can deadlock: a
-    // worker waiting on the scope steals a sibling job whose query re-enters a
-    // memo suspended on this very thread. Report the violation loudly — the
-    // deadlock it precedes is otherwise silent.
+    // Reaching this under an exclusive-pool job means a pre-pool warm-up missed
+    // this config root: the load is about to park a build worker for a whole
+    // configuration's XML parse. `off_exclusive_pool` keeps that from
+    // deadlocking, but the miss itself stays a defect worth naming.
     if stdx::par_guard::no_nested_parallelism() {
         tracing::error!(
             ?path,
             "whole-config metadata load entered from a no-nested-parallelism job; \
-             its rayon::scope may deadlock the calling pool"
+             the pre-pool warm-up did not cover this config root"
         );
-        debug_assert!(false, "metadata loader entered under a no-nested-parallelism job");
     }
 
-    let loaded = load_all_metadata_parallel(path);
+    let loaded = off_exclusive_pool(|| load_all_metadata_parallel(path));
     let config = build_configuration(loaded);
 
     tracing::info!(
@@ -44,6 +42,51 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     );
 
     Ok(config)
+}
+
+/// Run `f` off the pool of a job that forbids nested parallelism, and directly
+/// otherwise.
+///
+/// The whole-config load fans out over a `rayon::scope` on the CURRENT pool.
+/// Under an exclusive-pool job (a graph-build worker) that nesting can deadlock:
+/// rayon keeps stealing while a worker waits on a latch, so the waiting worker
+/// can pick up a sibling job whose query re-enters a memo suspended on this very
+/// thread. Handing the work to a plain OS thread moves the fan-out to the global
+/// pool and parks the caller in `join`, which steals nothing. Installing on
+/// another rayon pool would NOT do: the caller would still wait on a latch.
+/// Probe `Ext/<name>` under an object directory, canonical spelling first;
+/// the returned path carries the REAL on-disk spelling (it flows into
+/// `module_file` and URIs, which must agree with the scanned universe).
+fn probe_ext_child(
+    dir: &Path,
+    name: bsl_conventions::ConventionalName,
+) -> Option<std::path::PathBuf> {
+    bsl_conventions::resolve_chain_ci(
+        dir,
+        &[bsl_conventions::ConventionalName::Ext.canonical(), name.canonical()],
+    )
+}
+
+/// The `<name>.xml` sibling of an object directory: the stem is the OBJECT's
+/// name and matches exactly, only the extension is case-insensitive.
+fn probe_sibling_xml(dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    bsl_conventions::find_child_stem_exact(dir, name, bsl_conventions::XML_EXTENSION)
+}
+
+/// A collection directory under the root: canonical English spelling first,
+/// else the case variant the tree actually uses. Falls back to the constructed
+/// path so an absent collection keeps reading as empty.
+fn collection_dir(root: &Path, name: &str) -> std::path::PathBuf {
+    bsl_conventions::find_child_ci(root, name).unwrap_or_else(|| root.join(name))
+}
+
+fn off_exclusive_pool<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    if !stdx::par_guard::no_nested_parallelism() {
+        return f();
+    }
+
+    std::thread::scope(|scope| scope.spawn(f).join())
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
 }
 
 struct LoadedMetadata {
@@ -107,84 +150,98 @@ fn load_all_metadata_parallel(path: &Path) -> LoadedMetadata {
     rayon::scope(|s| {
         s.spawn(|_| {
             *common_modules.lock().unwrap() =
-                load_common_modules_parallel(&path.join("CommonModules"))
+                load_common_modules_parallel(&collection_dir(path, "CommonModules"))
         });
-        s.spawn(|_| *catalogs.lock().unwrap() = load_catalogs_parallel(&path.join("Catalogs")));
-        s.spawn(|_| *documents.lock().unwrap() = load_documents_parallel(&path.join("Documents")));
+        s.spawn(|_| {
+            *catalogs.lock().unwrap() = load_catalogs_parallel(&collection_dir(path, "Catalogs"))
+        });
+        s.spawn(|_| {
+            *documents.lock().unwrap() = load_documents_parallel(&collection_dir(path, "Documents"))
+        });
         s.spawn(|_| {
             *info_registers.lock().unwrap() =
-                load_information_registers_parallel(&path.join("InformationRegisters"))
+                load_information_registers_parallel(&collection_dir(path, "InformationRegisters"))
         });
         s.spawn(|_| {
             *accum_registers.lock().unwrap() =
-                load_accumulation_registers_parallel(&path.join("AccumulationRegisters"))
+                load_accumulation_registers_parallel(&collection_dir(path, "AccumulationRegisters"))
         });
         s.spawn(|_| {
             *account_registers.lock().unwrap() =
-                load_accounting_registers_parallel(&path.join("AccountingRegisters"))
+                load_accounting_registers_parallel(&collection_dir(path, "AccountingRegisters"))
         });
         s.spawn(|_| {
             *calc_registers.lock().unwrap() =
-                load_calculation_registers_parallel(&path.join("CalculationRegisters"))
+                load_calculation_registers_parallel(&collection_dir(path, "CalculationRegisters"))
         });
         s.spawn(|_| {
             *event_subscriptions.lock().unwrap() =
-                load_event_subscriptions_parallel(&path.join("EventSubscriptions"))
+                load_event_subscriptions_parallel(&collection_dir(path, "EventSubscriptions"))
         });
         s.spawn(|_| {
             *scheduled_jobs.lock().unwrap() =
-                load_scheduled_jobs_parallel(&path.join("ScheduledJobs"))
+                load_scheduled_jobs_parallel(&collection_dir(path, "ScheduledJobs"))
         });
-        s.spawn(|_| *roles.lock().unwrap() = load_roles_parallel(&path.join("Roles")));
+        s.spawn(|_| *roles.lock().unwrap() = load_roles_parallel(&collection_dir(path, "Roles")));
         s.spawn(|_| {
-            *defined_types.lock().unwrap() = load_defined_types_parallel(&path.join("DefinedTypes"))
+            *defined_types.lock().unwrap() =
+                load_defined_types_parallel(&collection_dir(path, "DefinedTypes"))
         });
         s.spawn(|_| {
             *charts_char_types.lock().unwrap() = load_charts_of_characteristic_types_parallel(
-                &path.join("ChartsOfCharacteristicTypes"),
+                &collection_dir(path, "ChartsOfCharacteristicTypes"),
             )
         });
-        s.spawn(|_| *constants.lock().unwrap() = load_constants_parallel(&path.join("Constants")));
+        s.spawn(|_| {
+            *constants.lock().unwrap() = load_constants_parallel(&collection_dir(path, "Constants"))
+        });
         s.spawn(|_| {
             *exchange_plans.lock().unwrap() =
-                load_exchange_plans_parallel(&path.join("ExchangePlans"))
+                load_exchange_plans_parallel(&collection_dir(path, "ExchangePlans"))
         });
         s.spawn(|_| {
             *business_processes.lock().unwrap() =
-                load_business_processes_parallel(&path.join("BusinessProcesses"))
+                load_business_processes_parallel(&collection_dir(path, "BusinessProcesses"))
         });
-        s.spawn(|_| *enums.lock().unwrap() = load_enums_parallel(&path.join("Enums")));
-        s.spawn(|_| *tasks.lock().unwrap() = load_tasks_parallel(&path.join("Tasks")));
+        s.spawn(|_| *enums.lock().unwrap() = load_enums_parallel(&collection_dir(path, "Enums")));
+        s.spawn(|_| *tasks.lock().unwrap() = load_tasks_parallel(&collection_dir(path, "Tasks")));
         s.spawn(|_| {
             *charts_accounts.lock().unwrap() =
-                load_charts_of_accounts_parallel(&path.join("ChartsOfAccounts"))
+                load_charts_of_accounts_parallel(&collection_dir(path, "ChartsOfAccounts"))
         });
         s.spawn(|_| {
-            *charts_calc_types.lock().unwrap() =
-                load_charts_of_calculation_types_parallel(&path.join("ChartsOfCalculationTypes"))
+            *charts_calc_types.lock().unwrap() = load_charts_of_calculation_types_parallel(
+                &collection_dir(path, "ChartsOfCalculationTypes"),
+            )
         });
         s.spawn(|_| {
             *external_data_sources.lock().unwrap() = load_simple_metadata_objects_parallel(
-                &path.join("ExternalDataSources"),
+                &collection_dir(path, "ExternalDataSources"),
                 MdoType::ExternalDataSource,
             )
         });
         s.spawn(|_| {
-            *http_services.lock().unwrap() = load_http_services_parallel(&path.join("HTTPServices"))
+            *http_services.lock().unwrap() =
+                load_http_services_parallel(&collection_dir(path, "HTTPServices"))
         });
         s.spawn(|_| {
-            *web_services.lock().unwrap() = load_web_services_parallel(&path.join("WebServices"))
+            *web_services.lock().unwrap() =
+                load_web_services_parallel(&collection_dir(path, "WebServices"))
         });
         s.spawn(|_| {
             *integration_services.lock().unwrap() =
-                load_integration_services_parallel(&path.join("IntegrationServices"))
+                load_integration_services_parallel(&collection_dir(path, "IntegrationServices"))
         });
         s.spawn(|_| {
             *data_processors.lock().unwrap() =
-                load_data_processors_parallel(&path.join("DataProcessors"))
+                load_data_processors_parallel(&collection_dir(path, "DataProcessors"))
         });
-        s.spawn(|_| *reports.lock().unwrap() = load_reports_parallel(&path.join("Reports")));
-        s.spawn(|_| *subsystems.lock().unwrap() = load_subsystems(&path.join("Subsystems")));
+        s.spawn(|_| {
+            *reports.lock().unwrap() = load_reports_parallel(&collection_dir(path, "Reports"))
+        });
+        s.spawn(|_| {
+            *subsystems.lock().unwrap() = load_subsystems(&collection_dir(path, "Subsystems"))
+        });
     });
 
     let result = LoadedMetadata {
@@ -335,7 +392,7 @@ fn collect_subsystems(dir: &Path, out: &mut Vec<crate::subsystem::Subsystem>) {
     };
     for entry in entries {
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+        if path.is_file() && bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION) {
             if let Ok(xml) = fs::read_to_string(&path) {
                 if let Ok(subsystem) = xml_parser::parse_subsystem_xml(&xml) {
                     out.push(subsystem);
@@ -343,7 +400,7 @@ fn collect_subsystems(dir: &Path, out: &mut Vec<crate::subsystem::Subsystem>) {
             }
         } else if path.is_dir() {
             // Nested subsystems live under `<Name>/Subsystems/`.
-            collect_subsystems(&path.join("Subsystems"), out);
+            collect_subsystems(&collection_dir(&path, "Subsystems"), out);
         }
     }
 }
@@ -367,21 +424,28 @@ fn load_common_modules_parallel(dir: &Path) -> Vec<crate::common_module::CommonM
             }
 
             let name = module_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-            let module_bsl_path = module_dir.join("Ext/Module.bsl");
-            let module_bin_path = module_dir.join("Ext/Module.bin");
-
-            if !xml_path.exists() {
-                return None;
-            }
+            let xml_path = probe_sibling_xml(dir, name)?;
+            let module_bsl_path =
+                probe_ext_child(&module_dir, bsl_conventions::ConventionalName::Module);
+            let module_bin_path =
+                probe_ext_child(&module_dir, bsl_conventions::ConventionalName::ModuleBin);
 
             let xml = fs::read_to_string(&xml_path).ok()?;
             let mut module = xml_parser::parse_common_module_xml(&xml).ok()?;
 
-            let is_protected = module_bin_path.exists() && !module_bsl_path.exists();
+            let is_protected = module_bin_path.is_some() && module_bsl_path.is_none();
 
-            if module_bsl_path.exists() {
-                let uri = format!("CommonModules/{}/Ext/Module.bsl", name);
+            if let Some(found) = &module_bsl_path {
+                let suffix = found
+                    .strip_prefix(&module_dir)
+                    .unwrap_or(found.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                // Сегмент коллекции — тоже реальное написание: `dir` пришёл из
+                // пробы каталога коллекции.
+                let collection =
+                    dir.file_name().and_then(|n| n.to_str()).unwrap_or("CommonModules");
+                let uri = format!("{}/{}/{}", collection, name, suffix);
                 module = crate::common_module::CommonModule::builder()
                     .uuid(*module.uuid())
                     .name(module.name())
@@ -490,21 +554,14 @@ where
 
             if path.is_dir() {
                 let name = path.file_name()?.to_str()?;
-                let xml_path = dir.join(format!("{}.xml", name));
-
-                if !xml_path.exists() {
-                    return None;
-                }
-
+                let xml_path = probe_sibling_xml(dir, name)?;
                 let main_xml = fs::read_to_string(&xml_path).ok()?;
-                let predefined_path = path.join("Ext").join("Predefined.xml");
-                let predefined_xml = predefined_path
-                    .exists()
-                    .then(|| fs::read_to_string(&predefined_path).ok())
-                    .flatten();
+                let predefined_xml =
+                    probe_ext_child(&path, bsl_conventions::ConventionalName::PredefinedXml)
+                        .and_then(|p| fs::read_to_string(p).ok());
 
                 build_metadata_object(&main_xml, predefined_xml.as_deref(), &parser)
-            } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
+            } else if bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION) {
                 let file_stem = path.file_stem()?.to_str()?;
 
                 if dir_names.contains(file_stem) {
@@ -625,10 +682,10 @@ const SIMPLE_XML_DIRS: &[(&str, MdoType)] =
 pub fn discover_metadata_structure(root: &Path) -> Vec<DiscoveredMdo> {
     let mut out = Vec::new();
     for (subdir, mdo_type) in METADATA_OBJECT_DIRS {
-        discover_dir_with_predefined(&root.join(subdir), *mdo_type, &mut out);
+        discover_dir_with_predefined(&collection_dir(root, subdir), *mdo_type, &mut out);
     }
     for (subdir, mdo_type) in SIMPLE_XML_DIRS {
-        discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
+        discover_loose_xml(&collection_dir(root, subdir), *mdo_type, &mut out);
     }
     // `read_dir` yields entries in an unspecified order, so sort to a stable key:
     // a structure listing built from this must compare equal across calls when the
@@ -666,14 +723,11 @@ fn discover_dir_with_predefined(dir: &Path, mdo_type: MdoType, out: &mut Vec<Dis
         let path = entry.path();
         if path.is_dir() {
             let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            let main = dir.join(format!("{name}.xml"));
-            if !main.exists() {
-                continue;
-            }
-            let predefined_path = path.join("Ext").join("Predefined.xml");
-            let predefined = predefined_path.exists().then_some(predefined_path);
+            let Some(main) = probe_sibling_xml(dir, name) else { continue };
+            let predefined =
+                probe_ext_child(&path, bsl_conventions::ConventionalName::PredefinedXml);
             out.push(DiscoveredMdo { mdo_type, name: name.to_string(), main, predefined });
-        } else if path.extension().and_then(|e| e.to_str()) == Some("xml") {
+        } else if bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION) {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
             if dir_names.contains(stem) {
                 continue;
@@ -696,7 +750,8 @@ fn discover_loose_xml(dir: &Path, mdo_type: MdoType, out: &mut Vec<DiscoveredMdo
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !path.is_file() || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+        {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -721,7 +776,7 @@ const REGISTER_DIRS: &[(&str, MdoType)] = &[
 pub fn discover_register_structure(root: &Path) -> Vec<DiscoveredMdo> {
     let mut out = Vec::new();
     for (subdir, mdo_type) in REGISTER_DIRS {
-        discover_loose_xml(&root.join(subdir), *mdo_type, &mut out);
+        discover_loose_xml(&collection_dir(root, subdir), *mdo_type, &mut out);
     }
     out.sort_by(|a, b| {
         (a.mdo_type as u32, a.name.fold_lower(), &a.main).cmp(&(
@@ -802,7 +857,7 @@ pub struct DiscoveredRole {
 /// by [`parse_defined_type_from_text`], so they get their own discovery + parse
 /// query while sharing the per-config-root structure listing.
 pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType> {
-    let dir = root.join("DefinedTypes");
+    let dir = collection_dir(root, "DefinedTypes");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -811,7 +866,8 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !path.is_file() || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+        {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -827,7 +883,7 @@ pub fn discover_defined_type_structure(root: &Path) -> Vec<DiscoveredDefinedType
 /// main XML path), the event-subscription counterpart of
 /// [`discover_defined_type_structure`].
 pub fn discover_event_subscription_structure(root: &Path) -> Vec<DiscoveredEventSubscription> {
-    let dir = root.join("EventSubscriptions");
+    let dir = collection_dir(root, "EventSubscriptions");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -836,7 +892,8 @@ pub fn discover_event_subscription_structure(root: &Path) -> Vec<DiscoveredEvent
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !path.is_file() || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+        {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -850,7 +907,7 @@ pub fn discover_event_subscription_structure(root: &Path) -> Vec<DiscoveredEvent
 /// XML path), the scheduled-job counterpart of
 /// [`discover_event_subscription_structure`].
 pub fn discover_scheduled_job_structure(root: &Path) -> Vec<DiscoveredScheduledJob> {
-    let dir = root.join("ScheduledJobs");
+    let dir = collection_dir(root, "ScheduledJobs");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -859,7 +916,8 @@ pub fn discover_scheduled_job_structure(root: &Path) -> Vec<DiscoveredScheduledJ
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !path.is_file() || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+        {
             continue;
         }
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -871,7 +929,7 @@ pub fn discover_scheduled_job_structure(root: &Path) -> Vec<DiscoveredScheduledJ
 
 pub fn discover_subsystem_structure(root: &Path) -> Vec<DiscoveredSubsystem> {
     let mut out = Vec::new();
-    collect_subsystem_structure(&root.join("Subsystems"), &mut out);
+    collect_subsystem_structure(&collection_dir(root, "Subsystems"), &mut out);
     out.sort_by(|a, b| (a.name.fold_lower(), &a.main).cmp(&(b.name.fold_lower(), &b.main)));
     out
 }
@@ -891,11 +949,13 @@ fn collect_subsystem_structure(dir: &Path, out: &mut Vec<DiscoveredSubsystem>) {
             };
 
             let path = entry.path();
-            if file_type.is_file() && path.extension().and_then(|e| e.to_str()) == Some("xml") {
+            if file_type.is_file()
+                && bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
                 out.push(DiscoveredSubsystem { name: stem.to_string(), main: path });
             } else if file_type.is_dir() {
-                stack.push(path.join("Subsystems"));
+                stack.push(collection_dir(&path, "Subsystems"));
             }
         }
     }
@@ -947,7 +1007,7 @@ pub struct DiscoveredIntegrationService {
 /// by [`parse_common_module_from_text`], so they get their own discovery + parse
 /// query while sharing the per-config-root structure listing.
 pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModule> {
-    let dir = root.join("CommonModules");
+    let dir = collection_dir(root, "CommonModules");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -960,12 +1020,8 @@ pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModu
             continue;
         }
         let Some(name) = module_dir.file_name().and_then(|n| n.to_str()) else { continue };
-        let main = dir.join(format!("{name}.xml"));
-        if !main.exists() {
-            continue;
-        }
-        let module_bsl = module_dir.join("Ext/Module.bsl");
-        let module_file = module_bsl.exists().then_some(module_bsl);
+        let Some(main) = probe_sibling_xml(&dir, name) else { continue };
+        let module_file = probe_ext_child(&module_dir, bsl_conventions::ConventionalName::Module);
         out.push(DiscoveredCommonModule { name: name.to_string(), main, module_file });
     }
     // Stable order so a structure listing built from this compares equal across
@@ -975,7 +1031,7 @@ pub fn discover_common_module_structure(root: &Path) -> Vec<DiscoveredCommonModu
 }
 
 pub fn discover_http_service_structure(root: &Path) -> Vec<DiscoveredHTTPService> {
-    let dir = root.join("HTTPServices");
+    let dir = collection_dir(root, "HTTPServices");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -984,13 +1040,13 @@ pub fn discover_http_service_structure(root: &Path) -> Vec<DiscoveredHTTPService
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let main = entry.path();
-        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !bsl_conventions::has_extension(&main, bsl_conventions::XML_EXTENSION) {
             continue;
         }
 
         let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
-        let module_bsl = dir.join(name).join("Ext/Module.bsl");
-        let module_file = module_bsl.exists().then_some(module_bsl);
+        let module_file =
+            probe_ext_child(&dir.join(name), bsl_conventions::ConventionalName::Module);
         out.push(DiscoveredHTTPService { name: name.to_string(), main, module_file });
     }
 
@@ -999,7 +1055,7 @@ pub fn discover_http_service_structure(root: &Path) -> Vec<DiscoveredHTTPService
 }
 
 pub fn discover_web_service_structure(root: &Path) -> Vec<DiscoveredWebService> {
-    let dir = root.join("WebServices");
+    let dir = collection_dir(root, "WebServices");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -1008,13 +1064,13 @@ pub fn discover_web_service_structure(root: &Path) -> Vec<DiscoveredWebService> 
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let main = entry.path();
-        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !bsl_conventions::has_extension(&main, bsl_conventions::XML_EXTENSION) {
             continue;
         }
 
         let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
-        let module_bsl = dir.join(name).join("Ext/Module.bsl");
-        let module_file = module_bsl.exists().then_some(module_bsl);
+        let module_file =
+            probe_ext_child(&dir.join(name), bsl_conventions::ConventionalName::Module);
         out.push(DiscoveredWebService { name: name.to_string(), main, module_file });
     }
 
@@ -1023,7 +1079,7 @@ pub fn discover_web_service_structure(root: &Path) -> Vec<DiscoveredWebService> 
 }
 
 pub fn discover_integration_service_structure(root: &Path) -> Vec<DiscoveredIntegrationService> {
-    let dir = root.join("IntegrationServices");
+    let dir = collection_dir(root, "IntegrationServices");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -1032,13 +1088,13 @@ pub fn discover_integration_service_structure(root: &Path) -> Vec<DiscoveredInte
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let main = entry.path();
-        if main.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !bsl_conventions::has_extension(&main, bsl_conventions::XML_EXTENSION) {
             continue;
         }
 
         let Some(name) = main.file_stem().and_then(|n| n.to_str()) else { continue };
-        let module_bsl = dir.join(name).join("Ext/Module.bsl");
-        let module_file = module_bsl.exists().then_some(module_bsl);
+        let module_file =
+            probe_ext_child(&dir.join(name), bsl_conventions::ConventionalName::Module);
         out.push(DiscoveredIntegrationService { name: name.to_string(), main, module_file });
     }
 
@@ -1125,7 +1181,7 @@ pub fn parse_role_from_texts(
 /// [`discover_scheduled_job_structure`]. Roles are stored as loose `Roles/<name>.xml`
 /// files, with optional rights under `Roles/<name>/Ext/Rights.xml`.
 pub fn discover_role_structure(root: &Path) -> Vec<DiscoveredRole> {
-    let dir = root.join("Roles");
+    let dir = collection_dir(root, "Roles");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(_) => return Vec::new(),
@@ -1134,14 +1190,15 @@ pub fn discover_role_structure(root: &Path) -> Vec<DiscoveredRole> {
     let mut out = Vec::new();
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+        if !path.is_file() || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+        {
             continue;
         }
 
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
         let rights = {
-            let rights_path = dir.join(stem).join("Ext").join("Rights.xml");
-            rights_path.is_file().then_some(rights_path)
+            probe_ext_child(&dir.join(stem), bsl_conventions::ConventionalName::RightsXml)
+                .filter(|p| p.is_file())
         };
 
         out.push(DiscoveredRole { name: stem.to_string(), main: path, rights });
@@ -1165,7 +1222,9 @@ fn load_enums_parallel(dir: &Path) -> Vec<MetadataObject> {
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1189,7 +1248,9 @@ fn load_constants_parallel(dir: &Path) -> Vec<MetadataObject> {
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1216,7 +1277,9 @@ where
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1258,7 +1321,9 @@ fn load_event_subscriptions_parallel(
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1282,7 +1347,9 @@ fn load_scheduled_jobs_parallel(dir: &Path) -> Vec<crate::scheduled_job::Schedul
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1306,7 +1373,9 @@ fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1314,8 +1383,9 @@ fn load_roles_parallel(dir: &Path) -> Vec<crate::role::Role> {
             let xml = fs::read_to_string(&path).ok()?;
             let mut role = xml_parser::parse_role_xml(&xml).ok()?;
 
-            let rights_path = dir.join(name).join("Ext").join("Rights.xml");
-            if rights_path.exists() {
+            let rights_path =
+                probe_ext_child(&dir.join(name), bsl_conventions::ConventionalName::RightsXml);
+            if let Some(rights_path) = rights_path {
                 if let Ok(rights_xml) = fs::read_to_string(&rights_path) {
                     if let Ok(rights_data) = xml_parser::parse_rights_xml(&rights_xml) {
                         role = crate::role::Role::with_data(
@@ -1346,7 +1416,9 @@ fn load_defined_types_parallel(dir: &Path) -> Vec<crate::defined_type::DefinedTy
         .into_par_iter()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("xml") {
+            if !path.is_file()
+                || !bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION)
+            {
                 return None;
             }
 
@@ -1375,14 +1447,22 @@ fn load_http_services_parallel(dir: &Path) -> Vec<crate::http_service::HTTPServi
             }
 
             let name = service_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-
-            if !xml_path.exists() {
-                return None;
-            }
+            let xml_path = probe_sibling_xml(dir, name)?;
 
             let xml = fs::read_to_string(&xml_path).ok()?;
-            xml_parser::parse_http_service_xml(&xml, name).ok()
+            let mut service = xml_parser::parse_http_service_xml(&xml, name).ok()?;
+            if let Some(found) =
+                probe_ext_child(&service_dir, bsl_conventions::ConventionalName::Module)
+            {
+                let suffix = found
+                    .strip_prefix(&service_dir)
+                    .unwrap_or(found.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let collection = dir.file_name().and_then(|n| n.to_str()).unwrap_or("HTTPServices");
+                service.set_uri(format!("{}/{}/{}", collection, name, suffix));
+            }
+            Some(service)
         })
         .collect()
 }
@@ -1406,14 +1486,22 @@ fn load_web_services_parallel(dir: &Path) -> Vec<crate::web_service::WebService>
             }
 
             let name = service_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-
-            if !xml_path.exists() {
-                return None;
-            }
+            let xml_path = probe_sibling_xml(dir, name)?;
 
             let xml = fs::read_to_string(&xml_path).ok()?;
-            xml_parser::parse_web_service_xml(&xml, name).ok()
+            let mut service = xml_parser::parse_web_service_xml(&xml, name).ok()?;
+            if let Some(found) =
+                probe_ext_child(&service_dir, bsl_conventions::ConventionalName::Module)
+            {
+                let suffix = found
+                    .strip_prefix(&service_dir)
+                    .unwrap_or(found.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let collection = dir.file_name().and_then(|n| n.to_str()).unwrap_or("WebServices");
+                service.set_uri(format!("{}/{}/{}", collection, name, suffix));
+            }
+            Some(service)
         })
         .collect()
 }
@@ -1439,11 +1527,7 @@ fn load_integration_services_parallel(
             }
 
             let name = service_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-
-            if !xml_path.exists() {
-                return None;
-            }
+            let xml_path = probe_sibling_xml(dir, name)?;
 
             let xml = fs::read_to_string(&xml_path).ok()?;
             xml_parser::parse_integration_service_xml(&xml, name).ok()
@@ -1470,11 +1554,7 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
             }
 
             let name = obj_dir.file_name()?.to_str()?;
-            let xml_path = dir.join(format!("{}.xml", name));
-
-            if !xml_path.exists() {
-                return None;
-            }
+            probe_sibling_xml(dir, name)?;
 
             Some(MetadataObject::new(mdo_type, name))
         })
@@ -1485,6 +1565,46 @@ fn load_simple_metadata_objects_parallel(dir: &Path, mdo_type: MdoType) -> Vec<M
 mod tests {
     use super::*;
     use crate::traits::Module;
+
+    /// Both polarities on purpose: a hop that never happens leaves the deadlock
+    /// in place, and one that always happens pays a thread per load on every
+    /// ordinary path.
+    #[test]
+    fn the_fan_out_leaves_the_calling_thread_only_under_the_guard() {
+        let caller = std::thread::current().id();
+
+        assert_eq!(
+            off_exclusive_pool(|| std::thread::current().id()),
+            caller,
+            "an unguarded load must stay on the calling thread"
+        );
+
+        let _guard = stdx::par_guard::enter_no_nested_parallelism();
+        assert_ne!(
+            off_exclusive_pool(|| std::thread::current().id()),
+            caller,
+            "a guarded load must not fan out on the calling pool"
+        );
+    }
+
+    /// The hop must not change what is loaded. Compared against the same
+    /// directory read without the guard rather than against a fixed count, so
+    /// the check keeps its meaning as the fixture grows.
+    #[test]
+    fn the_guarded_load_yields_the_same_configuration() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/designer");
+
+        let direct = load_from_directory(path).unwrap();
+        let off_pool = {
+            let _guard = stdx::par_guard::enter_no_nested_parallelism();
+            load_from_directory(path).unwrap()
+        };
+
+        assert!(!direct.metadata_objects().is_empty(), "fixture sanity: the load is not empty");
+        assert_eq!(direct.metadata_objects(), off_pool.metadata_objects());
+        assert_eq!(direct.common_modules(), off_pool.common_modules());
+        assert_eq!(direct.registers(), off_pool.registers());
+    }
 
     #[test]
     fn parse_metadata_object_from_texts_matches_directory_load() {
@@ -1542,7 +1662,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let subsystems_dir = root.join("Subsystems");
+        let subsystems_dir = collection_dir(&root, "Subsystems");
         let parent_dir = subsystems_dir.join("Группа").join("Subsystems");
         std::fs::create_dir_all(&parent_dir).unwrap();
 
@@ -1612,7 +1732,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let subsystems_dir = root.join("Subsystems");
+        let subsystems_dir = collection_dir(&root, "Subsystems");
         let child_dir = subsystems_dir.join("Группа").join("Subsystems");
         std::fs::create_dir_all(&child_dir).unwrap();
 
@@ -1632,7 +1752,8 @@ mod tests {
 
         std::fs::write(subsystems_dir.join("Альфа.xml"), subsystem_xml("Альфа")).unwrap();
         std::fs::write(child_dir.join("Дочерняя.xml"), subsystem_xml("Дочерняя")).unwrap();
-        std::os::unix::fs::symlink(&subsystems_dir, child_dir.join("Subsystems")).unwrap();
+        std::os::unix::fs::symlink(&subsystems_dir, collection_dir(&child_dir, "Subsystems"))
+            .unwrap();
 
         let discovered = discover_subsystem_structure(&root);
         let discovered_names: Vec<_> =
@@ -1670,7 +1791,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let dt_dir = root.join("DefinedTypes");
+        let dt_dir = collection_dir(&root, "DefinedTypes");
         std::fs::create_dir_all(&dt_dir).unwrap();
         let xml = |name: &str| {
             format!(
@@ -1709,7 +1830,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let dir = root.join("EventSubscriptions");
+        let dir = collection_dir(&root, "EventSubscriptions");
         std::fs::create_dir_all(&dir).unwrap();
 
         let xml = |name: &str, event: &str| {
@@ -1766,7 +1887,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let dir = root.join("ScheduledJobs");
+        let dir = collection_dir(&root, "ScheduledJobs");
         std::fs::create_dir_all(&dir).unwrap();
 
         let xml = |name: &str, method_name: &str| {
@@ -1845,7 +1966,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let roles_dir = root.join("Roles");
+        let roles_dir = collection_dir(&root, "Roles");
         std::fs::create_dir_all(roles_dir.join("Alpha/Ext")).unwrap();
         std::fs::create_dir_all(roles_dir.join("alpha/Ext")).unwrap();
 
@@ -1902,7 +2023,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let roles_dir = root.join("Roles");
+        let roles_dir = collection_dir(&root, "Roles");
         std::fs::create_dir_all(roles_dir.join("Alpha/Ext")).unwrap();
 
         let role_xml = |name: &str| {
@@ -2046,7 +2167,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let cat_dir = root.join("Catalogs").join("Товары");
+        let cat_dir = collection_dir(&root, "Catalogs").join("Товары");
         std::fs::create_dir_all(cat_dir.join("Ext")).unwrap();
         std::fs::write(root.join("Catalogs/Товары.xml"), "<MetaDataObject/>").unwrap();
         std::fs::write(cat_dir.join("Ext/Predefined.xml"), "<Predefined/>").unwrap();
@@ -2142,7 +2263,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let services_dir = root.join("HTTPServices");
+        let services_dir = collection_dir(&root, "HTTPServices");
         std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
@@ -2192,7 +2313,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let services_dir = root.join("WebServices");
+        let services_dir = collection_dir(&root, "WebServices");
         std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
@@ -2242,7 +2363,7 @@ mod tests {
             std::process::id(),
             line!()
         ));
-        let services_dir = root.join("IntegrationServices");
+        let services_dir = collection_dir(&root, "IntegrationServices");
         std::fs::create_dir_all(services_dir.join("Alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("alpha/Ext")).unwrap();
         std::fs::create_dir_all(services_dir.join("Beta/Ext")).unwrap();
@@ -2772,5 +2893,143 @@ mod tests {
         let exists =
             config.has_metadata_object(crate::metadata_object::MdoType::Catalog, catalog_name);
         assert!(exists, "Catalog '{}' should be loaded from XML-only file", catalog_name);
+    }
+}
+
+#[cfg(test)]
+mod case_parity_tests {
+    //! По контролю на каждую функцию discovery/загрузки: фильтры листингов и
+    //! пробы сконструированных имён сидят в независимых функциях, представитель
+    //! одной не исполняет остальные.
+
+    use super::*;
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_case_parity_{tag}_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write(path: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    const COMMON_XML: &str = concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
+        "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">",
+        "<CommonModule uuid=\"00000000-0000-0000-0000-000000000001\">",
+        "<Properties><Name>X</Name><Server>true</Server></Properties>",
+        "</CommonModule></MetaDataObject>"
+    );
+
+    #[test]
+    fn discovery_of_a_common_module_takes_case_variant_probes() {
+        let root = temp_root("cm");
+        write(&root.join("CommonModules/X.xml"), COMMON_XML);
+        write(&root.join("CommonModules/X/EXT/MODULE.BSL"), "// тело");
+        let found = discover_common_module_structure(&root);
+        assert_eq!(found.len(), 1);
+        assert!(
+            found[0].module_file.as_deref().is_some_and(|p| p.ends_with("EXT/MODULE.BSL")),
+            "тело найдено и несёт реальное написание: {:?}",
+            found[0].module_file
+        );
+    }
+
+    #[test]
+    fn discovery_of_services_takes_case_variant_probes() {
+        let root = temp_root("svc");
+        write(&root.join("HTTPServices/S.xml"), "<x/>");
+        write(&root.join("HTTPServices/S/EXT/MODULE.BSL"), "//");
+        write(&root.join("WebServices/W.xml"), "<x/>");
+        write(&root.join("WebServices/W/EXT/MODULE.BSL"), "//");
+        write(&root.join("IntegrationServices/I.xml"), "<x/>");
+        write(&root.join("IntegrationServices/I/EXT/MODULE.BSL"), "//");
+        let http = discover_http_service_structure(&root);
+        assert!(http[0].module_file.as_deref().is_some_and(|p| p.ends_with("EXT/MODULE.BSL")));
+        let web = discover_web_service_structure(&root);
+        assert!(web[0].module_file.as_deref().is_some_and(|p| p.ends_with("EXT/MODULE.BSL")));
+        let integration = discover_integration_service_structure(&root);
+        assert!(integration[0]
+            .module_file
+            .as_deref()
+            .is_some_and(|p| p.ends_with("EXT/MODULE.BSL")));
+    }
+
+    #[test]
+    fn discovery_listing_filters_take_case_variant_xml() {
+        let root = temp_root("lists");
+        write(&root.join("DefinedTypes/Новый.XML"), "<x/>");
+        write(&root.join("ScheduledJobs/Job.XML"), "<x/>");
+        write(&root.join("EventSubscriptions/Событие.XML"), "<x/>");
+        assert_eq!(discover_defined_type_structure(&root).len(), 1, "DefinedTypes");
+        assert_eq!(discover_scheduled_job_structure(&root).len(), 1, "ScheduledJobs");
+        assert_eq!(discover_event_subscription_structure(&root).len(), 1, "EventSubscriptions");
+    }
+
+    #[test]
+    fn discovery_of_roles_takes_case_variant_listing_and_rights_probe() {
+        let root = temp_root("roles");
+        write(&root.join("Roles/Роль.XML"), "<x/>");
+        write(&root.join("Roles/Роль/EXT/RIGHTS.XML"), "<x/>");
+        let roles = discover_role_structure(&root);
+        assert_eq!(roles.len(), 1);
+        assert!(
+            roles[0].rights.as_deref().is_some_and(|p| p.ends_with("EXT/RIGHTS.XML")),
+            "права найдены через регистронезависимую пробу: {:?}",
+            roles[0].rights
+        );
+    }
+
+    #[test]
+    fn discovery_of_catalogs_takes_a_case_variant_sibling_and_predefined() {
+        let root = temp_root("cat");
+        std::fs::create_dir_all(root.join("Catalogs/Товар")).unwrap();
+        write(&root.join("Catalogs/Товар.XML"), "<x/>");
+        write(&root.join("Catalogs/Товар/EXT/PREDEFINED.XML"), "<x/>");
+        let found = discover_metadata_structure(&root);
+        let catalog = found.iter().find(|m| m.name == "Товар");
+        assert!(catalog.is_some(), "каталог с соседним Товар.XML обнаружен");
+        assert!(
+            catalog
+                .unwrap()
+                .predefined
+                .as_deref()
+                .is_some_and(|p| p.to_string_lossy().ends_with("EXT/PREDEFINED.XML")),
+            "predefined найден через пробу"
+        );
+    }
+
+    #[test]
+    fn a_case_variant_collection_directory_is_still_the_collection() {
+        let root = temp_root("coll");
+        write(&root.join("CATALOGS/Товар.XML"), "<x/>");
+        std::fs::create_dir_all(root.join("CATALOGS/Товар")).unwrap();
+        let found = discover_metadata_structure(&root);
+        assert!(
+            found.iter().any(|m| m.name == "Товар"),
+            "CATALOGS/ — та же коллекция в другом регистре"
+        );
+    }
+
+    #[test]
+    fn full_load_takes_a_case_variant_module_and_keeps_its_spelling_in_uri() {
+        let root = temp_root("load");
+        write(&root.join("COMMONMODULES/X.xml"), COMMON_XML);
+        write(&root.join("COMMONMODULES/X/EXT/MODULE.BSL"), "// тело");
+        let config = load_from_directory(&root).unwrap();
+        let module = config.common_modules().iter().find(|m| m.name() == "X").unwrap();
+        use crate::traits::Module as _;
+        assert_eq!(
+            module.uri(),
+            Some("COMMONMODULES/X/EXT/MODULE.BSL"),
+            "URI несёт РЕАЛЬНОЕ написание найденного пути, включая сегмент коллекции"
+        );
     }
 }

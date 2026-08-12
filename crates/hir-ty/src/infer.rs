@@ -185,8 +185,81 @@ impl InferenceResult {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareNameUse {
+    ReadValue,
+    AssignmentTarget,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareNameOrigin {
+    SelfName,
+    FlowLocal,
+    UserBinding,
+    Builtin,
+    FormMember,
+    ObjectMember,
+    CommonModule,
+    GlobalExport,
+    ManagerCollection,
+    PlatformProperty,
+    PlatformSystemEnum,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareNameGap {
+    MissingConfigurationRoot,
+    UnreadUserGlobalSurface,
+    MissingPlatformCatalog,
+    UnverifiedPlatformCatalog,
+    UnsupportedTargetPlatform,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BareNameResolution {
+    Resolved { ty: TypeId, origin: BareNameOrigin, availability: hir_def::execution_env::EnvFlags },
+    Absent,
+    Indeterminate { gaps: Vec<BareNameGap> },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BareNameVerdict {
+    Resolved,
+    Absent,
+    Indeterminate,
+}
+
+fn classify_bare_name_miss(
+    mut gaps: Vec<BareNameGap>,
+    platform_status: bsl_platform::PlatformCatalogStatus,
+) -> BareNameResolution {
+    match platform_status {
+        bsl_platform::PlatformCatalogStatus::Missing => {
+            gaps.push(BareNameGap::MissingPlatformCatalog)
+        }
+        bsl_platform::PlatformCatalogStatus::Unverified => {
+            gaps.push(BareNameGap::UnverifiedPlatformCatalog)
+        }
+        bsl_platform::PlatformCatalogStatus::UnsupportedTarget => {
+            gaps.push(BareNameGap::UnsupportedTargetPlatform)
+        }
+        bsl_platform::PlatformCatalogStatus::Complete => {}
+    }
+
+    if gaps.is_empty() {
+        BareNameResolution::Absent
+    } else {
+        BareNameResolution::Indeterminate { gaps }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InferenceDiagnostic {
+    UnresolvedName {
+        expr: ExprId,
+        name: Name,
+    },
+
     UnresolvedMethodCall {
         expr: ExprId,
         receiver_name: Name,
@@ -290,6 +363,12 @@ pub enum InferenceDiagnostic {
         callee_kind: EnvCalleeKind,
         missing: hir_def::execution_env::EnvFlags,
     },
+    /// A call that hands a command or a path to the operating system. The
+    /// receiver decides it: platform types expose methods spelled like the
+    /// library ones that launch, and only the owner's method launches.
+    ExternalAppStarting {
+        expr: ExprId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,6 +377,7 @@ pub enum EnvMemberKind {
     Property,
     GlobalFunction,
     GlobalProperty,
+    GlobalVariable,
     Type,
 }
 
@@ -311,8 +391,14 @@ pub enum EnvCalleeKind {
 pub enum UnresolvedMethodKind {
     MethodNotFound,
     MethodNotExport,
-    CommonModuleNoSource,
+    /// A body of the callee module exists but could not be read. Travels as a
+    /// resolution outcome only: the call is left undiagnosed, because everything
+    /// that could be said about it would be said about the wrong file.
+    BodyUnread,
     ReceiverNotResolved,
+    /// The receiver root is proven absent. IDE dispatch keeps this legacy
+    /// fallback only while the replacement `UnresolvedName` rule is disabled.
+    ReceiverNameAbsent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +417,22 @@ pub struct CandidateCallBinding {
     pub candidates: crate::call_resolution::CallCandidateSet,
 
     pub resolution: crate::call_resolution::CallResolution,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlobalCallableVariant {
+    method: hir_def::MethodId,
+    host: hir_def::resolver::GlobalExportHost,
+}
+
+#[derive(Debug, Clone)]
+struct GlobalCallableExport {
+    variants: Vec<GlobalCallableVariant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GlobalReadableExport {
+    availability: hir_def::execution_env::EnvFlags,
 }
 
 pub struct InferenceContext<'db> {
@@ -390,6 +492,10 @@ pub struct InferenceContext<'db> {
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
 
+    /// Every bare assignment target anywhere in the body, collected once so a
+    /// global read can skip CFG/reaching-definitions unless shadowing is possible.
+    assignment_target_names: rustc_hash::FxHashSet<NormName>,
+
     /// Memoised `bare_global_name_claim` verdicts. That lookup reaches past the
     /// body into the module and the workspace while the body itself does not
     /// change during a run, and the same collection root recurs throughout a
@@ -401,6 +507,21 @@ pub struct InferenceContext<'db> {
     expr_types: FxHashMap<ExprId, TypeId>,
 
     diagnostics: Vec<InferenceDiagnostic>,
+
+    /// Bare path expressions used as assignment targets. They keep normal type
+    /// inference, but an absent name in this position is never diagnostic.
+    assignment_targets: rustc_hash::FxHashSet<ExprId>,
+
+    /// Exact bare-root verdicts keyed by the root expression. Qualified-call
+    /// dispatch consumes the same verdict so an absent root is not also reported
+    /// as `UnresolvedMethodCall::ReceiverNotResolved`.
+    bare_name_verdicts: FxHashMap<ExprId, BareNameVerdict>,
+
+    /// Calls whose callee module has a body that exists but could not be read.
+    /// Resolution carries on past it, so the receiver keeps whatever type its
+    /// platform surface gives; what is barred is any later verdict that the call
+    /// is unresolved, which would be filed against the calling file.
+    calls_with_unread_target: rustc_hash::FxHashSet<ExprId>,
 
     call_arg_bindings: Vec<CallArgBinding>,
 
@@ -414,12 +535,16 @@ pub struct InferenceContext<'db> {
     /// out of default verdicts.
     checked_env: hir_def::execution_env::EnvFlags,
 
-    /// Lazily-built lookup of unqualified-callable exports of the GLOBAL common modules
-    /// visible to this body: lowercased method name → owning `MethodId` (first global
-    /// module wins on a name collision). Built once per inference run on first bare-call
-    /// miss and reused, so a global-util-heavy body does not re-enumerate global modules
-    /// per call. `None` until first consulted. See [`Self::global_export_map`].
-    global_exports: Option<Arc<FxHashMap<NormName, hir_def::MethodId>>>,
+    /// Lazily-built, usage-aware user global surface. Both maps are constructed
+    /// together so global modules are enumerated at most once per inference run.
+    global_exports: Option<Arc<FxHashMap<NormName, GlobalCallableExport>>>,
+    global_read_exports: Option<Arc<FxHashMap<NormName, GlobalReadableExport>>>,
+    /// An existing visible global body was unread, so call shadowing cannot be
+    /// decided without guessing. Missing configuration/index coverage still bars
+    /// absence diagnostics, but preserves the historical positive platform-call
+    /// fallback used by config-less editor buffers.
+    global_surface_partly_unknown: bool,
+    global_surface_incomplete: bool,
 
     /// Per-body literal `Структура` shapes (keys built via `Новый Структура` / `.Вставить`), keyed
     /// by lowercased local name. Collected once at the start of [`Self::infer_all`] and used to
@@ -607,6 +732,20 @@ impl<'db> InferenceContext<'db> {
         with_body_env: bool,
     ) -> Self {
         let opts = db.env_options();
+        fn implicit_assignment_name(body: &Body, target: ExprId) -> Option<NormName> {
+            match body.expr(target) {
+                Expr::Path(name) => Some(NormName::intern(name.as_str())),
+                Expr::Index { base, .. } => implicit_assignment_name(body, ExprId::from_idx(*base)),
+                _ => None,
+            }
+        }
+        let assignment_target_names = body
+            .stmts_iter()
+            .filter_map(|(_, stmt)| {
+                let Stmt::Assign { target, .. } = stmt else { return None };
+                implicit_assignment_name(body, ExprId::from_idx(*target))
+            })
+            .collect();
         let body_env = if !with_body_env {
             hir_def::execution_env::EnvFlags::EMPTY
         } else {
@@ -635,15 +774,22 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
+            assignment_target_names,
             shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
             expr_types: FxHashMap::default(),
             diagnostics: Vec::new(),
+            assignment_targets: rustc_hash::FxHashSet::default(),
+            bare_name_verdicts: FxHashMap::default(),
+            calls_with_unread_target: rustc_hash::FxHashSet::default(),
             call_arg_bindings: Vec::new(),
             return_expr_ids: Vec::new(),
             body_env,
             checked_env: opts.checked_environments,
             global_exports: None,
+            global_read_exports: None,
+            global_surface_partly_unknown: false,
+            global_surface_incomplete: false,
             structure_shapes: FxHashMap::default(),
             callee_module_env: FxHashMap::default(),
             local_callee_env: FxHashMap::default(),
@@ -738,20 +884,87 @@ impl<'db> InferenceContext<'db> {
         resolved
     }
 
-    /// Lazily build (and cache) the unqualified-export lookup of the global common
-    /// modules visible to this body. See [`Self::global_exports`].
-    fn global_export_map(&mut self) -> Arc<FxHashMap<NormName, hir_def::MethodId>> {
+    /// Lazily build both usage projections of the complete user global surface.
+    fn global_export_map(&mut self) -> Arc<FxHashMap<NormName, GlobalCallableExport>> {
         if let Some(map) = &self.global_exports {
             return Arc::clone(map);
         }
         let resolver = self.get_resolver();
-        let mut map: FxHashMap<NormName, hir_def::MethodId> = FxHashMap::default();
-        for (_module, method_name, method_id) in resolver.global_common_module_exports(self.db) {
-            map.entry(NormName::intern(method_name.as_str())).or_insert(method_id);
+        let common = resolver.global_common_module_exports(self.db);
+        let application = resolver.application_module_exports(self.db);
+        self.global_surface_incomplete = !common.is_complete() || !application.is_complete();
+        self.global_surface_partly_unknown =
+            common.gaps.iter().chain(application.gaps.iter()).any(|gap| {
+                matches!(
+                    gap,
+                    hir_def::resolver::GlobalSurfaceGap::UnreadBody { .. }
+                        | hir_def::resolver::GlobalSurfaceGap::UnreadApplicationModule { .. }
+                )
+            });
+
+        let mut callables: FxHashMap<NormName, GlobalCallableExport> = FxHashMap::default();
+        let mut readable: FxHashMap<NormName, GlobalReadableExport> = FxHashMap::default();
+        for entry in common.entries.into_iter().chain(application.entries) {
+            let key = NormName::intern(entry.name.as_str());
+            if entry.capabilities.callable == Some(true) {
+                if let hir_def::resolver::GlobalExportDefinition::Method(method) = entry.definition
+                {
+                    let variant = GlobalCallableVariant { method, host: entry.host };
+                    match callables.entry(key) {
+                        std::collections::hash_map::Entry::Vacant(slot) => {
+                            slot.insert(GlobalCallableExport { variants: vec![variant] });
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut slot)
+                            if slot.get().variants.iter().all(|v| {
+                                matches!(
+                                    v.host,
+                                    hir_def::resolver::GlobalExportHost::ApplicationModule(_)
+                                )
+                            }) && matches!(
+                                entry.host,
+                                hir_def::resolver::GlobalExportHost::ApplicationModule(_)
+                            ) =>
+                        {
+                            slot.get_mut().variants.push(variant);
+                        }
+                        std::collections::hash_map::Entry::Occupied(_) => {}
+                    }
+                }
+            }
+            if entry.capabilities.readable_as_value == Some(true) {
+                let availability = match entry.host {
+                    hir_def::resolver::GlobalExportHost::CommonModule => {
+                        hir_def::execution_env::EnvFlags::ALL
+                    }
+                    hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
+                        self.application_export_env(kind)
+                    }
+                };
+                readable
+                    .entry(key)
+                    .and_modify(|export| {
+                        export.availability = export.availability.union(availability)
+                    })
+                    .or_insert(GlobalReadableExport { availability });
+            }
         }
-        let arc = Arc::new(map);
-        self.global_exports = Some(Arc::clone(&arc));
-        arc
+        let callables = Arc::new(callables);
+        self.global_exports = Some(Arc::clone(&callables));
+        self.global_read_exports = Some(Arc::new(readable));
+        callables
+    }
+
+    fn global_read_export(&mut self, name: &Name) -> Option<GlobalReadableExport> {
+        self.global_export_map();
+        self.global_read_exports.as_ref()?.get(&NormName::intern(name.as_str())).copied()
+    }
+
+    fn application_export_env(
+        &self,
+        kind: hir_def::ApplicationModuleKind,
+    ) -> hir_def::execution_env::EnvFlags {
+        let metadata = hir_def::ModuleMetadata::unknown(kind.module_type());
+        hir_def::execution_env::module_base_env(&metadata, &self.db.env_options())
     }
 
     /// Whether `name` is a method of the current module (or, under weaving, its paired
@@ -781,32 +994,66 @@ impl<'db> InferenceContext<'db> {
         args: &[ExprId],
         callee: ExprId,
     ) -> Option<TypeId> {
-        let method_id = self.global_export_map().get(&NormName::intern(name.as_str())).copied()?;
+        let export = self.global_export_map().get(&NormName::intern(name.as_str())).cloned()?;
+        let primary = *export.variants.first()?;
 
-        self.check_common_module_callee_env(callee, None, method_id.module);
+        match primary.host {
+            hir_def::resolver::GlobalExportHost::CommonModule => {
+                self.check_common_module_callee_env(callee, None, primary.method.module);
+            }
+            hir_def::resolver::GlobalExportHost::ApplicationModule(_) => {
+                let availability = export.variants.iter().fold(
+                    hir_def::execution_env::EnvFlags::EMPTY,
+                    |env, variant| match variant.host {
+                        hir_def::resolver::GlobalExportHost::ApplicationModule(kind) => {
+                            env | self.application_export_env(kind)
+                        }
+                        hir_def::resolver::GlobalExportHost::CommonModule => env,
+                    },
+                );
+                self.check_member_env(callee, name, availability, EnvMemberKind::Method);
+            }
+        }
 
         for arg in args {
             self.infer_expr(*arg);
         }
 
-        let symbol_tree = self.db.symbol_tree_ref(method_id.module);
-        let method_symbol = symbol_tree.find_method_by_id(method_id)?;
-        let signature = crate::method_resolution::materialise_signature_enriched(
-            self.db,
-            method_id,
-            method_symbol,
-        );
-
+        let signatures = export
+            .variants
+            .iter()
+            .filter_map(|variant| {
+                let symbol_tree = self.db.symbol_tree_ref(variant.method.module);
+                let method_symbol = symbol_tree.find_method_by_id(variant.method)?;
+                let signature = crate::method_resolution::materialise_signature_enriched(
+                    self.db,
+                    variant.method,
+                    method_symbol,
+                );
+                Some((variant.method, signature))
+            })
+            .collect::<Vec<_>>();
+        let (method_id, signature) = signatures.first()?;
         self.expr_types.insert(callee, self.db.unknown());
-        let return_ty = self.effective_local_return(method_id, signature.ret);
+
+        if signatures.len() > 1 {
+            let returns = signatures
+                .iter()
+                .map(|(method, signature)| self.effective_local_return(*method, signature.ret))
+                .collect();
+            return Some(self.db.union(returns));
+        }
+
+        let return_ty = self.effective_local_return(*method_id, signature.ret);
         let candidates =
-            crate::user_call_candidates::for_resolved_method(self.db, name, method_id, return_ty)
+            crate::user_call_candidates::for_resolved_method(self.db, name, *method_id, return_ty)
                 .ok()?;
         Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
 
     fn push_inference_diagnostic(&mut self, diag: InferenceDiagnostic) {
         let key = match &diag {
+            InferenceDiagnostic::UnresolvedName { expr, .. } => *expr,
             InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
             InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
             InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
@@ -820,8 +1067,19 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
+            InferenceDiagnostic::ExternalAppStarting { expr } => *expr,
         };
         if self.body.is_recovered(key) {
+            return;
+        }
+        // A call whose target body could not be read gets no "unresolved" verdict from
+        // ANY later attempt: resolution continues past the unread module (the platform
+        // surface of a manager or object does not live in the user module, and losing
+        // it would cost the receiver's type), but nothing it fails to find afterwards
+        // is evidence about the call.
+        if matches!(diag, InferenceDiagnostic::UnresolvedMethodCall { .. })
+            && self.calls_with_unread_target.contains(&key)
+        {
             return;
         }
         self.diagnostics.push(diag);
@@ -1189,6 +1447,54 @@ impl<'db> InferenceContext<'db> {
         self.body.bindings_iter().any(|(_, b)| NormName::intern(b.name.as_str()) == target)
     }
 
+    /// Whether assignment syntax for `name` may introduce an implicit local.
+    /// Mirrors the exclusions in assignment inference so reaching definitions
+    /// cannot turn a rejected write to a module/global property into a local.
+    fn assignment_can_declare_implicit_local(&mut self, name: &Name) -> bool {
+        use hir_def::resolver::Resolution;
+
+        let resolver = self.get_resolver();
+        let resolved = resolver.resolve_name(self.db, name);
+        if matches!(resolved, Some(Resolution::Variable(_))) {
+            return false;
+        }
+        let declared_owner =
+            matches!(resolved, Some(Resolution::Method(_) | Resolution::Variable(_)))
+                || self.body_declares_binding(name);
+        if !declared_owner
+            && crate::form_self::resolve_form_self_property(self.db, &resolver, name).is_some()
+        {
+            return false;
+        }
+        let is_manager_collection = bsl_metadata::MdoType::from_plural(name.as_str())
+            .is_some_and(|mdo| mdo.manager_type_prefix().is_some());
+        !is_manager_collection || self.manager_collection_shadowed(name)
+    }
+
+    /// Whether an implicit assignment actually reaches this read. The assignment
+    /// may carry `Unknown` and therefore be absent from `var_types`, but still
+    /// declares the local on every path represented by reaching definitions.
+    fn implicit_local_reaches(&mut self, use_expr: ExprId, name: &Name) -> bool {
+        if !self.assignment_can_declare_implicit_local(name) {
+            return false;
+        }
+        let key = name.as_str().fold_lower();
+        if let Some(definitions) = self.reaching_assignment_types(use_expr, &key) {
+            return !definitions.is_empty();
+        }
+
+        // Recovery/effective bodies may lack dataflow. Keep the sequential
+        // fallback there without allowing an ordinary later assignment to
+        // declare an earlier read.
+        let Some(info) = self.implicit_locals.get(&key) else {
+            return false;
+        };
+        let use_index = use_expr.into_raw().into_u32();
+        info.assignments
+            .iter()
+            .any(|assignment| assignment.target.into_raw().into_u32() < use_index)
+    }
+
     /// True when the receiver is a reassigned local variable and a definition
     /// that actually reaches this use either resolves the method or cannot be
     /// typed. Sequential inference records the textually-last assignment type,
@@ -1242,13 +1548,13 @@ impl<'db> InferenceContext<'db> {
         use_expr: ExprId,
         var_key: &str,
     ) -> Option<Vec<Option<TypeId>>> {
-        let DefWithBodyId::Method(local_id) = self.owner else {
-            return None;
-        };
         let stmt_id = self.body.enclosing_stmt(use_expr)?;
         let module_defs = self.db.module_reaching_definitions(self.context_file_id);
-        let method_defs = module_defs.get(local_id)?;
-        let defs = method_defs.defs_for_var_at_stmt(var_key, stmt_id)?;
+        let body_defs = match self.owner {
+            DefWithBodyId::Method(local_id) => module_defs.get(local_id)?,
+            DefWithBodyId::ModuleCode => module_defs.module_code()?,
+        };
+        let defs = body_defs.defs_for_var_at_stmt(var_key, stmt_id)?;
         Some(
             defs.into_iter()
                 .map(|def| match def.def_site {
@@ -1485,6 +1791,9 @@ impl<'db> InferenceContext<'db> {
                 }
 
                 if infer_target {
+                    if matches!(target_expr, Expr::Path(_)) {
+                        self.assignment_targets.insert(target_id);
+                    }
                     self.infer_expr(target_id);
                 }
             }
@@ -1851,9 +2160,47 @@ impl<'db> InferenceContext<'db> {
     }
 
     fn infer_path_name(&mut self, name: &hir_def::Name, expr_id: ExprId) -> TypeId {
+        let usage = if self.assignment_targets.contains(&expr_id) {
+            BareNameUse::AssignmentTarget
+        } else {
+            BareNameUse::ReadValue
+        };
+        let resolution = self.resolve_bare_name(name, expr_id, usage);
+        let verdict = match &resolution {
+            BareNameResolution::Resolved { .. } => BareNameVerdict::Resolved,
+            BareNameResolution::Absent => BareNameVerdict::Absent,
+            BareNameResolution::Indeterminate { .. } => BareNameVerdict::Indeterminate,
+        };
+        self.bare_name_verdicts.insert(expr_id, verdict);
+
+        match resolution {
+            BareNameResolution::Resolved { ty, .. } => ty,
+            BareNameResolution::Absent => {
+                if usage == BareNameUse::ReadValue && !name.is_missing() {
+                    self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedName {
+                        expr: expr_id,
+                        name: name.clone(),
+                    });
+                }
+                self.db.unknown()
+            }
+            BareNameResolution::Indeterminate { .. } => self.db.unknown(),
+        }
+    }
+
+    fn resolve_bare_name(
+        &mut self,
+        name: &hir_def::Name,
+        expr_id: ExprId,
+        usage: BareNameUse,
+    ) -> BareNameResolution {
         use hir_def::resolver::Resolution;
 
+        debug_assert!(matches!(usage, BareNameUse::ReadValue | BareNameUse::AssignmentTarget));
         let resolver = self.get_resolver();
+        let found =
+            |ty, origin, availability| BareNameResolution::Resolved { ty, origin, availability };
+        let all_env = hir_def::execution_env::EnvFlags::ALL;
 
         let name_lower = name.as_str().fold_lower();
         let self_name_wins =
@@ -1861,17 +2208,25 @@ impl<'db> InferenceContext<'db> {
         if self_name_wins && (name_lower == "этотобъект" || name_lower == "thisobject") {
             if let Some(owner) = crate::this_object::resolve_this_object_owner(self.db, &resolver) {
                 trace!("resolved {} as ThisObject {{ owner: {:?} }}", name, owner);
-                return self.db.mk_this_object(
-                    ConfigId::Root,
-                    MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                return found(
+                    self.db.mk_this_object(
+                        ConfigId::Root,
+                        MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                    ),
+                    BareNameOrigin::SelfName,
+                    all_env,
                 );
             }
             if let Some(owner) = crate::this_object::resolve_this_manager_owner(self.db, &resolver)
             {
                 trace!("resolved {} as ThisManager {{ owner: {:?} }}", name, owner);
-                return self.db.mk_this_manager(
-                    ConfigId::Root,
-                    MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                return found(
+                    self.db.mk_this_manager(
+                        ConfigId::Root,
+                        MdoRefFacet::new(owner.0, owner.1.as_str().to_string()),
+                    ),
+                    BareNameOrigin::SelfName,
+                    all_env,
                 );
             }
             if let Some((mdo, name)) =
@@ -1884,7 +2239,11 @@ impl<'db> InferenceContext<'db> {
                         kind,
                         name
                     );
-                    return self.db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx);
+                    return found(
+                        self.db.metadata_ref(kind, name.as_str().to_string(), &RootConfigCtx),
+                        BareNameOrigin::SelfName,
+                        all_env,
+                    );
                 }
             }
         }
@@ -1895,7 +2254,11 @@ impl<'db> InferenceContext<'db> {
         // up treating the receiver as an unresolved module.
         if self_name_wins && crate::this_object::is_managed_form_module(self.db, &resolver) {
             trace!("resolved {} as managed form Self", name);
-            return self.db.platform_object(crate::form_self::FORM_TYPE_NAME.to_string());
+            return found(
+                self.db.platform_object(crate::form_self::FORM_TYPE_NAME.to_string()),
+                BareNameOrigin::SelfName,
+                all_env,
+            );
         }
 
         let resolved = resolver.resolve_name(self.db, name);
@@ -1911,7 +2274,7 @@ impl<'db> InferenceContext<'db> {
                 if let Some(rich) =
                     crate::structure_keys::materialize(self.db, &self.structure_shapes, &key)
                 {
-                    return rich;
+                    return found(rich, BareNameOrigin::FlowLocal, all_env);
                 }
             }
             if crate::method_lookup::receiver_needs_refinement_id(self.db, ty_id) {
@@ -1925,24 +2288,27 @@ impl<'db> InferenceContext<'db> {
                 ) {
                     let refined = self.db.query(projections.iter().cloned().collect());
                     trace!("Phase F refined {} to {:?}", name, refined);
-                    return refined;
+                    return found(refined, BareNameOrigin::FlowLocal, all_env);
                 }
             }
-            return ty_id;
+            return found(ty_id, BareNameOrigin::FlowLocal, all_env);
         }
 
         let user_shadows =
-            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)));
+            matches!(resolved, Some(Resolution::Method(_)) | Some(Resolution::Variable(_)))
+                || resolver.resolve_module_variable(self.db, name).is_some();
         let body_binding_shadows = self.body_declares_binding(name);
 
         if user_shadows || body_binding_shadows {
-            return self.db.unknown();
+            return found(self.db.unknown(), BareNameOrigin::UserBinding, all_env);
         }
 
         let resolver_says_builtin = matches!(resolved, Some(Resolution::Builtin(_)));
         let hir_sig = builtin::builtin_functions().get(name.as_str());
-        if resolver_says_builtin || hir_sig.is_some() {
-            return self.db.unknown();
+        // BSL procedures/functions are not first-class values: EDT accepts
+        // `СтрДлина(...)` but reports `A = СтрДлина` as an undefined variable.
+        if usage != BareNameUse::ReadValue && (resolver_says_builtin || hir_sig.is_some()) {
+            return found(self.db.unknown(), BareNameOrigin::Builtin, all_env);
         }
 
         if !user_shadows && !body_binding_shadows {
@@ -1950,14 +2316,14 @@ impl<'db> InferenceContext<'db> {
                 crate::form_self::resolve_form_self_property(self.db, &resolver, name)
             {
                 trace!("resolved {} as managed-form Self property", name);
-                return resolution.return_ty;
+                return found(resolution.return_ty, BareNameOrigin::FormMember, all_env);
             }
         }
 
         if !user_shadows && !body_binding_shadows {
             if let Some(ty) = crate::form_attr::resolve_form_attribute(self.db, &resolver, name) {
                 trace!("resolved {} as managed-form attribute", name);
-                return ty;
+                return found(ty, BareNameOrigin::FormMember, all_env);
             }
         }
 
@@ -1973,7 +2339,7 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object_attr::resolve_this_object_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit ЭтотОбъект.{} member", name, name);
-                return ty;
+                return found(ty, BareNameOrigin::ObjectMember, all_env);
             }
         }
 
@@ -1982,8 +2348,14 @@ impl<'db> InferenceContext<'db> {
                 crate::this_object_attr::resolve_this_record_set_member(self.db, &resolver, name)
             {
                 trace!("resolved {} as implicit record-set ЭтотОбъект.{} member", name, name);
-                return ty;
+                return found(ty, BareNameOrigin::ObjectMember, all_env);
             }
+        }
+
+        if self.assignment_target_names.contains(&NormName::intern(name.as_str()))
+            && self.implicit_local_reaches(expr_id, name)
+        {
+            return found(self.db.unknown(), BareNameOrigin::FlowLocal, all_env);
         }
 
         // A bare common-module reference (`ОбщегоНазначения`, used directly) is a value of that
@@ -2003,7 +2375,34 @@ impl<'db> InferenceContext<'db> {
                 self.db.module_index(source_root_id).canonical_common_module_name(name)
             {
                 trace!("resolved {} as common module type", name);
-                return self.db.common_module(canonical.to_string(), ConfigId::Root);
+                return found(
+                    self.db.common_module(canonical.to_string(), ConfigId::Root),
+                    BareNameOrigin::CommonModule,
+                    all_env,
+                );
+            }
+        }
+
+        // A manager module may qualify one of its own methods with the metadata
+        // object's name (`ТестовыйОтчёт.Метод()`). Name dispatch already treats
+        // that spelling as this module's object manager; classify the root the
+        // same way so it cannot simultaneously become `Absent`.
+        let assigned_in_body = self.assigned_var_names.contains(&NormName::intern(name.as_str()));
+        if !assigned_in_body {
+            if let Some((mdo_type, self_name)) =
+                crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+            {
+                if name.as_str().fold_lower() == self_name.as_str().fold_lower() {
+                    return found(
+                        self.db.object_manager(
+                            mdo_type,
+                            self_name.as_str().to_string(),
+                            &RootConfigCtx,
+                        ),
+                        BareNameOrigin::SelfName,
+                        all_env,
+                    );
+                }
             }
         }
 
@@ -2012,8 +2411,22 @@ impl<'db> InferenceContext<'db> {
         // form and `ЭтотОбъект` members have already returned above; what remains
         // is an implicit local written earlier in this body and a workspace common
         // module.
-        let assigned_in_body = self.assigned_var_names.contains(&NormName::intern(name.as_str()));
         let user_holds_name = workspace_owns_common_module || assigned_in_body;
+
+        // Exported application-context variables are user globals and therefore
+        // shadow platform globals, just as exported user methods shadow platform
+        // global functions on the call path.
+        if !user_holds_name {
+            if let Some(export) = self.global_read_export(name) {
+                self.check_member_env(
+                    expr_id,
+                    name,
+                    export.availability,
+                    EnvMemberKind::GlobalVariable,
+                );
+                return found(self.db.unknown(), BareNameOrigin::GlobalExport, export.availability);
+            }
+        }
 
         // Metadata collections are the exception, and it is not a stylistic one: a
         // collection name is a Global-context PROPERTY, and assigning to it does not
@@ -2027,7 +2440,13 @@ impl<'db> InferenceContext<'db> {
                 if mdo_type.manager_type_prefix().is_some() {
                     trace!("resolved {} as manager collection {:?}", name, mdo_type);
                     self.check_manager_collection_env(expr_id, name, mdo_type);
-                    return self.db.manager_collection(mdo_type);
+                    let availability =
+                        crate::platform_global_lookup::manager_collection_env(mdo_type);
+                    return found(
+                        self.db.manager_collection(mdo_type),
+                        BareNameOrigin::ManagerCollection,
+                        availability,
+                    );
                 }
             }
         }
@@ -2038,7 +2457,32 @@ impl<'db> InferenceContext<'db> {
             {
                 trace!("resolved {} as platform global → {:?}", name, id);
                 self.check_member_env(expr_id, name, env, EnvMemberKind::GlobalProperty);
-                return id;
+                return found(id, BareNameOrigin::PlatformProperty, env);
+            }
+        }
+
+        if !user_holds_name {
+            if let Some(symbol) =
+                bsl_platform::PlatformGlobalCatalog::instance().lookup(name.as_str())
+            {
+                if symbol.kind == bsl_platform::PlatformGlobalKind::Property
+                    && symbol.capabilities.readable_as_value == Some(true)
+                {
+                    let availability = hir_def::execution_env::EnvFlags::from_platform_context(
+                        symbol.context.as_ref(),
+                    );
+                    self.check_member_env(
+                        expr_id,
+                        name,
+                        availability,
+                        EnvMemberKind::GlobalProperty,
+                    );
+                    return found(
+                        self.db.unknown(),
+                        BareNameOrigin::PlatformProperty,
+                        availability,
+                    );
+                }
             }
         }
 
@@ -2047,14 +2491,39 @@ impl<'db> InferenceContext<'db> {
                 crate::platform_global_lookup::resolve_platform_system_enum_type(self.db, name)
             {
                 trace!("resolved {} as platform system enum → {:?}", name, id);
-                return id;
+                let availability = bsl_platform::PlatformGlobalCatalog::instance()
+                    .lookup(name.as_str())
+                    .map_or(all_env, |symbol| {
+                        hir_def::execution_env::EnvFlags::from_platform_context(
+                            symbol.context.as_ref(),
+                        )
+                    });
+                self.check_member_env(expr_id, name, availability, EnvMemberKind::Type);
+                return found(id, BareNameOrigin::PlatformSystemEnum, availability);
             }
         }
 
-        match resolved {
-            Some(Resolution::Method(_)) | Some(Resolution::Variable(_)) => self.db.unknown(),
-            Some(Resolution::Builtin(_)) | Some(Resolution::Local(_)) | None => self.db.unknown(),
+        if resolved.is_some() && !resolver_says_builtin {
+            return found(self.db.unknown(), BareNameOrigin::UserBinding, all_env);
         }
+
+        // Building the cached maps also records whether every user-global body
+        // (global common + application modules) was readable and enumerable.
+        self.global_export_map();
+        let mut gaps = Vec::new();
+        if self.global_surface_incomplete {
+            gaps.push(BareNameGap::UnreadUserGlobalSurface);
+        }
+        if !self.db.workspace_load_complete()
+            || self.db.configurations(self.context_file_id).is_empty()
+        {
+            gaps.push(BareNameGap::MissingConfigurationRoot);
+        }
+
+        let target = self.db.target_platform_version();
+        let platform_status =
+            bsl_platform::PlatformGlobalCatalog::instance().status_for_target(target.as_deref());
+        classify_bare_name_miss(gaps, platform_status)
     }
 
     fn infer_literal(&self, lit: &Literal) -> TypeId {
@@ -2147,6 +2616,38 @@ impl<'db> InferenceContext<'db> {
         (!self.manager_collection_shadowed(&plural)).then_some(plural)
     }
 
+    fn report_self_qualified_manager_diagnostic(
+        &mut self,
+        call_expr: ExprId,
+        receiver: ExprId,
+        receiver_ty: TypeId,
+    ) {
+        let Expr::Path(receiver_name) = self.body.expr(receiver) else { return };
+        let receiver_key = NormName::intern(receiver_name.as_str());
+        if self.var_types.contains_key(&receiver_key) || self.body_declares_binding(receiver_name) {
+            return;
+        }
+        let TypeKind::ObjectManager(facet) = self.db.lookup_type(receiver_ty) else { return };
+        let resolver = self.get_resolver();
+        if resolver.resolve_module_variable(self.db, receiver_name).is_some() {
+            return;
+        }
+        let Some((owner_kind, owner_name)) =
+            crate::this_object::resolve_this_manager_owner(self.db, &resolver)
+        else {
+            return;
+        };
+        if facet.mdo == owner_kind
+            && facet.name.as_str().fold_lower() == owner_name.as_str().fold_lower()
+            && receiver_name.as_str().fold_lower() == owner_name.as_str().fold_lower()
+        {
+            self.push_inference_diagnostic(InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
+                expr: call_expr,
+                module: receiver_name.clone(),
+            });
+        }
+    }
+
     /// The two verdicts a spelled-out manager chain carries: the object may be the
     /// enclosing module's own (`Справочники.Товары.Метод()` inside the manager module
     /// of `Товары` is a detour), and the call may omit required parameters.
@@ -2190,6 +2691,10 @@ impl<'db> InferenceContext<'db> {
 
             let mut receiver_ty = self.infer_expr(base_id);
 
+            if !self.is_unknown(receiver_ty) {
+                self.report_self_qualified_manager_diagnostic(callee, base_id, receiver_ty);
+            }
+
             if self.is_unknown(receiver_ty) {
                 let base_expr = self.body.expr(base_id).clone();
                 if let Expr::Path(path_name) = base_expr {
@@ -2197,6 +2702,7 @@ impl<'db> InferenceContext<'db> {
                         &path_name,
                         &method_name,
                         args,
+                        base_id,
                         callee,
                     ) {
                         BareReceiverDispatch::Resolved(return_ty) => {
@@ -2219,6 +2725,11 @@ impl<'db> InferenceContext<'db> {
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
             if let TypeKind::CommonModule(facet) = &workspace_receiver_kind {
                 let module = hir_def::Name::new(&facet.name);
+                if is_external_app_module_call(&facet.name, method_name.as_str()) {
+                    self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                        expr: callee,
+                    });
+                }
                 // A bare module name as receiver (not a variable that holds a module) keeps the
                 // self-qualified-access and missed-parameter diagnostics that the name dispatch
                 // emits — the handlers filter further (TwoLevel only fires when the called module
@@ -2293,10 +2804,15 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
-                        | UnresolvedMethodKind::ReceiverNotResolved),
+                        | UnresolvedMethodKind::ReceiverNotResolved
+                        | UnresolvedMethodKind::ReceiverNameAbsent),
                     ) => {
                         unreachable!(
                             "resolve_object_module_call returned unexpected kind: {:?}",
@@ -2345,10 +2861,15 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
-                        | UnresolvedMethodKind::ReceiverNotResolved),
+                        | UnresolvedMethodKind::ReceiverNotResolved
+                        | UnresolvedMethodKind::ReceiverNameAbsent),
                     ) => {
                         unreachable!(
                             "resolve_record_set_module_call returned unexpected kind: {:?}",
@@ -2408,10 +2929,15 @@ impl<'db> InferenceContext<'db> {
                         return self.record_candidate_call_arg_binding(callee, args, candidates);
                     }
                     Err(UnresolvedMethodKind::MethodNotFound) => {}
+                    Err(UnresolvedMethodKind::BodyUnread) => {
+                        // Fall through exactly like a missing user method: the platform
+                        // surface is still worth resolving. Only the verdict is barred.
+                        self.calls_with_unread_target.insert(callee);
+                    }
                     Err(
                         kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::CommonModuleNoSource
-                        | UnresolvedMethodKind::ReceiverNotResolved),
+                        | UnresolvedMethodKind::ReceiverNotResolved
+                        | UnresolvedMethodKind::ReceiverNameAbsent),
                     ) => {
                         unreachable!(
                             "resolve_aliased_manager_call returned unexpected kind: {:?}",
@@ -2542,6 +3068,20 @@ impl<'db> InferenceContext<'db> {
         // the global context, so it shadows a same-named platform global function. A
         // same-module method (checked here) still wins, keeping Local → Module → Global-CM
         // → Platform precedence.
+        // Judged before the early return below: that return withholds a verdict when
+        // some global module body could not be read, because an unknown export may
+        // own the name and the platform contract would be the wrong yardstick. This
+        // verdict is about who owns the name, not about the argument contract, and a
+        // stranger's unreadable body must not silence it.
+        if let Some(name) = &bare_callee_name {
+            let name = name.clone();
+            if is_external_app_global(name.as_str()) && !self.is_call_name_shadowed(&name) {
+                self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                    expr: callee,
+                });
+            }
+        }
+
         if let Some(name) = &bare_callee_name {
             if !self.body_declares_binding(name)
                 && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
@@ -2549,6 +3089,18 @@ impl<'db> InferenceContext<'db> {
             {
                 if let Some(ret) = self.resolve_bare_global_export(name, args, callee) {
                     return ret;
+                }
+                // The name is not in the known global surface — but if a visible global
+                // common module has a body nobody could read, that surface is not the
+                // whole one. The unknown body may export this very name, and a global
+                // export shadows the platform global, so falling through to the platform
+                // signature would measure the call against a contract that never applied.
+                if self.global_surface_partly_unknown {
+                    for arg in args {
+                        self.infer_expr(*arg);
+                    }
+                    self.expr_types.insert(callee, self.db.unknown());
+                    return self.db.unknown();
                 }
             }
         }
@@ -2616,6 +3168,40 @@ impl<'db> InferenceContext<'db> {
                 }
                 self.expr_types.insert(callee, self.db.unknown());
                 return ret;
+            }
+        }
+
+        // The exact EDT catalog contains a handful of current global functions
+        // absent from the older HBK signature corpus. They are still known
+        // callables; infer arguments and availability, but keep the return type
+        // unknown until a signature is available.
+        if let Some(name) = &bare_callee_name {
+            let unshadowed = !self.body_declares_binding(name)
+                && !self.assigned_var_names.contains(&NormName::intern(name.as_str()))
+                && !self.bare_module_method_exists(name);
+            if unshadowed {
+                if let Some(symbol) =
+                    bsl_platform::PlatformGlobalCatalog::instance().lookup(name.as_str())
+                {
+                    if symbol.kind == bsl_platform::PlatformGlobalKind::Function
+                        && symbol.capabilities.callable == Some(true)
+                    {
+                        let availability = hir_def::execution_env::EnvFlags::from_platform_context(
+                            symbol.context.as_ref(),
+                        );
+                        self.check_member_env(
+                            callee,
+                            name,
+                            availability,
+                            EnvMemberKind::GlobalFunction,
+                        );
+                        for arg in args {
+                            self.infer_expr(*arg);
+                        }
+                        self.expr_types.insert(callee, self.db.unknown());
+                        return self.db.unknown();
+                    }
+                }
             }
         }
 
@@ -2842,6 +3428,9 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
 
+                // `BodyUnread` travels on: inference records the outcome it actually
+                // reached, and whether an outcome is worth telling the user about is
+                // the diagnostics layer's call, not this one's.
                 self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
                     expr: call_expr,
                     receiver_name: module_name.clone(),
@@ -2886,6 +3475,7 @@ impl<'db> InferenceContext<'db> {
         module_name: &Name,
         method_name: &Name,
         args: &[ExprId],
+        root_expr: ExprId,
         call_expr: ExprId,
     ) -> BareReceiverDispatch {
         use hir_def::resolver::Resolution;
@@ -2955,7 +3545,7 @@ impl<'db> InferenceContext<'db> {
         if let Some((mdo_type, self_name)) =
             crate::this_object::resolve_this_manager_owner(self.db, &resolver)
         {
-            if module_name.as_str().eq_ignore_ascii_case(self_name.as_str()) {
+            if module_name.as_str().fold_lower() == self_name.as_str().fold_lower() {
                 self.push_inference_diagnostic(
                     InferenceDiagnostic::RedundantAccessToObjectTwoLevel {
                         expr: call_expr,
@@ -3007,11 +3597,27 @@ impl<'db> InferenceContext<'db> {
         for arg in args {
             self.infer_expr(*arg);
         }
+        let kind = if self.bare_name_verdicts.get(&root_expr) == Some(&BareNameVerdict::Absent) {
+            UnresolvedMethodKind::ReceiverNameAbsent
+        } else {
+            UnresolvedMethodKind::ReceiverNotResolved
+        };
+        // Nothing typed the receiver, so no library module can be recognised by type
+        // here. A security hotspot that goes quiet in that state is worse than one
+        // judged by name, so the owner is matched by spelling here and only here.
+        // Both unresolved verdicts qualify: a name the workspace calls absent is
+        // still not evidence that the call is something else, and the call already
+        // carries its own unresolved report.
+        if is_external_app_module_call(module_name.as_str(), method_name.as_str()) {
+            self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                expr: call_expr,
+            });
+        }
         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
             expr: call_expr,
             receiver_name: module_name.clone(),
             method_name: method_name.clone(),
-            kind: UnresolvedMethodKind::ReceiverNotResolved,
+            kind,
         });
         BareReceiverDispatch::Resolved(self.db.unknown())
     }
@@ -3365,6 +3971,21 @@ fn is_proceed_with_call_name(name: &Name) -> bool {
     matches!(name.as_str().fold_lower().as_str(), "продолжитьвызов" | "proceedwithcall")
 }
 
+/// A library common module handing a command or a path to the operating system.
+fn is_external_app_module_call(receiver: &str, method: &str) -> bool {
+    bsl_platform::security::registry().lookup_module_method(receiver, method).is_some_and(|entry| {
+        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
+    })
+}
+
+/// A global-context method that launches. Reachable only as a bare call: a
+/// qualified one names something else that shares the spelling.
+fn is_external_app_global(name: &str) -> bool {
+    bsl_platform::security::registry().lookup_global(name).is_some_and(|entry| {
+        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
+    })
+}
+
 /// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /
 /// `&Перед` / `&После`). Unlike [`infer_effective`] there is no text splice: the
 /// extension module keeps its native text and is inferred through
@@ -3558,6 +4179,36 @@ mod tests {
         assert_eq!(result.expr_types_by_body.len(), 0);
         assert_eq!(result.diagnostics.len(), 0);
         assert!(!result.has_diagnostics());
+    }
+
+    #[test]
+    fn a_bare_name_miss_requires_complete_surfaces() {
+        assert_eq!(
+            classify_bare_name_miss(Vec::new(), bsl_platform::PlatformCatalogStatus::Complete),
+            BareNameResolution::Absent
+        );
+        assert_eq!(
+            classify_bare_name_miss(Vec::new(), bsl_platform::PlatformCatalogStatus::Unverified),
+            BareNameResolution::Indeterminate {
+                gaps: vec![BareNameGap::UnverifiedPlatformCatalog]
+            }
+        );
+        assert_eq!(
+            classify_bare_name_miss(
+                Vec::new(),
+                bsl_platform::PlatformCatalogStatus::UnsupportedTarget,
+            ),
+            BareNameResolution::Indeterminate {
+                gaps: vec![BareNameGap::UnsupportedTargetPlatform]
+            }
+        );
+        assert_eq!(
+            classify_bare_name_miss(
+                vec![BareNameGap::UnreadUserGlobalSurface],
+                bsl_platform::PlatformCatalogStatus::Complete,
+            ),
+            BareNameResolution::Indeterminate { gaps: vec![BareNameGap::UnreadUserGlobalSurface] }
+        );
     }
 
     #[test]

@@ -15,6 +15,21 @@ pub enum DepsOutputFormat {
     Json,
 }
 
+/// The dependency scan's file universe: every module body under the root, with
+/// its size.
+fn collect_bsl_entries(source_dir: &Path) -> Result<Vec<(PathBuf, u64)>, walkdir::Error> {
+    let mut bsl_entries: Vec<(PathBuf, u64)> = Vec::new();
+    for entry in walkdir::WalkDir::new(source_dir).follow_links(true) {
+        let entry = entry?;
+        if entry.file_type().is_file() && project_model::is_bsl_source_path(entry.path()) {
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
+            bsl_entries.push((path, size));
+        }
+    }
+    Ok(bsl_entries)
+}
+
 struct UnionSummary {
     size: usize,
     bytes: u64,
@@ -74,7 +89,6 @@ pub fn run_deps(
     use indicatif::{ProgressBar, ProgressStyle};
     use rayon::prelude::*;
     use vfs::FileId;
-    use walkdir::WalkDir;
 
     let _span = tracing::info_span!("cli_deps", ?source_dir, depth, sample).entered();
     let start = Instant::now();
@@ -82,17 +96,7 @@ pub fn run_deps(
 
     let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
 
-    let mut bsl_entries: Vec<(PathBuf, u64)> = Vec::new();
-    for entry in WalkDir::new(&source_dir).follow_links(true) {
-        let entry = entry?;
-        if entry.file_type().is_file()
-            && entry.path().extension().and_then(|e| e.to_str()) == Some("bsl")
-        {
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let path = entry.path().canonicalize().unwrap_or_else(|_| entry.path().to_path_buf());
-            bsl_entries.push((path, size));
-        }
-    }
+    let mut bsl_entries = collect_bsl_entries(&source_dir)?;
     bsl_entries.sort_by(|a, b| a.0.cmp(&b.0));
     let total = bsl_entries.len();
     tracing::info!(total, "discovered .bsl files");
@@ -128,7 +132,7 @@ pub fn run_deps(
                 tracing::warn!(path = %path.display(), error = %err, "failed to read file");
                 unreadable.insert(*file_id);
                 read_errors.push((path.clone(), err));
-                db.set_file_text(*file_id, "");
+                db.set_file_unreadable(*file_id);
             }
         }
     }
@@ -675,4 +679,17 @@ fn run_deps_bench_index(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod deps_walk_tests {
+    #[test]
+    fn the_dependency_walk_takes_a_case_variant_module_body() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("CommonModules/X/Ext")).unwrap();
+        std::fs::write(dir.path().join("CommonModules/X/Ext/Module.BSL"), "").unwrap();
+        std::fs::write(dir.path().join("CommonModules/X.xml"), "<x/>").unwrap();
+        let entries = super::collect_bsl_entries(dir.path()).unwrap();
+        assert_eq!(entries.len(), 1, "Module.BSL — тело модуля и входит во вселенную обхода");
+    }
 }

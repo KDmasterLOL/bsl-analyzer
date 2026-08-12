@@ -1,5 +1,6 @@
 mod bootstrap;
 mod embed;
+mod overlay_retry;
 mod sync;
 #[cfg(test)]
 mod test_support;
@@ -58,13 +59,12 @@ pub struct SharedState {
     /// sink already runs off a clone taken at construction.
     #[allow(dead_code)]
     change_hub: Option<WorkspaceChangeHub>,
-    /// The ONE embed single-flight shared by the boot pass and the post-refresh re-embed kick,
-    /// held here so `init_search` reuses the same flight the publish hook does — otherwise the
-    /// two could race an index swap and last-writer-wins would install a stale index.
-    embed_flight: Arc<embed::EmbedFlight>,
     /// This daemon's claim on the workspace's derived caches, held so the serve loop can retire
     /// a superseded backend early. Unmanaged for profiles with no workspace to coordinate over.
     workspace_lease: crate::workspace_lease::WorkspaceLease,
+    /// The overlay retry driver — the one owner of every Embed pass (startup included).
+    /// `None` outside PostgresRemoteOverlay-with-embedder, where no such pass exists.
+    overlay_retry: Option<Arc<overlay_retry::OverlayRetry>>,
 }
 
 #[derive(Clone)]
@@ -96,6 +96,19 @@ impl SharedState {
     /// [`crate::workspace_lease`]). Such a backend still serves everything it holds, but it
     /// produces no new derived state — so once its last session leaves there is nothing left
     /// to stay warm for.
+    /// Set when the resolved configuration root is itself an extension analyzed
+    /// without the main configuration it extends — the state in which valid
+    /// calls into that configuration are reported as unresolved.
+    /// Derived from the project as it is now, not from the root captured at
+    /// bootstrap: a config edit can move the resolved root between a main
+    /// configuration and an extension, and everything else — diagnostics, graph,
+    /// drift — already rebuilds through `crate::project::at` when it does.
+    pub(crate) fn standalone_extension_notice(&self) -> Option<String> {
+        let root = self.workspace_root.as_deref()?;
+        let project = crate::project::at(root).ok()?;
+        project_model::standalone_extension_notice(project.source_path())
+    }
+
     pub(crate) fn superseded(&self) -> bool {
         !self.workspace_lease.owns_caches()
     }
@@ -218,6 +231,11 @@ impl SharedState {
     pub fn shutdown(&self) {
         self.baseline.shutdown();
         self.diagnostics.shutdown();
+        // The retry driver stops BEFORE the lease is released: its Arc-held worker would
+        // otherwise outlive the handover and publish over the next owner's caches.
+        if let Some(retry) = &self.overlay_retry {
+            retry.stop();
+        }
         // Handing the workspace back on the way out is what keeps a short-lived server (a
         // stdio session, a broker fallback) from demoting a long-running daemon for the whole
         // staleness window just by having started later.
@@ -276,5 +294,53 @@ mod onec_connection_tests {
             OnecConnection::new(OnecClient::new("http://localhost/only", "", ""), false),
         );
         assert!(!state.onec_connection(None).unwrap().allow_execute());
+    }
+}
+
+#[cfg(test)]
+mod standalone_extension_tests {
+    use super::SharedState;
+
+    fn configuration(root: &std::path::Path, rel: &str, extension: bool) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        let purpose = if extension {
+            "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+        } else {
+            ""
+        };
+        std::fs::write(
+            dir.join("Configuration.xml"),
+            format!(
+                "<MetaDataObject><Configuration><Properties>{purpose}</Properties>\
+                 </Configuration></MetaDataObject>"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn the_notice_follows_a_config_edit_that_moves_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        configuration(root, "cf", false);
+        configuration(root, "ext", true);
+        let config = root.join("bsl-analyzer.toml");
+        std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
+
+        let state = SharedState::workspace(root.to_path_buf()).unwrap();
+        assert!(state.standalone_extension_notice().is_none(), "a main configuration stays silent");
+
+        // Everything else — diagnostics, graph, drift — rebuilds through
+        // `crate::project::at` after a config edit, so a notice read from the
+        // root captured at bootstrap would describe a project no longer in use.
+        std::fs::write(&config, "[source]\nroot = \"ext\"\nextensions = []\n").unwrap();
+        assert!(
+            state.standalone_extension_notice().is_some(),
+            "the root is now an extension and the notice must follow"
+        );
+
+        std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
+        assert!(state.standalone_extension_notice().is_none(), "and must go away again");
     }
 }

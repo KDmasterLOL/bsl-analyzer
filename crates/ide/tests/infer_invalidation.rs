@@ -84,15 +84,13 @@ fn infer_invalidates_when_config_set_changes() {
     let kinds = unresolved_kinds(&db, file_id);
     assert_eq!(
         kinds,
-        vec![UnresolvedMethodKind::ReceiverNotResolved],
+        vec![UnresolvedMethodKind::ReceiverNameAbsent],
         "after registering bogus config: the visibility gate must flip \
-         resolution to UnresolvedMethodCall(ReceiverNotResolved); if this \
-         fails, `db.infer` is not invalidated by `set_all_config_paths` — \
-         the metadata bridge is not wired through Salsa. The kind is \
-         ReceiverNotResolved (not MethodNotFound) because the cascade gate \
-         in `dispatch_bare_ident_field_call` distinguishes \"module \
-         doesn't resolve anywhere\" from \"module reachable but method \
-         missing\" — the invisible-module case is the former."
+         resolution to an absent receiver root; if this fails, `db.infer` \
+         is not invalidated by `set_all_config_paths` — the metadata bridge \
+         is not wired through Salsa. ReceiverNameAbsent preserves the legacy \
+         ReceiverNotResolved diagnostic while UnresolvedName is default-off, \
+         and lets the IDE deduplicate it when the root diagnostic is enabled."
     );
     assert!(
         mismatched_arg_counts(&db, file_id).is_empty(),

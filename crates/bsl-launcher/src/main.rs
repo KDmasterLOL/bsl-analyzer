@@ -1,5 +1,6 @@
 mod cache;
 mod entities;
+mod http;
 mod messages;
 mod parent_death;
 mod provider;

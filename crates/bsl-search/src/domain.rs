@@ -134,18 +134,34 @@ pub struct SnapshotPublishStats {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DocumentPath {
     pub collection: String,
+    /// The source root the file belongs to; [`crate::CONFIGURATION_ROOT_ID`] for
+    /// the configuration. `path` alone does not identify a file — an extension
+    /// repeats the configuration's layout verbatim.
+    pub root_id: String,
     pub path: String,
 }
 
 impl DocumentPath {
-    pub fn new(collection: impl Into<String>, path: impl Into<String>) -> Self {
-        Self { collection: collection.into(), path: path.into() }
+    pub fn new(
+        collection: impl Into<String>,
+        root_id: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Self {
+        Self { collection: collection.into(), root_id: root_id.into(), path: path.into() }
+    }
+
+    /// A file of the configuration root.
+    pub fn configuration(collection: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::new(collection, crate::CONFIGURATION_ROOT_ID, path)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedDocument {
     pub collection: String,
+    /// The source root this document's file belongs to; see
+    /// [`DocumentPath::root_id`].
+    pub root_id: String,
     pub path: String,
     pub symbol_name: String,
     pub kind: String,
@@ -164,7 +180,7 @@ pub struct IndexedDocument {
 
 impl IndexedDocument {
     pub fn document_path(&self) -> DocumentPath {
-        DocumentPath::new(self.collection.clone(), self.path.clone())
+        DocumentPath::new(self.collection.clone(), self.root_id.clone(), self.path.clone())
     }
 
     /// Attach pre-rendered graph context. A blank/whitespace-only string is treated
@@ -179,6 +195,7 @@ impl IndexedDocument {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LexicalHit {
     pub collection: String,
+    pub root_id: String,
     pub path: String,
     pub symbol_name: String,
     pub kind: String,
@@ -191,6 +208,7 @@ pub struct LexicalHit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SemanticHit {
     pub collection: String,
+    pub root_id: String,
     pub path: String,
     pub symbol_name: String,
     pub kind: String,

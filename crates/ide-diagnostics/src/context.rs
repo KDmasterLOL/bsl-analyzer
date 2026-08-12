@@ -36,11 +36,17 @@ impl<'a> DiagnosticsContext<'a> {
         self.provider.visible_configurations(self.file_id)
     }
 
-    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
-    /// this file — base + its own extension. For diagnostics that read the module
-    /// body (handler method existence/export, required parameters). Scoped
-    /// extension-private through the per-common-module substrate.
-    pub fn common_module_body_files(&self, name: &str) -> Vec<vfs::FileId> {
+    /// The `Ext/Module.bsl` bodies of the common module `name` visible to this file —
+    /// base + its own extension, each carrying whether it could be read. For
+    /// diagnostics that read the module body (handler method existence/export,
+    /// required parameters). Scoped extension-private through the per-common-module
+    /// substrate.
+    ///
+    /// Look things up with [`hir::CommonModuleBodies::search_merged_surface`]: this is
+    /// the merged surface, not priority order, and a diagnostic that concludes "the
+    /// module has no such method" must know that every body was actually readable, or
+    /// it accuses the caller of an absence nobody established.
+    pub fn common_module_bodies(&self, name: &str) -> hir::CommonModuleBodies {
         self.provider.resolve_common_module_files(self.file_id, name)
     }
 
@@ -265,6 +271,15 @@ impl<'a> DiagnosticsContext<'a> {
         vfs_path: &vfs::VfsPath,
     ) -> Option<vfs::FileId> {
         self.query(|p| p.resolve_vfs_path(source_root_id, vfs_path))
+    }
+
+    pub fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: base_db::SourceRootId,
+        candidate: &std::path::Path,
+        tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<vfs::FileId> {
+        self.query(|p| p.resolve_vfs_path_ci(source_root_id, candidate, tail_modes))
     }
 
     pub fn resolve_qualified_path(

@@ -29,6 +29,12 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// checks (which client environments the configuration targets).
     fn env_options(&self) -> hir_def::execution_env::EnvOptions;
 
+    /// Configured 1C runtime target; `None` selects the bundled catalog release.
+    fn target_platform_version(&self) -> Option<Arc<str>>;
+
+    /// Whether the host has finished the initial workspace/metadata load.
+    fn workspace_load_complete(&self) -> bool;
+
     fn proc_signature(&self, method_input: MethodIdInput<'_>) -> Arc<ProcSignature>;
 
     fn infer_method(&self, method: MethodIdInput<'_>) -> Arc<BodyInferenceResult>;

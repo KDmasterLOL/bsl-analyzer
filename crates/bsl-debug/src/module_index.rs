@@ -68,8 +68,11 @@ impl ModuleIndex {
         let mut index =
             Self { by_path: HashMap::new(), by_id: HashMap::new(), by_name: HashMap::new() };
 
-        let config_xml = config_root.join("Configuration.xml");
-        if !config_xml.exists() {
+        let config_present = bsl_conventions::find_child_ci(
+            config_root,
+            bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+        );
+        if config_present.is_none() {
             return Err(DebugError::ConfigRootNotFound(config_root.to_path_buf()));
         }
 
@@ -134,10 +137,17 @@ impl ModuleIndex {
     }
 
     fn scan_root(&mut self, extension: &str, root: &Path) -> Result<(), DebugError> {
-        let config_xml = root.join("Configuration.xml");
+        let config_xml = bsl_conventions::find_child_ci(
+            root,
+            bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+        )
+        .unwrap_or_else(|| root.join("Configuration.xml"));
         if let Some(config_object_id) = read_object_uuid(&config_xml)? {
-            let ext_dir = root.join("Ext");
-            if ext_dir.is_dir() {
+            let ext_dir = bsl_conventions::find_child_ci(
+                root,
+                bsl_conventions::ConventionalName::Ext.canonical(),
+            );
+            if let Some(ext_dir) = ext_dir.filter(|d| d.is_dir()) {
                 self.index_bsl_files(extension, &config_object_id, "", &ext_dir)?;
             }
         }
@@ -145,7 +155,9 @@ impl ModuleIndex {
         for entry in fs::read_dir(root)? {
             let entry = entry?;
             let dir_path = entry.path();
-            if !dir_path.is_dir() || entry.file_name() == "Ext" {
+            let is_root_ext = entry.file_name().to_str().and_then(bsl_conventions::conventional_of)
+                == Some(bsl_conventions::ConventionalName::Ext);
+            if !dir_path.is_dir() || is_root_ext {
                 continue;
             }
 
@@ -166,7 +178,7 @@ impl ModuleIndex {
             let entry = entry?;
             let path = entry.path();
 
-            let is_xml = path.extension().is_some_and(|e| e == "xml");
+            let is_xml = bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION);
             if !is_xml {
                 continue;
             }
@@ -184,19 +196,31 @@ impl ModuleIndex {
                 continue;
             }
 
-            let ext_dir = object_dir.join("Ext");
+            let ext_dir = bsl_conventions::find_child_ci(
+                &object_dir,
+                bsl_conventions::ConventionalName::Ext.canonical(),
+            )
+            .unwrap_or_else(|| object_dir.join("Ext"));
             if ext_dir.is_dir() {
                 self.index_bsl_files(extension, &object_id, dir_name, &ext_dir)?;
 
                 self.register_names(extension, dir_name, &object_name, &object_id, &ext_dir)?;
             }
 
-            let forms_dir = object_dir.join("Forms");
+            let forms_dir = bsl_conventions::find_child_ci(
+                &object_dir,
+                bsl_conventions::ConventionalName::Forms.canonical(),
+            )
+            .unwrap_or_else(|| object_dir.join("Forms"));
             if forms_dir.is_dir() {
                 self.scan_forms(extension, dir_name, &object_name, &forms_dir)?;
             }
 
-            let commands_dir = object_dir.join("Commands");
+            let commands_dir = bsl_conventions::find_child_ci(
+                &object_dir,
+                bsl_conventions::ConventionalName::Commands.canonical(),
+            )
+            .unwrap_or_else(|| object_dir.join("Commands"));
             if commands_dir.is_dir() {
                 self.scan_commands(extension, dir_name, &object_name, &path, &commands_dir)?;
             }
@@ -216,7 +240,7 @@ impl ModuleIndex {
             let entry = entry?;
             let path = entry.path();
 
-            let is_xml = path.extension().is_some_and(|e| e == "xml");
+            let is_xml = bsl_conventions::has_extension(&path, bsl_conventions::XML_EXTENSION);
             if !is_xml {
                 continue;
             }
@@ -230,10 +254,20 @@ impl ModuleIndex {
             };
 
             let form_dir = forms_dir.join(&form_name);
-            let module_file = form_dir.join("Ext").join("Form").join("Module.bsl");
-            if module_file.exists() {
-                let property_id = property_id_for_module(dir_name, "Module")
-                    .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
+            let module_file = bsl_conventions::resolve_chain_ci(
+                &form_dir,
+                &[
+                    bsl_conventions::ConventionalName::Ext.canonical(),
+                    bsl_conventions::ConventionalName::Form.canonical(),
+                    bsl_conventions::ConventionalName::Module.canonical(),
+                ],
+            );
+            if let Some(module_file) = module_file {
+                let property_id = property_id_for_module(
+                    dir_name,
+                    Some(bsl_conventions::ConventionalName::Module),
+                )
+                .unwrap_or(crate::constants::PROPERTY_FORM_MODULE);
 
                 let module_id = ModuleId {
                     extension: extension.to_string(),
@@ -275,8 +309,14 @@ impl ModuleIndex {
                 None => continue,
             };
 
-            let module_file = cmd_dir.join("Ext").join("CommandModule.bsl");
-            if module_file.exists() {
+            let module_file = bsl_conventions::resolve_chain_ci(
+                &cmd_dir,
+                &[
+                    bsl_conventions::ConventionalName::Ext.canonical(),
+                    bsl_conventions::ConventionalName::CommandModule.canonical(),
+                ],
+            );
+            if let Some(module_file) = module_file {
                 let module_id = ModuleId {
                     extension: extension.to_string(),
                     object_id: cmd_object_id.clone(),
@@ -305,18 +345,20 @@ impl ModuleIndex {
             let entry = entry?;
             let path = entry.path();
 
-            let is_bsl = path.extension().is_some_and(|e| e == "bsl");
+            let is_bsl = bsl_conventions::has_extension(&path, bsl_conventions::BSL_EXTENSION);
             if !is_bsl {
                 continue;
             }
 
-            let stem =
-                path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let kind = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(bsl_conventions::conventional_of);
 
-            let property_id = match property_id_for_module(dir_name, &stem) {
+            let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
                 None => {
-                    debug!(dir_name, stem, "skipping unknown module type");
+                    debug!(dir_name, ?kind, "skipping unknown module type");
                     continue;
                 }
             };
@@ -345,15 +387,17 @@ impl ModuleIndex {
             let entry = entry?;
             let path = entry.path();
 
-            let is_bsl = path.extension().is_some_and(|e| e == "bsl");
+            let is_bsl = bsl_conventions::has_extension(&path, bsl_conventions::BSL_EXTENSION);
             if !is_bsl {
                 continue;
             }
 
-            let stem =
-                path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let kind = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(bsl_conventions::conventional_of);
 
-            let property_id = match property_id_for_module(dir_name, &stem) {
+            let property_id = match property_id_for_module(dir_name, kind) {
                 Some(id) => id,
                 None => continue,
             };
@@ -472,4 +516,109 @@ fn local_name(name: &[u8]) -> &[u8] {
 
 fn ru_type_name(dir_name: &str) -> &'static str {
     METADATA_TYPES.iter().find(|(d, _)| *d == dir_name).map(|(_, ru)| *ru).unwrap_or("")
+}
+
+#[cfg(test)]
+mod case_parity_tests {
+    //! По контролю на каждую независимую ветвь индекса; в фикстуре каждой
+    //! ветви регистр меняется у ВСЕХ конвенционных сегментов её цепочки.
+
+    use super::*;
+
+    fn write(path: &Path, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+
+    fn object_xml(uuid: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\"?><MetaDataObject><Catalog uuid=\"{uuid}\"></Catalog></MetaDataObject>"
+        )
+    }
+
+    fn root_with_config(dir: &Path, config_name: &str) {
+        write(
+            &dir.join(config_name),
+            "<?xml version=\"1.0\"?><MetaDataObject><Configuration \
+             uuid=\"00000000-0000-0000-0000-0000000000c0\"></Configuration></MetaDataObject>",
+        );
+    }
+
+    /// В семействах одиночных модулей вид даёт КАТАЛОГ, а не имя файла:
+    /// неконвенционное имя тела остаётся индексируемым, как и раньше.
+    #[test]
+    fn an_unconventional_single_module_file_is_still_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        root_with_config(root, "Configuration.xml");
+        write(
+            &root.join("CommonModules/X.xml"),
+            &object_xml("00000000-0000-0000-0000-000000000004"),
+        );
+        write(&root.join("CommonModules/X/Ext/Custom.bsl"), "//");
+        let index = ModuleIndex::scan(root, &[]).unwrap();
+        assert!(
+            index.module_by_path(&root.join("CommonModules/X/Ext/Custom.bsl")).is_some(),
+            "PROPERTY_MODULE по каталогу, независимо от имени файла"
+        );
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn every_branch_of_the_index_takes_case_variant_conventional_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Корень: CONFIGURATION.XML целиком в другом регистре + корневой модуль.
+        root_with_config(root, "CONFIGURATION.XML");
+        write(&root.join("EXT/SESSIONMODULE.BSL"), "//");
+        // Объектная ветвь: XML-фильтр обхода на C.XML + объектный модуль.
+        write(&root.join("Catalogs/C.XML"), &object_xml("00000000-0000-0000-0000-000000000001"));
+        write(&root.join("Catalogs/C/EXT/OBJECTMODULE.BSL"), "//");
+        // Форменная цепочка.
+        write(
+            &root.join("Catalogs/C/FORMS/F.XML"),
+            &object_xml("00000000-0000-0000-0000-000000000002"),
+        );
+        write(&root.join("Catalogs/C/FORMS/F/EXT/FORM/MODULE.BSL"), "//");
+
+        let index = ModuleIndex::scan(root, &[]).expect("CONFIGURATION.XML — тот же корень");
+
+        assert!(
+            index.module_by_path(&root.join("EXT/SESSIONMODULE.BSL")).is_some(),
+            "корневой модуль сеанса в индексе"
+        );
+        assert!(
+            index.module_by_path(&root.join("Catalogs/C/EXT/OBJECTMODULE.BSL")).is_some(),
+            "объектный модуль в индексе"
+        );
+        assert!(
+            index.module_by_path(&root.join("Catalogs/C/FORMS/F/EXT/FORM/MODULE.BSL")).is_some(),
+            "форменная цепочка в индексе"
+        );
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn the_command_branch_takes_case_variant_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        root_with_config(root, "Configuration.xml");
+        write(
+            &root.join("Catalogs/C.xml"),
+            "<?xml version=\"1.0\"?><MetaDataObject><Catalog \
+             uuid=\"00000000-0000-0000-0000-000000000001\"><ChildObjects><Command \
+             uuid=\"00000000-0000-0000-0000-000000000003\"><Properties><Name>К</Name>\
+             </Properties></Command></ChildObjects></Catalog></MetaDataObject>",
+        );
+        std::fs::create_dir_all(root.join("Catalogs/C/Ext")).unwrap();
+        write(&root.join("Catalogs/C/COMMANDS/К/EXT/COMMANDMODULE.BSL"), "//");
+
+        let index = ModuleIndex::scan(root, &[]).unwrap();
+        assert!(
+            index
+                .module_by_path(&root.join("Catalogs/C/COMMANDS/К/EXT/COMMANDMODULE.BSL"))
+                .is_some(),
+            "командная цепочка в индексе"
+        );
+    }
 }

@@ -88,6 +88,25 @@ struct ScopeCliArgs {
     diff_filter: Option<PathBuf>,
 }
 
+/// The analysis file universe: every module body under the source roots,
+/// first spelling wins across overlapping roots.
+fn collect_bsl_files(source_roots: &[PathBuf]) -> Result<Vec<PathBuf>, walkdir::Error> {
+    let mut bsl_files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in source_roots {
+        for entry in walkdir::WalkDir::new(root).follow_links(true) {
+            let entry = entry?;
+            if entry.file_type().is_file() && project_model::is_bsl_source_path(entry.path()) {
+                let path = entry.path().to_path_buf();
+                if seen.insert(path.clone()) {
+                    bsl_files.push(path);
+                }
+            }
+        }
+    }
+    Ok(bsl_files)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze(
     source_dir: PathBuf,
@@ -104,6 +123,7 @@ pub fn analyze(
     only_diagnostic: Option<String>,
     diff_filter_path: Option<PathBuf>,
     ignored_authors: Vec<String>,
+    source_set: super::source_set::SourceSetArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     analyze_salsa(
         source_dir,
@@ -117,6 +137,7 @@ pub fn analyze(
         only_diagnostic,
         ScopeCliArgs { incremental, changed_files, git_diff, diff_filter: diff_filter_path },
         ignored_authors,
+        source_set,
     )
 }
 
@@ -218,6 +239,7 @@ fn analyze_salsa(
     only_diagnostic: Option<String>,
     scope_args: ScopeCliArgs,
     ignored_authors: Vec<String>,
+    source_set: super::source_set::SourceSetArgs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
@@ -232,7 +254,6 @@ fn analyze_salsa(
     use indicatif::{ProgressBar, ProgressStyle};
     use rayon::prelude::*;
     use vfs::FileId;
-    use walkdir::WalkDir;
 
     use bsl_analyzer::reporters::{AnalysisResults, FileAnalysis, ReporterRegistry};
 
@@ -270,11 +291,16 @@ fn analyze_salsa(
     let output_dir = output_dir.unwrap_or_else(|| PathBuf::from("."));
 
     tracing::info!("Loading project configuration");
-    let proj_config = if let Some(ref cfg) = config_path {
+    let mut proj_config = if let Some(ref cfg) = config_path {
         project_model::ProjectConfig::load_from_file(cfg)?
     } else {
         project_model::ProjectConfig::load(&source_dir)?.unwrap_or_default()
     };
+
+    // Applied before anything reads the config: `configuration_path` and
+    // `load_metadata` below run on this value, and the path the first produces
+    // becomes the interned configuration input the diagnostics resolve through.
+    source_set.resolve(&source_dir)?.apply_to(&mut proj_config);
 
     let scope = build_scope(&source_dir, &scope_args, proj_config.analysis.diff_base.as_deref())?;
     let author_filter =
@@ -287,11 +313,16 @@ fn analyze_salsa(
     // instead of the raw `-s` dir, so vendored/build copies such as
     // `.build/vendor` are not analyzed as a duplicate configuration.
     let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
+    // Deliberately not gated on `--quiet`: this explains why the findings that
+    // follow are wrong, and suppressing it leaves the run looking merely broken.
+    if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+        eprintln!("warning: {notice}");
+    }
     let source_roots = project.source_roots();
 
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
-    bsl_analyzer::features_state::apply_features_to_db(&mut db, &project.config.features);
+    bsl_analyzer::features_state::apply_project_config_to_db(&mut db, &project.config);
 
     // Register the base + extension configuration roots (with their dependency
     // topology) so per-file resolution — and the `&ИзменениеИКонтроль` effective
@@ -303,21 +334,7 @@ fn analyze_salsa(
     ));
 
     tracing::info!("Finding BSL files in {:?}", source_roots);
-    let mut bsl_files = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for root in &source_roots {
-        for entry in WalkDir::new(root).follow_links(true) {
-            let entry = entry?;
-            if entry.file_type().is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "bsl")
-            {
-                let path = entry.path().to_path_buf();
-                if seen.insert(path.clone()) {
-                    bsl_files.push(path);
-                }
-            }
-        }
-    }
+    let bsl_files = collect_bsl_files(&source_roots)?;
 
     tracing::info!(
         "Found {} BSL files across {} source root(s)",
@@ -850,4 +867,16 @@ fn analyze_salsa(
     tracing::info!("Analysis complete");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod analyze_walk_tests {
+    #[test]
+    fn the_analysis_walk_takes_a_case_variant_module_body() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("CommonModules/X/Ext")).unwrap();
+        std::fs::write(dir.path().join("CommonModules/X/Ext/Module.BSL"), "").unwrap();
+        let files = super::collect_bsl_files(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(files.len(), 1, "Module.BSL — тело модуля и входит во вселенную обхода");
+    }
 }

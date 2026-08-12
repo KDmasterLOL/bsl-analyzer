@@ -143,10 +143,23 @@ pub struct FileTextInput {
 /// (so an evicted+rederived text is sound). The model is probabilistic — a hash
 /// collision at the same length would alias two contents — which is acceptable
 /// for analysis caching but not a cryptographic guarantee.
+///
+/// `unreadable` rides here rather than on [`FileTextInput`] because this input is
+/// the one every registered file has: the disk-backed path stores no text input at
+/// all, so "the file became unreadable" would be the APPEARANCE of a text input —
+/// a plain map insert that Salsa cannot see, leaving a memo that read "no entry"
+/// unrevalidated. The revision is already the trigger `file_text_query` keys on for
+/// the same reason.
 #[salsa::input(debug, heap_size = stdx::heap::zero)]
 pub struct FileRevisionInput {
     #[returns(copy)]
     pub revision: u64,
+
+    /// The file exists but its bytes could not be read. Distinct from an empty
+    /// file: both carry an empty text, and nothing else tells them apart — the
+    /// source root holds the file either way, and the VFS never forgets a FileId.
+    #[returns(copy)]
+    pub unreadable: bool,
 }
 
 /// Compute the [`FileRevisionInput`] value for some text. Folds the byte length

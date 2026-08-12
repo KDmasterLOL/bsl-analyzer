@@ -55,11 +55,14 @@ pub use hir_def::module_structure;
 pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
 pub use hir_def::{
-    module_key_for_path, parse_form_module_path, ConditionalTree, FormKey, ItemTree, ModuleIndex,
-    ModuleKey, SymbolTree, WorkspaceSymbols,
+    module_key_for_path, module_path_segment_modes, parse_form_module_path, ConditionalTree,
+    FormKey, ItemTree, ModuleIndex, ModuleKey, SymbolTree, WorkspaceSymbols,
 };
 
-pub use hir_def::resolver::{AssignmentResolution, Resolver};
+pub use hir_def::resolver::{
+    AssignmentResolution, GlobalExportCapabilities, GlobalExportDefinition, GlobalExportEntry,
+    GlobalExportHost, GlobalExports, GlobalSurfaceGap, Resolver,
+};
 pub use hir_def::scope::{ExprScopes, ScopeDef};
 pub use hir_def::DefDatabase;
 
@@ -170,7 +173,9 @@ pub use hir_def::weaving::{
     interception_applicable, interceptor_target, signature_mismatch, Interception,
     InterceptionKind, SignatureMismatch, WeavingModuleId,
 };
-pub use hir_def::ConfigsDatabase;
+pub use hir_def::{
+    ApplicationModuleKind, BodySearch, CommonModuleBodies, CommonModuleBody, ConfigsDatabase,
+};
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::call_resolution::{
     BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallResolution, CallSelection,
@@ -192,9 +197,10 @@ pub use hir_ty::narrow::{
 pub use hir_ty::proc_signature;
 pub use hir_ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
-    form_element_kind_sort_band, BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind,
-    FormElementKind, InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult,
-    MetadataKind, ModuleCodeInferenceResult, UnresolvedMethodKind,
+    form_element_kind_sort_band, BareNameGap, BareNameOrigin, BareNameResolution, BareNameUse,
+    BodyInferenceResult, CallArgBinding, EnvCalleeKind, EnvMemberKind, FormElementKind,
+    InferOwnerResult, InferenceContext, InferenceDiagnostic, InferenceResult, MetadataKind,
+    ModuleCodeInferenceResult, UnresolvedMethodKind,
 };
 
 pub use bsl_types::builders::Builders;

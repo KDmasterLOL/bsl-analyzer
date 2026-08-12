@@ -1,15 +1,23 @@
 //! The single owner of the per-workspace derived-cache directory.
 //!
 //! Every SQLite index the server builds from a workspace (the call graph and the
-//! code-search index) lives under `<workspace>/.build`. Centralising the path here
-//! keeps the directory layout in one place instead of being reconstructed ad-hoc at
-//! each call site. The directory is a rebuildable cache: it is safe to delete and is
-//! re-created on demand.
+//! code-search index) lives under one root: `<workspace>/.build` by default, or the
+//! directory `mcp serve --cache-dir` names. Centralising the path here keeps the
+//! directory layout in one place instead of being reconstructed ad-hoc at each call
+//! site. The directory is a rebuildable cache: it is safe to delete and is re-created
+//! on demand.
 //!
 //! Workspace-independent caches (the platform reference-search database) live in the
 //! user's OS cache directory, not here — see `state::reference_search_db_path`.
 
 use std::path::{Path, PathBuf};
+
+/// The lock serializing lease reads and writes. Defined here, not next to the lease code, so
+/// the directory's file names have one definition and a rename cannot leave the layout behind.
+pub(crate) const LEASE_LOCK_FILE: &str = "writer.lease.lock";
+
+/// The one-shot artifact a wedged build leaves behind when daemon file logging is off.
+pub(crate) const STALL_REPORT_FILE: &str = "bsl-graph-stall-report.txt";
 
 /// Resolved locations of every cache derived from one workspace.
 ///
@@ -73,11 +81,11 @@ impl WorkspaceCacheLayout {
     }
 
     pub fn lease_lock_path(&self) -> PathBuf {
-        self.root.join("writer.lease.lock")
+        self.root.join(LEASE_LOCK_FILE)
     }
 
     pub fn stall_report_path(&self) -> PathBuf {
-        self.root.join("bsl-graph-stall-report.txt")
+        self.root.join(STALL_REPORT_FILE)
     }
 
     pub fn daemon_log_path(&self) -> PathBuf {
@@ -100,6 +108,7 @@ pub fn ensure_workspace_cache_dir(workspace_root: &Path) -> std::io::Result<Path
 }
 
 /// The call-graph SQLite index path under the workspace cache directory.
+#[cfg(test)]
 pub fn graph_db_path(workspace_root: &Path) -> PathBuf {
     WorkspaceCacheLayout::for_workspace(workspace_root).graph_db_path()
 }

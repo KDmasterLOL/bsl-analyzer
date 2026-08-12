@@ -60,8 +60,13 @@ pub(crate) struct StatusReport {
     /// `disabled | idle | loading | ready | failed`.
     pub state: &'static str,
     pub generation: u64,
-    /// Resident `.bsl` count once `ready`.
+    /// SERVED resident `.bsl` count once `ready` — files held out as unreadable are
+    /// not in it. See `unread_files` for those.
     pub files: Option<usize>,
+    /// Workspace `.bsl` files that exist but could not be read, once `ready`.
+    /// `Option`, like `files`: in a state with no resident there is no such count,
+    /// and a flat `0` would read as "everything was read".
+    pub unread_files: Option<usize>,
     /// Background reload state: `none | running | failed`.
     pub reload: &'static str,
     /// The failure message when `state == failed` (build panicked or errored).

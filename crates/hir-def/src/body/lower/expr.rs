@@ -466,11 +466,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
         }
 
-        if is_external_app_method(&name) {
-            ctx.diagnostics
-                .push(BodyDiagnostic::ExternalAppStarting { range: actual_callee.text_range() });
-        }
-
         if is_os_users_method(&name) {
             ctx.diagnostics
                 .push(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
@@ -580,15 +575,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         if let Some(method_token) = idents.last() {
             let method_name = method_token.text();
-            if is_external_app_method(method_name) {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::ExternalAppStarting { range: method_token.text_range() });
-            }
-
-            if is_file_system_method(method_name) {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::FileSystemAccess { range: method_token.text_range() });
-            }
 
             if is_form_data_to_value_method(method_name) && !ctx.has_no_context_annotation {
                 ctx.diagnostics
@@ -1251,12 +1237,6 @@ fn is_os_users_method(name: &str) -> bool {
     bsl_platform::security::registry()
         .lookup_global(name)
         .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::OsUsers))
-}
-
-fn is_external_app_method(name: &str) -> bool {
-    bsl_platform::security::registry()
-        .lookup_global(name)
-        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::ExternalApp))
 }
 
 fn is_file_system_type(name: &str) -> bool {

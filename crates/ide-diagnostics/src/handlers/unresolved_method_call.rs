@@ -32,10 +32,12 @@ pub fn from_hir(
         UnresolvedMethodKind::MethodNotExport => {
             format!("Метод '{}.{}' не экспортирован", receiver_name.as_str(), method_name.as_str())
         }
-        UnresolvedMethodKind::CommonModuleNoSource => {
-            format!("Для общего модуля '{}' не найден исходный файл", receiver_name.as_str())
-        }
-        UnresolvedMethodKind::ReceiverNotResolved => {
+        // Nothing is said about this call. The module's surface is unknown, so any
+        // verdict would be a guess, and it would be filed against the calling file —
+        // which is not the one with the problem. The unreadable file is reported at
+        // its own address, once, by the host that failed to read it.
+        UnresolvedMethodKind::BodyUnread => return None,
+        UnresolvedMethodKind::ReceiverNotResolved | UnresolvedMethodKind::ReceiverNameAbsent => {
             format!("Не удалось разрешить модуль '{}'", receiver_name.as_str())
         }
     };
@@ -67,6 +69,158 @@ mod tests {
             unresolved[0].message.contains("НесуществующийМетод"),
             "message must name the missing method, got: {}",
             unresolved[0].message
+        );
+    }
+
+    /// The body of the callee module could not be read, so its empty text is
+    /// ignorance rather than an empty API — and the caller, which did not change,
+    /// must not be blamed for a method the unread body may well export.
+    ///
+    /// The readable half is the positive control: without it the test would pass on
+    /// an implementation that never reports an unresolved call at all.
+    #[test]
+    fn an_unread_callee_body_silences_the_call_where_an_empty_one_reports_it() {
+        use crate::test_utils::check_hir_diagnostic_with_unreadable;
+
+        let fixture = r#"
+//- /CommonModules/Сервер/Ext/Module.bsl
+
+//- /test.bsl
+Процедура Тест()
+    Сервер.П();
+КонецПроцедуры
+"#;
+
+        let readable = check_hir_diagnostic_with_unreadable(fixture, &[]);
+        let reported: Vec<_> =
+            readable.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert_eq!(
+            reported.len(),
+            1,
+            "an honestly empty module really does lack the method: {readable:?}"
+        );
+
+        let unread = check_hir_diagnostic_with_unreadable(
+            fixture,
+            &["/CommonModules/Сервер/Ext/Module.bsl"],
+        );
+        let silenced: Vec<_> =
+            unread.iter().filter(|d| d.code == DiagnosticCode::UnresolvedMethodCall).collect();
+        assert!(silenced.is_empty(), "the caller is not the file with the problem: {silenced:?}");
+    }
+
+    /// A common module can have more than one body — the base declaration plus an
+    /// extension's adoption of the same name — and the method may live in either. When
+    /// one of them cannot be read, the readable one missing the method proves nothing,
+    /// even though the candidate list is not empty. This is the input on which a rule
+    /// phrased as "refuse once the list is empty" would silently do nothing.
+    #[test]
+    fn a_readable_body_without_the_method_is_no_verdict_while_a_sibling_body_is_unread() {
+        use crate::test_utils::{check_with_cfe, check_with_cfe_unreadable};
+
+        let source = r#"
+Процедура Тест() Экспорт
+    Сервер.П();
+КонецПроцедуры
+"#;
+        let build = || {
+            let mut builder = test_fixture::CfeFixtureBuilder::new("");
+            builder.add_base_module("Сервер", "Процедура Другой() Экспорт КонецПроцедуры");
+            builder.add_extension("Расш", "");
+            builder.add_extension_module("Расш", "Сервер", "Процедура П() Экспорт КонецПроцедуры");
+            builder.build()
+        };
+
+        // Positive control: both bodies readable and neither exports `П` — the verdict
+        // is earned, and the test would be green on "suppress always" without this.
+        let mut readable_builder = test_fixture::CfeFixtureBuilder::new("");
+        readable_builder.add_base_module("Сервер", "Процедура Другой() Экспорт КонецПроцедуры");
+        readable_builder.add_extension("Расш", "");
+        readable_builder.add_extension_module(
+            "Расш",
+            "Сервер",
+            "Процедура Третий() Экспорт КонецПроцедуры",
+        );
+        let control = check_with_cfe(source, readable_builder.build());
+        assert!(
+            control.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "with every body readable the method really is missing: {control:?}"
+        );
+
+        let unread = check_with_cfe_unreadable(
+            source,
+            build(),
+            &["Extensions/Расш/CommonModules/Сервер/Ext/Module.bsl"],
+        );
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "the method may well live in the body nobody could read: {unread:?}"
+        );
+    }
+
+    /// Priority runs base-before-extension, so a hit in the extension body is the
+    /// answer only when the base body was readable and did not have the method. With
+    /// the base unread, the extension's non-exported `П` must not produce a verdict:
+    /// the base may well export one, and its declaration would have won.
+    #[test]
+    fn an_unread_base_body_bars_a_verdict_from_the_extension_body_behind_it() {
+        use crate::test_utils::{check_with_cfe, check_with_cfe_unreadable};
+
+        let source = r#"
+Процедура Тест() Экспорт
+    Сервер.П();
+КонецПроцедуры
+"#;
+        let build = || {
+            let mut builder = test_fixture::CfeFixtureBuilder::new("");
+            builder.add_base_module("Сервер", "Процедура П() Экспорт КонецПроцедуры");
+            builder.add_extension("Расш", "");
+            builder.add_extension_module("Расш", "Сервер", "Процедура П() КонецПроцедуры");
+            builder.build()
+        };
+
+        // Control: with the base readable its exported `П` wins and nothing is reported,
+        // so the assertion below is about the unread base and not about the fixture.
+        let control = check_with_cfe(source, build());
+        assert!(
+            !control.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "the base body exports П and has priority: {control:?}"
+        );
+
+        let unread =
+            check_with_cfe_unreadable(source, build(), &["CommonModules/Сервер/Ext/Module.bsl"]);
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "an unread base body bars the extension from answering for it: {unread:?}"
+        );
+    }
+
+    /// The route that produced the defect in the first place: with no configuration
+    /// root the resolver never asks the substrate at all and takes the candidate
+    /// straight from the path-derived module index, which holds the unread body's id
+    /// like any other file's.
+    #[test]
+    fn the_path_index_route_is_the_one_under_test_here() {
+        use crate::test_utils::check_hir_diagnostic_with_unreadable;
+
+        let fixture = r#"
+//- /CommonModules/Сервер/Ext/Module.bsl
+
+//- /test.bsl
+Процедура Тест()
+    Сервер.П();
+КонецПроцедуры
+"#;
+        // No `set_all_config_paths` runs in this fixture, so `has_config_root` is
+        // false and the substrate branch is unreachable — the assertion below can
+        // only be satisfied by the check on the path-index candidate.
+        let unread = check_hir_diagnostic_with_unreadable(
+            fixture,
+            &["/CommonModules/Сервер/Ext/Module.bsl"],
+        );
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::UnresolvedMethodCall),
+            "path-index candidates must be checked for readability too: {unread:?}"
         );
     }
 

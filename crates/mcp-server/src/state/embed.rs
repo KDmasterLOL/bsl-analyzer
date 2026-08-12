@@ -1,9 +1,12 @@
 use super::types::{OverlayWarmupState, SemanticRuntimeStatus, SharedSearchEngine};
 use super::SharedState;
-use bsl_search::{IndexProgress, SearchEngine};
-use std::path::{Path, PathBuf};
+use bsl_search::{IndexProgress, SearchEngine, WorkspaceRootsTransitionOutcome};
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The ONE embed single-flight for the whole workspace. Both the boot pass (fills the initial
@@ -161,6 +164,16 @@ type EmbedPostPassHook = Box<dyn FnMut(&Path) + Send>;
 #[cfg(test)]
 static EMBED_POST_PASS_HOOK: Mutex<Option<EmbedPostPassHook>> = Mutex::new(None);
 
+// Test observer bracketing the expensive root-plan validation. Thread-local so parallel graph
+// tests cannot report their own transitions into this test's deterministic assertion.
+#[cfg(test)]
+type RootValidationHook = Option<Box<dyn Fn(bool)>>;
+#[cfg(test)]
+thread_local! {
+    static ROOT_VALIDATION_HOOK: std::cell::RefCell<RootValidationHook> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl SharedState {
     /// The production publish hook: after a graph publish it re-renders the search chunks
     /// marked context-dirty by an `.xml` drift, then re-embeds them. Extracted so a test can
@@ -168,16 +181,32 @@ impl SharedState {
     /// hook receives `(drift_pending, build_start_seq)`: `build_start_seq` bounds which marks
     /// the refresh may clear (only drifts this build already reflects), while `drift_pending`
     /// is a fast-path hint to skip a round when a fresher reload is imminent.
+    // Each handle is an independent owner used by the long-lived publish closure; grouping them
+    // would only move the same lifecycle dependencies behind a bag-of-fields type.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn build_publish_hook(
         search_engine: SharedSearchEngine,
         cache: crate::cache::WorkspaceCacheLayout,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         index_progress: Arc<IndexProgress>,
         embed_flight: Arc<EmbedFlight>,
+        overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
+        root_drift_epoch: Arc<AtomicU64>,
         lease: crate::workspace_lease::WorkspaceLease,
-    ) -> Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync> {
+    ) -> Arc<
+        dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome + Send + Sync,
+    > {
         Arc::new(move |signal| {
-            Self::refresh_search_contexts_after_graph_with_cache(
+            // The transition must precede the context consume: the latter marks and refreshes
+            // rows under the root keyspace that is current when it takes the engine lock.
+            let (roots_handled, pending_collection_embeddings, pending_overlay_embeddings) =
+                Self::refresh_search_roots_after_graph(
+                    &search_engine,
+                    &cache,
+                    &root_drift_epoch,
+                    &signal,
+                );
+            let topology_handled = Self::refresh_search_contexts_after_graph_with_cache(
                 &search_engine,
                 &cache,
                 &semantic_runtime,
@@ -185,12 +214,247 @@ impl SharedState {
                 &embed_flight,
                 &lease,
                 signal,
-            )
+            );
+            // Context refresh may have NULLed more chunks, so kick after both mutations and let
+            // the existing single-flights absorb all pending work in one rerun.
+            if pending_collection_embeddings {
+                Self::kick_context_reembed(
+                    &search_engine,
+                    &semantic_runtime,
+                    &index_progress,
+                    &embed_flight,
+                    &lease,
+                );
+            }
+            if pending_overlay_embeddings {
+                if let Some(retry) = &overlay_retry {
+                    retry.kick_fresh();
+                }
+            }
+            crate::graph::GraphPublishOutcome { topology_handled, roots_handled }
         })
     }
+
+    /// Apply the search root table carried by the published graph. Planning walks and reads the
+    /// filesystem without the outer engine mutex; only seed capture and guarded apply serialize
+    /// with searches and watcher attribution.
+    fn refresh_search_roots_after_graph(
+        engine: &SharedSearchEngine,
+        cache: &crate::cache::WorkspaceCacheLayout,
+        root_drift_epoch: &AtomicU64,
+        signal: &crate::graph::GraphPublishSignal,
+    ) -> (bool, bool, bool) {
+        if !signal.roots_refresh_requested {
+            return (true, false, false);
+        }
+        if signal.drift_pending {
+            tracing::debug!(
+                "graph drift still pending; deferring search root transition to the next publish"
+            );
+            return (false, false, false);
+        }
+        let Some(roots) = signal.workspace_roots.clone() else {
+            tracing::debug!(
+                "published graph has no validated project root table; keeping search roots"
+            );
+            return (false, false, false);
+        };
+        let Some(provider) = Self::published_graph_context_provider(cache, signal.topology) else {
+            return (false, false, false);
+        };
+        let seed = {
+            let Ok(mut guard) = engine.lock() else {
+                tracing::warn!("search engine lock poisoned while capturing root transition");
+                return (false, false, false);
+            };
+            let Some(engine) = guard.as_mut() else {
+                return (false, false, false);
+            };
+            // Every graph publish asks the hook to check roots. The overwhelmingly common
+            // unchanged case must stay O(1), not re-walk and re-chunk the whole workspace.
+            // It still installs the new artifact provider: otherwise a later watcher point
+            // refresh would keep querying the graph file that was open at daemon boot.
+            if engine.workspace_roots() == Some(&roots) {
+                return match engine.replace_published_graph_context_provider(provider) {
+                    Ok(()) => (true, false, false),
+                    Err(error) => {
+                        tracing::warn!(
+                            "could not install published graph context provider: {error}"
+                        );
+                        (false, false, false)
+                    }
+                };
+            }
+            match engine.workspace_roots_transition_seed(roots) {
+                Ok(seed) => seed,
+                Err(error) => {
+                    tracing::warn!("could not capture search root transition: {error}");
+                    return (false, false, false);
+                }
+            }
+        };
+        // Fence the complete off-lock preparation, not only its second validation pass. Metadata
+        // is intentionally absent from the BSL file identity set, so only the sink epoch can say
+        // that an XML/config event landed while plan() was chunking the workspace.
+        let validation_epoch = root_drift_epoch.load(Ordering::SeqCst);
+        let seed = seed.with_graph_context_provider(provider.clone());
+        let plan = match seed.plan() {
+            Ok(plan) => plan,
+            Err(error) => {
+                tracing::warn!("could not plan search root transition: {error}");
+                return (false, false, false);
+            }
+        };
+        // The second scan/read bracket is deliberately off the outer engine mutex. Fence it with
+        // the search sink's root-relevant drift epoch: a BSL/config/subtree batch processed before
+        // the final engine-lock claim supersedes this plan, while one processed afterwards waits
+        // on that lock and is attributed through the newly-published roots after apply. Unlike the
+        // hub-wide raw event counter, unrelated files do not reject a valid transition.
+        #[cfg(test)]
+        ROOT_VALIDATION_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow().as_ref() {
+                hook(true);
+            }
+        });
+        let validation = plan.revalidate();
+        #[cfg(test)]
+        ROOT_VALIDATION_HOOK.with(|hook| {
+            if let Some(hook) = hook.borrow().as_ref() {
+                hook(false);
+            }
+        });
+        let validated = match validation {
+            Ok(Some(validated)) => validated,
+            Ok(None) => {
+                tracing::debug!(
+                    "search root transition validation was superseded; keeping retry obligation"
+                );
+                return (false, false, false);
+            }
+            Err(error) => {
+                // No inner retry loop: GraphState retains the root-only obligation and the
+                // existing search-sink heartbeat retries it once per bounded wake.
+                tracing::warn!("could not validate search root transition: {error}");
+                return (false, false, false);
+            }
+        };
+        let outcome = {
+            let Ok(mut guard) = engine.lock() else {
+                tracing::warn!("search engine lock poisoned while applying root transition");
+                return (false, false, false);
+            };
+            let Some(engine) = guard.as_mut() else {
+                return (false, false, false);
+            };
+            if root_drift_epoch.load(Ordering::SeqCst) != validation_epoch {
+                tracing::debug!(
+                    "root-relevant drift was processed across validation; keeping retry obligation"
+                );
+                return (false, false, false);
+            }
+            let applied = engine.apply_validated_workspace_roots_transition(validated);
+            match applied {
+                Ok(WorkspaceRootsTransitionOutcome::Unchanged) => engine
+                    .replace_published_graph_context_provider(provider)
+                    .map(|()| WorkspaceRootsTransitionOutcome::Unchanged),
+                Ok(outcome @ WorkspaceRootsTransitionOutcome::Applied { .. }) => {
+                    // Preserve the already-committed outcome even if the provider lock is
+                    // poisoned: its pending embedding signals must still reach their owners.
+                    if let Err(error) = engine.replace_published_graph_context_provider(provider) {
+                        tracing::warn!(
+                            "root transition applied but published graph provider was not installed: {error}"
+                        );
+                    }
+                    Ok(outcome)
+                }
+                other => other,
+            }
+        };
+        match outcome {
+            Ok(WorkspaceRootsTransitionOutcome::Unchanged) => (true, false, false),
+            Ok(WorkspaceRootsTransitionOutcome::Applied {
+                removed,
+                rebuilt,
+                added,
+                pending_collection_embeddings,
+                pending_overlay_embeddings,
+            }) => {
+                tracing::info!(
+                    removed,
+                    rebuilt,
+                    added,
+                    "search root table transitioned after graph publish"
+                );
+                (true, pending_collection_embeddings, pending_overlay_embeddings)
+            }
+            Ok(WorkspaceRootsTransitionOutcome::Superseded) => {
+                tracing::debug!("search root transition was superseded; keeping retry obligation");
+                (false, false, false)
+            }
+            Err(error) => {
+                tracing::warn!("search root transition failed; keeping last-known-good: {error}");
+                (false, false, false)
+            }
+        }
+    }
+
+    fn published_graph_context_provider(
+        cache: &crate::cache::WorkspaceCacheLayout,
+        topology: u64,
+    ) -> Option<Arc<crate::graph_query::GraphDbContextProvider>> {
+        let graph_path = cache.graph_db_path();
+        let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
+            Ok(db) => db,
+            Err(error) => {
+                tracing::debug!("graph unavailable for search root transition: {error}");
+                return None;
+            }
+        };
+        match graph_db.freshness_token() {
+            Ok((_, fingerprint, _)) if fingerprint.topology == topology => {
+                Some(Arc::new(crate::graph_query::GraphDbContextProvider::new(graph_db)))
+            }
+            _ => {
+                tracing::warn!(
+                    published_topology = topology,
+                    "graph database on disk is not the published build; skipping root transition"
+                );
+                None
+            }
+        }
+    }
+    /// The outcome of one warmup pass, from what its plan proved. A pass whose scan left
+    /// something unseen (`unreadable`, `canonical_fallbacks`) or whose reads failed may not
+    /// speak for the whole tree: reporting `NoLocalDiffs`/`Synced` then would claim a
+    /// completeness nobody verified, so those are reserved for a fully-verified pass.
+    fn warmup_outcome(
+        plan_empty: bool,
+        overlay_files: usize,
+        embedded: usize,
+        unreadable: usize,
+        canonical_fallbacks: usize,
+        read_failures: usize,
+        persist_failed: bool,
+    ) -> OverlayWarmupState {
+        if unreadable > 0 || canonical_fallbacks > 0 || read_failures > 0 || persist_failed {
+            OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                persist_failed,
+            }
+        } else if plan_empty {
+            OverlayWarmupState::NoLocalDiffs
+        } else {
+            OverlayWarmupState::Synced { overlay_files, embedded }
+        }
+    }
+
     pub(super) fn run_overlay_warmup(
         search_engine: &SharedSearchEngine,
         overlay_warmup: &Arc<Mutex<OverlayWarmupState>>,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        keep_going: &dyn Fn() -> bool,
     ) {
         let cloned = match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
@@ -203,8 +467,7 @@ impl SharedState {
                         );
                         return;
                     };
-                    let Some(workspace_root) = engine.workspace_root().map(Path::to_path_buf)
-                    else {
+                    let Some(roots) = engine.workspace_roots().cloned() else {
                         tracing::debug!("overlay warmup: no workspace root; skipping");
                         Self::set_overlay_warmup_state(
                             overlay_warmup,
@@ -226,9 +489,10 @@ impl SharedState {
                         }
                     };
                     // Captured here, under the same lock as the warm cache and before the lock-free
-                    // embed: the publish below clears only these, so a watcher edit landing mid-embed
-                    // stays dirty and is re-embedded by a later refresh instead of being lost.
-                    let dirty_before = match engine.workspace_overlay_dirty_paths_snapshot() {
+                    // embed: the publish judges itself against this baseline — marks it may
+                    // consume, and the freshness fence point settlements must out-date to
+                    // survive it.
+                    let dirty_before = match engine.workspace_overlay_publication_baseline() {
                         Ok(dirty) => dirty,
                         Err(error) => {
                             tracing::warn!(
@@ -244,7 +508,7 @@ impl SharedState {
                     Some((
                         engine.db_path().to_path_buf(),
                         embedder_config,
-                        workspace_root,
+                        roots,
                         warm_cache,
                         engine.graph_context_provider(),
                         dirty_before,
@@ -261,14 +525,8 @@ impl SharedState {
                 return;
             }
         };
-        let Some((
-            db_path,
-            embedder_config,
-            workspace_root,
-            warm_cache,
-            graph_provider,
-            dirty_before,
-        )) = cloned
+        let Some((db_path, embedder_config, roots, warm_cache, graph_provider, dirty_before)) =
+            cloned
         else {
             // Engine was published earlier but is gone now (e.g. shutdown raced the warmup).
             Self::set_overlay_warmup_state(
@@ -280,12 +538,19 @@ impl SharedState {
 
         // Lock-free: plan against a reopened standalone store and embed the missing chunks. The
         // engine mutex is NOT held here, so search/status stay responsive during the remote embed.
+        // Ownership is re-checked between embed batches (the uncached read — the cached
+        // verdict would let a superseded daemon write for up to its TTL after a takeover),
+        // and the caller's own stop signal rides along: a shutdown mid-batch must not keep
+        // writing the shared table while the lease is being handed over.
+        let should_continue = || lease.owns_caches_now() && keep_going();
         let primed = SearchEngine::prime_workspace_overlay_standalone(
             &db_path,
             embedder_config,
-            &workspace_root,
+            &roots,
             warm_cache,
             graph_provider,
+            &should_continue,
+            dirty_before.distrusted(),
         );
         let (plan, new_embeddings) = match primed {
             Ok(result) => result,
@@ -300,24 +565,91 @@ impl SharedState {
         };
 
         // Capture plan stats BEFORE `plan`/`new_embeddings` are consumed by the publish below, so
-        // the warmup outcome can report how many local files were embedded (and how many chunks).
-        let plan_empty = plan.is_empty();
-        let overlay_files = plan.overlay_file_count();
+        // the warmup outcome can report how many local files were embedded (and how many chunks)
+        // — and, for an incomplete pass, exactly how much the pass could not vouch for.
         let embedded = new_embeddings.len();
+        let scan_unreadable = plan.scan_unreadable();
+        let scan_canonical_fallbacks = plan.scan_canonical_fallbacks();
 
+        // The stop/ownership signal is honoured even when the embed set was EMPTY (the
+        // in-batch checks never ran): a stopped driver must not publish anything.
+        if !lease.owns_caches_now() || !keep_going() {
+            tracing::warn!("overlay warmup: stopped before publish");
+            Self::set_overlay_warmup_state(
+                overlay_warmup,
+                OverlayWarmupState::Failed("workspace ownership lost at publish".to_owned()),
+            );
+            return;
+        }
         // Brief lock to publish the merged result atomically.
         match search_engine.lock() {
             Ok(guard) => match guard.as_ref() {
                 Some(engine) => {
-                    match engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before) {
-                        Ok(()) => {
+                    // Re-checked AFTER the engine lock was acquired: the pre-publish check
+                    // above is a TOCTOU guard only, and a stop arriving while this thread
+                    // waited on the mutex must still win — the ownership fence below cannot
+                    // stand in for it (an unmanaged lease always grants it).
+                    if !keep_going() {
+                        tracing::warn!("overlay warmup: stopped before publish");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Failed(
+                                "workspace ownership lost at publish".to_owned(),
+                            ),
+                        );
+                        return;
+                    }
+                    // Phase C under the REAL fence: fingerprint rows suppress the next
+                    // owner's re-reads after a restart, so a narrow ownership window is not
+                    // enough here — a claim either completes before this write or waits.
+                    let published = lease.with_ownership(|| {
+                        engine.publish_workspace_overlay(plan, new_embeddings, &dirty_before)
+                    });
+                    let Some(published) = published else {
+                        tracing::warn!("overlay warmup: workspace ownership lost at publish");
+                        Self::set_overlay_warmup_state(
+                            overlay_warmup,
+                            OverlayWarmupState::Failed(
+                                "workspace ownership lost at publish".to_owned(),
+                            ),
+                        );
+                        return;
+                    };
+                    match published {
+                        Ok(bsl_search::PublishOutcome::Applied {
+                            gate_deferred,
+                            persist_ok,
+                            overlay_files: applied_overlay_files,
+                            deleted_files,
+                            unread_keys,
+                        }) => {
                             tracing::info!("workspace overlay semantic warmup complete");
-                            let outcome = if plan_empty {
-                                OverlayWarmupState::NoLocalDiffs
-                            } else {
-                                OverlayWarmupState::Synced { overlay_files, embedded }
-                            };
+                            // Every number comes from the APPLIED state, not the plan:
+                            // carried and fenced keys make the two diverge. "No local
+                            // diffs" requires zero entries AND zero local deletions; the
+                            // unread count is the applied one, so an out-fenced stale
+                            // failure no longer inflates `Incomplete`, while a marked key
+                            // the gate skipped unread still counts — the pass did not
+                            // verify it. A failed persist keeps the pass incomplete too.
+                            let outcome = Self::warmup_outcome(
+                                applied_overlay_files == 0 && deleted_files == 0,
+                                applied_overlay_files,
+                                embedded,
+                                scan_unreadable,
+                                scan_canonical_fallbacks,
+                                unread_keys + gate_deferred,
+                                !persist_ok,
+                            );
                             Self::set_overlay_warmup_state(overlay_warmup, outcome);
+                        }
+                        Ok(bsl_search::PublishOutcome::Superseded) => {
+                            tracing::info!(
+                                "workspace overlay warmup superseded by a concurrent publication"
+                            );
+                            Self::set_overlay_warmup_state(
+                                overlay_warmup,
+                                OverlayWarmupState::Superseded,
+                            );
                         }
                         Err(error) => {
                             tracing::warn!("overlay warmup: publish failed: {error}");
@@ -412,6 +744,7 @@ impl SharedState {
             build_start_seq,
             topology_changed,
             topology,
+            ..
         } = signal;
         // Fast-path skip (an optimization, not correctness): a follow-up reload is already
         // catching up, so let ITS publish re-render against the fresher graph. Correctness
@@ -681,8 +1014,10 @@ mod tests {
     };
     use super::SharedState;
     use bsl_search::SearchEngine;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     /// The extension topology recorded in the graph database a test just built — what a real
@@ -694,6 +1029,501 @@ mod tests {
             .expect("graph database carries its freshness token")
             .1
             .topology
+    }
+
+    fn write_root_layout(workspace: &std::path::Path, include_extension: bool) {
+        let configuration = workspace.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(&configuration, "Основа", "Процедура Основа() Экспорт\nКонецПроцедуры");
+        let extension = workspace.join("ext/live");
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(extension.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &extension,
+            "Расширение",
+            "Процедура Расширение() Экспорт\nКонецПроцедуры",
+        );
+        let config = if include_extension {
+            "[source]\nroot = \"cf\"\nextensions = [{ name = \"live\", path = \"ext/live\" }]\n"
+        } else {
+            "[source]\nroot = \"cf\"\nextensions = []\n"
+        };
+        fs::write(workspace.join("bsl-analyzer.toml"), config).unwrap();
+    }
+
+    struct BootGraphProvider;
+
+    impl bsl_search::GraphContextProvider for BootGraphProvider {
+        fn graph_context(&self, _: &str, _: &str, _: &str) -> Option<String> {
+            Some("boot graph".to_owned())
+        }
+    }
+
+    fn wait_for_root_count(engine: &super::SharedSearchEngine, expected: usize) {
+        for _ in 0..400 {
+            let count = engine.lock().ok().and_then(|guard| {
+                guard
+                    .as_ref()
+                    .and_then(SearchEngine::workspace_roots)
+                    .map(|roots| roots.entries().count())
+            });
+            if count == Some(expected) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("search root table did not reach {expected} entries");
+    }
+
+    /// The production publish hook, not a hand-called transition, installs and removes an
+    /// extension from the root table carried by the graph's exact project snapshot.
+    #[test]
+    fn production_publish_hook_transitions_live_search_roots() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_root_layout(&workspace, true);
+
+        let db_path = crate::cache::search_db_path(&workspace);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        let (boot_roots, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &workspace.join("cf"), &[]);
+        engine.initialize_workspace_roots(boot_roots).unwrap();
+        let boot_provider: Arc<dyn bsl_search::GraphContextProvider> = Arc::new(BootGraphProvider);
+        engine.set_graph_context_provider(Arc::clone(&boot_provider));
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Disabled));
+        let progress = bsl_search::IndexProgress::new();
+        let flight = super::EmbedFlight::new();
+        let hook = SharedState::build_publish_hook(
+            Arc::clone(&engine),
+            crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
+            Arc::clone(&semantic_runtime),
+            Arc::clone(&progress),
+            Arc::clone(&flight),
+            None,
+            Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+        let graph =
+            crate::graph::GraphState::for_workspace(workspace.clone()).with_publish_hook(hook);
+        graph.ensure_loading();
+        wait_for_root_count(&engine, 2);
+        let guard = engine.lock().unwrap();
+        let published_engine = guard.as_ref().unwrap();
+        assert!(published_engine.workspace_roots().unwrap().contains_id("ext/live"));
+        let published_provider = published_engine.graph_context_provider().unwrap();
+        assert!(
+            !Arc::ptr_eq(&boot_provider, &published_provider),
+            "the root transition must install the provider of the published graph artifact"
+        );
+        drop(guard);
+
+        write_root_layout(&workspace, false);
+        graph.nudge_project_reload();
+        wait_for_root_count(&engine, 1);
+        assert!(!engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_roots()
+            .unwrap()
+            .contains_id("ext/live"));
+    }
+
+    /// The root transition reads the graph the daemon actually published. With the cache
+    /// moved out of the source tree there is no `<workspace>/.build` to fall back to, so a
+    /// provider keyed on the workspace instead of the layout would never find the artifact
+    /// and the root table would stay frozen at its boot contents.
+    #[test]
+    fn publish_hook_transitions_roots_when_the_cache_lives_outside_the_workspace() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_root_layout(&workspace, true);
+        let external = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::from_root(external.path().to_path_buf());
+        cache.ensure().unwrap();
+
+        let mut engine = SearchEngine::fts_only(&cache.search_db_path()).unwrap();
+        let (boot_roots, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &workspace.join("cf"), &[]);
+        engine.initialize_workspace_roots(boot_roots).unwrap();
+        engine.set_graph_context_provider(Arc::new(BootGraphProvider));
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let hook = SharedState::build_publish_hook(
+            Arc::clone(&engine),
+            cache.clone(),
+            Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Disabled)),
+            bsl_search::IndexProgress::new(),
+            super::EmbedFlight::new(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+        let graph = crate::graph::GraphState::for_workspace_with_cache(workspace.clone(), cache)
+            .with_publish_hook(hook);
+        graph.ensure_loading();
+
+        wait_for_root_count(&engine, 2);
+        assert!(engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_roots()
+            .unwrap()
+            .contains_id("ext/live"));
+        assert!(!workspace.join(".build").exists(), "the source tree stays untouched");
+    }
+
+    /// Both edges bracket the complete second SourceSet scan plus file reads. `try_lock`
+    /// succeeding there proves production never performs that filesystem validation while
+    /// holding the outer engine mutex that serializes `search_code`.
+    #[test]
+    fn production_root_validation_runs_off_the_engine_mutex() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_root_layout(&workspace, true);
+        let db_path = crate::cache::search_db_path(&workspace);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let mut search = SearchEngine::fts_only(&db_path).unwrap();
+        let (boot_roots, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &workspace.join("cf"), &[]);
+        search.initialize_workspace_roots(boot_roots).unwrap();
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(search)));
+        let observed = Arc::new(AtomicUsize::new(0));
+        let observed_in_hook = Arc::clone(&observed);
+        let checked_engine = Arc::clone(&engine);
+        super::ROOT_VALIDATION_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                assert!(
+                    checked_engine.try_lock().is_ok(),
+                    "filesystem validation ran while the outer search-engine mutex was held"
+                );
+                observed_in_hook.fetch_add(1, Ordering::SeqCst);
+            }));
+        });
+
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        graph.ensure_loading();
+        for _ in 0..400 {
+            if matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }));
+        let signal = crate::graph::GraphPublishSignal {
+            drift_pending: false,
+            build_start_seq: 0,
+            topology_changed: false,
+            topology: built_graph_topology(&workspace),
+            roots_refresh_requested: true,
+            workspace_roots: crate::project::at(&workspace)
+                .ok()
+                .map(|project| crate::project::workspace_roots(&project).0),
+        };
+        let outcome = SharedState::refresh_search_roots_after_graph(
+            &engine,
+            &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
+            &AtomicU64::new(0),
+            &signal,
+        );
+        super::ROOT_VALIDATION_HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        assert!(outcome.0, "the validated transition must apply");
+        assert_eq!(observed.load(Ordering::SeqCst), 2, "both validation edges were observed");
+    }
+
+    /// An event delivered after filesystem validation but before the final engine-lock claim
+    /// supersedes the plan. Without the hub fence the old table can consume and drop an event in
+    /// a newly-added root, after which stale planned bytes would be published with no retry debt.
+    #[test]
+    fn event_across_root_validation_keeps_the_old_table_and_retry_obligation() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_root_layout(&workspace, true);
+        let db_path = crate::cache::search_db_path(&workspace);
+        fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let mut search = SearchEngine::fts_only(&db_path).unwrap();
+        let (boot_roots, _) =
+            bsl_search::WorkspaceRoots::build(&workspace, &workspace.join("cf"), &[]);
+        search.initialize_workspace_roots(boot_roots).unwrap();
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(search)));
+
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        graph.ensure_loading();
+        for _ in 0..400 {
+            if matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }));
+        let signal = crate::graph::GraphPublishSignal {
+            drift_pending: false,
+            build_start_seq: 0,
+            topology_changed: false,
+            topology: built_graph_topology(&workspace),
+            roots_refresh_requested: true,
+            workspace_roots: crate::project::at(&workspace)
+                .ok()
+                .map(|project| crate::project::workspace_roots(&project).0),
+        };
+
+        let root_drift_epoch = Arc::new(AtomicU64::new(0));
+        let hook_epoch = Arc::clone(&root_drift_epoch);
+        super::ROOT_VALIDATION_HOOK.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |started| {
+                if !started {
+                    // Exactly what the search sink does before processing a root-relevant batch.
+                    hook_epoch.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        });
+        let outcome = SharedState::refresh_search_roots_after_graph(
+            &engine,
+            &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
+            root_drift_epoch.as_ref(),
+            &signal,
+        );
+        super::ROOT_VALIDATION_HOOK.with(|hook| *hook.borrow_mut() = None);
+
+        assert_eq!(
+            root_drift_epoch.load(Ordering::SeqCst),
+            1,
+            "the seam must actually cross the validation fence"
+        );
+        assert!(!outcome.0, "the root-only retry obligation must remain armed");
+        let guard = engine.lock().unwrap();
+        let roots = guard.as_ref().unwrap().workspace_roots().unwrap();
+        assert_eq!(roots.entries().count(), 1, "the stale plan must not publish");
+    }
+
+    /// Field-by-field transfer into the outcome: the enum-variant check alone cannot tell
+    /// correctly-carried numbers from zeros, and `NoLocalDiffs`/`Synced` stay reserved for a
+    /// fully-verified pass.
+    #[test]
+    fn warmup_outcome_carries_the_exact_numbers() {
+        use crate::state::OverlayWarmupState;
+        match SharedState::warmup_outcome(true, 0, 0, 2, 1, 2, false) {
+            OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                ..
+            } => {
+                assert_eq!((unreadable, canonical_fallbacks, read_failures), (2, 1, 2))
+            }
+            other => panic!("expected Incomplete, got {other:?}"),
+        }
+        assert!(matches!(
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 1, false),
+            OverlayWarmupState::Incomplete { read_failures: 1, .. }
+        ));
+        assert!(matches!(
+            SharedState::warmup_outcome(true, 0, 0, 0, 0, 0, false),
+            OverlayWarmupState::NoLocalDiffs
+        ));
+        assert!(matches!(
+            SharedState::warmup_outcome(false, 2, 5, 0, 0, 0, false),
+            OverlayWarmupState::Synced { overlay_files: 2, embedded: 5 }
+        ));
+    }
+
+    /// A stopped driver must not publish even when the embed set was EMPTY: the in-batch
+    /// stop checks never ran, so the pre-publish check is the only thing standing between a
+    /// shutdown and a post-handover publication.
+    #[test]
+    fn a_stopped_empty_embed_pass_does_not_publish() {
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| false,
+        );
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_retry_signals()
+                .unwrap()
+                .initialized,
+            "a stopped pass publishes nothing"
+        );
+    }
+
+    /// A stop that lands AFTER the pre-publish check still wins: the post-lock re-check is
+    /// the only guard once the pre-check has passed, and an unmanaged lease's fence cannot
+    /// stand in for it.
+    #[test]
+    fn a_stop_after_the_precheck_still_blocks_the_publication() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        // The first check (pre-publish) passes; the stop lands before the post-lock one.
+        let calls = AtomicUsize::new(0);
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| calls.fetch_add(1, Ordering::SeqCst) == 0,
+        );
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_retry_signals()
+                .unwrap()
+                .initialized,
+            "the post-lock re-check must stop the publication"
+        );
+    }
+
+    /// A warmup pass that could not SEE or READ everything must report `Incomplete` with the
+    /// pass's own numbers — never `NoLocalDiffs`: an empty plan from an incomplete pass proves
+    /// nothing about the working tree, and the numbers must travel from the plan, not be zeros.
+    #[cfg(unix)]
+    #[test]
+    fn an_incomplete_warmup_pass_reports_incomplete_not_no_diffs() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let closed = workspace.join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::write(closed.join("Hidden.bsl"), "Процедура Скрытая()\nКонецПроцедуры").unwrap();
+        let broken = workspace.join("Broken.bsl");
+        std::fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&closed).is_ok() {
+            // Running as root: permissions cannot hide anything.
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| true,
+        );
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let outcome = overlay_warmup.lock().unwrap().clone();
+        match outcome {
+            crate::state::OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                ..
+            } => assert_eq!(
+                (unreadable, canonical_fallbacks, read_failures),
+                (1, 0, 1),
+                "the outcome carries the pass's own numbers"
+            ),
+            other => panic!("an incomplete pass must say so, got {other:?}"),
+        }
+    }
+
+    /// A CLEAN scan with an unread seen file is still not `NoLocalDiffs`: the file is proven
+    /// present with unknown contents, so the outcome is `Incomplete` and the key stays dirty
+    /// for the retry.
+    #[cfg(unix)]
+    #[test]
+    fn an_unread_file_on_a_clean_scan_reports_incomplete_and_stays_dirty() {
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let broken = workspace.join("Broken.bsl");
+        std::fs::write(&broken, "Процедура Ломкая()\nКонецПроцедуры").unwrap();
+
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(workspace, workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let overlay_warmup = Arc::new(Mutex::new(crate::state::OverlayWarmupState::Pending));
+
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&broken).is_ok() {
+            std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        SharedState::run_overlay_warmup(
+            &engine_arc,
+            &overlay_warmup,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &|| true,
+        );
+        std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let outcome = overlay_warmup.lock().unwrap().clone();
+        match outcome {
+            crate::state::OverlayWarmupState::Incomplete {
+                unreadable,
+                canonical_fallbacks,
+                read_failures,
+                ..
+            } => assert_eq!((unreadable, canonical_fallbacks, read_failures), (0, 0, 1)),
+            other => panic!("an unread file must not read as no-diffs, got {other:?}"),
+        }
+        let dirty = engine_arc
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_overlay_dirty_paths_snapshot()
+            .unwrap();
+        assert!(
+            dirty.keys().any(|key| key.path == "Broken.bsl"),
+            "the unread key stays dirty for the retry: {dirty:?}"
+        );
     }
 
     /// The re-embed kick: after a context refresh NULLs a chunk's embedding, the kick's
@@ -716,6 +1546,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -793,6 +1624,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {
@@ -862,6 +1694,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -894,6 +1727,8 @@ mod tests {
             Arc::clone(&semantic_runtime),
             Arc::clone(&index_progress),
             Arc::clone(&embed_flight),
+            None,
+            Arc::new(AtomicU64::new(0)),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
         let graph =
@@ -912,12 +1747,12 @@ mod tests {
             kind: ChangeKind::MaybeChanged,
             seq: 1,
         };
-        SharedState::apply_search_drift(&engine_arc, &workspace, &[entry], false, &graph);
+        SharedState::apply_search_drift(&engine_arc, &[entry], false, &graph);
         {
             let guard = engine_arc.lock().unwrap();
             let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
             assert!(
-                dirty.contains(module_rel),
+                dirty.contains(&bsl_search::FileKey::configuration(module_rel)),
                 "the owned module is marked context-dirty: {dirty:?}"
             );
         }
@@ -975,6 +1810,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1006,7 +1842,6 @@ mod tests {
         };
         SharedState::apply_search_drift(
             &engine_arc,
-            &workspace,
             &[entry],
             false,
             &crate::graph::GraphState::disabled(),
@@ -1014,7 +1849,11 @@ mod tests {
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "the owned module is marked context-dirty",
             );
         }
@@ -1048,12 +1887,18 @@ mod tests {
                 build_start_seq: i64::MAX,
                 topology_changed: false,
                 topology: built_graph_topology(&workspace),
+                roots_refresh_requested: false,
+                workspace_roots: None,
             },
         );
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "a pending drift defers the refresh; the mark survives",
             );
         }
@@ -1071,12 +1916,18 @@ mod tests {
                 build_start_seq: i64::MAX,
                 topology_changed: false,
                 topology: built_graph_topology(&workspace),
+                roots_refresh_requested: false,
+                workspace_roots: None,
             },
         );
         {
             let g = engine_arc.lock().unwrap();
             assert!(
-                !g.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+                !g.as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration(module_rel)),
                 "with no pending drift the mark is consumed",
             );
         }
@@ -1103,6 +1954,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1119,7 +1971,9 @@ mod tests {
                 )
                 .unwrap();
             // A mark left pending before any wired bound exists (seq 1).
-            store.mark_context_dirty("code", module_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1151,8 +2005,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // The graph is never wired to a mark-seq source: its build captures the unwired default.
@@ -1167,7 +2026,12 @@ mod tests {
 
         let guard = engine_arc.lock().unwrap();
         assert!(
-            guard.as_ref().unwrap().context_dirty_paths("code").unwrap().contains(module_rel),
+            guard
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "an unwired build's publish (bound 0) clears no marks; the mark survives",
         );
     }
@@ -1193,6 +2057,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     module_rel,
                     b"h1",
                     &[Chunk {
@@ -1208,7 +2073,9 @@ mod tests {
                     Some(&[Some("СТАРЫЙ контекст".to_owned())]),
                 )
                 .unwrap();
-            store.mark_context_dirty("code", module_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1238,8 +2105,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // Boot: the graph builds and publishes while UNWIRED, so the leftover mark survives.
@@ -1259,7 +2131,7 @@ mod tests {
                 .unwrap()
                 .context_dirty_paths("code")
                 .unwrap()
-                .contains(module_rel),
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "the leftover mark survives the unwired boot publish",
         );
 
@@ -1277,7 +2149,7 @@ mod tests {
                 .unwrap()
                 .context_dirty_paths("code")
                 .unwrap()
-                .contains(module_rel),
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
             "the leftover pickup consumed the mark with the wired bound",
         );
     }
@@ -1306,6 +2178,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     leftover_rel,
                     b"h1",
                     &[Chunk {
@@ -1322,7 +2195,9 @@ mod tests {
                 )
                 .unwrap();
             // The leftover mark a prior run left pending (seq 1).
-            store.mark_context_dirty("code", leftover_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, leftover_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1354,8 +2229,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // Boot: build+publish while UNWIRED, so the leftover mark survives, then wire the source.
@@ -1385,9 +2265,12 @@ mod tests {
 
         let guard = engine_arc.lock().unwrap();
         let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
-        assert!(!dirty.contains(leftover_rel), "the leftover mark is consumed by the pickup");
         assert!(
-            dirty.contains(newer_rel),
+            !dirty.contains(&bsl_search::FileKey::configuration(leftover_rel)),
+            "the leftover mark is consumed by the pickup"
+        );
+        assert!(
+            dirty.contains(&bsl_search::FileKey::configuration(newer_rel)),
             "the newer mark (stamped after the captured bound) survives the pickup",
         );
     }
@@ -1414,6 +2297,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     leftover_rel,
                     b"h1",
                     &[Chunk {
@@ -1429,7 +2313,9 @@ mod tests {
                     Some(&[Some("СТАРЫЙ контекст".to_owned())]),
                 )
                 .unwrap();
-            store.mark_context_dirty("code", leftover_rel).unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, leftover_rel)
+                .unwrap();
         }
         let mut engine = SearchEngine::fts_only(&db_path).unwrap();
         engine.set_workspace_root(&workspace);
@@ -1465,8 +2351,13 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                handled
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
 
         // The graph is `Idle` (never wired): arming the pickup here stores the bound but cannot
@@ -1484,11 +2375,11 @@ mod tests {
         let guard = engine_arc.lock().unwrap();
         let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
         assert!(
-            !dirty.contains(leftover_rel),
+            !dirty.contains(&bsl_search::FileKey::configuration(leftover_rel)),
             "the deferred pickup consumed the leftover mark with the stored bound",
         );
         assert!(
-            dirty.contains(newer_rel),
+            dirty.contains(&bsl_search::FileKey::configuration(newer_rel)),
             "the newer mark (stamped after the captured bound) survives the deferred pickup",
         );
     }
@@ -1530,6 +2421,7 @@ mod tests {
             let mut store = Store::open(db).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "A.bsl",
                     b"ha",
                     &[Chunk {
@@ -1595,6 +2487,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "A.bsl",
                     b"ha",
                     &[chunk("Альфа")],
@@ -1630,6 +2523,7 @@ mod tests {
                     let mut store = Store::open(db).unwrap();
                     store
                         .reindex_file_with_context(
+                            bsl_search::CONFIGURATION_ROOT_ID,
                             "B.bsl",
                             b"hb",
                             &[Chunk {
@@ -1711,6 +2605,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
                     "Owned.bsl",
                     b"h1",
                     &[Chunk {

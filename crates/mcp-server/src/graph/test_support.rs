@@ -93,8 +93,11 @@ pub(super) fn write_extension_config(root: &Path, depends_on: bool) {
 pub(super) fn seed_cache(root: &Path, fingerprint: crate::graph_db::GraphFp) {
     let out = graph_db_path(root);
     fs::create_dir_all(out.parent().unwrap()).unwrap();
+    let project = crate::graph::ProjectSnapshot::load(root);
+    let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
     build_graph_database(
-        &crate::graph::ProjectSnapshot::load(root),
+        &project,
+        &universe,
         &out,
         GRAPH_BUILD_BATCH,
         &crate::graph_db::GraphMeta {
@@ -107,7 +110,7 @@ pub(super) fn seed_cache(root: &Path, fingerprint: crate::graph_db::GraphFp) {
     .expect("seed cache builds");
 }
 
-pub(super) fn meta_string(path: &Path, key: &str) -> String {
+pub(crate) fn meta_string(path: &Path, key: &str) -> String {
     rusqlite::Connection::open(path)
         .unwrap()
         .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| row.get(0))

@@ -12,15 +12,20 @@ pub(super) const HYBRID_FETCH_MULTIPLIER: usize = 2;
 /// The version of the `search` structured hit contract: the fields of one hit object and the
 /// envelope around the list. Bump it whenever that shape changes — a machine consumer pins
 /// against this, whereas the text listing is a human mirror with no such promise.
-pub(super) const SEARCH_SCHEMA_VERSION: &str = "1";
+///
+/// `2` adds `root_id` to every code hit: with extensions in the index the same relative path
+/// exists under several roots, so the owning root became part of a hit's identity.
+pub(super) const SEARCH_SCHEMA_VERSION: &str = "2";
 
 /// The outcome of producing one modality's code hits, separated from presentation so the
 /// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;
 /// these soft states let `hybrid_code` reproduce today's lexical messages and degrade
 /// gracefully on a semantic shortfall.
 pub(super) enum CodeHits {
-    /// Hits (possibly empty) plus the workspace root for the graph-id bridge.
-    Ready { hits: Vec<SearchHit>, workspace_root: Option<std::path::PathBuf> },
+    /// Hits (possibly empty) plus the root table the graph-id bridge anchors them with.
+    /// The whole table, not one root: a hit's path is relative to the root that owns it, and
+    /// which root that is differs per hit.
+    Ready { hits: Vec<SearchHit>, roots: Option<bsl_search::WorkspaceRoots> },
     /// The index/overlay is still warming or building — no hits yet, emit `message`.
     Pending(String),
     /// The semantic modality cannot serve this request; `hybrid_code` degrades to lexical.

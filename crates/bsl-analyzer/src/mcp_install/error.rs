@@ -50,9 +50,9 @@ impl InstallError {
             Self::AlreadyExists { .. } => {
                 Some("rerun with --force to replace the existing MCP entry")
             }
-            Self::TargetBinaryNotFound { .. } => {
-                Some("install the target CLI first or add it to PATH")
-            }
+            Self::TargetBinaryNotFound { .. } => Some(
+                "install the target CLI first or add it to PATH; on Windows the npm shim is <name>.cmd, so PATHEXT must list .CMD",
+            ),
             Self::UnsupportedScope { .. } | Self::UnsupportedAllScope { .. } => {
                 Some("choose a supported --scope for this --target")
             }

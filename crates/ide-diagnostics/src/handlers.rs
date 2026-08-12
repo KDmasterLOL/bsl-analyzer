@@ -162,6 +162,7 @@ pub mod unlimited_length_string_usage_in_query;
 pub mod unreachable_code;
 pub mod unresolved_field;
 pub mod unresolved_method_call;
+pub mod unresolved_name;
 pub mod unsafe_find_by_code;
 pub mod unsafe_safe_mode_method_call;
 pub mod unused_local_method;
@@ -471,6 +472,7 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
             Some(&wrong_use_function_proceed_with_call::METADATA)
         }
 
+        DiagnosticCode::UnresolvedName => Some(&unresolved_name::METADATA),
         DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),
@@ -567,6 +569,7 @@ mod metadata_tests {
             DiagnosticCode::MissingTempStorageDeletion,
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
+            DiagnosticCode::UnresolvedName,
         ];
 
         for code in codes {
@@ -673,6 +676,7 @@ mod metadata_tests {
             DiagnosticCode::TernaryOperatorUsage,
             DiagnosticCode::TooManyReturns,
             DiagnosticCode::TypeMismatchByDocComment,
+            DiagnosticCode::UnresolvedName,
         ];
 
         for code in disabled_codes {

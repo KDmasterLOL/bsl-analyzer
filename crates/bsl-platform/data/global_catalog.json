@@ -1,0 +1,7452 @@
+{
+  "schema_version": 1,
+  "source": {
+    "provider": "1C:EDT platform model",
+    "edt_version": "2026.1.2.2",
+    "platform_version": "8.3.27",
+    "environment_mask_bits": {
+      "thick_client": 1,
+      "thin_client": 2,
+      "web_client": 4,
+      "server": 8,
+      "mobile_client": 16,
+      "external_connection": 32
+    },
+    "resources": {
+      "global_context": {
+        "path": "resources/v8.3.27/GlobalContext.type",
+        "sha256": "1e1aeb9c893ade97c45a77aa74ad8b3c82847f9477a3639e51f2ad704e416349"
+      },
+      "system_enums": {
+        "path": "resources/v8.3.27/SystemEnums.type",
+        "sha256": "6291d183e5ba4bf2cc8fa1525627d8fa1f3bcbf658ee197fc6cc9b3884baa036"
+      }
+    },
+    "extracted_at": "2026-08-10"
+  },
+  "completeness": {
+    "global_context": true,
+    "system_enums": true
+  },
+  "attestation": {
+    "expected_symbol_counts": {
+      "function": 507,
+      "property": 100,
+      "system_enum": 628
+    }
+  },
+  "symbols": [
+    {
+      "kind": "function",
+      "ru": "ПараметрыДоступа",
+      "en": "AccessParameters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПравоДоступа",
+      "en": "AccessRight",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ACos",
+      "en": "ACos",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "АктивноеОкно",
+      "en": "ActiveWindow",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ДобавитьМесяц",
+      "en": "AddMonth",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеПриложения",
+      "en": "ApplicationPresentation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ASin",
+      "en": "ASin",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ATan",
+      "en": "ATan",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьВнешнююКомпоненту",
+      "en": "AttachAddIn",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьВнешнююКомпонентуАсинх",
+      "en": "AttachAddInAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьРасширениеПолученияИнформацииОКомпьютереАсинх",
+      "en": "AttachComputerInformationExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьРасширениеРаботыСКриптографией",
+      "en": "AttachCryptoExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьРасширениеРаботыСКриптографиейАсинх",
+      "en": "AttachCryptoExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьРасширениеРаботыСФайлами",
+      "en": "AttachFileSystemExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьРасширениеРаботыСФайламиАсинх",
+      "en": "AttachFileSystemExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьОбработчикОжидания",
+      "en": "AttachIdleHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьОбработчикЗапросаНастроекКлиентаЛицензирования",
+      "en": "AttachLicensingClientParametersRequestHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодключитьОбработчикОповещения",
+      "en": "AttachNotificationHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Base64Строка",
+      "en": "Base64String",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Base64Значение",
+      "en": "Base64Value",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Сигнал",
+      "en": "Beep",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПодключениеВнешнейКомпоненты",
+      "en": "BeginAttachingAddIn",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПодключениеРасширенияПолученияИнформацииОКомпьютере",
+      "en": "BeginAttachingComputerInformationExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПодключениеРасширенияРаботыСКриптографией",
+      "en": "BeginAttachingCryptoExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПодключениеРасширенияРаботыСФайлами",
+      "en": "BeginAttachingFileSystemExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьКопированиеФайла",
+      "en": "BeginCopyingFile",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьСозданиеДвоичныхДанныхИзФайла",
+      "en": "BeginCreateBinaryDataFromFile",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьСозданиеКаталога",
+      "en": "BeginCreatingDirectory",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьУдалениеФайлов",
+      "en": "BeginDeletingFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПоискФайлов",
+      "en": "BeginFindingFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеФайлаССервера",
+      "en": "BeginGetFileFromServer",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеФайловССервера",
+      "en": "BeginGetFilesFromServer",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеКаталогаДокументов",
+      "en": "BeginGettingDocumentsDir",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеФайлов",
+      "en": "BeginGettingFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеКаталогаБиблиотекиМобильногоУстройства",
+      "en": "BeginGettingMobileDeviceLibraryDir",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеИнформацииОСетевыхАдаптерах",
+      "en": "BeginGettingNetworkAdaptersInformation",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеКаталогаВременныхФайлов",
+      "en": "BeginGettingTempFilesDir",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПолучениеРабочегоКаталогаДанныхПользователя",
+      "en": "BeginGettingUserDataWorkDir",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьУстановкуВнешнейКомпоненты",
+      "en": "BeginInstallAddIn",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьУстановкуРасширенияРаботыСКриптографией",
+      "en": "BeginInstallCryptoExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьУстановкуРасширенияРаботыСФайлами",
+      "en": "BeginInstallFileSystemExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьУстановкуРасширенияПолученияИнформацииОКомпьютере",
+      "en": "BeginInstallingComputerInformationExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПеремещениеФайла",
+      "en": "BeginMovingFile",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПомещениеФайла",
+      "en": "BeginPutFile",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПомещениеФайловНаСервер",
+      "en": "BeginPutFilesToServer",
+      "environment_mask": 31
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПомещениеФайлаНаСервер",
+      "en": "BeginPutFileToServer",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьПомещениеФайлов",
+      "en": "BeginPuttingFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьЗапросРазрешенияПользователя",
+      "en": "BeginRequestingUserPermission",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьЗапускПриложения",
+      "en": "BeginRunningApplication",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НачатьТранзакцию",
+      "en": "BeginTransaction",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоДня",
+      "en": "BegOfDay",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоЧаса",
+      "en": "BegOfHour",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоМинуты",
+      "en": "BegOfMinute",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоМесяца",
+      "en": "BegOfMonth",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоКвартала",
+      "en": "BegOfQuarter",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоНедели",
+      "en": "BegOfWeek",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоГода",
+      "en": "BegOfYear",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогПрограммы",
+      "en": "BinDir",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовоеИ",
+      "en": "BitwiseAnd",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовоеИНе",
+      "en": "BitwiseAndNot",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовоеНе",
+      "en": "BitwiseNot",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовоеИли",
+      "en": "BitwiseOr",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовыйСдвигВлево",
+      "en": "BitwiseShiftLeft",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовыйСдвигВправо",
+      "en": "BitwiseShiftRight",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПобитовоеИсключительноеИли",
+      "en": "BitwiseXor",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Булево",
+      "en": "Boolean",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КраткоеПредставлениеОшибки",
+      "en": "BriefErrorDescription",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ВызватьПаузу",
+      "en": "CallSleep",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапрещеноОткрытиеФорм",
+      "en": "CannotOpenForm",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВозможностьЧтенияXML",
+      "en": "CanReadXML",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Символ",
+      "en": "Char",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КодСимвола",
+      "en": "CharCode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьПодключениеВнешнейКомпоненты",
+      "en": "CheckAddInAttachment",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьБит",
+      "en": "CheckBit",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьПоБитовойМаске",
+      "en": "CheckByBitMask",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьРаскрытиеПароля",
+      "en": "CheckPasswordCompromise",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьЦиклическиеСсылкиВстроенногоЯзыка",
+      "en": "CheckScriptCircularRefs",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПроверитьСоответствиеПароляПользователяСохраняемомуЗначению",
+      "en": "CheckUserPasswordComplianceWithStoredValue",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОчиститьЖурналРегистрации",
+      "en": "ClearEventLog",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОчиститьСообщения",
+      "en": "ClearMessages",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОчиститьНастройкиПользователя",
+      "en": "ClearUserSettings",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ЗакрытьСправку",
+      "en": "CloseHelp",
+      "environment_mask": 55
+    },
+    {
+      "kind": "function",
+      "ru": "ЗафиксироватьТранзакцию",
+      "en": "CommitTransaction",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ИмяКомпьютера",
+      "en": "ComputerName",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СоединитьДвоичныеДанные",
+      "en": "ConcatBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СоединитьБуферыДвоичныхДанных",
+      "en": "ConcatBinaryDataBuffers",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонфигурацияИзменена",
+      "en": "ConfigurationChanged",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСоединениеСВнешнимИсточникомДанных",
+      "en": "ConnectExternalDataSource",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НеобходимостьЗавершенияСоединения",
+      "en": "ConnectionStopRequest",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СкопироватьЖурналРегистрации",
+      "en": "CopyEventLog",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "КопироватьФайл",
+      "en": "CopyFile",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КопироватьФайлАсинх",
+      "en": "CopyFileAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "КопироватьДанныеФормы",
+      "en": "CopyFormData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Cos",
+      "en": "Cos",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СоздатьОбъектВнешнейКомпонентыАсинх",
+      "en": "CreateAddInObjectAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "СоздатьДвоичныеДанныеИзФайлаАсинх",
+      "en": "CreateBinaryDataFromFileAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "СоздатьКаталог",
+      "en": "CreateDirectory",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СоздатьКаталогАсинх",
+      "en": "CreateDirectoryAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "СоздатьФабрикуXDTO",
+      "en": "CreateXDTOFactory",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущаяДата",
+      "en": "CurrentDate",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущийЯзык",
+      "en": "CurrentLanguage",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущийКодЛокализации",
+      "en": "CurrentLocaleCode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущийРежимЗапуска",
+      "en": "CurrentRunMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущаяДатаСеанса",
+      "en": "CurrentSessionDate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущийСеансТестируется",
+      "en": "CurrentSessionIsTested",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущийЯзыкСистемы",
+      "en": "CurrentSystemLanguage",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущаяУниверсальнаяДата",
+      "en": "CurrentUniversalDate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ТекущаяУниверсальнаяДатаВМиллисекундах",
+      "en": "CurrentUniversalDateInMilliseconds",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонфигурацияБазыДанныхИзмененаДинамически",
+      "en": "DataBaseConfigurationChangedDynamically",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "БезопасныйРежимРазделенияДанных",
+      "en": "DataSeparationSafeMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Дата",
+      "en": "Date",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "День",
+      "en": "Day",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СмещениеЛетнегоВремени",
+      "en": "DaylightTimeOffset",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ДеньГода",
+      "en": "DayOfYear",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РаскодироватьСтроку",
+      "en": "DecodeString",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьНедопустимыеСимволыXML",
+      "en": "DeleteDisallowedXMLCharacters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьФайлы",
+      "en": "DeleteFiles",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьФайлыАсинх",
+      "en": "DeleteFilesAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьИзВременногоХранилища",
+      "en": "DeleteFromTempStorage",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьОбъекты",
+      "en": "DeleteObjects",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОтключитьОбработчикОжидания",
+      "en": "DetachIdleHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОтключитьОбработчикЗапросаНастроекКлиентаЛицензирования",
+      "en": "DetachLicensingClientParametersRequestHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОтключитьОбработчикОповещения",
+      "en": "DetachNotificationHandler",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПодробноеПредставлениеОшибки",
+      "en": "DetailErrorDescription",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РазорватьСоединениеСВнешнимИсточникомДанных",
+      "en": "DisconnectExternalDataSource",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ДокументЗащищенПаролем",
+      "en": "DocumentIsPasswordProtected",
+      "environment_mask": 27
+    },
+    {
+      "kind": "function",
+      "ru": "ДокументЗащищенПаролемАсинх",
+      "en": "DocumentIsPasswordProtectedAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогДокументов",
+      "en": "DocumentsDir",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогДокументовАсинх",
+      "en": "DocumentsDirAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Предупреждение",
+      "en": "DoMessageBox",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПредупреждениеАсинх",
+      "en": "DoMessageBoxAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Вопрос",
+      "en": "DoQueryBox",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ВопросАсинх",
+      "en": "DoQueryBoxAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоддерживаетсяДинамическаяУстановкаВнешнихКомпонент",
+      "en": "DynamicAddInInstallationSupported",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "КодироватьСтроку",
+      "en": "EncodeString",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "КонецДня",
+      "en": "EndOfDay",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецЧаса",
+      "en": "EndOfHour",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецМинуты",
+      "en": "EndOfMinute",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецМесяца",
+      "en": "EndOfMonth",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецКвартала",
+      "en": "EndOfQuarter",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецНедели",
+      "en": "EndOfWeek",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КонецГода",
+      "en": "EndOfYear",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УдалитьДанныеИнформационнойБазы",
+      "en": "EraseInfoBaseData",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОписаниеОшибки",
+      "en": "ErrorDescription",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ИнформацияОбОшибке",
+      "en": "ErrorInfo",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Вычислить",
+      "en": "Eval",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ВычислитьСохраняемоеЗначениеПароляПользователя",
+      "en": "EvaluateStoredUserPasswordValue",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеСобытияЖурналаРегистрации",
+      "en": "EventLogEventPresentation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "МонопольныйРежим",
+      "en": "ExclusiveMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ВыполнитьОбработкуОповещения",
+      "en": "ExecuteNotifyProcessing",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ЗавершитьРаботуСистемы",
+      "en": "Exit",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Exp",
+      "en": "Exp",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "",
+      "en": "FileCopy",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаполнитьЗначенияСвойств",
+      "en": "FillPropertyValues",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Найти",
+      "en": "Find",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиПоСсылкам",
+      "en": "FindByRef",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиНедопустимыеСимволыXML",
+      "en": "FindDisallowedXMLCharacters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиФайлы",
+      "en": "FindFiles",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиФайлыАсинх",
+      "en": "FindFilesAsync",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиПомеченныеНаУдаление",
+      "en": "FindMarkedForDeletion",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НайтиОкноПоНавигационнойСсылке",
+      "en": "FindWindowByURL",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Формат",
+      "en": "Format",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ДанныеФормыВЗначение",
+      "en": "FormDataToValue",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ИзXMLТипа",
+      "en": "FromXMLType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДействиеПриНесоответствииПаролейПользователейТребованиямПриАутентификации",
+      "en": "GetActionOnUserPasswordRequirementsViolationOnAuthentication",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИспользованиеДополнительныхИндексов",
+      "en": "GetAdditionalIndexesUsage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьАдресПоМестоположению",
+      "en": "GetAddressByLocation",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМаскуВсеФайлы",
+      "en": "GetAllFilesMask",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМакетОформления",
+      "en": "GetAppearanceTemplate",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДопустимыеКодыЛокализации",
+      "en": "GetAvailableLocaleCodes",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДопустимыеЧасовыеПояса",
+      "en": "GetAvailableTimeZones",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьBase64БуферДвоичныхДанныхИзБуфераДвоичныхДанных",
+      "en": "GetBase64BinaryDataBufferFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьBase64ДвоичныеДанныеИзДвоичныхДанных",
+      "en": "GetBase64BinaryDataFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьBase64СтрокуИзДвоичныхДанных",
+      "en": "GetBase64StringFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьBase64СтрокуИзБуфераДвоичныхДанных",
+      "en": "GetBase64StringFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзBase64БуфераДвоичныхДанных",
+      "en": "GetBinaryDataBufferFromBase64BinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзBase64Строки",
+      "en": "GetBinaryDataBufferFromBase64String",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзДвоичныхДанных",
+      "en": "GetBinaryDataBufferFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзHexБуфераДвоичныхДанных",
+      "en": "GetBinaryDataBufferFromHexBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзHexСтроки",
+      "en": "GetBinaryDataBufferFromHexString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБуферДвоичныхДанныхИзСтроки",
+      "en": "GetBinaryDataBufferFromString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзBase64ДвоичныхДанных",
+      "en": "GetBinaryDataFromBase64BinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзBase64Строки",
+      "en": "GetBinaryDataFromBase64String",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзБуфераДвоичныхДанных",
+      "en": "GetBinaryDataFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзHexДвоичныхДанных",
+      "en": "GetBinaryDataFromHexBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзHexСтроки",
+      "en": "GetBinaryDataFromHexString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДвоичныеДанныеИзСтроки",
+      "en": "GetBinaryDataFromString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДанныеВыбора",
+      "en": "GetChoiceData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМаскуВсеФайлыКлиента",
+      "en": "GetClientAllFilesMask",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьЗаголовокКлиентскогоПриложения",
+      "en": "GetClientApplicationCaption",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСкоростьКлиентскогоСоединения",
+      "en": "GetClientConnectionSpeed",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИнформациюЭкрановКлиента",
+      "en": "GetClientDisplaysInformation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРазделительПутиКлиента",
+      "en": "GetClientPathSeparator",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОбщуюФорму",
+      "en": "GetCommonForm",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОбщийМакет",
+      "en": "GetCommonTemplate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьCOMОбъект",
+      "en": "GetCOMObject",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьЗапретЗасыпанияКомпьютера",
+      "en": "GetComputerSleepModeProhibition",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИдентификаторКонфигурации",
+      "en": "GetConfigurationID",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБлокировкуУстановкиСоединений",
+      "en": "GetConnectionsLock",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьТекущийСеансИнформационнойБазы",
+      "en": "GetCurrentInfoBaseSession",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРазмерДанныхБазыДанныхИХранилищаДвоичныхДанных",
+      "en": "GetDatabaseAndBinaryDataStorageDataSize",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОбновлениеКонфигурацииБазыДанных",
+      "en": "GetDataBaseConfigurationUpdate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРазмерДанныхБазыДанных",
+      "en": "GetDatabaseDataSize",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтруктуруХраненияБазыДанных",
+      "en": "GetDBStorageStructureInfo",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПериодРазделенияХраненияДанныхЖурналаРегистрации",
+      "en": "GetEventLogDataStorageSplitPeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИспользованиеСобытияЖурналаРегистрации",
+      "en": "GetEventLogEventUse",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьЗначенияОтбораЖурналаРегистрации",
+      "en": "GetEventLogFilterValues",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПериодЖурналаРегистрации",
+      "en": "GetEventLogPeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИспользованиеЖурналаРегистрации",
+      "en": "GetEventLogUsing",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПараметрыМонопольногоРежима",
+      "en": "GetExclusiveModeParameters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРежимВнешнихРесурсов",
+      "en": "GetExternalResourcesMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВнешнююНавигационнуюСсылку",
+      "en": "GetExternalURL",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФайл",
+      "en": "GetFile",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФайлССервераАсинх",
+      "en": "GetFileFromServerAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФайлы",
+      "en": "GetFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФайлыССервераАсинх",
+      "en": "GetFilesFromServerAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФорму",
+      "en": "GetForm",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИзВременногоХранилища",
+      "en": "GetFromTempStorage",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФункциональнуюОпцию",
+      "en": "GetFunctionalOption",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьHexБуферДвоичныхДанныхИзБуфераДвоичныхДанных",
+      "en": "GetHexBinaryDataBufferFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьHexДвоичныеДанныеИзДвоичныхДанных",
+      "en": "GetHexBinaryDataFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьHexСтрокуИзДвоичныхДанных",
+      "en": "GetHexStringFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьHexСтрокуИзБуфераДвоичныхДанных",
+      "en": "GetHexStringFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВремяЗавершенияСпящегоСеанса",
+      "en": "GetHibernateSessionTerminateTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВремяЗавершенияСеансаПриБездействии",
+      "en": "GetInactivityTimeForTerminateSession",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВремяПредупрежденияОЗавершенииСеансаПриБездействии",
+      "en": "GetInactivityTimeForTerminateSessionNotification",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьНачалоСтолетияИнформационнойБазы",
+      "en": "GetInfoBaseBeginningOfCentury",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСоединенияИнформационнойБазы",
+      "en": "GetInfoBaseConnections",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОбновлениеПредопределенныхДанныхИнформационнойБазы",
+      "en": "GetInfoBasePredefinedData",
+      "environment_mask": 27
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРегиональныеНастройкиИнформационнойБазы",
+      "en": "GetInfoBaseRegionalSettings",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСеансыИнформационнойБазы",
+      "en": "GetInfoBaseSessions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьЧасовойПоясИнформационнойБазы",
+      "en": "GetInfoBaseTimeZone",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьНавигационнуюСсылкуИнформационнойБазы",
+      "en": "GetInfoBaseURL",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьФункциональнуюОпциюИнтерфейса",
+      "en": "GetInterfaceFunctionalOption",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПараметрыФункциональныхОпцийИнтерфейса",
+      "en": "GetInterfaceFunctionalOptionParameters",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьДополнительныйПараметрКлиентаЛицензирования",
+      "en": "GetLicensingClientAdditionalParameter",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИмяКлиентаЛицензирования",
+      "en": "GetLicensingClientName",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМестоположениеПоАдресу",
+      "en": "GetLocationByAddress",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВремяОжиданияБлокировкиДанных",
+      "en": "GetLockWaitTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСпособПроверкиПодписиМобильногоКлиента",
+      "en": "GetMobileClientSignatureVerificationMethod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИнформациюОСетевыхАдаптерах",
+      "en": "GetNetworkAdaptersInformation",
+      "environment_mask": 41
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИнформациюОСетевыхАдаптерахАсинх",
+      "en": "GetNetworkAdaptersInformationAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСоответствиеОбъектаИРеквизитаФормы",
+      "en": "GetObjectAndFormAttributeConformity",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСоответствиеОбъектаИФормы",
+      "en": "GetObjectAndFormConformity",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьВремяЗасыпанияПассивногоСеанса",
+      "en": "GetPassiveSessionHibernateTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРазделительПути",
+      "en": "GetPathSeparator",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПолноеИмяПредопределенногоЗначения",
+      "en": "GetPredefinedValueFullName",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПреимущественноеИспользованиеОсновногоСервера",
+      "en": "GetPreferableMainServerUse",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОперативнуюОтметкуВремени",
+      "en": "GetRealTimeTimestamp",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОтключениеБезопасногоРежима",
+      "en": "GetSafeModeDisabled",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМаскуВсеФайлыСервера",
+      "en": "GetServerAllFilesMask",
+      "environment_mask": 27
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРазделительПутиСервера",
+      "en": "GetServerPathSeparator",
+      "environment_mask": 27
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьРегиональныеНастройкиСеанса",
+      "en": "GetSessionRegionalSettings",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьБлокировкуСеансов",
+      "en": "GetSessionsLock",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьКраткийЗаголовокПриложения",
+      "en": "GetShortApplicationCaption",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеОбщихНастроек",
+      "en": "GetStandardCommonSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеПользовательскихНастроекДинамическихСписков",
+      "en": "GetStandardDynamicListsUserSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеНастроекДанныхФорм",
+      "en": "GetStandardFormDataSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСоставСтандартногоИнтерфейсаOData",
+      "en": "GetStandardODataInterfaceContent",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеПользовательскихНастроекОтчетов",
+      "en": "GetStandardReportsUserSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеВариантовОтчетов",
+      "en": "GetStandardReportsVariantsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтандартноеХранилищеВнешнихДанныхНавигационныхСсылок",
+      "en": "GetStandardURLExternalDataStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСклоненияСтроки",
+      "en": "GetStringDeclensions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСклоненияСтрокиПоЧислу",
+      "en": "GetStringDeclensionsByNumber",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтрокуИзДвоичныхДанных",
+      "en": "GetStringFromBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСтрокуИзБуфераДвоичныхДанных",
+      "en": "GetStringFromBinaryDataBuffer",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИмяВременногоФайла",
+      "en": "GetTempFileName",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьКоличествоЗаданийПересчетаИтогов",
+      "en": "GetTotalRecalcJobCount",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьНавигационнуюСсылку",
+      "en": "GetURL",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПредставленияНавигационныхСсылок",
+      "en": "GetURLsPresentations",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьИспользуемыйСервер",
+      "en": "GetUsedServer",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСообщенияПользователю",
+      "en": "GetUserMessages",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПроверкуРаскрытияПаролейПользователей",
+      "en": "GetUserPasswordCompromiseCheck",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьСрокПредупрежденияОбИстеченииСрокаДействияПаролейПользователей",
+      "en": "GetUserPasswordExpirationNotificationPeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьТипАлгоритмаХешированияПаролейПользователей",
+      "en": "GetUserPasswordHashAlgorithmType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМаксимальныйСрокДействияПаролейПользователей",
+      "en": "GetUserPasswordMaxEffectivePeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМинимальныйСрокДействияПаролейПользователей",
+      "en": "GetUserPasswordMinEffectivePeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьМинимальнуюДлинуПаролейПользователей",
+      "en": "GetUserPasswordMinLength",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОграничениеПовторенияПаролейПользователейСредиПоследних",
+      "en": "GetUserPasswordReuseLimit",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьПроверкуСложностиПаролейПользователей",
+      "en": "GetUserPasswordStrengthCheck",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьУникальныйИдентификаторСПоддержкойСовместимости",
+      "en": "GetUUIDWithCompatibilitySupport",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьОкна",
+      "en": "GetWindows",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолучитьXMLТип",
+      "en": "GetXMLType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПерейтиПоНавигационнойСсылке",
+      "en": "GotoURL",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Час",
+      "en": "Hour",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ИмпортМоделиXDTO",
+      "en": "ImportXDTOModel",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НомерСоединенияИнформационнойБазы",
+      "en": "InfoBaseConnectionNumber",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СтрокаСоединенияИнформационнойБазы",
+      "en": "InfoBaseConnectionString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КодЛокализацииИнформационнойБазы",
+      "en": "InfoBaseLocaleCode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "НомерСеансаИнформационнойБазы",
+      "en": "InfoBaseSessionNumber",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ИнициализироватьПредопределенныеДанные",
+      "en": "InitializePredefinedData",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиДату",
+      "en": "InputDate",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиДатуАсинх",
+      "en": "InputDateAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиЧисло",
+      "en": "InputNumber",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиЧислоАсинх",
+      "en": "InputNumberAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиСтроку",
+      "en": "InputString",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиСтрокуАсинх",
+      "en": "InputStringAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиЗначение",
+      "en": "InputValue",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВвестиЗначениеАсинх",
+      "en": "InputValueAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВнешнююКомпоненту",
+      "en": "InstallAddIn",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВнешнююКомпонентуАсинх",
+      "en": "InstallAddInAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРасширениеПолученияИнформацииОКомпьютереАсинх",
+      "en": "InstallComputerInformationExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРасширениеРаботыСКриптографией",
+      "en": "InstallCryptoExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРасширениеРаботыСКриптографиейАсинх",
+      "en": "InstallCryptoExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРасширениеРаботыСФайлами",
+      "en": "InstallFileSystemExtension",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРасширениеРаботыСФайламиАсинх",
+      "en": "InstallFileSystemExtensionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Цел",
+      "en": "Int",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПустаяСтрока",
+      "en": "IsBlankString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РольДоступна",
+      "en": "IsInRole",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЭтоАдресВременногоХранилища",
+      "en": "IsTempStorageURL",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Лев",
+      "en": "Left",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗагрузитьВнешнююКомпоненту",
+      "en": "LoadAddIn",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеКодаЛокализации",
+      "en": "LocaleCodePresentation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаблокироватьРаботуПользователя",
+      "en": "LockApplication",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаблокироватьДанныеДляРедактирования",
+      "en": "LockDataForEdit",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Log",
+      "en": "Log",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Log10",
+      "en": "Log10",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НРег",
+      "en": "Lower",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ОсновнойСерверДоступен",
+      "en": "MainServerAvailable",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "ПоддерживаетсяОтображениеКарты",
+      "en": "MapRepresentationSupported",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Макс",
+      "en": "Max",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ОбъединитьФайлы",
+      "en": "MergeFiles",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Сообщить",
+      "en": "Message",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Сред",
+      "en": "Mid",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Мин",
+      "en": "Min",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Минута",
+      "en": "Minute",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПоддерживаетсяФункциональностьМобильногоПриложения",
+      "en": "MobileApplicationFunctionalitySupported",
+      "environment_mask": 31
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогБиблиотекиМобильногоУстройства",
+      "en": "MobileDeviceLibraryDir",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогБиблиотекиМобильногоУстройстваАсинх",
+      "en": "MobileDeviceLibraryDirAsync",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "Месяц",
+      "en": "Month",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПереместитьФайл",
+      "en": "MoveFile",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПереместитьФайлАсинх",
+      "en": "MoveFileAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Оповестить",
+      "en": "Notify",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОповеститьОбИзменении",
+      "en": "NotifyChanged",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "НСтр",
+      "en": "NStr",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Число",
+      "en": "Number",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЧислоИзДвоичнойСтроки",
+      "en": "NumberFromBinaryString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЧислоИзШестнадцатеричнойСтроки",
+      "en": "NumberFromHexString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЧислоПрописью",
+      "en": "NumberInWords",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьФорму",
+      "en": "OpenForm",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьФормуМодально",
+      "en": "OpenFormModal",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьСправку",
+      "en": "OpenHelp",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьСодержаниеСправки",
+      "en": "OpenHelpContent",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьИндексСправки",
+      "en": "OpenHelpIndex",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьЗначение",
+      "en": "OpenValue",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ОткрытьЗначениеАсинх",
+      "en": "OpenValueAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПользователиОС",
+      "en": "OSUsers",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеПериода",
+      "en": "PeriodPresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Pow",
+      "en": "Pow",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПредопределенноеЗначение",
+      "en": "PredefinedValue",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПривилегированныйРежим",
+      "en": "PrivilegedMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПродолжитьВызов",
+      "en": "ProceedWithCall",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ВыполнитьОбработкуЗаданий",
+      "en": "ProcessJobs",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоместитьФайл",
+      "en": "PutFile",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ПоместитьФайлы",
+      "en": "PutFiles",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоместитьФайлыНаСерверАсинх",
+      "en": "PutFilesToServerAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоместитьФайлНаСерверАсинх",
+      "en": "PutFileToServerAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоместитьВоВременноеХранилище",
+      "en": "PutToTempStorage",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПрочитатьJSON",
+      "en": "ReadJSON",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПрочитатьДатуJSON",
+      "en": "ReadJSONDate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПрочитатьЗначениеJSON",
+      "en": "ReadJSONValue",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПрочитатьXML",
+      "en": "ReadXML",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СократитьЖурналРегистрации",
+      "en": "ReduceEventLog",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОбновитьИнтерфейс",
+      "en": "RefreshInterface",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ОбновитьНумерациюОбъектов",
+      "en": "RefreshObjectsNumbering",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОбновитьПовторноИспользуемыеЗначения",
+      "en": "RefreshReusableValues",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапроситьРазрешениеПользователя",
+      "en": "RequestUserPermission",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапроситьРазрешениеПользователяАсинх",
+      "en": "RequestUserPermissionAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВосстановитьЗначение",
+      "en": "RestoreValue",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "Прав",
+      "en": "Right",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеПрава",
+      "en": "RightPresentation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОтменитьТранзакцию",
+      "en": "RollbackTransaction",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Окр",
+      "en": "Round",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапуститьПриложение",
+      "en": "RunApp",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапуститьПриложениеАсинх",
+      "en": "RunAppAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ВыполнитьОбработкуОповещения",
+      "en": "RunCallback",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ЗапуститьСистему",
+      "en": "RunSystem",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "БезопасныйРежим",
+      "en": "SafeMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СохранитьНастройкиПользователя",
+      "en": "SaveUserSettings",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "СохранитьЗначение",
+      "en": "SaveValue",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "Секунда",
+      "en": "Second",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НачалоСтолетияСеанса",
+      "en": "SessionBeginningOfCentury",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЧасовойПоясСеанса",
+      "en": "SessionTimeZone",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьДействиеПриНесоответствииПаролейПользователейТребованиямПриАутентификации",
+      "en": "SetActionOnUserPasswordRequirementsViolationOnAuthentication",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьИспользованиеДополнительныхИндексов",
+      "en": "SetAdditionalIndexesUsage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьБит",
+      "en": "SetBit",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьЗаголовокКлиентскогоПриложения",
+      "en": "SetClientApplicationCaption",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьЗапретЗасыпанияКомпьютера",
+      "en": "SetComputerSleepModeProhibition",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьБлокировкуУстановкиСоединений",
+      "en": "SetConnectionsLock",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьБезопасныйРежимРазделенияДанных",
+      "en": "SetDataSeparationSafeMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПериодРазделенияХраненияДанныхЖурналаРегистрации",
+      "en": "SetEventLogDataStorageSplitPeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьИспользованиеСобытияЖурналаРегистрации",
+      "en": "SetEventLogEventUse",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьИспользованиеЖурналаРегистрации",
+      "en": "SetEventLogUsing",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьМонопольныйРежим",
+      "en": "SetExclusiveMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВремяЗавершенияСпящегоСеанса",
+      "en": "SetHibernateSessionTerminateTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВремяЗавершенияСеансаПриБездействии",
+      "en": "SetInactivityTimeForTerminateSession",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВремяПредупрежденияОЗавершенииСеансаПриБездействии",
+      "en": "SetInactivityTimeForTerminateSessionNotification",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьНачалоСтолетияИнформационнойБазы",
+      "en": "SetInfoBaseBeginningOfCentury",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьОбновлениеПредопределенныхДанныхИнформационнойБазы",
+      "en": "SetInfoBasePredefinedDataUpdate",
+      "environment_mask": 27
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьРегиональныеНастройкиИнформационнойБазы",
+      "en": "SetInfoBaseRegionalSettings",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьЧасовойПоясИнформационнойБазы",
+      "en": "SetInfoBaseTimeZone",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПараметрыФункциональныхОпцийИнтерфейса",
+      "en": "SetInterfaceFunctionalOptionParameters",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьНастройкиКлиентаЛицензирования",
+      "en": "SetLicensingClientParameters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВремяОжиданияБлокировкиДанных",
+      "en": "SetLockWaitTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСпособПроверкиПодписиМобильногоКлиента",
+      "en": "SetMobileClientSignatureVerificationMethod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСоответствиеОбъектаИРеквизитаФормы",
+      "en": "SetObjectAndFormAttributeConformity",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСоответствиеОбъектаИФормы",
+      "en": "SetObjectAndFormConformity",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьВремяЗасыпанияПассивногоСеанса",
+      "en": "SetPassiveSessionHibernateTime",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПреимущественноеИспользованиеОсновногоСервера",
+      "en": "SetPreferableMainServerUse",
+      "environment_mask": 26
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПривилегированныйРежим",
+      "en": "SetPrivilegedMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьБезопасныйРежим",
+      "en": "SetSafeMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьОтключениеБезопасногоРежима",
+      "en": "SetSafeModeDisabled",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьБлокировкуСеансов",
+      "en": "SetSessionsLock",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьЧасовойПоясСеанса",
+      "en": "SetSessionTimeZone",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьКраткийЗаголовокПриложения",
+      "en": "SetShortApplicationCaption",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСоставСтандартногоИнтерфейсаOData",
+      "en": "SetStandardODataInterfaceContent",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьКоличествоЗаданийПересчетаИтогов",
+      "en": "SetTotalRecalcJobCount",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьИспользуемыйСервер",
+      "en": "SetUsedServer",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПроверкуРаскрытияПаролейПользователей",
+      "en": "SetUserPasswordCompromiseCheck",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьСрокПредупрежденияОбИстеченииСрокаДействияПаролейПользователей",
+      "en": "SetUserPasswordExpirationNotificationPeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьТипАлгоритмаХешированияПаролейПользователей",
+      "en": "SetUserPasswordHashAlgorithmType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьМаксимальныйСрокДействияПаролейПользователей",
+      "en": "SetUserPasswordMaxEffectivePeriod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьМинимальныйСрокДействияПаролейПользователей",
+      "en": "SetUserPasswordMinEffectivePeriod",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьМинимальнуюДлинуПаролейПользователей",
+      "en": "SetUserPasswordMinLength",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьОграничениеПовторенияПаролейПользователейСредиПоследних",
+      "en": "SetUserPasswordReuseLimit",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "УстановитьПроверкуСложностиПаролейПользователей",
+      "en": "SetUserPasswordStrengthCheck",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьИнформациюОбОшибке",
+      "en": "ShowErrorInfo",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВводОценкиПриложения",
+      "en": "ShowInputAppRate",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВводДаты",
+      "en": "ShowInputDate",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВводЧисла",
+      "en": "ShowInputNumber",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВводСтроки",
+      "en": "ShowInputString",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВводЗначения",
+      "en": "ShowInputValue",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьПредупреждение",
+      "en": "ShowMessageBox",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьНаКарте",
+      "en": "ShowOnMap",
+      "environment_mask": 18
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьВопрос",
+      "en": "ShowQueryBox",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьОповещениеПользователя",
+      "en": "ShowUserNotification",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПоказатьЗначение",
+      "en": "ShowValue",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "Sin",
+      "en": "Sin",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РазделитьДвоичныеДанные",
+      "en": "SplitBinaryData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РазделитьФайл",
+      "en": "SplitFile",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Sqrt",
+      "en": "Sqrt",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СмещениеСтандартногоВремени",
+      "en": "StandardTimeOffset",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Состояние",
+      "en": "Status",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "СтрСравнить",
+      "en": "StrCompare",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрСоединить",
+      "en": "StrConcat",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрЗаканчиваетсяНа",
+      "en": "StrEndsWith",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрНайти",
+      "en": "StrFind",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрНайтиВсеПоРегулярномуВыражению",
+      "en": "StrFindAllByRegularExpression",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СтрНайтиИВыделитьОформлением",
+      "en": "StrFindAndHighlightByAppearance",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрНайтиПоРегулярномуВыражению",
+      "en": "StrFindByRegularExpression",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СтрПолучитьСтроку",
+      "en": "StrGetLine",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "Строка",
+      "en": "String",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрокаСЧислом",
+      "en": "StringWithNumber",
+      "environment_mask": 31
+    },
+    {
+      "kind": "function",
+      "ru": "СтрДлина",
+      "en": "StrLen",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрПодобнаПоРегулярномуВыражению",
+      "en": "StrLikeByRegularExpression",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СтрЧислоСтрок",
+      "en": "StrLineCount",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрЧислоВхождений",
+      "en": "StrOccurrenceCount",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрЗаменить",
+      "en": "StrReplace",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрЗаменитьПоРегулярномуВыражению",
+      "en": "StrReplaceByRegularExpression",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СтрРазделить",
+      "en": "StrSplit",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрНачинаетсяС",
+      "en": "StrStartsWith",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СтрШаблон",
+      "en": "StrTemplate",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КомандаСистемы",
+      "en": "System",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "Tan",
+      "en": "Tan",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогВременныхФайлов",
+      "en": "TempFilesDir",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "КаталогВременныхФайловАсинх",
+      "en": "TempFilesDirAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПрекратитьРаботуСистемы",
+      "en": "Terminate",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ЧасовойПояс",
+      "en": "TimeZone",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ПредставлениеЧасовогоПояса",
+      "en": "TimeZonePresentation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ТРег",
+      "en": "Title",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "МестноеВремя",
+      "en": "ToLocalTime",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "УниверсальноеВремя",
+      "en": "ToUniversalTime",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТранзакцияАктивна",
+      "en": "TransactionActive",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "СокрЛП",
+      "en": "TrimAll",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СокрЛ",
+      "en": "TrimL",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СокрП",
+      "en": "TrimR",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "СократитьЖурналРегистрации",
+      "en": "TruncateEventLog",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Тип",
+      "en": "Type",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ТипЗнч",
+      "en": "TypeOf",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ВыгрузитьЖурналРегистрации",
+      "en": "UnloadEventLog",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "РазблокироватьДанныеДляРедактирования",
+      "en": "UnlockDataForEdit",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ВРег",
+      "en": "Upper",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "РабочийКаталогДанныхПользователя",
+      "en": "UserDataWorkDir",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "РабочийКаталогДанныхПользователяАсинх",
+      "en": "UserDataWorkDirAsync",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ПолноеИмяПользователя",
+      "en": "UserFullName",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ОбработкаПрерыванияПользователя",
+      "en": "UserInterruptProcessing",
+      "environment_mask": 23
+    },
+    {
+      "kind": "function",
+      "ru": "ИмяПользователя",
+      "en": "UserName",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеИзФайла",
+      "en": "ValueFromFile",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеИзСтрокиВнутр",
+      "en": "ValueFromStringInternal",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеЗаполнено",
+      "en": "ValueIsFilled",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеВФайл",
+      "en": "ValueToFile",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеВДанныеФормы",
+      "en": "ValueToFormData",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗначениеВСтрокуВнутр",
+      "en": "ValueToStringInternal",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ВыполнитьПроверкуПравДоступа",
+      "en": "VerifyAccessRights",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ДеньНедели",
+      "en": "WeekDay",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "НеделяГода",
+      "en": "WeekOfYear",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ПользователиWindows",
+      "en": "WindowsUsers",
+      "environment_mask": 19
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаписатьJSON",
+      "en": "WriteJSON",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаписатьДатуJSON",
+      "en": "WriteJSONDate",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаписатьЗначениеJSON",
+      "en": "WriteJSONValue",
+      "environment_mask": 63
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаписьЖурналаРегистрации",
+      "en": "WriteLogEvent",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "ЗаписатьXML",
+      "en": "WriteXML",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "XMLСтрока",
+      "en": "XMLString",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "XMLТип",
+      "en": "XMLType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "XMLТипЗнч",
+      "en": "XMLTypeOf",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "XMLЗначение",
+      "en": "XMLValue",
+      "environment_mask": 59
+    },
+    {
+      "kind": "function",
+      "ru": "Год",
+      "en": "Year",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "РегистрыБухгалтерии",
+      "en": "AccountingRegisters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РегистрыНакопления",
+      "en": "AccumulationRegisters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ДополнительныеНастройкиАутентификации",
+      "en": "AdditionalAuthenticationSettings",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ДополнительнаяПроверкаПользователя",
+      "en": "AdditionalUserVerification",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "ОтображениеРекламы",
+      "en": "AdRepresentation",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваОтображенияРекламы",
+      "en": "AdvertisingPresentationTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "СистемаАналитики",
+      "en": "AnalyticsSystem",
+      "environment_mask": 62
+    },
+    {
+      "kind": "property",
+      "ru": "СтатистикаИспользованияПриложения",
+      "en": "ApplicationUsageStatistics",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "БлокировкаАутентификации",
+      "en": "AuthenticationLock",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ФоновыеЗадания",
+      "en": "BackgroundJobs",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ВнешниеХранилищаДвоичныхДанных",
+      "en": "BinaryDataExternalStorages",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеДвоичныхДанных",
+      "en": "BinaryDataStorage",
+      "environment_mask": 26
+    },
+    {
+      "kind": "property",
+      "ru": "БизнесПроцессы",
+      "en": "BusinessProcesses",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РегистрыРасчета",
+      "en": "CalculationRegisters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Справочники",
+      "en": "Catalogs",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПланыСчетов",
+      "en": "ChartsOfAccounts",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПланыВидовРасчета",
+      "en": "ChartsOfCalculationTypes",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПланыВидовХарактеристик",
+      "en": "ChartsOfCharacteristicTypes",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "КлиентскоеПриложение",
+      "en": "ClientApplication",
+      "environment_mask": 31
+    },
+    {
+      "kind": "property",
+      "ru": "АгентКлиентскогоПриложения",
+      "en": "ClientApplicationAgent",
+      "environment_mask": 23
+    },
+    {
+      "kind": "property",
+      "ru": "УведомленияКлиента",
+      "en": "ClientNotifications",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваБуфераОбмена",
+      "en": "ClipboardTools",
+      "environment_mask": 55
+    },
+    {
+      "kind": "property",
+      "ru": "СистемаВзаимодействия",
+      "en": "CollaborationSystem",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеОбщихНастроек",
+      "en": "CommonSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РасширенияКонфигурации",
+      "en": "ConfigurationExtensions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Константы",
+      "en": "Constants",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваКриптографии",
+      "en": "CryptoTools",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "КопииБазыДанных",
+      "en": "DatabaseCopies",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ТабличныеПространстваБазыДанных",
+      "en": "DatabaseTablespaces",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "БиблиотекаМакетовОформленияКомпоновкиДанных",
+      "en": "DataCompositionAppearanceTemplateLib",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ОбменДаннымиСОсновнымСервером",
+      "en": "DataExchangeWithMainServer",
+      "environment_mask": 26
+    },
+    {
+      "kind": "property",
+      "ru": "ИсторияДанных",
+      "en": "DataHistory",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Обработки",
+      "en": "DataProcessors",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ДоставляемыеУведомления",
+      "en": "DeliverableNotifications",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "ОтправкаДоставляемыхУведомлений",
+      "en": "DeliverableNotificationSend",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваПередачиДанныхНаУстройстве",
+      "en": "DeviceDataSharingTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваУстройства",
+      "en": "DeviceTools",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ЖурналыДокументов",
+      "en": "DocumentJournals",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Документы",
+      "en": "Documents",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеПользовательскихНастроекДинамическихСписков",
+      "en": "DynamicListsUserSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Перечисления",
+      "en": "Enums",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ОбработкаОшибок",
+      "en": "ErrorProcessing",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ПланыОбмена",
+      "en": "ExchangePlans",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ВнешниеОбработки",
+      "en": "ExternalDataProcessors",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ВнешниеИсточникиДанных",
+      "en": "ExternalDataSources",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ВнешниеОтчеты",
+      "en": "ExternalReports",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ОкноВнешнегоСайта",
+      "en": "ExternalSiteWindow",
+      "environment_mask": 23
+    },
+    {
+      "kind": "property",
+      "ru": "ФайловыеПотоки",
+      "en": "FileStreams",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "КритерииОтбора",
+      "en": "FilterCriteria",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеНастроекДанныхФорм",
+      "en": "FormDataSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПолнотекстовыйПоиск",
+      "en": "FullTextSearch",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ГлобальныйПоиск",
+      "en": "GlobalSearch",
+      "environment_mask": 55
+    },
+    {
+      "kind": "property",
+      "ru": "ВстроенныеПокупки",
+      "en": "InAppPurchases",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "ПроверкаВстроенныхПокупок",
+      "en": "InAppPurchasesValidation",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПользователиИнформационнойБазы",
+      "en": "InfoBaseUsers",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РегистрыСведений",
+      "en": "InformationRegisters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "СервисыИнтеграции",
+      "en": "IntegrationServices",
+      "environment_mask": 41
+    },
+    {
+      "kind": "property",
+      "ru": "ИнформацияОбИнтернетСоединении",
+      "en": "InternetConnectionInformation",
+      "environment_mask": 26
+    },
+    {
+      "kind": "property",
+      "ru": "ПараметрЗапуска",
+      "en": "LaunchParameter",
+      "environment_mask": 23
+    },
+    {
+      "kind": "property",
+      "ru": "ДанныеЗапросаПоделитьсяЗапуска",
+      "en": "LaunchShareRequestData",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "НавигационнаяСсылкаЗапуска",
+      "en": "LaunchURL",
+      "environment_mask": 23
+    },
+    {
+      "kind": "property",
+      "ru": "ДанныеПереходаПоНавигационнойСсылкеЗапуска",
+      "en": "LaunchURLNavigationData",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ПолучениеЛицензий",
+      "en": "LicenseAcquisition",
+      "environment_mask": 58
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваГеопозиционирования",
+      "en": "LocationTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваПочты",
+      "en": "MailTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "ГлавныйИнтерфейс",
+      "en": "MainInterface",
+      "environment_mask": 19
+    },
+    {
+      "kind": "property",
+      "ru": "ОсновнойСервер",
+      "en": "MainServer",
+      "environment_mask": 26
+    },
+    {
+      "kind": "property",
+      "ru": "ГлавныйСтиль",
+      "en": "MainStyle",
+      "environment_mask": 27,
+      "writable": true
+    },
+    {
+      "kind": "property",
+      "ru": "Метаданные",
+      "en": "Metadata",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваМультимедиа",
+      "en": "MultimediaTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваNFC",
+      "en": "NFCTools",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ПанельЗадачОС",
+      "en": "OSTaskbar",
+      "environment_mask": 19
+    },
+    {
+      "kind": "property",
+      "ru": "БиблиотекаКартинок",
+      "en": "PictureLib",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "ПрогрессивноеВебПриложение",
+      "en": "ProgressiveWebApplication",
+      "environment_mask": 23
+    },
+    {
+      "kind": "property",
+      "ru": "Отчеты",
+      "en": "Reports",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ОформлениеОтчетов",
+      "en": "ReportsAppearance",
+      "environment_mask": 27
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеПользовательскихНастроекОтчетов",
+      "en": "ReportsUserSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеВариантовОтчетов",
+      "en": "ReportsVariantsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РегламентныеЗадания",
+      "en": "ScheduledJobs",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ШаблоныНастроекВторогоФактораАутентификации",
+      "en": "SecondAuthenticationFactorSettingsTemplates",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "БезопасноеХранилище",
+      "en": "SecureStorage",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "Последовательности",
+      "en": "Sequences",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПараметрыСеанса",
+      "en": "SessionParameters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищаНастроек",
+      "en": "SettingsStorages",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РаботаСРечью",
+      "en": "SpeechProcessing",
+      "environment_mask": 31
+    },
+    {
+      "kind": "property",
+      "ru": "БиблиотекаСтилей",
+      "en": "StyleLib",
+      "environment_mask": 27
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеСистемныхНастроек",
+      "en": "SystemSettingsStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "Задачи",
+      "en": "Tasks",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "СредстваТелефонии",
+      "en": "TelephonyTools",
+      "environment_mask": 18
+    },
+    {
+      "kind": "property",
+      "ru": "ХранилищеВнешнихДанныхНавигационныхСсылок",
+      "en": "URLExternalDataStorage",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ПолитикиПаролейПользователей",
+      "en": "UserPasswordPolicies",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ИсторияРаботыПользователя",
+      "en": "UserWorkHistory",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "WebSocketКлиентСоединения",
+      "en": "WebSocketClientConnections",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "WebSocketКлиенты",
+      "en": "WebSocketClients",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "РабочаяДата",
+      "en": "WorkingDate",
+      "environment_mask": 19,
+      "writable": true
+    },
+    {
+      "kind": "property",
+      "ru": "ИспользованиеРабочейДаты",
+      "en": "WorkingDateUse",
+      "environment_mask": 19
+    },
+    {
+      "kind": "property",
+      "ru": "WSСсылки",
+      "en": "WSReferences",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ФабрикаXDTO",
+      "en": "XDTOFactory",
+      "environment_mask": 63
+    },
+    {
+      "kind": "property",
+      "ru": "СериализаторXDTO",
+      "en": "XDTOSerializer",
+      "environment_mask": 59
+    },
+    {
+      "kind": "property",
+      "ru": "ОбработкаСтрокиXML",
+      "en": "XMLStringProcessing",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АлгоритмПодписиТокенаДоступа",
+      "en": "AccessTokenSignAlgorithm",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидДвиженияБухгалтерии",
+      "en": "AccountingRecordType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидСчета",
+      "en": "AccountType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидДвиженияНакопления",
+      "en": "AccumulationRecordType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПериодичностьАгрегатаРегистраНакопления",
+      "en": "AccumulationRegisterAggregatePeriodicity",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеАгрегатаРегистраНакопления",
+      "en": "AccumulationRegisterAggregateUse",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеПриНесоответствииПароляТребованиямПриАутентификации",
+      "en": "ActionOnThePasswordRequirementsViolationOnAuthentication",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеРекламногоБаннера",
+      "en": "AdBannerRepresentation",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПодключенияВнешнейКомпоненты",
+      "en": "AddInAttachmentType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВнешнейКомпоненты",
+      "en": "AddInType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДополнительныйРежимОтображения",
+      "en": "AdditionalShowMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособДополнительнойПроверкиПользователя",
+      "en": "AdditionalUserVerificationMethod",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеДействиеПриПревышенииОграниченияПотребленияРесурсов",
+      "en": "AdministrationActionOnResourceConsumptionLimitExcess",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеТипТребованияНазначения",
+      "en": "AdministrationAssignmentRuleType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеУровеньБезопасностиСоединений",
+      "en": "AdministrationConnectionSecurityLevel",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеРежимУдаленияИнформационнойБазы",
+      "en": "AdministrationInfoBaseDeletionMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеПриоритетВыбораПроцесса",
+      "en": "AdministrationProcessChoicePriority",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеТипОтбораСчетчикаПотребленияРесурсов",
+      "en": "AdministrationResourceConsumptionCounterFilterType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеТипГруппировкиСчетчикаПотребленияРесурсов",
+      "en": "AdministrationResourceConsumptionCounterGroupType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АдминистрированиеСостояниеРабочегоПроцесса",
+      "en": "AdministrationWorkProcessStatus",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусРекламы",
+      "en": "AdStatus",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДопустимаяДлина",
+      "en": "AllowedLength",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДопустимыйНомерСообщения",
+      "en": "AllowedMessageNo",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДопустимыйЗнак",
+      "en": "AllowedSign",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидДанныхАнализа",
+      "en": "AnalysisDataType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОбластиОформления",
+      "en": "AppearanceAreaType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОткрытияФормПриложения",
+      "en": "ApplicationFormsOpenningMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "УровеньСжатияФайлаАрхива",
+      "en": "ArchiveFileCompressionLevel",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодСжатияФайлаАрхива",
+      "en": "ArchiveFileCompressionMethod",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодШифрованияФайлаАрхива",
+      "en": "ArchiveFileEncryptionMethod",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВосстановленияПутейФайлаАрхива",
+      "en": "ArchiveFileRestoreFilePathsMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСохраненияПутейФайлаАрхива",
+      "en": "ArchiveFileStorePathMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОбработкиПодкаталоговФайлаАрхива",
+      "en": "ArchiveFileSubDirProcessingMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФайлаАрхива",
+      "en": "ArchiveFileType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтильСтрелки",
+      "en": "ArrowStyle",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИсточникаДанныхПоискаАссоциаций",
+      "en": "AssociationRulesDataSourceType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтсеченияПравилАссоциации",
+      "en": "AssociationRulesPruneType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеКаналовАудиозаписи",
+      "en": "AudioRecordingChannelUse",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФорматАудиозаписи",
+      "en": "AudioRecordingFormat",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоИзменениеРегистраПриВводеТекста",
+      "en": "AutoCapitalizationOnTextInput",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоРегистрацияИзменений",
+      "en": "AutoChangeRecord",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоИсправлениеПриВводеТекста",
+      "en": "AutoCorrectionOnTextInput",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтонумерацияВФорме",
+      "en": "AutonumerationInForm",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоматическоеСохранениеДанныхФормыВНастройках",
+      "en": "AutoSaveFormDataInSettings",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоРаздвижениеСерий",
+      "en": "AutoSeriesSeparation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимАвтоОтображенияКнопкиОчистки",
+      "en": "AutoShowClearButtonMode",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимАвтоОтображенияКнопкиОткрытия",
+      "en": "AutoShowOpenButtonMode",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимАвтоОтображенияСостояния",
+      "en": "AutoShowStateMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимАвтоВремя",
+      "en": "AutoTimeMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеФоновогоЗадания",
+      "en": "BackgroundJobState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПорядокОтображенияТочекГоризонтальнойГистограммы",
+      "en": "BarChartPointsOrder",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипШтрихКода",
+      "en": "BarcodeType",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипURLВнешнегоХранилищаДвоичныхДанных",
+      "en": "BinaryDataExternalStorageURLType",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРазмещенияКопийДанныхВХранилищеДвоичныхДанных",
+      "en": "BinaryDataStorageDataCopiesPlacementMode",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеХраненияВХранилищеДвоичныхДанных",
+      "en": "BinaryDataStorageLocationUse",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимЧтенияЗаписиХранилищаДвоичныхДанных",
+      "en": "BinaryDataStorageReadWriteMode",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипХранилищаДвоичныхДанных",
+      "en": "BinaryDataStorageType",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИспользованияХранилищаДвоичныхДанных",
+      "en": "BinaryDataStorageUseMode",
+      "environment_mask": 8
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособБиометрическойПроверки",
+      "en": "BiometricVerificationMethod",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидРамки",
+      "en": "BorderType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидГраницы",
+      "en": "BoundaryType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеОтрицательныхЗначенийПузырьковойДиаграммы",
+      "en": "BubbleChartNegativeValuesShowMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидТочкиМаршрутаБизнесПроцесса",
+      "en": "BusinessProcessRoutePointType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеГруппыКнопок",
+      "en": "ButtonGroupRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКнопкиВКоманднойПанели",
+      "en": "ButtonLocationInCommandBar",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКартинкиКнопки",
+      "en": "ButtonPictureLocation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеКнопки",
+      "en": "ButtonRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФигураКнопки",
+      "en": "ButtonShape",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеФигурыКнопки",
+      "en": "ButtonShapeRepresentation",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПорядокБайтов",
+      "en": "ByteOrder",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеByteOrderMark",
+      "en": "ByteOrderMarkUse",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидПериодаРегистраРасчета",
+      "en": "CalculationRegisterPeriodType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПовторениеСобытияКалендаря",
+      "en": "CalendarEventRecurrence",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗвонкаЖурналаЗвонков",
+      "en": "CallLogCallType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПодсветкиКамеры",
+      "en": "CameraLightingType",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "Символы",
+      "en": "Chars",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АнимацияДиаграммы",
+      "en": "ChartAnimation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособОпределенияОграничивающегоЗначенияДиаграммы",
+      "en": "ChartBoundaryDetectionMethod",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникЗначенияРазмераПузырькаДиаграммы",
+      "en": "ChartBubbleSizeValueSource",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВлияниеРазмераНаПузырекДиаграммы",
+      "en": "ChartBubbleSizing",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПалитраЦветовДиаграммы",
+      "en": "ChartColorPalette",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеЛинийСеткиДиаграммы",
+      "en": "ChartGridLinesShowMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеПодписейКДиаграмме",
+      "en": "ChartLabelLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияПодписейДиаграммы",
+      "en": "ChartLabelsOrientation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидПодписейКДиаграмме",
+      "en": "ChartLabelType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеЛегендыДиаграммы",
+      "en": "ChartLegendPlacement",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЛинииДиаграммы",
+      "en": "ChartLineType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипМаркераДиаграммы",
+      "en": "ChartMarkerType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияДиаграммы",
+      "en": "ChartOrientation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеОбластиПостроенияДиаграммы",
+      "en": "ChartPlotAreaPlacement",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникЗначенийОсиТочекДиаграммы",
+      "en": "ChartPointsAxisValuesSource",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСоединенияТочекДиаграммы",
+      "en": "ChartPointsConnectionType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеГраницыИнформационногоИнтервалаДиаграммы",
+      "en": "ChartReferenceBandBorderPosition",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеИнформационнойЛинииДиаграммы",
+      "en": "ChartReferenceLinePosition",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеПодписейШкалыДиаграммы",
+      "en": "ChartScaleLabelLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеШкалыДиаграммы",
+      "en": "ChartScaleLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеОтметокШкалыДиаграммы",
+      "en": "ChartScaleMarkLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеЗаголовкаШкалыДиаграммы",
+      "en": "ChartScaleTitlePlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособЗаполненияТекстаЗаголовкаШкалыДиаграммы",
+      "en": "ChartScaleTitleTextSource",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияДиаграммы",
+      "en": "ChartSelectionMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПолупрозрачностиДиаграммы",
+      "en": "ChartSemitransparencyMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипГрафическогоПредставленияСерииДиаграммы",
+      "en": "ChartSeriesGraphicalRepresentationType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПорядокСерийВЛегендеДиаграммы",
+      "en": "ChartSeriesOrderInLegend",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипНакопленияСерииДиаграммы",
+      "en": "ChartSeriesStackType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПробеловДиаграммы",
+      "en": "ChartSpaceMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСглаживанияДиаграммы",
+      "en": "ChartSplineMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеОбластиЗаголовкаДиаграммы",
+      "en": "ChartTitleAreaPlacement",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАппроксимацииЛинииТрендаДиаграммы",
+      "en": "ChartTrendLineApproximationType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФакторЛинииТрендаДиаграммы",
+      "en": "ChartTrendlineFactor",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипДиаграммы",
+      "en": "ChartType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеРедактированияЗначенияДиаграммы",
+      "en": "ChartValueEditState",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСоединенияЗначенийПоСериямДиаграммы",
+      "en": "ChartValuesBySeriesConnectionType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРедактированияЗначенийДиаграммы",
+      "en": "ChartValuesEditMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗаполнениеПодсказкиЗначенийДиаграммы",
+      "en": "ChartValuesToolTipFillType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеПодсказкиЗначенийДиаграммы",
+      "en": "ChartValuesToolTipShowMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидФлажка",
+      "en": "CheckBoxType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГруппировкаПодчиненныхЭлементовФормы",
+      "en": "ChildFormItemsGroup",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ШиринаПодчиненныхЭлементовФормы",
+      "en": "ChildFormItemsWidth",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеКнопкиВыбора",
+      "en": "ChoiceButtonRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПолученияДанныхВыбораПриВводеПоСтроке",
+      "en": "ChoiceDataGetModeOnInputByString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсторияВыбораПриВводе",
+      "en": "ChoiceHistoryOnInput",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеАгентаКлиентскогоПриложения",
+      "en": "ClientApplicationAgentState",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантОсновногоШрифтаКлиентскогоПриложения",
+      "en": "ClientApplicationBaseFontVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантМасштабаФормКлиентскогоПриложения",
+      "en": "ClientApplicationFormScaleVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантИнтерфейсаКлиентскогоПриложения",
+      "en": "ClientApplicationInterfaceVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКлиентскогоПриложения",
+      "en": "ClientApplicationType",
+      "environment_mask": 62
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СкоростьКлиентскогоСоединения",
+      "en": "ClientConnectionSpeed",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимЗапускаКлиентскогоПриложения",
+      "en": "ClientRunMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартныйФорматДанныхБуфераОбмена",
+      "en": "ClipboardDataStandardFormat",
+      "environment_mask": 55
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодКластеризации",
+      "en": "ClusterizationMethod",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникКомандСистемыВзаимодействия",
+      "en": "CollaborationSystemCommandSource",
+      "environment_mask": 55
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусВыгрузкиДанныхСистемыВзаимодействия",
+      "en": "CollaborationSystemDataDumpStatus",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусВосстановленияИзВыгрузкиДанныхСистемыВзаимодействия",
+      "en": "CollaborationSystemFromDataDumpRestoreStatus",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеКнопкиПанелиКнопокСообщенияСистемыВзаимодействия",
+      "en": "CollaborationSystemMessageButtonPanelButtonAction",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидКнопкиПанелиКнопокСообщенияСистемыВзаимодействия",
+      "en": "CollaborationSystemMessageButtonPanelButtonType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеОповещенийСистемыВзаимодействия",
+      "en": "CollaborationSystemNotificationRepresentation",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяКомандаСистемыВзаимодействия",
+      "en": "CollaborationSystemStandardCommand",
+      "environment_mask": 55
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НазначениеВыбораПользователейСистемыВзаимодействия",
+      "en": "CollaborationSystemUsersChoicePurpose",
+      "environment_mask": 55
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СворачиваниеЭлементовФормыПоВажности",
+      "en": "CollapseFormItemsByImportance",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГлубинаЦвета",
+      "en": "ColorDepth",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидЦвета",
+      "en": "ColorType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРедактированияКолонки",
+      "en": "ColumnEditMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКолонки",
+      "en": "ColumnLocation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГруппировкаКолонок",
+      "en": "ColumnsGroup",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИзменениеРазмераКолонки",
+      "en": "ColumnSizeChange",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВыравниваниеКнопокКоманднойПанели",
+      "en": "CommandBarButtonAlignment",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПорядокКнопокКоманднойПанели",
+      "en": "CommandBarButtonOrder",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеКнопкиКоманднойПанели",
+      "en": "CommandBarButtonRepresentation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКнопкиКоманднойПанели",
+      "en": "CommandBarButtonType",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияГруппыКоманд",
+      "en": "CommandGroupCategory",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИспользованияПараметраКоманды",
+      "en": "CommandParameterUseMode",
+      "environment_mask": 47
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидСравнения",
+      "en": "ComparisonType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРазделенияСоставныхСлов",
+      "en": "CompositeWordsSeparationMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВажностьПроблемыПримененияРасширенияКонфигурации",
+      "en": "ConfigurationExtensionApplicationIssueSeverity",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбластьДействияРасширенияКонфигурации",
+      "en": "ConfigurationExtensionScope",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникРасширенийКонфигурации",
+      "en": "ConfigurationExtensionsSource",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособПолученияКомпонентСвязностиРасчетаСистемЛинейныхУравнений",
+      "en": "ConnectedComponentsOfSystemOfLinearEquationsCalculationGettingMethod",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСоединительнойЛинии",
+      "en": "ConnectorLineType",
+      "environment_mask": 15
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеТекстаСоединительнойЛинии",
+      "en": "ConnectorTextLocation",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАдресаДанныхКонтакта",
+      "en": "ContactDataAddressType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАдресаЭлектроннойПочтыДанныхКонтакта",
+      "en": "ContactDataEmailAddressType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАдресаМгновенныхСообщенийДанныхКонтакта",
+      "en": "ContactDataInstantMessagingAddressType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипНомераТелефонаДанныхКонтакта",
+      "en": "ContactDataPhoneNumberType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтношенийДанныхКонтакта",
+      "en": "ContactDataRelationshipType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВебАдресаДанныхКонтакта",
+      "en": "ContactDataURLType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРамкиЭлементаУправления",
+      "en": "ControlBorderType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСверткиЭлементаУправления",
+      "en": "ControlCollapseMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГраницаЭлементаУправления",
+      "en": "ControlEdge",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантИспользованияБазыДанныхКопии",
+      "en": "CopyDatabaseUseVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПроверкиСертификатаКриптографии",
+      "en": "CryptoCertificateCheckMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВключенияСертификатовКриптографии",
+      "en": "CryptoCertificateIncludeMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеХранилищаСертификатовКриптографии",
+      "en": "CryptoCertificateStorePlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипХранилищаСертификатовКриптографии",
+      "en": "CryptoCertificateStoreType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеИнтерактивногоРежимаКриптографии",
+      "en": "CryptoInteractiveModeUse",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПодписиКриптографии",
+      "en": "CryptoSignatureType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеТекущейСтроки",
+      "en": "CurrentRowUse",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантХраненияДанныхДатаАкселератора",
+      "en": "DataAcceleratorDataStorageVariant",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУпорядочиванияПравилАссоциацииАнализаДанных",
+      "en": "DataAnalysisAssociationRulesOrderType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиАнализаДанныхПоискАссоциаций",
+      "en": "DataAnalysisColumnTypeAssociationRules",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиАнализаДанныхКластеризация",
+      "en": "DataAnalysisColumnTypeClusterization",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиАнализаДанныхДеревоРешений",
+      "en": "DataAnalysisColumnTypeDecisionTree",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиАнализаДанныхПоискПоследовательностей",
+      "en": "DataAnalysisColumnTypeSequentialPatterns",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиАнализаДанныхОбщаяСтатистика",
+      "en": "DataAnalysisColumnTypeSummaryStatistics",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипМерыРасстоянияАнализаДанных",
+      "en": "DataAnalysisDistanceMetricType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПоляАнализаДанных",
+      "en": "DataAnalysisFieldType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИспользованияЧисловыхЗначенийАнализаДанных",
+      "en": "DataAnalysisNumericValueUseType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗаполненияТаблицыРезультатаАнализаДанных",
+      "en": "DataAnalysisResultTableFillType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУпорядочиванияШаблоновПоследовательностейАнализаДанных",
+      "en": "DataAnalysisSequentialPatternsOrderType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСтандартизацииАнализаДанных",
+      "en": "DataAnalysisStandardizationType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЕдиницыИнтервалаВремениАнализаДанных",
+      "en": "DataAnalysisTimeIntervalUnitType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЭлементаИнформацииОВыполненииОбновленияКонфигурацииБазыДанных",
+      "en": "DataBaseConfigurationUpdateExecutionInformationItemType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеОбновленияКонфигурацииБазыДанных",
+      "en": "DataBaseConfigurationUpdateState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВерсияСтандартнойРепликацииКопийБазыДанных",
+      "en": "DatabaseCopiesStandardReplicationVersion",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеКопийБазыДанных",
+      "en": "DatabaseCopiesUse",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеПоляЭлементаСоставаКопииБазыДанных",
+      "en": "DatabaseCopyContentItemFieldUse",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСУБДКопииБазыДанных",
+      "en": "DatabaseCopyDBMSType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРепликацииКопииБазыДанных",
+      "en": "DatabaseCopyReplicationType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеКопииБазыДанных",
+      "en": "DatabaseCopyState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПричинаОтключенияКопииБазыДанных",
+      "en": "DatabaseCopyTurnedOffReason",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеОбновленияКопииБазыДанных",
+      "en": "DatabaseCopyUpdateState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИспользованияТабличныхПространствБазыДанных",
+      "en": "DatabaseTablespacesUseMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидИзмененияДанных",
+      "en": "DataChangeType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипБухгалтерскогоОстаткаКомпоновкиДанных",
+      "en": "DataCompositionAccountingBalanceType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипМакетаОбластиКомпоновкиДанных",
+      "en": "DataCompositionAreaTemplateType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеРеквизитовКомпоновкиДанных",
+      "en": "DataCompositionAttributesPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОстаткаКомпоновкиДанных",
+      "en": "DataCompositionBalanceType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеЛегендыДиаграммыКомпоновкиДанных",
+      "en": "DataCompositionChartLegendPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидСравненияКомпоновкиДанных",
+      "en": "DataCompositionComparisonType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеУсловногоОформленияКомпоновкиДанных",
+      "en": "DataCompositionConditionalAppearanceUse",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВыводаКопииБазыДанныхКомпоновкиДанных",
+      "en": "DataCompositionDatabaseCopyOutputType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВыводаАктуальностиДанныхКомпоновкиДанных",
+      "en": "DataCompositionDataRelevanceOutputType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСвязиНаборовДанныхКомпоновкиДанных",
+      "en": "DataCompositionDataSetsLinkType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеОбработкиРасшифровкиКомпоновкиДанных",
+      "en": "DataCompositionDetailsProcessingAction",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеПоляКомпоновкиДанных",
+      "en": "DataCompositionFieldPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗаголовкаПолейКомпоновкиДанных",
+      "en": "DataCompositionFieldsTitleType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПримененияОтбораКомпоновкиДанных",
+      "en": "DataCompositionFilterApplicationType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипГруппыЭлементовОтбораКомпоновкиДанных",
+      "en": "DataCompositionFilterItemsGroupType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФиксацияКомпоновкиДанных",
+      "en": "DataCompositionFixation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеПолейГруппировкиКомпоновкиДанных",
+      "en": "DataCompositionGroupFieldsPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеГруппировкиКомпоновкиДанных",
+      "en": "DataCompositionGroupPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипМакетаГруппировкиКомпоновкиДанных",
+      "en": "DataCompositionGroupTemplateType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипГруппировкиКомпоновкиДанных",
+      "en": "DataCompositionGroupType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантИспользованияГруппировкиКомпоновкиДанных",
+      "en": "DataCompositionGroupUseVariant",
+      "environment_mask": 45
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеПараметраКомпоновкиДанных",
+      "en": "DataCompositionParameterUse",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипДополненияПериодаКомпоновкиДанных",
+      "en": "DataCompositionPeriodAdditionType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПериодаКомпоновкиДанных",
+      "en": "DataCompositionPeriodType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВыводаКартинкиКомпоновкиДанных",
+      "en": "DataCompositionPictureOutputType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "АвтоПозицияРесурсовКомпоновкиДанных",
+      "en": "DataCompositionResourcesAutoPosition",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеРесурсовКомпоновкиДанных",
+      "en": "DataCompositionResourcesPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеРесурсовВДиаграммеКомпоновкиДанных",
+      "en": "DataCompositionResourcesPlacementInChart",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЭлементаРезультатаКомпоновкиДанных",
+      "en": "DataCompositionResultItemType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеВложенныхЭлементовРезультатаКомпоновкиДанных",
+      "en": "DataCompositionResultNestedItemsLayout",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеЭлементаНастройкиКомпоновкиДанных",
+      "en": "DataCompositionSettingsItemState",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияЭлементаНастройкиКомпоновкиДанных",
+      "en": "DataCompositionSettingsItemViewMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособВосстановленияНастроекКомпоновкиДанных",
+      "en": "DataCompositionSettingsRefreshMethod",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияНастроекКомпоновкиДанных",
+      "en": "DataCompositionSettingsViewMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеСортировкиКомпоновкиДанных",
+      "en": "DataCompositionSortDirection",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВыводаТекстаКомпоновкиДанных",
+      "en": "DataCompositionTextOutputType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияТекстаКомпоновкиДанных",
+      "en": "DataCompositionTextPlacementType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеИтоговКомпоновкиДанных",
+      "en": "DataCompositionTotalPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПолучениеЭлементаДанных",
+      "en": "DataItemReceive",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтправкаЭлементаДанных",
+      "en": "DataItemSend",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидИзмененияСтрокиДанных",
+      "en": "DataLineChangeType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимУправленияБлокировкойДанных",
+      "en": "DataLockControlMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимБлокировкиДанных",
+      "en": "DataLockMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЧастиДаты",
+      "en": "DateFractions",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияДаты",
+      "en": "DateSelectionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУпрощенияДереваРешений",
+      "en": "DecisionTreeSimplificationType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОшибкиОтправкиДоставляемогоУведомления",
+      "en": "DeliverableNotificationSendErrorType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПодписчикаДоставляемыхУведомлений",
+      "en": "DeliverableNotificationSubscriberType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияДендрограммы",
+      "en": "DendrogramOrientation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоддержкаМасштабаДендрограммы",
+      "en": "DendrogramScaleKeeping",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКамерыУстройства",
+      "en": "DeviceCameraType",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КодВозвратаДиалога",
+      "en": "DialogReturnCode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияРеквизитовИзмерений",
+      "en": "DimensionAttributePlacementType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияИзмерений",
+      "en": "DimensionPlacementType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВажностьПриОтображении",
+      "en": "DisplayImportance",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПроведенияДокумента",
+      "en": "DocumentPostingMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОпределенияОриентацииСканированияДокументов",
+      "en": "DocumentScanningOrientationDetectionMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФильтрОбработкиСканированияДокументов",
+      "en": "DocumentScanningProcessingFilter",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПроверкаКачестваСканированияДокументов",
+      "en": "DocumentScanningQualityCheck",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимЗаписиДокумента",
+      "en": "DocumentWriteMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеПостроителяDOM",
+      "en": "DOMBuilderAction",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПозицияВДокументеDOM",
+      "en": "DOMDocumentPosition",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПараметрыОтбораУзловDOM",
+      "en": "DOMNodeFilterParameters",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУзлаDOM",
+      "en": "DOMNodeType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРезультатаDOMXPath",
+      "en": "DOMXPathResultType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеПеретаскивания",
+      "en": "DragAction",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДопустимыеДействияПеретаскивания",
+      "en": "DragAllowedActions",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияВыделенияРисунков",
+      "en": "DrawingSelectionShowMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипДвустороннейПечати",
+      "en": "DuplexPrintingType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидКлючаДинамическогоСписка",
+      "en": "DynamicListKeyType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияСтрокиПоискаДинамическогоСписка",
+      "en": "DynamicListSearchStringViewMode",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбновлениеТекстаРедактирования",
+      "en": "EditTextUpdate",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособАутентификацииЧерезЭлектроннуюПочту",
+      "en": "EmailAuthenticationMethod",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПоведенияКлавишиEnter",
+      "en": "EnterKeyBehaviorType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияОшибки",
+      "en": "ErrorCategory",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантОтображенияСообщенияОбОшибке",
+      "en": "ErrorMessageDisplayVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтправкиИнформацииОбОшибке",
+      "en": "ErrorReportingMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПериодРазделенияХраненияДанныхЖурналаРегистрации",
+      "en": "EventLogDataStorageSplitPeriod",
+      "environment_mask": 40
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимТранзакцииЗаписиЖурналаРегистрации",
+      "en": "EventLogEntryTransactionMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусТранзакцииЗаписиЖурналаРегистрации",
+      "en": "EventLogEntryTransactionStatus",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "УровеньЖурналаРегистрации",
+      "en": "EventLogLevel",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеВнешнегоИсточникаДанных",
+      "en": "ExternalDataSourceState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДоступКФайлу",
+      "en": "FileAccess",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособСравненияФайлов",
+      "en": "FileCompareMethod",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимДиалогаВыбораФайла",
+      "en": "FileDialogMode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РазделДиалогаВыбораФайла",
+      "en": "FileDialogSection",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособПеретаскиванияФайлов",
+      "en": "FileDragMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КодировкаИменФайловВФайлеАрхива",
+      "en": "FileNamesEncodingInArchiveFile",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КодировкаИменФайловВZipФайле",
+      "en": "FileNamesEncodingInZipFile",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОткрытияФайла",
+      "en": "FileOpenMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПроверкаЗаполнения",
+      "en": "FillChecking",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРазмещенияНаСтранице",
+      "en": "FitPageMode",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФиксацияВТаблице",
+      "en": "FixingInTable",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГруппыИЭлементы",
+      "en": "FoldersAndItems",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеГруппИЭлементов",
+      "en": "FoldersAndItemsUse",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидШрифта",
+      "en": "FontType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФайлаФорматированногоДокумента",
+      "en": "FormattedDocumentFileType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЭлементаФорматированногоДокумента",
+      "en": "FormattedDocumentItemType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКартинкиКнопкиФормы",
+      "en": "FormButtonPictureLocation",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидКнопкиФормы",
+      "en": "FormButtonType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКоманднойПанелиФормы",
+      "en": "FormCommandBarLabelLocation",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеОбсужденийФормы",
+      "en": "FormConversationsRepresentation",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидДекорацииФормы",
+      "en": "FormDecorationType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидПоляФормы",
+      "en": "FormFieldType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидГруппыФормы",
+      "en": "FormGroupType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидДополненияЭлементаФормы",
+      "en": "FormItemAdditionType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКоманднойПанелиЭлементаФормы",
+      "en": "FormItemCommandBarLabelLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияЭлементаФормы",
+      "en": "FormItemOrientation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИнтервалМеждуЭлементамиФормы",
+      "en": "FormItemSpacing",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеЗаголовкаЭлементаФормы",
+      "en": "FormItemTitleLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеСтраницФормы",
+      "en": "FormPagesRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеСтраницФормы",
+      "en": "FormPagesState",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСтандартнойНавигационнойСсылкиФормы",
+      "en": "FormStandardURLVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОткрытияОкнаФормы",
+      "en": "FormWindowOpeningMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "УровеньИспользованияЗащищенногоСоединенияFTP",
+      "en": "FTPSecureConnectionUsageLevel",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПолнотекстовогоПоиска",
+      "en": "FullTextMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеМетаданныхПолнотекстовогоПоиска",
+      "en": "FullTextSearchMetadataUse",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПолнотекстовогоПоиска",
+      "en": "FullTextSearchMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПолнотекстовыйПоискПриВводеПоСтроке",
+      "en": "FullTextSearchOnInputByString",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидОтображенияПолнотекстовогоПоиска",
+      "en": "FullTextSearchRepresentationType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВерсияПолнотекстовогоПоиска",
+      "en": "FullTextSearchVersion",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеИнтервалаДиаграммыГанта",
+      "en": "GanttChartIntervalRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияИнтерваловДиаграммыГанта",
+      "en": "GanttChartIntervalsSelectionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеТекстаИнтервалаДиаграммыГанта",
+      "en": "GanttChartIntervalTextRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСвязиДиаграммыГанта",
+      "en": "GanttChartLinkType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоддержкаМасштабаДиаграммыГанта",
+      "en": "GanttChartScaleKeeping",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеТаблицыДиаграммыГанта",
+      "en": "GanttChartTableLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияТекстаДиаграммыГанта",
+      "en": "GanttChartTextPlacementType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияЗначенийДиаграммыГанта",
+      "en": "GanttChartValuesSelectionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеТекстаЗначенияДиаграммыГанта",
+      "en": "GanttChartValueTextRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РастягиваниеПоВертикалиДиаграммыГанта",
+      "en": "GanttChartVerticalStretch",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеЗначенияИзмерительнойДиаграммы",
+      "en": "GaugeChartValueRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеПодписейШкалыЗначенийИзмерительнойДиаграммы",
+      "en": "GaugeChartValuesScaleLabelsLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОрганизацииИсточникаДанныхГеографическойСхемы",
+      "en": "GeographicalSchemaDataSourceOrganizationType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИмпортаСерийСлояГеографическойСхемы",
+      "en": "GeographicalSchemaLayerSeriesImportModeType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтображенияСерииСлояГеографическойСхемы",
+      "en": "GeographicalSchemaLayerSeriesShowMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтображенияШкалыЭлементаЛегендыГеографическойСхемы",
+      "en": "GeographicalSchemaLegendItemShowScaleType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЛинииГеографическойСхемы",
+      "en": "GeographicalSchemaLineType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипМаркераГеографическойСхемы",
+      "en": "GeographicalSchemaMarkerType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПоискаОбъектовГеографическойСхемы",
+      "en": "GeographicalSchemaObjectFindType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтображенияТочечногоОбъектаГеографическойСхемы",
+      "en": "GeographicalSchemaPointObjectDrawingType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПроекцииГеографическойСхемы",
+      "en": "GeographicalSchemaProjection",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияГеографическойСхемы",
+      "en": "GeographicalSchemaShowMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПолученияАрхиваФайлов",
+      "en": "GetFilesArchiveMode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтрисовкиСеткиГрафическойСхемы",
+      "en": "GraphicalSchemaGridDrawMode",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКартинкиЭлементаГрафическойСхемы",
+      "en": "GraphicalSchemaItemPictureLocation",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФигурыГрафическойСхемы",
+      "en": "GraphicalSchemaShapes",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСтороныЭлементаГрафическойСхемы",
+      "en": "GraphicalSchemeElementSideType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ХешФункция",
+      "en": "HashFunction",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеПанелиИерархии",
+      "en": "HierarchyPanelLocation",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГоризонтальноеПоложение",
+      "en": "HorizontalAlign",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияСодержимогоHTML",
+      "en": "HTMLContentCategory",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПоляHTMLДокумента",
+      "en": "HTMLDocumentFieldMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СервисВстроенныхПокупок",
+      "en": "InAppPurchaseService",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипВстроеннойПокупки",
+      "en": "InAppPurchaseType",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяКомандаВходящегоЗапросаПоделиться",
+      "en": "IncomingShareRequestStandardCommand",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыбораНезаполненного",
+      "en": "IncompleteChoiceMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособАутентификацииПользователяИнформационнойБазы",
+      "en": "InfoBaseUserAuthenticationMethod",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособВосстановленияПароляПользователяИнформационнойБазы",
+      "en": "InfoBaseUserPasswordRecoveryMethod",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НачальноеОтображениеСписка",
+      "en": "InitialListView",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НачальноеОтображениеДерева",
+      "en": "InitialTreeView",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПодсказкаАвтозаполненияПоляВвода",
+      "en": "InputFieldAutofillHint",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникКомандПоляВвода",
+      "en": "InputFieldCommandSource",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФигураКартинкиМножественногоЗначенияПоляВвода",
+      "en": "InputFieldMultipleValuePictureShape",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РазмерКартинкиМножественногоЗначенияПоляВвода",
+      "en": "InputFieldMultipleValuePictureSize",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяКомандаПоляВвода",
+      "en": "InputFieldStandardCommand",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеКаналаСервисаИнтеграции",
+      "en": "IntegrationServiceChannelState",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСовместимостиИнтерфейса",
+      "en": "InterfaceCompatibilityMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИнтернетСоединения",
+      "en": "InternetConnectionType",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособКодированияИнтернетПочтовогоВложения",
+      "en": "InternetMailAttachmentEncodingMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВажностьИнтернетПочтовогоСообщения",
+      "en": "InternetMailMessageImportance",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособКодированияНеASCIIСимволовИнтернетПочтовогоСообщения",
+      "en": "InternetMailMessageNonASCIISymbolsEncodingMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусРазбораИнтернетПочтовогоСообщения",
+      "en": "InternetMailMessageParseStatus",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПротоколИнтернетПочты",
+      "en": "InternetMailProtocol",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбработкаТекстаИнтернетПочтовогоСообщения",
+      "en": "InternetMailTextProcessing",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипТекстаПочтовогоСообщения",
+      "en": "InternetMailTextType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантГраницыИнтервала",
+      "en": "IntervalBoundVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантУправленияВысотойЭлемента",
+      "en": "ItemHeightControlVariant",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ГоризонтальноеПоложениеЭлемента",
+      "en": "ItemHorizontalLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантВыравниванияЭлементовИЗаголовков",
+      "en": "ItemsAndTitlesAlignVariant",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВертикальноеПоложениеЭлемента",
+      "en": "ItemVerticalAlign",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЭкранированиеСимволовJSON",
+      "en": "JSONCharactersEscapeMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФорматДатыJSON",
+      "en": "JSONDateFormat",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантЗаписиДатыJSON",
+      "en": "JSONDateWritingVariant",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПереносСтрокJSON",
+      "en": "JSONLineBreak",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗначенияJSON",
+      "en": "JSONValueType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "Клавиша",
+      "en": "Key",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКартинкиНадписи",
+      "en": "LabelPictureLocation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИзмененияСвязанногоЗначения",
+      "en": "LinkedValueChangeMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособРедактированияСписка",
+      "en": "ListEditMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеОтносительноГеозоны",
+      "en": "LocationRelativeToGeofence",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособВыбораСертификатаMacOS",
+      "en": "MacOSCertificateSelectMode",
+      "environment_mask": 19
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОсновногоОкнаКлиентскогоПриложения",
+      "en": "MainClientApplicationWindowMode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МаксимумСерий",
+      "en": "MaxSeries",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусСообщения",
+      "en": "MessageStatus",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФункциональностьМобильногоПриложения",
+      "en": "MobileApplicationFunctionalities",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособПроверкиПодписиМобильногоКлиента",
+      "en": "MobileClientSignatureVerificationMethod",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКаталогаБиблиотекиМобильногоУстройства",
+      "en": "MobileDeviceLibraryDirType",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеКнопкиОстановкиЗаписиМультимедиа",
+      "en": "MultimediaRecordingStopButtonPlacement",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипТекстаНовыхЭлементовПланировщика",
+      "en": "NewPlannerItemsTextType",
+      "environment_mask": 30
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантПроверкиОтображенияНовойСтроки",
+      "en": "NewRowShowCheckVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеНечисловыхЗначенийДиаграммы",
+      "en": "NonnumericChartValueUse",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидЧисловогоЗначения",
+      "en": "NumericValueType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоведениеПриНедоступностиОсновногоСервера",
+      "en": "OnMainServerUnavalableBehavior",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТекстКнопкиВводаЭкраннойКлавиатуры",
+      "en": "OnScreenKeyboardReturnKeyText",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеПриНедоступностиНастроекКомпоновкиДанных",
+      "en": "OnUnavailabilityDataCompositionSettingsAction",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "Ориентация",
+      "en": "Orientation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособВыбораСертификатаОС",
+      "en": "OSCertificateSelectMode",
+      "environment_mask": 19
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияСтраницы",
+      "en": "PageOrientation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЧередованиеРасположенияСтраниц",
+      "en": "PagePlacementAlternation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеОпорнойТочкиОтрисовки",
+      "en": "PaintingReferencePointPosition",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеКартинкиПанели",
+      "en": "PanelPictureLocation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПараграфа",
+      "en": "ParagraphType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РезультатПроверкиСоответствияПароляПолитике",
+      "en": "PasswordPolicyComplianceCheckResult",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСвязиВложенияPDF",
+      "en": "PDFAttachmentRelationshipType",
+      "environment_mask": 15
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФайлаДокументаPDF",
+      "en": "PDFDocumentFileType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РазрешенияДоступаИзмененияPDF",
+      "en": "PDFModificationAccessPermissions",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПодписиPDF",
+      "en": "PDFSignatureType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантНастройкиПериода",
+      "en": "PeriodSettingsVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантПериода",
+      "en": "PeriodVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФорматКартинки",
+      "en": "PictureFormat",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "БиблиотекаКартинок",
+      "en": "PictureLib",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РазмерКартинки",
+      "en": "PictureSize",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидКартинки",
+      "en": "PictureType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОриентацияМетокСводнойДиаграммы",
+      "en": "PivotChartLabelsOrientation",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоддержкаМасштабаСводнойДиаграммы",
+      "en": "PivotChartScaleKeeping",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСводнойДиаграммы",
+      "en": "PivotChartType",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеЗначенийСводнойДиаграммы",
+      "en": "PivotChartValuesShowMode",
+      "environment_mask": 27
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеИтоговКолонокСводнойТаблицы",
+      "en": "PivotTableColumnTotalPosition",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтображенияЛинийСводнойТаблицы",
+      "en": "PivotTableLinesShowType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеИтоговСтрокСводнойТаблицы",
+      "en": "PivotTableRowTotalPosition",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсточникКомандПланировщика",
+      "en": "PlannerCommandSource",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяКомандаПоляПланировщика",
+      "en": "PlannerFieldStandardCommand",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ДействиеПеретаскиванияВнутриПланировщика",
+      "en": "PlannerInsideDragAction",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантИзмененияГраницПеретаскиванияВнутриПланировщика",
+      "en": "PlannerInsideDragBoundaryChangeVariant",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеДействияЭлементаПланировщика",
+      "en": "PlannerItemActionLocation",
+      "environment_mask": 30
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРазрешенияРедактированияЭлементаПланировщика",
+      "en": "PlannerItemEnableEditMode",
+      "environment_mask": 30
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоведениеЭлементовПланировщикаПриНедостаткеМеста",
+      "en": "PlannerItemsBehaviorWhenSpaceInsufficient",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеВремениЭлементовПланировщика",
+      "en": "PlannerItemsTimeRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяКомандаПланировщика",
+      "en": "PlannerStandardCommand",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПлатформы",
+      "en": "PlatformType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСоединенияТочекПриПропущенныхЗначенияхДиаграммы",
+      "en": "PointsConnectionAcrossSkippedChartValuesType",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособPOP3Аутентификации",
+      "en": "POP3AuthenticationMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПозицияВПотоке",
+      "en": "PositionInStream",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеРежимаПроведения",
+      "en": "PostingModeUse",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбновлениеПредопределенныхДанных",
+      "en": "PredefinedDataUpdate",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКолонкиМоделиПрогноза",
+      "en": "PredictionModelColumnType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипДобавленияПредставлений",
+      "en": "PresentationAdditionType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТочностьПечати",
+      "en": "PrintAccuracy",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИспользованияДиалогаПечати",
+      "en": "PrintDialogUseMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСглаживанияИндикатора",
+      "en": "ProgressBarSmoothingMode",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПрогрессивногоВебПриложения",
+      "en": "ProgressiveWebApplicationMode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИзмеренияПостроителяЗапроса",
+      "en": "QueryBuilderDimensionType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗаписиЗапроса",
+      "en": "QueryRecordType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбходРезультатаЗапроса",
+      "en": "QueryResultIteration",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПараметраДоступнойТаблицыСхемыЗапроса",
+      "en": "QuerySchemaAvailableTableParameterType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСоединенияСхемыЗапроса",
+      "en": "QuerySchemaJoinType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеПорядкаСхемыЗапроса",
+      "en": "QuerySchemaOrderDirection",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипДополненияПериодамиСхемыЗапроса",
+      "en": "QuerySchemaPeriodAdditionType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКонтрольнойТочкиСхемыЗапроса",
+      "en": "QuerySchemaTotalCalculationFieldType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОбъединенияСхемыЗапроса",
+      "en": "QuerySchemaUnionType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимДиалогаВопрос",
+      "en": "QuestionDialogMode",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипШкалыРадарнойДиаграммы",
+      "en": "RadarChartScaleType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидПереключателя",
+      "en": "RadioButtonType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособЗапросаОбновления",
+      "en": "RefreshRequestMethod",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимЗамещения",
+      "en": "ReplacementMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидЗаполненияРасшифровкиПостроителяОтчета",
+      "en": "ReportBuilderDetailsFillType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипИзмеренияПостроителяОтчета",
+      "en": "ReportBuilderDimensionType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФормыОтчета",
+      "en": "ReportFormType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияРезультатаОтчета",
+      "en": "ReportResultViewMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФайлаПакетаОтображаемыхДокументов",
+      "en": "RepresentableDocumentBatchFileType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТребуемаяАктуальностьДанных",
+      "en": "RequiredDataRelevance",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимКомпоновкиРезультата",
+      "en": "ResultCompositionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеРоуминга",
+      "en": "RoamingUsage",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОкругления",
+      "en": "RoundMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеПереходаКСтроке",
+      "en": "RowGotoDirection",
+      "environment_mask": 19
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СохранениеОформленияКомпоновкиДанных",
+      "en": "SaveDataCompositionAppearance",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СохранениеДанныхФормыВНастройках",
+      "en": "SaveFormDataInSettings",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеПолосыПрокрутки",
+      "en": "ScrollBarUse",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимБегущейСтроки",
+      "en": "ScrollingTextMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеУправленияПоиском",
+      "en": "SearchControlLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеПоиска",
+      "en": "SearchDirection",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоискВТаблицеПриВводе",
+      "en": "SearchInTableOnInput",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеСтрокиПоиска",
+      "en": "SearchStringLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособПоискаСтрокиПриВводеПоСтроке",
+      "en": "SearchStringModeOnInputByString",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОбработкиНастроекВторогоФактораАутентификации",
+      "en": "SecondAuthenticationFactorSettingsProcessingType",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеПанелиРазделов",
+      "en": "SectionsPanelRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособЗащитыДоступаБезопасногоХранилища",
+      "en": "SecureStorageAccessProtectionMethod",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияВыделения",
+      "en": "SelectionShowMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОтображенияЗначенийСерии",
+      "en": "SeriesValuesDrawingMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимПроверкиОтзываTLSСертификатаСервера",
+      "en": "ServerTLSCertificateRevocationCheckMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантОбработкиДанныхЗапросаПоделиться",
+      "en": "ShareRequestDataProcessingVariant",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображатьВсплывающуюИнформационнуюЛиниюДиаграммы",
+      "en": "ShowChartPopupReferenceLine",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеЗаголовкаШкалыДиаграммы",
+      "en": "ShowChartScaleTitle",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеВДиаграмме",
+      "en": "ShowInChart",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеВЛегендеДиаграммы",
+      "en": "ShowInChartLegend",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеВДиаграммеГанта",
+      "en": "ShowInGanttChart",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеЗакладок",
+      "en": "ShowTabs",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИзмененияРазмера",
+      "en": "SizeChangeMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеСреза",
+      "en": "SliceUse",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособSMTPАутентификации",
+      "en": "SMTPAuthenticationMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеСортировки",
+      "en": "SortDirection",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗвуковоеОповещение",
+      "en": "SoundAlert",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпециальныйРежимВводаТекста",
+      "en": "SpecialTextInputMode",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПроверкаПравописанияПриВводеТекста",
+      "en": "SpellCheckingOnTextInput",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗаполненияОбластиТабличногоДокумента",
+      "en": "SpreadsheetDocumentAreaFillType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОбластиЯчеекТабличногоДокумента",
+      "en": "SpreadsheetDocumentCellAreaType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЛинииЯчейкиТабличногоДокумента",
+      "en": "SpreadsheetDocumentCellLineType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеРасшифровкиТабличногоДокумента",
+      "en": "SpreadsheetDocumentDetailUse",
+      "environment_mask": 47
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЛинииРисункаТабличногоДокумента",
+      "en": "SpreadsheetDocumentDrawingLineType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРисункаТабличногоДокумента",
+      "en": "SpreadsheetDocumentDrawingType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипФайлаТабличногоДокумента",
+      "en": "SpreadsheetDocumentFileType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РасположениеЗаголовкаГруппировкиТабличногоДокумента",
+      "en": "SpreadsheetDocumentGroupHeaderPlacement",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУзораТабличногоДокумента",
+      "en": "SpreadsheetDocumentPatternType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКурсоровТабличногоДокумента",
+      "en": "SpreadsheetDocumentPointerType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПлотностьСохраняемыхКартинокТабличногоДокумента",
+      "en": "SpreadsheetDocumentSavedPicturesDensity",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипОтображенияВыделенияТабличногоДокумента",
+      "en": "SpreadsheetDocumentSelectionShowModeType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипСмещенияТабличногоДокумента",
+      "en": "SpreadsheetDocumentShiftType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипНаправленияПереходаТабличногоДокумента",
+      "en": "SpreadsheetDocumentStepDirectionType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияТекстаТабличногоДокумента",
+      "en": "SpreadsheetDocumentTextPlacementType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособЧтенияЗначенийТабличногоДокумента",
+      "en": "SpreadsheetDocumentValuesReadingMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартноеОформление",
+      "en": "StandardAppearance",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСтандартнойДатыНачала",
+      "en": "StandardBeginningDateVariant",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартнаяГруппаКоманд",
+      "en": "StandardCommandsGroup",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтандартныйВидГлобальногоПоиска",
+      "en": "StandardGlobalSearchType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСтандартногоПериода",
+      "en": "StandardPeriodVariant",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользуемоеЗначениеТочкиБиржевойДиаграммы",
+      "en": "StockChartUsedPointValue",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособКодированияСтроки",
+      "en": "StringEncodingMethod",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РамкиСтиля",
+      "en": "StyleBorders",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЦветаСтиля",
+      "en": "StyleColors",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ШрифтыСтиля",
+      "en": "StyleFonts",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимИспользованияСинхронныхВызововРасширенийИВнешнихКомпонент",
+      "en": "SynchronousExtensionAndAddInCallUseMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоведениеТаблицыПриСжатииПоГоризонтали",
+      "en": "TableBehaviorOnHorizontalCompression",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВводаСтрокТабличногоПоля",
+      "en": "TableBoxRowInputMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияСтрокиТабличногоПоля",
+      "en": "TableBoxRowSelectionMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияТабличногоПоля",
+      "en": "TableBoxSelectionMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеТекущейСтрокиТаблицы",
+      "en": "TableCurrentRowUse",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантУправленияВысотойТаблицы",
+      "en": "TableHeightControlVariant",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеТаблицы",
+      "en": "TableRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВводаСтрокТаблицы",
+      "en": "TableRowInputMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияСтрокиТаблицы",
+      "en": "TableRowSelectionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВыделенияТаблицы",
+      "en": "TableSelectionMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСпискаЗадач",
+      "en": "TaskListMode",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСобытияЗвонкаСредствТелефонии",
+      "en": "TelephonyToolsCallEventVariant",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЗвонкаСредствТелефонии",
+      "en": "TelephonyToolsCallType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипSMSСредствТелефонии",
+      "en": "TelephonyToolsSMSType",
+      "environment_mask": 58
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НаправлениеТекста",
+      "en": "TextDirection",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КодировкаТекста",
+      "en": "TextEncoding",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеТекстаОтносительноКартинки",
+      "en": "TextPositionRelativeToPicture",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СквозноеВыравнивание",
+      "en": "ThroughAlign",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФорматДняШкалыВремени",
+      "en": "TimeScaleDayFormat",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеШкалыВремени",
+      "en": "TimeScalePosition",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипЕдиницыШкалыВремени",
+      "en": "TimeScaleUnitType",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеЗаголовка",
+      "en": "TitleLocation",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеПодсказки",
+      "en": "ToolTipRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипРазмещенияИтогов",
+      "en": "TotalPlacementType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеРазметкиПолосыРегулирования",
+      "en": "TrackBarMarkingAppearance",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "УровеньИзоляцииТранзакций",
+      "en": "TransactionsIsolationLevel",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбновлениеПриИзмененииДанных",
+      "en": "UpdateOnDataChange",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользуемаяОсьЗначенийДиаграммы",
+      "en": "UsedChartValuesAxis",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользуемыйСервер",
+      "en": "UsedServer",
+      "environment_mask": 26
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеАутентификацииИнтернетПочтыПоТокену",
+      "en": "UseInternetMailTokenAuthentication",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеРежимаМеню",
+      "en": "UseMenuMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеВывода",
+      "en": "UseOutput",
+      "environment_mask": 47
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СтатусОповещенияПользователя",
+      "en": "UserNotificationStatus",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАлгоритмаХешированияПаролейПользователей",
+      "en": "UserPasswordHashAlgorithmType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИспользованиеШириныСжатияТабличногоДокумента",
+      "en": "UseSpreadsheetDocumentWidthReduction",
+      "environment_mask": 9
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоведениеОбычнойГруппы",
+      "en": "UsualGroupBehavior",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеУправленияОбычнойГруппы",
+      "en": "UsualGroupControlRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеОбычнойГруппы",
+      "en": "UsualGroupRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВерсияУникальногоИдентификатора",
+      "en": "UUIDVersion",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВертикальноеПоложение",
+      "en": "VerticalAlign",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВертикальнаяПрокруткаФормы",
+      "en": "VerticalFormScroll",
+      "environment_mask": 31
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КачествоВидеозаписи",
+      "en": "VideoQuality",
+      "environment_mask": 18
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПрименениеРежимаОтображенияПриУстановкеРезультатаОтчета",
+      "en": "ViewModeApplicationOnSetReportResult",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимМасштабированияПросмотра",
+      "en": "ViewScalingMode",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПоложениеСостоянияПросмотра",
+      "en": "ViewStatusLocation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОтображениеПредупрежденияПриРедактировании",
+      "en": "WarningOnEditRepresentation",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "WebЦвета",
+      "en": "WebColors",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СостояниеWebSocketСоединения",
+      "en": "WebSocketConnectionState",
+      "environment_mask": 63
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИзменениеСпособаОтображенияОкна",
+      "en": "WindowAppearanceModeChange",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСпособаОтображенияОкна",
+      "en": "WindowAppearanceModeVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантПрикрепленияОкна",
+      "en": "WindowDockVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантПоложенияОкна",
+      "en": "WindowLocationVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантОткрытияОкна",
+      "en": "WindowOpenVariant",
+      "environment_mask": 23
+    },
+    {
+      "kind": "system_enum",
+      "ru": "СпособВыбораСертификатаWindows",
+      "en": "WindowsCertificateSelectMode",
+      "environment_mask": 19
+    },
+    {
+      "kind": "system_enum",
+      "ru": "WindowsЦвета",
+      "en": "WindowsColors",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "WindowsШрифты",
+      "en": "WindowsFonts",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИзменениеРазмераОкна",
+      "en": "WindowSizeChange",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантСостоянияОкна",
+      "en": "WindowStateVariant",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимРабочейДаты",
+      "en": "WorkingDateMode",
+      "environment_mask": 1
+    },
+    {
+      "kind": "system_enum",
+      "ru": "WSНаправлениеПараметра",
+      "en": "WSParameterDirection",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КодировкаXBase",
+      "en": "XBaseEncoding",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидФасетаXDTO",
+      "en": "XDTOFacetType",
+      "environment_mask": 41
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипАтрибутаXML",
+      "en": "XMLAttributeType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКаноническогоXML",
+      "en": "XMLCanonicalizationType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФормаXML",
+      "en": "XMLForm",
+      "environment_mask": 43
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипУзлаXML",
+      "en": "XMLNodeType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ПробельныеСимволыXML",
+      "en": "XMLSpace",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НазначениеТипаXML",
+      "en": "XMLTypeAssignment",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипПроверкиXML",
+      "en": "XMLValidationType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияИспользованияАтрибутаXS",
+      "en": "XSAttributeUseCategory",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗавершенностьСоставногоТипаXS",
+      "en": "XSComplexFinal",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ТипКомпонентыXS",
+      "en": "XSComponentType",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВидГруппыМоделиXS",
+      "en": "XSCompositor",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОграничениеЗначенияXS",
+      "en": "XSConstraint",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МодельСодержимогоXS",
+      "en": "XSContentModel",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодНаследованияXS",
+      "en": "XSDerivationMethod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "НедопустимыеПодстановкиXS",
+      "en": "XSDisallowedSubstitutions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ФормаПредставленияXS",
+      "en": "XSForm",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияОграниченияИдентичностиXS",
+      "en": "XSIdentityConstraintCategory",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "КатегорияОграниченияПространствИменXS",
+      "en": "XSNamespaceConstraintCategory",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбработкаСодержимогоXS",
+      "en": "XSProcessContents",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗапрещенныеПодстановкиXS",
+      "en": "XSProhibitedSubstitutions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗавершенностьСхемыXS",
+      "en": "XSSchemaFinal",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ЗавершенностьПростогоТипаXS",
+      "en": "XSSimpleFinal",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантПростогоТипаXS",
+      "en": "XSSimpleTypeVariety",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ИсключенияГруппПодстановкиXS",
+      "en": "XSSubstitutionGroupExclusions",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ОбработкаПробельныхСимволовXS",
+      "en": "XSWhitespaceHandling",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "ВариантXPathXS",
+      "en": "XSXPathVariety",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "УровеньСжатияZIP",
+      "en": "ZIPCompressionLevel",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодСжатияZIP",
+      "en": "ZIPCompressionMethod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "МетодШифрованияZIP",
+      "en": "ZIPEncryptionMethod",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимВосстановленияПутейФайловZIP",
+      "en": "ZIPRestoreFilePathsMode",
+      "environment_mask": 43
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимСохраненияПутейZIP",
+      "en": "ZIPStorePathMode",
+      "environment_mask": 59
+    },
+    {
+      "kind": "system_enum",
+      "ru": "РежимОбработкиПодкаталоговZIP",
+      "en": "ZIPSubDirProcessingMode",
+      "environment_mask": 59
+    }
+  ]
+}

@@ -1,8 +1,9 @@
 //! Read-only serving of the workspace call graph from the SQLite store.
 //!
 //! Mirrors the agent-facing shapes of `ide::Analysis::graph_*` (the same response
-//! structs, hence the same JSON), but every fact comes from the `.build` database
-//! built by [`crate::graph_db`] rather than from a resident Salsa database — so a
+//! structs, hence the same JSON), but every fact comes from the on-disk database in
+//! the workspace cache root built by [`crate::graph_db`] rather than from a resident
+//! Salsa database — so a
 //! 25k-module config can be served without holding the whole graph in RAM.
 //!
 //! Source text is read on demand from the file + byte ranges stored per node, so
@@ -226,6 +227,18 @@ impl GraphDb {
     /// Defaults to 0 when absent (an older build without the row).
     pub fn files(&self) -> anyhow::Result<usize> {
         Ok(self.meta("files")?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    }
+
+    /// How many modules this artefact was built (or last patched) without being able
+    /// to read. Those modules contributed no nodes and no edges, so the graph is
+    /// incomplete in a way no fingerprint comparison reveals — `stat` needs no read
+    /// permission.
+    ///
+    /// A count is derived here rather than stored, because the union the patch
+    /// computes needs the paths themselves. Absent key → 0, which is honest only
+    /// because `SCHEMA_VERSION` gates out artefacts built before the key existed.
+    pub fn unread_files(&self) -> usize {
+        crate::graph_db::read_unread_paths(&self.conn).len()
     }
 
     fn count(&self, sql: &str) -> anyhow::Result<usize> {
@@ -1025,7 +1038,7 @@ impl GraphDb {
 
 /// A [`bsl_search::GraphContextProvider`] backed by the on-disk graph
 /// ([`GraphDb`]). This is the production source for bulk index enrichment: reading a
-/// method's outbound facts from the prebuilt `.build/bsl-graph.db` is RAM-bounded and
+/// method's outbound facts from the prebuilt `bsl-graph.db` is RAM-bounded and
 /// shares the graph's freshness, unlike rendering from a whole-workspace `Analysis`.
 ///
 /// `GraphDb` holds a non-`Sync` rusqlite connection; the [`Mutex`] makes the provider

@@ -11,7 +11,8 @@ use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 
 use super::snapshot::{FpMapState, PooledSnapshotEntry, ScanCache};
 use super::types::{
-    FusedStartup, GraphPublishSignal, GraphStatus, GraphStatusReport, NudgeOutcome,
+    FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus, GraphStatusReport,
+    NudgeOutcome,
 };
 
 /// Minimum time between on-disk drift scans. A scan stats every `.bsl`/`.xml`
@@ -56,6 +57,28 @@ pub(super) struct Published {
     pub(super) generation: u64,
     pub(super) fingerprint: crate::graph_db::GraphFp,
     pub(super) reload: ReloadState,
+    /// The published build's coherence marker: it straddled a disk write or was
+    /// built over an incomplete scan, so it never was a faithful snapshot. A
+    /// fingerprint comparison alone cannot retire it — the incomplete-scan case
+    /// leaves the fingerprints EQUAL — so the reload decision must read it.
+    pub(super) force_stale: bool,
+    /// Search roots paired with this publication: from the build snapshot for a fresh
+    /// artifact, or from the fingerprint-verified live project for cached adoption.
+    pub(super) search_roots: Option<bsl_search::WorkspaceRoots>,
+}
+
+impl Published {
+    /// Whether disk state warrants a fresh build: the tree moved past this build's
+    /// fingerprint, or this build never was coherent (`force_stale`) and the
+    /// current scan is CLEAN — an unclean scan must not trigger the rebuild, or a
+    /// chronically unreadable subtree would rebuild in a loop, each build unclean
+    /// again. Recovery (the subtree becomes readable) rebuilds exactly once.
+    pub(super) fn wants_reload(&self, disk: Option<(crate::graph_db::GraphFp, bool)>) -> bool {
+        match disk {
+            Some((fp, scan_clean)) => fp != self.fingerprint || (self.force_stale && scan_clean),
+            None => false,
+        }
+    }
 }
 
 /// Everything mutable about the published graph, guarded by a single mutex. Locks
@@ -107,7 +130,8 @@ pub(crate) struct GraphState {
     /// consumer (search context re-render) may read the fresh graph. Never called on a
     /// query path. Receives a [`GraphPublishSignal`]: `build_start_seq` bounds which marks
     /// the consumer may clear (correctness), `drift_pending` is a fast-path hint.
-    pub(super) on_published: Option<Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>>,
+    pub(super) on_published:
+        Option<Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>>,
     /// The store's monotonic context-dirty mark counter, wired once the search engine
     /// exists (the engine is built after this graph). Read at each build's start to capture
     /// its `build_start_seq`. Absent (never wired, e.g. a disabled/reference graph, or a build
@@ -136,6 +160,14 @@ pub(crate) struct GraphState {
     /// context refresh (engine not yet published, or deferred behind a fresher
     /// reload). Re-raised on the next publish so the refresh is never lost.
     pub(super) pending_topology_refresh: Arc<AtomicBool>,
+    /// A root-table refresh that the publish hook could not apply. Kept separate from
+    /// topology context work so retrying roots does not trigger a full context rerender.
+    pub(super) pending_roots_refresh: Arc<AtomicBool>,
+    /// Monotonic force-project-reload request and the latest request completed by a full
+    /// publication. A counter rather than a boolean prevents a request arriving during a
+    /// build from being cleared by that older build.
+    pub(super) project_reload_epoch: Arc<AtomicUsize>,
+    pub(super) completed_project_reload_epoch: Arc<AtomicUsize>,
     /// This daemon's claim on the workspace's derived caches. The graph database is shared
     /// with every other daemon generation over the same workspace, so a superseded daemon
     /// builds and publishes nothing — it serves what it already holds and lets the owner
@@ -184,6 +216,9 @@ impl GraphState {
             on_published: None,
             pending_nudge: Arc::new(AtomicBool::new(false)),
             pending_topology_refresh: Arc::new(AtomicBool::new(false)),
+            pending_roots_refresh: Arc::new(AtomicBool::new(false)),
+            project_reload_epoch: Arc::new(AtomicUsize::new(0)),
+            completed_project_reload_epoch: Arc::new(AtomicUsize::new(0)),
             mark_seq: Arc::new(OnceLock::new()),
             leftover_bound: Arc::new(AtomicI64::new(0)),
             fp_map: Arc::new(Mutex::new(FpMapState::default())),
@@ -222,6 +257,28 @@ impl GraphState {
         self.scan_count.load(Ordering::SeqCst)
     }
 
+    /// Whether `path` is one of the analyzer config files directly in this workspace root.
+    /// Basename-only detection is unsafe: nested projects may carry the same config name but
+    /// cannot change this daemon's source-root table.
+    pub(crate) fn is_workspace_config_path(&self, path: &Path) -> bool {
+        let Some(root) = self.workspace_root.as_deref() else { return false };
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| project_model::CONFIG_FILE_NAMES.contains(&name))
+        {
+            return false;
+        }
+        let Some(parent) = path.parent() else { return false };
+        if parent == root {
+            return true;
+        }
+        let canonical_parent =
+            std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        canonical_parent == canonical_root
+    }
+
     /// Attach the daemon's change hub so a freshness check invalidates the throttled
     /// fingerprint cache as soon as a change is delivered, without waiting out the throttle.
     pub(crate) fn with_change_hub(mut self, hub: WorkspaceChangeHub) -> Self {
@@ -236,7 +293,7 @@ impl GraphState {
     /// (correctness), `drift_pending` is a skip-this-round hint (optimization).
     pub(crate) fn with_publish_hook(
         mut self,
-        hook: Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>,
+        hook: Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>,
     ) -> Self {
         self.on_published = Some(hook);
         self
@@ -311,16 +368,19 @@ impl GraphState {
         if self.pending_nudge.swap(false, Ordering::SeqCst) {
             self.reclaim_pending_reload();
         }
-        // A topology refresh survives publishes that cannot run it: the flag is
-        // re-raised whenever the hook reports the requested whole-collection
-        // re-render did not happen (deferred behind a fresher reload, or the
-        // search engine is not published yet). The flag is taken FIRST, never behind a
-        // short-circuit: a publish that already carries `topology_changed` performs the very
-        // re-render the flag asks for, so leaving it armed would only make someone do it twice.
-        let pending = self.pending_topology_refresh.swap(false, Ordering::SeqCst);
-        let topology = topology_changed || pending;
-        if !self.fire_hook(build_start_seq, topology) && topology {
+        // Topology context and search-root refreshes are independent obligations. Every
+        // successful publish checks roots, while a previously failed check stays armed until
+        // the hook reports it handled. A root-only failure must never manufacture a semantic
+        // topology change on retry.
+        let pending_topology = self.pending_topology_refresh.swap(false, Ordering::SeqCst);
+        let topology = topology_changed || pending_topology;
+        self.pending_roots_refresh.swap(false, Ordering::SeqCst);
+        let outcome = self.fire_hook(build_start_seq, topology, true);
+        if topology && !outcome.topology_handled {
             self.pending_topology_refresh.store(true, Ordering::SeqCst);
+        }
+        if !outcome.roots_handled {
+            self.pending_roots_refresh.store(true, Ordering::SeqCst);
         }
         // A leftover-marks consume was armed at boot (see `consume_leftover_marks`). This build's
         // own publish (above) captured its own `build_start_seq` — for the pre-wiring boot build
@@ -330,19 +390,21 @@ impl GraphState {
         // a mark stamped after the capture: that mark is a new drift with its own nudge→publish.
         let leftover_bound = self.leftover_bound.swap(0, Ordering::SeqCst);
         if leftover_bound != 0 {
-            self.fire_hook(leftover_bound, false);
+            self.fire_hook(leftover_bound, false, false);
         }
     }
 
-    /// Invoke the publish hook, if any, with the given bound. The consumer sees the current
-    /// [`Self::drift_pending`] so it can defer when a fresher reload is imminent. Returns
-    /// whether a requested topology refresh was handled (vacuously true when none was
-    /// requested or no hook is attached).
-    fn fire_hook(&self, build_start_seq: i64, topology_changed: bool) -> bool {
-        let topology = lock_recover(&self.inner)
+    /// Invoke the publish hook, if any, with the given independent obligations.
+    fn fire_hook(
+        &self,
+        build_start_seq: i64,
+        topology_changed: bool,
+        roots_refresh_requested: bool,
+    ) -> GraphPublishOutcome {
+        let (topology, workspace_roots) = lock_recover(&self.inner)
             .published
             .as_ref()
-            .map(|p| p.fingerprint.topology)
+            .map(|p| (p.fingerprint.topology, p.search_roots.clone()))
             .unwrap_or_default();
         match &self.on_published {
             Some(hook) => hook(GraphPublishSignal {
@@ -350,8 +412,10 @@ impl GraphState {
                 build_start_seq,
                 topology_changed,
                 topology,
+                roots_refresh_requested,
+                workspace_roots,
             }),
-            None => true,
+            None => GraphPublishOutcome::HANDLED,
         }
     }
 
@@ -377,8 +441,25 @@ impl GraphState {
         if !matches!(self.status(), GraphStatus::Ready { .. }) || self.drift_pending() {
             return;
         }
-        if self.pending_topology_refresh.swap(false, Ordering::SeqCst) && !self.fire_hook(0, true) {
+        if self.pending_topology_refresh.swap(false, Ordering::SeqCst)
+            && !self.fire_hook(0, true, false).topology_handled
+        {
             self.pending_topology_refresh.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Retry a search-root transition without pretending the graph topology changed.
+    pub(crate) fn flush_pending_search_roots_refresh(&self) {
+        if !self.pending_roots_refresh.load(Ordering::SeqCst) {
+            return;
+        }
+        if !matches!(self.status(), GraphStatus::Ready { .. }) || self.drift_pending() {
+            return;
+        }
+        if self.pending_roots_refresh.swap(false, Ordering::SeqCst)
+            && !self.fire_hook(0, false, true).roots_handled
+        {
+            self.pending_roots_refresh.store(true, Ordering::SeqCst);
         }
     }
 
@@ -415,7 +496,7 @@ impl GraphState {
         {
             let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
             if bound != 0 {
-                self.fire_hook(bound, false);
+                self.fire_hook(bound, false, false);
             }
         }
     }
@@ -471,6 +552,7 @@ impl GraphState {
         let report = |state: &'static str| GraphStatusReport {
             state,
             files: None,
+            unread_files: None,
             revision: None,
             stale: None,
             reload: None,
@@ -486,6 +568,7 @@ impl GraphState {
                     let freshness = self.freshness(&snapshot);
                     GraphStatusReport {
                         files: Some(files),
+                        unread_files: Some(snapshot.unread_files()),
                         revision: Some(freshness.revision),
                         stale: Some(freshness.stale),
                         reload: Some(freshness.reload),
@@ -558,11 +641,18 @@ impl GraphState {
         generation: u64,
         fingerprint: crate::graph_db::GraphFp,
         files: usize,
+        search_roots: Option<bsl_search::WorkspaceRoots>,
     ) {
         *lock_recover(&self.scan) = None;
         let mut inner = lock_recover(&self.inner);
-        inner.published =
-            Some(Published { generation, fingerprint, stale: false, reload: ReloadState::Idle });
+        inner.published = Some(Published {
+            generation,
+            fingerprint,
+            stale: false,
+            reload: ReloadState::Idle,
+            force_stale: false,
+            search_roots,
+        });
         inner.status = GraphStatus::Ready { files };
     }
 
@@ -589,6 +679,18 @@ impl GraphState {
     /// rebuilds); `Disabled`/`Loading`/`Failed` schedule nothing. Walks the filesystem for
     /// the drift check, so call from a blocking context (the sink thread), never a query.
     pub(crate) fn nudge_rebuild(&self) -> NudgeOutcome {
+        self.nudge_after_recording(false)
+    }
+
+    /// Force a full project reload even when the graph fingerprint compares equal.
+    /// Root aliases and declared spellings can change search ownership without changing
+    /// canonical graph topology, so config delivery cannot use the ordinary fingerprint gate.
+    pub(crate) fn nudge_project_reload(&self) -> NudgeOutcome {
+        self.project_reload_epoch.fetch_add(1, Ordering::SeqCst);
+        self.nudge_after_recording(true)
+    }
+
+    fn nudge_after_recording(&self, force_project: bool) -> NudgeOutcome {
         match self.status() {
             GraphStatus::Idle => {
                 self.ensure_loading();
@@ -611,7 +713,7 @@ impl GraphState {
                     // or a reload is already `Running`. In the latter case the running build
                     // may have started before this drift, so record a pending nudge — its
                     // publish re-checks and reloads again if disk still differs.
-                    if self.reload_running() {
+                    if self.reload_running() || force_project {
                         self.pending_nudge.store(true, Ordering::SeqCst);
                     }
                     NudgeOutcome::NoOp
@@ -638,19 +740,33 @@ impl GraphState {
     /// the claim; a caller arriving while a reload runs (or when nothing drifted) gets
     /// `false`. Shares the exact single-flight discipline [`Self::freshness`] uses, so a
     /// nudge and a freshness check cannot both start a reload.
+    fn project_reload_pending(&self) -> bool {
+        self.project_reload_epoch.load(Ordering::SeqCst)
+            > self.completed_project_reload_epoch.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn project_reload_epoch(&self) -> usize {
+        self.project_reload_epoch.load(Ordering::SeqCst)
+    }
+
+    pub(super) fn complete_project_reload_through(&self, epoch: usize) {
+        self.completed_project_reload_epoch.fetch_max(epoch, Ordering::SeqCst);
+    }
+
     fn claim_reload_slot(&self) -> bool {
         // Ahead of the fingerprint walk: a superseded daemon must not even pay for drift
         // detection it is not allowed to act on.
         if !self.may_build() {
             return false;
         }
-        let disk_fp = self.current_disk_fp();
+        let disk = self.current_disk_fp();
         let mut inner = lock_recover(&self.inner);
         let Some(published) = inner.published.as_mut() else {
             return false;
         };
-        let drifted = disk_fp.map(|fp| fp != published.fingerprint).unwrap_or(false);
-        if drifted && published.reload != ReloadState::Running {
+        if (self.project_reload_pending() || published.wants_reload(disk))
+            && published.reload != ReloadState::Running
+        {
             published.reload = ReloadState::Running;
             true
         } else {
@@ -759,8 +875,8 @@ mod tests {
             let fired = Arc::clone(&fired);
             Arc::new(move |_signal: GraphPublishSignal| {
                 fired.fetch_add(1, Ordering::SeqCst);
-                true
-            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();
@@ -826,8 +942,8 @@ mod tests {
                 if signal.topology_changed {
                     refreshes.fetch_add(1, Ordering::SeqCst);
                 }
-                true
-            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();
@@ -925,8 +1041,8 @@ mod tests {
             let published = Arc::clone(&published);
             Arc::new(move |_signal: GraphPublishSignal| {
                 published.fetch_add(1, Ordering::SeqCst);
-                true
-            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         assert!(graph.try_begin_external_build(), "an idle graph yields the claim");
@@ -971,13 +1087,15 @@ mod tests {
             let seen = Arc::clone(&seen);
             let handled = Arc::clone(&handled);
             Arc::new(move |signal: GraphPublishSignal| {
-                if signal.topology_changed {
+                let topology_handled = if signal.topology_changed {
                     seen.fetch_add(1, Ordering::SeqCst);
                     // First sighting: report unhandled; second: handled.
-                    return handled.fetch_add(1, Ordering::SeqCst) > 0;
-                }
-                true
-            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+                    handled.fetch_add(1, Ordering::SeqCst) > 0
+                } else {
+                    true
+                };
+                GraphPublishOutcome { topology_handled, roots_handled: true }
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::disabled().with_publish_hook(hook);
 
@@ -1011,8 +1129,8 @@ mod tests {
             let fired = Arc::clone(&fired);
             Arc::new(move |_signal: GraphPublishSignal| {
                 fired.fetch_add(1, Ordering::SeqCst);
-                true
-            }) as Arc<dyn Fn(GraphPublishSignal) -> bool + Send + Sync>
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         // Simulate an initial build that already published (generation 1) with a fingerprint
@@ -1025,6 +1143,8 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
             });
         }
         graph.pending_nudge.store(true, Ordering::SeqCst);
@@ -1060,6 +1180,8 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
             });
         }
         assert!(!graph.drift_pending(), "a clean published graph has no pending drift");
@@ -1087,7 +1209,7 @@ mod tests {
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(Arc::new(
             move |_signal| {
                 hook_fired.fetch_add(1, Ordering::SeqCst);
-                true
+                GraphPublishOutcome::HANDLED
             },
         ));
         {
@@ -1097,6 +1219,8 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp { files: 1, topology: 1 },
                 stale: true,
                 reload: ReloadState::Failed("catch-up failed".to_owned()),
+                force_stale: false,
+                search_roots: None,
             });
             inner.status = GraphStatus::Ready { files: 1 };
         }
@@ -1128,6 +1252,8 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
             });
         }
         assert!(graph.claim_reload_slot(), "the first claim wins on drift");
@@ -1163,9 +1289,168 @@ mod tests {
                 fingerprint: crate::graph_db::GraphFp::default(),
                 stale: false,
                 reload: ReloadState::Running,
+                force_stale: false,
+                search_roots: None,
             });
         }
         assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
         assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
+    }
+
+    #[test]
+    fn a_force_request_arriving_during_a_build_survives_the_older_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Running,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+
+        assert_eq!(graph.nudge_project_reload(), NudgeOutcome::NoOp);
+        let first_epoch = graph.project_reload_epoch();
+        assert_eq!(graph.nudge_project_reload(), NudgeOutcome::NoOp);
+        let second_epoch = graph.project_reload_epoch();
+        assert!(second_epoch > first_epoch);
+
+        // The running build captured only the first request. Its full publication may complete
+        // that request, but not the newer one that arrived after its capture.
+        graph.complete_project_reload_through(first_epoch);
+        assert!(graph.project_reload_pending());
+
+        graph.pending_nudge.store(false, Ordering::SeqCst);
+        lock_recover(&graph.inner).published.as_mut().unwrap().reload = ReloadState::Idle;
+        assert!(graph.claim_reload_slot(), "the newer force request claims the follow-up reload");
+
+        graph.complete_project_reload_through(second_epoch);
+        assert!(!graph.project_reload_pending());
+    }
+
+    #[test]
+    fn project_config_detection_is_exactly_workspace_root_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = GraphState::for_workspace(dir.path().to_path_buf());
+        for name in project_model::CONFIG_FILE_NAMES {
+            assert!(graph.is_workspace_config_path(&dir.path().join(name)));
+            assert!(!graph.is_workspace_config_path(&dir.path().join("nested").join(name)));
+        }
+        let sibling = dir.path().with_extension("other").join("bsl-analyzer.toml");
+        assert!(!graph.is_workspace_config_path(&sibling));
+    }
+
+    #[test]
+    fn topology_and_root_retry_obligations_are_independent() {
+        let outcome = Arc::new(Mutex::new(GraphPublishOutcome {
+            topology_handled: false,
+            roots_handled: true,
+        }));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let hook = {
+            let outcome = Arc::clone(&outcome);
+            let seen = Arc::clone(&seen);
+            Arc::new(move |signal: GraphPublishSignal| {
+                seen.lock()
+                    .unwrap()
+                    .push((signal.topology_changed, signal.roots_refresh_requested));
+                *outcome.lock().unwrap()
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
+        };
+        let graph = GraphState::disabled().with_publish_hook(hook);
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+        graph.notify_published(0, true);
+        assert!(graph.pending_topology_refresh.load(Ordering::SeqCst));
+        assert!(!graph.pending_roots_refresh.load(Ordering::SeqCst));
+
+        *outcome.lock().unwrap() =
+            GraphPublishOutcome { topology_handled: true, roots_handled: false };
+        graph.flush_pending_topology_refresh();
+        assert!(!graph.pending_topology_refresh.load(Ordering::SeqCst));
+        graph.notify_published(0, false);
+        assert!(graph.pending_roots_refresh.load(Ordering::SeqCst));
+        assert!(!graph.pending_topology_refresh.load(Ordering::SeqCst));
+
+        *outcome.lock().unwrap() = GraphPublishOutcome::HANDLED;
+        graph.flush_pending_search_roots_refresh();
+        assert!(!graph.pending_roots_refresh.load(Ordering::SeqCst));
+        assert!(
+            seen.lock().unwrap().contains(&(false, true)),
+            "root retry must not claim a topology change"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_project_reload_bypasses_an_equal_graph_fingerprint() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let configuration = root.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("Configuration.xml"), "<Configuration/>").unwrap();
+        sample_workspace(&configuration);
+        symlink(&configuration, root.join("alias-a")).unwrap();
+        symlink(&configuration, root.join("alias-b")).unwrap();
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-a\"\n").unwrap();
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let (generation, before_fp) = {
+            let inner = lock_recover(&graph.inner);
+            let published = inner.published.as_ref().unwrap();
+            (published.generation, published.fingerprint)
+        };
+
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-b\"\n").unwrap();
+        assert_eq!(
+            super::super::scan::workspace_fingerprint(root),
+            before_fp,
+            "declared alias changed but canonical graph inputs did not"
+        );
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
+        assert_eq!(graph.nudge_project_reload(), NudgeOutcome::ReloadClaimed);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let done = {
+                let inner = lock_recover(&graph.inner);
+                inner.published.as_ref().is_some_and(|published| {
+                    published.generation > generation && published.reload == ReloadState::Idle
+                })
+            };
+            if done {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "forced reload did not publish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let inner = lock_recover(&graph.inner);
+        let roots = inner.published.as_ref().unwrap().search_roots.as_ref().unwrap();
+        assert!(roots.configuration().unwrap().ends_with("alias-b"));
+        assert_eq!(
+            graph.completed_project_reload_epoch.load(Ordering::SeqCst),
+            graph.project_reload_epoch.load(Ordering::SeqCst),
+            "only the successful full publication clears the force obligation"
+        );
     }
 }

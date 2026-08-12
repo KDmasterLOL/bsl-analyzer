@@ -68,11 +68,11 @@ echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOM
 ### Windows (PowerShell)
 
 ```powershell
-$dir = "$env:LOCALAPPDATA\bsl-analyzer"
-New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Invoke-WebRequest "https://github.com/itrous/bsl-analyzer/releases/latest/download/bsl-analyzer-windows-amd64.exe" -OutFile "$dir\bsl-analyzer.exe"
-[Environment]::SetEnvironmentVariable("Path", "$env:Path;$dir", "User")
+irm https://raw.githubusercontent.com/itrous/bsl-analyzer/develop/scripts/install.ps1 | iex
 ```
+
+Инсталлятор ставит именно лаунчер, сверяет SHA-256 с `checksums.txt` релиза и сам
+добавляет каталог установки в пользовательский `PATH`.
 
 ### Проверка (обязательная) — лаунчер и app по отдельности
 

@@ -703,29 +703,23 @@ fn emit_fused_chunks(
 /// Materialise the per-root metadata memos a batch database will need BEFORE its
 /// parallel region consumes it, one module per config root present in the batch.
 ///
-/// The pre-pool warm-up inside the batch runners covers `batch.first()` only, so
-/// the first module of an *extension* root otherwise computes
+/// Without this the first module of an *extension* root computes
 /// `merged_configuration` — a whole-config deep clone — inside a pool worker
 /// while every sibling worker parks on that memo: the widest cross-thread
 /// blocking window the build has. Warming on the caller's thread closes it. Only
 /// roots actually represented in `batch_files` are touched, so batches without
 /// extension modules pay nothing.
+///
+/// Roots are taken from the files themselves, not from the declared config
+/// paths: the two sets part company on a workspace whose configuration discovery
+/// never found, where the declared root is the workspace and the files attribute
+/// to nested directories under it.
 pub fn warm_batch_config_roots(
     db: &RootDatabaseImpl,
     batch_files: &[(FileId, std::path::PathBuf)],
-    config_paths: &[(Option<String>, std::path::PathBuf)],
 ) {
-    for (_, root) in config_paths {
-        // Batch file paths are canonicalized by the workspace scan; config roots
-        // come from the project config verbatim (relative, symlinked, or
-        // verbatim-prefixed on Windows). Canonicalize the root before the prefix
-        // test or an extension root silently never matches — and its merge memo
-        // would still materialise inside the pool.
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if let Some((file_id, _)) = batch_files.iter().find(|(_, path)| path.starts_with(&root)) {
-            let _ = db.module_metadata(ModuleId::new(*file_id));
-        }
-    }
+    let modules: Vec<_> = batch_files.iter().map(|(file_id, _)| ModuleId::new(*file_id)).collect();
+    db.warm_config_roots(&modules);
 }
 
 /// Live position of a streaming graph build, shared with an external watchdog.

@@ -1,5 +1,6 @@
 use crate::domain::IndexedDocument;
 use crate::ports::GraphContextProvider;
+use crate::workspace_roots::FileKey;
 use code_chunk::{Chunk, ChunkKind};
 
 #[derive(Debug, Clone)]
@@ -69,20 +70,24 @@ pub fn semantic_key_from_parts(
 /// only for method chunks (procedure / function); module headers and absent
 /// providers yield `None`, leaving the embedding text unenriched.
 pub(crate) fn indexed_document_for_chunk(
-    rel_path: &str,
+    key: &FileKey,
     chunk: &Chunk,
     provider: Option<&dyn GraphContextProvider>,
 ) -> IndexedDocument {
     let kind = chunk.kind.label();
     let graph_context = match chunk.kind {
+        // The graph reads a module's identity out of the metadata-shaped path,
+        // which is the path relative to its own root — an extension repeats that
+        // shape, so the root-relative spelling is the one to hand over.
         ChunkKind::Procedure | ChunkKind::Function => {
-            provider.and_then(|p| p.graph_context(rel_path, &chunk.name, kind))
+            provider.and_then(|p| p.graph_context(&key.path, &chunk.name, kind))
         }
         ChunkKind::ModuleHeader => None,
     };
     IndexedDocument {
         collection: "code".to_owned(),
-        path: rel_path.to_owned(),
+        root_id: key.root_id.clone(),
+        path: key.path.clone(),
         symbol_name: chunk.name.clone(),
         kind: kind.to_owned(),
         line_start: chunk.line_start,
@@ -100,6 +105,7 @@ mod tests {
     fn doc() -> IndexedDocument {
         IndexedDocument {
             collection: "code".to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: "A.bsl".to_owned(),
             symbol_name: "Найти".to_owned(),
             kind: "procedure".to_owned(),
@@ -126,6 +132,29 @@ mod tests {
         );
     }
 
+    /// The embedding key must stay deaf to the root, and the cost of breaking that is
+    /// paid twice. Every embedding published so far would be orphaned — a full paid
+    /// re-embed of the corpus — and the serving side, which recomputes the key from the
+    /// columns of a row that has no root to give, would stop matching the publisher's key
+    /// for good.
+    ///
+    /// The property is stated over the key of two documents rather than over "a second
+    /// publish calls no embedder", because that phrasing cannot fail: both publishes
+    /// compute the key with the same function, so the second hits the first's cache under
+    /// ANY recipe, the forbidden one included.
+    #[test]
+    fn the_embedding_key_ignores_the_root() {
+        let configuration = doc();
+        let extension = IndexedDocument { root_id: "Расширение".to_owned(), ..doc() };
+
+        assert_eq!(
+            semantic_key_for_indexed_document(&configuration),
+            semantic_key_for_indexed_document(&extension),
+            "the same chunk under a different root embeds to the same vector, so it must \
+             keep the same key"
+        );
+    }
+
     struct FakeProvider;
     impl GraphContextProvider for FakeProvider {
         fn graph_context(&self, _: &str, symbol_name: &str, _: &str) -> Option<String> {
@@ -147,12 +176,12 @@ mod tests {
 
     #[test]
     fn chunk_document_carries_provider_context_for_methods_only() {
-        let path = "CommonModules/Сервер/Ext/Module.bsl";
+        let path = FileKey::configuration("CommonModules/Сервер/Ext/Module.bsl");
         let provider = FakeProvider;
 
         // A method chunk gets the provider's context, folded into the embed text.
         let method = chunk(ChunkKind::Procedure, "Делать", "Процедура Делать() КонецПроцедуры");
-        let doc = indexed_document_for_chunk(path, &method, Some(&provider));
+        let doc = indexed_document_for_chunk(&path, &method, Some(&provider));
         assert!(doc.graph_context.as_deref().unwrap().contains("Dispatch: server"));
         let embed = semantic_text_for_indexed_document(&doc);
         assert!(embed.contains("Module: ОбщийМодуль.Сервер.Модуль"), "{embed}");
@@ -160,14 +189,14 @@ mod tests {
 
         // A module header never gets graph context, even with a provider.
         let header = indexed_document_for_chunk(
-            path,
+            &path,
             &chunk(ChunkKind::ModuleHeader, "", "Перем А;"),
             Some(&provider),
         );
         assert_eq!(header.graph_context, None);
 
         // No provider → no context.
-        let plain = indexed_document_for_chunk(path, &method, None);
+        let plain = indexed_document_for_chunk(&path, &method, None);
         assert_eq!(plain.graph_context, None);
     }
 

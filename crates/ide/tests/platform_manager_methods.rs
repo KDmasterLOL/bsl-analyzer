@@ -14,6 +14,11 @@ fn designer_fixture_path() -> PathBuf {
 }
 
 fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
+    setup_with_unreadable(fixture_text, &[])
+}
+
+/// [`setup`] with the named fixture files registered as existing but unreadable.
+fn setup_with_unreadable(fixture_text: &str, unreadable: &[&str]) -> (RootDatabaseImpl, FileId) {
     let fixture = Fixture::parse(fixture_text);
     let mut db = RootDatabaseImpl::new();
     let mut file_set = vfs::FileSet::default();
@@ -21,10 +26,18 @@ fn setup(fixture_text: &str) -> (RootDatabaseImpl, FileId) {
         file_set.insert(*file_id, file.path.clone());
     }
     db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    let mut marked = 0usize;
     for (file_id, file) in &fixture.files {
         db.set_file_source_root(*file_id, SourceRootId(0));
-        db.set_file_text(*file_id, &file.content);
+        let path = file.path.as_path().to_string_lossy().replace('\\', "/");
+        if unreadable.iter().any(|u| path.ends_with(u)) {
+            db.set_file_unreadable(*file_id);
+            marked += 1;
+        } else {
+            db.set_file_text(*file_id, &file.content);
+        }
     }
+    assert_eq!(marked, unreadable.len(), "every named file must exist in the fixture");
 
     db.set_all_config_paths(vec![(None, designer_fixture_path())]);
 
@@ -927,6 +940,40 @@ fn this_object_direct_non_exported_call_resolves() {
             .iter()
             .any(|n| n.eq_ignore_ascii_case("НеЭкспортный")),
         "direct `НеЭкспортный()` is a local-scope call, must resolve cleanly; got {:?}",
+        unresolved_method_names(&db, file_id),
+    );
+}
+
+/// A user module that could not be read says nothing about the PLATFORM surface of
+/// its metadata object: `НайтиПоНаименованию` lives on the catalog manager, not in
+/// `ManagerModule.bsl`. Refusing to resolve it would trade a false finding for a
+/// silently lost type — and with it every check downstream of that type.
+#[test]
+fn an_unread_manager_module_still_resolves_the_platform_manager_method() {
+    let fixture = r#"
+//- /Catalogs/Справочник1/Ext/ManagerModule.bsl
+Процедура Своя() Экспорт КонецПроцедуры
+
+//- /test.bsl
+Процедура Тест()
+    Ссылка = Справочники.Справочник1.НайтиПоНаименованию("X");
+КонецПроцедуры
+"#;
+
+    // Control: with the module readable the platform method resolves, so the
+    // assertion below is about unreadability and not about the fixture.
+    let (db, file_id) = setup(fixture);
+    let readable = var_ty(&db, file_id, "ссылка").expect("ссылка must be inferred");
+    assert_metadata_ref(&db, readable, MetadataKind::CatalogRef, "Справочник1");
+
+    let (db, file_id) =
+        setup_with_unreadable(fixture, &["/Catalogs/Справочник1/Ext/ManagerModule.bsl"]);
+    let unread = var_ty(&db, file_id, "ссылка").expect("ссылка must still be inferred");
+    assert_metadata_ref(&db, unread, MetadataKind::CatalogRef, "Справочник1");
+
+    assert!(
+        unresolved_method_names(&db, file_id).is_empty(),
+        "and no call is reported against the caller: {:?}",
         unresolved_method_names(&db, file_id),
     );
 }

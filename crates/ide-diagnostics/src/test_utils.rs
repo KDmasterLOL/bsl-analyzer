@@ -365,6 +365,20 @@ fn severity_sort_key(severity: Severity) -> u8 {
 }
 
 pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic> {
+    check_hir_diagnostic_with_unreadable(fixture_text, &[])
+}
+
+/// [`check_hir_diagnostic_with_fixtures`], with the named fixture files registered
+/// as bodies that exist but could not be read.
+///
+/// The state is set through the database rather than by making a real file
+/// unreadable on disk: this fixture never touches the disk at all, and the file
+/// permissions that would express it are ignored by root anyway, which would leave
+/// the stand green in a container no matter what the code did.
+pub fn check_hir_diagnostic_with_unreadable(
+    fixture_text: &str,
+    unreadable: &[&str],
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::RootDatabaseImpl;
     use test_fixture::Fixture;
@@ -373,10 +387,22 @@ pub fn check_hir_diagnostic_with_fixtures(fixture_text: &str) -> Vec<Diagnostic>
     let mut db = RootDatabaseImpl::new();
 
     let mut file_set = vfs::FileSet::default();
+    let mut marked = 0usize;
     for (file_id, file) in &fixture.files {
         file_set.insert(*file_id, file.path.clone());
-        db.set_file_text(*file_id, &file.content);
+        let path = file.path.as_path().to_string_lossy().replace('\\', "/");
+        if unreadable.iter().any(|u| path.ends_with(u)) {
+            db.set_file_unreadable(*file_id);
+            marked += 1;
+        } else {
+            db.set_file_text(*file_id, &file.content);
+        }
     }
+    assert_eq!(
+        marked,
+        unreadable.len(),
+        "every named body must exist in the fixture, or the stand proves nothing"
+    );
 
     let source_root = SourceRoot::new_local(file_set);
     db.set_source_root(SourceRootId(0), source_root);
@@ -964,6 +990,72 @@ pub fn check_snapshot_with_config_xml(
 }
 
 pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Diagnostic> {
+    check_with_cfe_unreadable(source, fixture, &[])
+}
+
+pub fn check_with_cfe_config(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    config: crate::DiagnosticsConfig,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        &[],
+        config,
+        crate::diagnostics,
+    )
+}
+
+/// [`check_with_cfe`], with the named module bodies registered as existing but
+/// unreadable. Names are paths relative to the fixture root and are matched WHOLE, so
+/// `"CommonModules/Сервер/Ext/Module.bsl"` names the base body and
+/// `"Extensions/Расш/CommonModules/Сервер/Ext/Module.bsl"` its extension sibling —
+/// a substring match would silently take both.
+pub fn check_with_cfe_unreadable(
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable(
+        "CommonModules/Caller/Ext/Module.bsl",
+        source,
+        fixture,
+        unreadable,
+        crate::diagnostics,
+    )
+}
+
+/// [`check_with_cfe_unreadable`], with the analyzed file placed at `caller_relative`
+/// inside the fixture's first extension and its diagnostics produced by `run` rather
+/// than the whole registry. A diagnostic keyed to a module TYPE (the session module,
+/// say) is unreachable unless its file sits at the conventional path.
+pub fn check_cfe_at_with_unreadable(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    check_cfe_at_with_unreadable_config(
+        caller_relative,
+        source,
+        fixture,
+        unreadable,
+        crate::DiagnosticsConfig::all_enabled(),
+        run,
+    )
+}
+
+fn check_cfe_at_with_unreadable_config(
+    caller_relative: &str,
+    source: &str,
+    fixture: test_fixture::CfeFixture,
+    unreadable: &[&str],
+    config: crate::DiagnosticsConfig,
+    run: impl FnOnce(&crate::DiagnosticsContext<'_>) -> Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use ide_db::metadata::intern_configuration_path;
     use ide_db::RootDatabaseImpl;
@@ -985,17 +1077,44 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
         .first()
         .map(|ext| ext.root().to_path_buf())
         .unwrap_or_else(|| fixture.root().to_path_buf());
-    let caller_path = caller_root.join("CommonModules/Caller/Ext/Module.bsl");
+    let caller_path = caller_root.join(caller_relative);
     file_set.insert(caller_file_id, VfsPath::new(caller_path.to_string_lossy().into_owned()));
 
     let mut module_files = Vec::new();
+    let relative_to_root = |path: &std::path::Path| {
+        path.strip_prefix(fixture.root())
+            .expect("every fixture body lives under the fixture root")
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    for module in fixture.base_modules() {
+        let fid = FileId((module_files.len() + 1) as u32);
+        let path = fixture.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
+        let spelling = relative_to_root(&path);
+        file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+        module_files.push((fid, module.source().to_string(), spelling));
+    }
     for extension in fixture.extensions() {
         for module in extension.modules() {
             let fid = FileId((module_files.len() + 1) as u32);
             let path =
                 extension.root().join(format!("CommonModules/{}/Ext/Module.bsl", module.name()));
+            let spelling = relative_to_root(&path);
             file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
-            module_files.push((fid, module.source()));
+            module_files.push((fid, module.source().to_string(), spelling));
+        }
+    }
+    for (_, root) in fixture.config_paths() {
+        for kind in hir::ApplicationModuleKind::ALL {
+            let path = root.join(kind.relative_path());
+            if !path.is_file() {
+                continue;
+            }
+            let fid = FileId((module_files.len() + 1) as u32);
+            let spelling = relative_to_root(&path);
+            let body = std::fs::read_to_string(&path).expect("read application-module fixture");
+            file_set.insert(fid, VfsPath::new(path.to_string_lossy().into_owned()));
+            module_files.push((fid, body, spelling));
         }
     }
 
@@ -1003,10 +1122,21 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
     db.set_source_root(SourceRootId(0), source_root);
     db.set_file_source_root(caller_file_id, SourceRootId(0));
     db.set_file_text(caller_file_id, source);
-    for (fid, body) in module_files {
+    let mut marked = 0usize;
+    for (fid, body, spelling) in module_files {
         db.set_file_source_root(fid, SourceRootId(0));
-        db.set_file_text(fid, body);
+        if unreadable.iter().any(|u| spelling == *u) {
+            db.set_file_unreadable(fid);
+            marked += 1;
+        } else {
+            db.set_file_text(fid, &body);
+        }
     }
+    assert_eq!(
+        marked,
+        unreadable.len(),
+        "every named body must exist in the fixture, or the stand proves nothing"
+    );
 
     let config_path = fixture.root().to_string_lossy();
     let config_path_input = intern_configuration_path(
@@ -1015,10 +1145,9 @@ pub fn check_with_cfe(source: &str, fixture: test_fixture::CfeFixture) -> Vec<Di
         db.config_root_revision_for_path(std::path::Path::new(config_path.as_ref())),
     );
     let provider = ide_db::SalsaProvider::new(&db, Some(config_path_input));
-    let config = crate::DiagnosticsConfig::all_enabled();
     let ctx = crate::DiagnosticsContext::new(&config, caller_file_id, &provider);
 
-    crate::diagnostics(&ctx)
+    run(&ctx)
 }
 
 pub fn check_snapshot_with_cfe(
@@ -1145,6 +1274,15 @@ fn common_module_xml(name: &str, idx: usize) -> String {
     common_module_xml_with_privileged(name, idx, false)
 }
 
+fn common_module_xml_with_global(name: &str, idx: usize, global: bool) -> String {
+    let xml = common_module_xml_with_privileged(name, idx, false);
+    if global {
+        xml.replace("<Global>false</Global>", "<Global>true</Global>")
+    } else {
+        xml
+    }
+}
+
 fn common_module_xml_with_privileged(name: &str, idx: usize, privileged: bool) -> String {
     let uuid = format!("00000000-0000-0000-0000-{:012}", idx + 1);
     format!(
@@ -1170,6 +1308,19 @@ fn common_module_xml_with_privileged(name: &str, idx: usize, privileged: bool) -
 
 fn materialize_cfe_loader_compat(fixture: &test_fixture::CfeFixture) {
     let mut idx = 0usize;
+    for module in fixture.base_modules() {
+        let common_modules_dir = fixture.root().join("CommonModules");
+        let ext_dir = common_modules_dir.join(module.name()).join("Ext");
+        std::fs::create_dir_all(&ext_dir).expect("create base CommonModule Ext directory");
+        std::fs::write(ext_dir.join("Module.bsl"), module.source())
+            .expect("write base CommonModule Ext body");
+        std::fs::write(
+            common_modules_dir.join(format!("{}.xml", module.name())),
+            common_module_xml_with_global(module.name(), idx, module.is_global()),
+        )
+        .expect("write base CommonModule XML");
+        idx += 1;
+    }
     for extension in fixture.extensions() {
         for module in extension.modules() {
             let common_modules_dir = extension.root().join("CommonModules");

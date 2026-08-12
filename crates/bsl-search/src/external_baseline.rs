@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 mod postgres;
+pub use postgres::ensure_the_roots_mean_the_same_elsewhere;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineSnapshotRecord {
@@ -51,6 +52,11 @@ pub struct BaselineFileObjectRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaselineFileObjectReference {
     pub snapshot_id: String,
+    /// The source root the referencing file belongs to. Two roots may share one file object
+    /// when their files have the same relative path and the same content — that is content
+    /// sharing, not a duplicate — so without the root two references are indistinguishable
+    /// and the question "where did this row come from" has no answer.
+    pub root_id: String,
     pub path: String,
 }
 

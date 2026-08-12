@@ -194,8 +194,24 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
                 // it (bootstrap runs after the source root is interned) rather than
                 // enrolling a duplicate. `None` when the path is absent or unloaded;
                 // the reverse lookup then misses, which is correct.
-                let module_file = c.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
-                common_modules.push(CommonModuleEntry { name: c.name, main, module_file });
+                // Both outcomes are recorded: the readable id backs the ordinary
+                // back-link, the unread one lets name resolution refuse to read the
+                // shorter list as proof that a method is missing.
+                let body = c.module_file.as_ref().map(|p| module_file_id(db, vfs, p));
+                let module_file = match body {
+                    Some(BodyRef::Readable(id)) => Some(id),
+                    _ => None,
+                };
+                let unread_module_file = match body {
+                    Some(BodyRef::Unread(id)) => Some(id),
+                    _ => None,
+                };
+                common_modules.push(CommonModuleEntry {
+                    name: c.name,
+                    main,
+                    module_file,
+                    unread_module_file,
+                });
             }
             let mut event_subscriptions = Vec::new();
             for s in d.event_subscriptions {
@@ -256,7 +272,10 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
                 ) else {
                     continue;
                 };
-                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 http_services.push(HTTPServiceEntry { name: service.name, main, module_file });
             }
             let mut web_services = Vec::new();
@@ -270,7 +289,10 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
                 ) else {
                     continue;
                 };
-                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 web_services.push(WebServiceEntry { name: service.name, main, module_file });
             }
             let mut integration_services = Vec::new();
@@ -284,7 +306,10 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
                 ) else {
                     continue;
                 };
-                let module_file = service.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file = service
+                    .module_file
+                    .as_ref()
+                    .and_then(|p| module_file_id(db, vfs, p).readable());
                 integration_services.push(IntegrationServiceEntry {
                     name: service.name,
                     main,
@@ -451,8 +476,24 @@ pub fn refresh_metadata_substrate(
                 // The module's `Ext/Module.bsl` is BSL source owned by root(0),
                 // not a metadata file — reuse the analyzer's existing FileId for
                 // it rather than enrolling a duplicate (see `bootstrap_metadata_substrate`).
-                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
-                common_modules.push(CommonModuleEntry { name: d.name, main, module_file });
+                // Both outcomes are recorded: the readable id backs the ordinary
+                // back-link, the unread one lets name resolution refuse to read the
+                // shorter list as proof that a method is missing.
+                let body = d.module_file.as_ref().map(|p| module_file_id(db, vfs, p));
+                let module_file = match body {
+                    Some(BodyRef::Readable(id)) => Some(id),
+                    _ => None,
+                };
+                let unread_module_file = match body {
+                    Some(BodyRef::Unread(id)) => Some(id),
+                    _ => None,
+                };
+                common_modules.push(CommonModuleEntry {
+                    name: d.name,
+                    main,
+                    module_file,
+                    unread_module_file,
+                });
             }
             let mut event_subscriptions = Vec::new();
             for d in bsl_metadata::discover_event_subscription_structure(root) {
@@ -518,7 +559,8 @@ pub fn refresh_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file =
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
             }
             let mut web_services = Vec::new();
@@ -533,7 +575,8 @@ pub fn refresh_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file =
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 web_services.push(WebServiceEntry { name: d.name, main, module_file });
             }
             let mut integration_services = Vec::new();
@@ -548,7 +591,8 @@ pub fn refresh_metadata_substrate(
                 ) else {
                     continue;
                 };
-                let module_file = d.module_file.as_ref().and_then(|p| module_file_id(vfs, p));
+                let module_file =
+                    d.module_file.as_ref().and_then(|p| module_file_id(db, vfs, p).readable());
                 integration_services.push(IntegrationServiceEntry {
                     name: d.name,
                     main,
@@ -655,6 +699,31 @@ impl AnalysisHost {
     }
 }
 
+/// What the substrate found behind a module's declared body path.
+///
+/// Three outcomes, not two: a body can be absent, present and readable, or present
+/// and unreadable. The last one used to be indistinguishable from the second and had
+/// to be supplied as a side-channel set of paths; it is now a property of the file in
+/// the database, asked by id.
+enum BodyRef {
+    Readable(FileId),
+    Unread(FileId),
+    Absent,
+}
+
+impl BodyRef {
+    /// The id a consumer of the back-link may use — that is, one whose text stands
+    /// for the module's API. An unread body deliberately answers `None`: handing its
+    /// id to a module-level consumer would let it read an empty text and conclude
+    /// the module has no API.
+    fn readable(self) -> Option<FileId> {
+        match self {
+            BodyRef::Readable(id) => Some(id),
+            BodyRef::Unread(_) | BodyRef::Absent => None,
+        }
+    }
+}
+
 /// Resolve a module's `Ext/Module.bsl` path to the FileId already interned for it,
 /// so the metadata reverse index points at the consumer's own source id.
 ///
@@ -665,12 +734,25 @@ impl AnalysisHost {
 /// though the file is interned under its real path — retry once with the path
 /// canonicalised. The syscall stays off the common case: it runs only on a miss, so
 /// an already-canonical VFS (the LSP) never pays for it and its behaviour is unchanged.
-fn module_file_id(vfs: &Vfs, path: &Path) -> Option<FileId> {
-    if let Some(id) = vfs.file_id(&VfsPath::new(path.to_path_buf())) {
-        return Some(id);
+///
+/// Readability is asked of the database by id, so the spelling the caller composed and
+/// the spelling the host interned no longer have to agree for the answer to be right.
+fn module_file_id(db: &RootDatabaseImpl, vfs: &Vfs, path: &Path) -> BodyRef {
+    let interned = match vfs.file_id(&VfsPath::new(path.to_path_buf())) {
+        Some(id) => Some(id),
+        None => {
+            // A consumer may seed its VFS with canonicalised paths while the caller
+            // here composes `root.join(relative)`, which does not resolve a symlink
+            // inside the tree. Retry once resolved; the syscall runs only on a miss.
+            path.canonicalize().ok().and_then(|c| vfs.file_id(&VfsPath::new(c)))
+        }
+    };
+    let Some(id) = interned else { return BodyRef::Absent };
+    if db.file_is_unread(id) {
+        BodyRef::Unread(id)
+    } else {
+        BodyRef::Readable(id)
     }
-    let canonical = path.canonicalize().ok()?;
-    vfs.file_id(&VfsPath::new(canonical))
 }
 
 /// Intern a metadata composing file (already read and hashed in the parallel pass)

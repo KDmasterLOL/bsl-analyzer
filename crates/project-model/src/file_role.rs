@@ -1,8 +1,8 @@
 use std::path::Path;
 
-pub const SOURCE_EXTENSIONS: &[&str] = &["bsl"];
+pub const SOURCE_EXTENSIONS: &[&str] = &[bsl_conventions::BSL_EXTENSION];
 
-pub const METADATA_WATCHED_EXTENSIONS: &[&str] = &["xml"];
+pub const METADATA_WATCHED_EXTENSIONS: &[&str] = &[bsl_conventions::XML_EXTENSION];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileRole {
@@ -40,7 +40,7 @@ pub fn is_metadata_path(path: &Path) -> bool {
 /// per-MDO structure listing (its `module_file` reverse-index entry). Callers use
 /// this to also refresh the metadata substrate on a common-module body add/remove.
 pub fn is_common_module_body_path(path: &Path) -> bool {
-    substrate_listed_family(path) == Some("CommonModules")
+    substrate_listed_family(path).is_some_and(|f| f.eq_ignore_ascii_case("CommonModules"))
 }
 
 /// Whether `path` is a module body whose creation or deletion changes a per-MDO
@@ -51,20 +51,24 @@ pub fn is_common_module_body_path(path: &Path) -> bool {
 /// Other module kinds (object/manager/form/command modules) resolve their owner through
 /// the directory layout at query time and need no listing refresh.
 pub fn is_substrate_listed_body_path(path: &Path) -> bool {
-    matches!(
-        substrate_listed_family(path),
-        Some("CommonModules" | "HTTPServices" | "WebServices" | "IntegrationServices")
-    )
+    substrate_listed_family(path).is_some_and(|family| {
+        ["CommonModules", "HTTPServices", "WebServices", "IntegrationServices"]
+            .iter()
+            .any(|f| family.eq_ignore_ascii_case(f))
+    })
 }
 
 /// The `<Family>` directory name for a `<Family>/<Name>/Ext/Module.bsl` layout, if
 /// `path` matches it.
 fn substrate_listed_family(path: &Path) -> Option<&str> {
-    if path.file_name().and_then(|n| n.to_str()) != Some("Module.bsl") {
+    use bsl_conventions::{conventional_of, ConventionalName};
+    let file = path.file_name().and_then(|n| n.to_str())?;
+    if conventional_of(file) != Some(ConventionalName::Module) {
         return None;
     }
     let ext_dir = path.parent()?;
-    if ext_dir.file_name().and_then(|n| n.to_str()) != Some("Ext") {
+    let ext = ext_dir.file_name().and_then(|n| n.to_str())?;
+    if conventional_of(ext) != Some(ConventionalName::Ext) {
         return None;
     }
     ext_dir.parent()?.parent()?.file_name().and_then(|n| n.to_str())
@@ -73,6 +77,12 @@ fn substrate_listed_family(path: &Path) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_case_variant_body_is_still_substrate_listed() {
+        assert!(is_substrate_listed_body_path(Path::new("/ws/CommonModules/X/EXT/MODULE.BSL")));
+        assert!(is_common_module_body_path(Path::new("/ws/CommonModules/X/EXT/MODULE.BSL")));
+    }
 
     #[test]
     fn substrate_listed_bodies_cover_common_modules_and_services() {

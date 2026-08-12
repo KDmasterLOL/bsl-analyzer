@@ -89,28 +89,33 @@ fn check_qualified_call(
             .entered();
 
     let name = Name::new(method_name);
-    let module_files = ctx.common_module_body_files(module_name);
-    if module_files.is_empty() {
+    let bodies = ctx.common_module_bodies(module_name);
+    if bodies.is_empty() {
         tracing::debug!("bailout: no CommonModule found in any visible configuration");
         return None;
     }
 
-    for module_file_id in module_files {
-        let module_id = ModuleId::new(module_file_id);
-        let symbol_tree = ctx.symbol_tree_for(module_id);
-        let Some(method) = symbol_tree.find_method(&name) else {
-            continue;
-        };
-        if !method.is_export {
-            continue;
+    match bodies.search_merged_surface(|module_file_id| {
+        let symbol_tree = ctx.symbol_tree_for(ModuleId::new(module_file_id));
+        let method = symbol_tree.find_method(&name)?;
+        method.is_export.then(|| check_missing_params(method, args))
+    }) {
+        hir::BodySearch::Found(missing) => {
+            tracing::debug!(missing_count = missing.len(), "check_qualified_call success");
+            Some(missing)
         }
-        let missing = check_missing_params(method, args);
-        tracing::debug!(missing_count = missing.len(), "check_qualified_call success");
-        return Some(missing);
+        hir::BodySearch::Absent => {
+            tracing::debug!("bailout: method not found (or not exported) in any defining module");
+            None
+        }
+        // Part of the module's surface could not be read, so the signature that would
+        // really answer this call is unknown: measuring the call against the readable
+        // remainder would demand arguments nobody can show are required.
+        hir::BodySearch::Unread => {
+            tracing::debug!("bailout: a body of the module could not be read");
+            None
+        }
     }
-
-    tracing::debug!("bailout: method not found (or not exported) in any defining module");
-    None
 }
 
 fn check_manager_module_call(
@@ -192,14 +197,18 @@ fn find_manager_module_file(
     };
 
     let manager_module_path = format!("{}/{}/Ext/ManagerModule.bsl", english_plural, mdo_name);
+    // Конвенционные позиции кандидата регистронезависимы; `mdo_name` — имя
+    // объекта, его позиция точная.
+    use bsl_conventions::SegmentMatch as M;
+    let modes = [M::Ci, M::Exact, M::Ci, M::Ci];
 
     for visible in ctx.visible_configurations() {
         if !visible.config.configuration.has_metadata_object(mdo_type, mdo_name) {
             continue;
         }
         let full_path = visible.root.join(&manager_module_path);
-        let vfs_path = vfs::VfsPath::new(full_path.to_string_lossy().into_owned());
-        if let Some(file_id) = ctx.resolve_vfs_path(base_db::SourceRootId(0), &vfs_path) {
+        if let Some(file_id) = ctx.resolve_vfs_path_ci(base_db::SourceRootId(0), &full_path, &modes)
+        {
             return Some(file_id);
         }
         tracing::warn!(
@@ -404,6 +413,45 @@ mod tests {
             code,
             DiagnosticCode::MissedRequiredParameter,
             expect![[r#""#]],
+        );
+    }
+
+    /// The parameter list a call is measured against must come from the body that would
+    /// really answer it. This route is handed the bodies as a merged surface, so an
+    /// unread one anywhere in it leaves the effective signature unknown — the other body
+    /// may declare the method with entirely different parameters, and measuring against
+    /// it accuses the caller of missing an argument nobody can show is required.
+    #[test]
+    fn an_unread_body_bars_the_signature_verdict_for_the_whole_module() {
+        use crate::test_utils::check_with_cfe_unreadable;
+
+        let code = "Процедура Тест() Экспорт\nСервер.П();\nКонецПроцедуры";
+        let fixture = || {
+            let mut builder = CfeFixtureBuilder::new("");
+            builder
+                .add_base_module("Сервер", "Процедура П(Обязательный) Экспорт КонецПроцедуры")
+                .add_extension("Расш", "")
+                .add_extension_module(
+                    "Расш",
+                    "Сервер",
+                    "Процедура П(Обязательный) Экспорт КонецПроцедуры",
+                );
+            builder.build()
+        };
+
+        // Control: with every body readable the base signature is measured and the call
+        // IS accused. Without it, the silence below would prove nothing.
+        let control = check_with_cfe_unreadable(code, fixture(), &[]);
+        assert!(
+            control.iter().any(|d| d.code == DiagnosticCode::MissedRequiredParameter),
+            "control: a readable base signature must produce the verdict, got {control:?}"
+        );
+
+        let unread =
+            check_with_cfe_unreadable(code, fixture(), &["CommonModules/Сервер/Ext/Module.bsl"]);
+        assert!(
+            !unread.iter().any(|d| d.code == DiagnosticCode::MissedRequiredParameter),
+            "an unread base body leaves the effective signature unknown, got {unread:?}"
         );
     }
 

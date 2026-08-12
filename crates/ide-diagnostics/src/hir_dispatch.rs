@@ -14,7 +14,6 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::EmptyCodeBlock,
     DiagnosticCode::EmptyStatement,
     DiagnosticCode::ExecuteExternalCode,
-    DiagnosticCode::ExternalAppStarting,
     DiagnosticCode::ExtraCommas,
     DiagnosticCode::FileSystemAccess,
     DiagnosticCode::FormDataToValue,
@@ -177,9 +176,6 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::ExecuteExternalCode { range } => {
             handlers::execute_external_code::from_hir(*range, ctx)
-        }
-        BodyDiagnostic::ExternalAppStarting { range } => {
-            handlers::external_app_starting::from_hir(*range, ctx)
         }
         BodyDiagnostic::ExtraCommas { range } => handlers::extra_commas::from_hir(*range, ctx),
         BodyDiagnostic::FileSystemAccess { range } => {

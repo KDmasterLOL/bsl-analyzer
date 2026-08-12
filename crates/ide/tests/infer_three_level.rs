@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use hir::{Builders, HirDatabase, TypeKernelDb, TypeKind, UnresolvedMethodKind};
+use hir::{
+    Builders, HirDatabase, InferenceDiagnostic, TypeKernelDb, TypeKind, UnresolvedMethodKind,
+};
 use ide_db::base_db::SourceDatabase;
 
 #[path = "infer_three_level/support.rs"]
@@ -183,7 +185,7 @@ fn self_qualified_call_in_report_manager_still_checks_the_method() {
     let fixture = r#"
 //- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
 Процедура Тест()
-    ТестовыйОтчёт.НетТакогоМетода();
+    ТЕСТОВЫЙОТЧЁТ.НетТакогоМетода();
 КонецПроцедуры
 "#;
     let (db, file_id) =
@@ -193,6 +195,13 @@ fn self_qualified_call_in_report_manager_still_checks_the_method() {
         vec![UnresolvedMethodKind::MethodNotFound],
         "a self-qualified call is re-resolved as the collection-qualified one, so a \
          misspelled method keeps its diagnostic"
+    );
+    assert!(
+        db.infer(file_id).diagnostics.iter().all(|(_, diagnostic)| !matches!(
+            diagnostic,
+            InferenceDiagnostic::UnresolvedName { .. }
+        )),
+        "the resolved self-manager root must not also be classified as absent"
     );
 }
 
@@ -286,6 +295,27 @@ fn a_self_qualified_call_stays_a_redundant_access() {
         redundant_two_level(&db, file_id),
         vec!["ТестовыйОтчёт".to_string()],
         "the method is reachable directly from its own module — the receiver is redundant"
+    );
+}
+
+#[test]
+fn manager_typed_local_is_not_reported_as_self_qualified_access() {
+    let fixture = r#"
+//- /Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl
+Функция Собрать() Экспорт
+    Возврат "готово";
+КонецФункции
+
+Процедура Тест()
+    ТестовыйОтчёт = Отчёты.ТестовыйОтчёт;
+    Р = ТестовыйОтчёт.Собрать();
+КонецПроцедуры
+"#;
+    let (db, file_id) =
+        setup_with_designer_config(fixture, "/Reports/ТестовыйОтчёт/Ext/ManagerModule.bsl");
+    assert!(
+        redundant_two_level(&db, file_id).is_empty(),
+        "an explicitly assigned receiver is a local variable, not redundant self qualification"
     );
 }
 

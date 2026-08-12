@@ -31,6 +31,23 @@ pub(crate) enum OverlayWarmupState {
     NoLocalDiffs,
     /// Completed; embedded `embedded` chunks across `overlay_files` locally-changed files.
     Synced { overlay_files: usize, embedded: usize },
+    /// Completed, but the pass could not vouch for the whole tree: the scan left `unreadable`
+    /// subtrees unread or walked `canonical_fallbacks` files without a physical spelling, or
+    /// `read_failures` seen files could not be read. What WAS seen is published and serving;
+    /// removals were withheld and stale entries may linger until a clean pass. Deliberately not
+    /// `Failed`: the overlay is live, and `Failed`'s restart advice would be wrong here.
+    Incomplete {
+        unreadable: usize,
+        canonical_fallbacks: usize,
+        read_failures: usize,
+        /// The publication landed in memory but the fingerprint-row persist failed: stale
+        /// rows survive on disk, and the pass must be repeated once the store recovers.
+        persist_failed: bool,
+    },
+    /// The plan was built against a state a wholesale invalidation replaced between its
+    /// phases: nothing was published (only value-stable embeddings merged) and a fresh pass
+    /// is owed. Not `Failed`: nothing is broken, the state simply moved on.
+    Superseded,
     /// Prime or publish failed. The baseline semantic index still serves; local edits are not
     /// reflected semantically until the next MCP restart retries the warmup.
     Failed(String),
@@ -79,6 +96,10 @@ pub(super) struct WorkspaceSearchInit {
     pub(super) pending_embed: Option<PendingEmbed>,
     /// How to bring the workspace overlay online for this boot branch.
     pub(super) overlay_init: OverlayInit,
+    /// Whether the change hub was watching by the time this init read disk. Only then is
+    /// the event stream complete from the baseline onwards, and only then may a sink be
+    /// started to trust it.
+    pub(super) watch_armed: bool,
 }
 
 /// Inputs for the background embedding pass: its own database path and embedder config

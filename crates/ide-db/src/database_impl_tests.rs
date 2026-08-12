@@ -371,6 +371,7 @@ fn resolve_common_module_by_name_and_by_body_file() {
             name: "ОбщегоНазначения".to_string(),
             main: xml_file,
             module_file: Some(bsl_file),
+            unread_module_file: None,
         }]),
         Arc::new(Vec::new()),
         Arc::new(Vec::new()),
@@ -3386,6 +3387,529 @@ fn call_hierarchy_index_cfe_parity() {
     }));
 }
 
+fn cfe_common_module_xml(name: &str, global: bool) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><Name>{name}</Name><Server>true</Server><Global>{global}</Global></Properties>
+    </CommonModule>
+</MetaDataObject>"#
+    )
+}
+
+/// Write one common module of a configuration root in the layout the whole-config
+/// loader expects: a sibling XML next to a `<Имя>/Ext/Module.bsl` body.
+fn write_cfe_common_module(
+    root: &std::path::Path,
+    name: &str,
+    global: bool,
+    source: &str,
+) -> std::path::PathBuf {
+    let modules_dir = root.join("CommonModules");
+    let body_dir = modules_dir.join(name).join("Ext");
+    std::fs::create_dir_all(&body_dir).expect("create CommonModule body directory");
+    std::fs::write(modules_dir.join(format!("{name}.xml")), cfe_common_module_xml(name, global))
+        .expect("write CommonModule metadata");
+    let path = body_dir.join("Module.bsl");
+    std::fs::write(&path, source).expect("write CommonModule body");
+    path
+}
+
+/// A two-body common module `Сервер` (base + the caller's own extension), both bodies
+/// declaring `П`, with a caller in the extension calling it both qualified and through a
+/// string-dispatched callback. `base_unread` marks the base body's bytes unreadable.
+///
+/// Returns the database plus the module ids in `(base, extension body, caller)` order.
+fn cfe_db_with_two_server_bodies(
+    fixture: &test_fixture::CfeFixture,
+    base_unread: bool,
+) -> (RootDatabaseImpl, [ModuleId; 3]) {
+    let base_path = write_cfe_common_module(
+        fixture.root(),
+        "Сервер",
+        false,
+        "Процедура П() Экспорт КонецПроцедуры",
+    );
+    let ext_root = fixture.extensions()[0].root().to_path_buf();
+    let ext_server_path =
+        write_cfe_common_module(&ext_root, "Сервер", false, "Процедура П() Экспорт КонецПроцедуры");
+    let caller_source = "Процедура Т() Экспорт\n\
+                         Сервер.П();\n\
+                         Оп = Новый ОписаниеОповещения(\"П\", Сервер);\n\
+                         КонецПроцедуры";
+    let caller_path = write_cfe_common_module(&ext_root, "Вызов", false, caller_source);
+
+    let (base, ext_server, caller) = (FileId(0), FileId(1), FileId(2));
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (id, path) in [(base, &base_path), (ext_server, &ext_server_path), (caller, &caller_path)] {
+        file_set.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for id in [base, ext_server, caller] {
+        db.set_file_source_root(id, SourceRootId(0));
+    }
+    db.set_file_text(ext_server, "Процедура П() Экспорт КонецПроцедуры");
+    db.set_file_text(caller, caller_source);
+    if base_unread {
+        db.set_file_unreadable(base);
+    } else {
+        db.set_file_text(base, "Процедура П() Экспорт КонецПроцедуры");
+    }
+    db.set_all_config_paths(fixture.config_paths());
+
+    (db, [ModuleId::new(base), ModuleId::new(ext_server), ModuleId::new(caller)])
+}
+
+/// The compact index and the Salsa fold must answer the same thing about a call whose
+/// callee module has an unread body ahead of a readable one. The unread base may well
+/// declare the method, and its declaration would outrank the extension's — so neither
+/// route may let the extension body answer in its place.
+#[test]
+fn graph_index_matches_the_salsa_fold_when_a_base_body_is_unread() {
+    use hir::call_graph::{EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    use hir::ConfigsDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    // Positive control: with every body readable the same fixture resolves the call to
+    // the BASE declaration. Without it the equality below could hold vacuously — two
+    // routes agreeing that nothing resolves at all.
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let readable_fixture = builder.build();
+    let (readable_db, [base, _, caller]) = cfe_db_with_two_server_bodies(&readable_fixture, false);
+    let control = readable_db.resolved_module_summary(caller);
+    assert!(
+        control.edges.iter().any(|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(&e.target, ResolvedTarget::Method(m) if m.module == base)),
+        "control: a readable base body must win the call, else the fixture proves nothing"
+    );
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let (db, modules) = cfe_db_with_two_server_bodies(&fixture, true);
+    let [_, ext_server, caller] = modules;
+    let index = GraphIndex::build(&db, &modules);
+
+    let salsa = db.resolved_module_summary(caller);
+    assert!(
+        !salsa
+            .edges
+            .iter()
+            .any(|e| matches!(&e.target, ResolvedTarget::Method(m) if m.module == ext_server)),
+        "a body behind an unread one must not answer for it"
+    );
+    for &module in &modules {
+        assert_eq!(
+            resolve_module_summary_via_index(&db, module, &index),
+            *db.resolved_module_summary(module),
+            "index and Salsa must agree about {module:?} when a base body is unread"
+        );
+    }
+}
+
+/// The bare-call surface of a GLOBAL common module is walked in the same priority order
+/// as a qualified call, and stops at the same place: a body behind an unread one is not
+/// the module's answer, so its exports must not enter the global context either.
+#[test]
+fn global_common_module_exports_stop_at_an_unread_body() {
+    use test_fixture::CfeFixtureBuilder;
+
+    fn exports_of(
+        fixture: &test_fixture::CfeFixture,
+        base_unread: bool,
+        base_registered: bool,
+    ) -> (Vec<(ModuleId, String, bool)>, bool) {
+        let base_path = write_cfe_common_module(
+            fixture.root(),
+            "Глоб",
+            true,
+            "Функция П() Экспорт КонецФункции",
+        );
+        let ext_root = fixture.extensions()[0].root().to_path_buf();
+        let ext_path =
+            write_cfe_common_module(&ext_root, "Глоб", true, "Функция П() Экспорт КонецФункции");
+        let caller_source = "Процедура Т() Экспорт КонецПроцедуры";
+        let caller_path = write_cfe_common_module(&ext_root, "Вызов", false, caller_source);
+
+        let (base, ext, caller) = (FileId(0), FileId(1), FileId(2));
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        if base_registered {
+            file_set.insert(base, VfsPath::new(base_path.to_string_lossy().as_ref()));
+        }
+        for (id, path) in [(ext, &ext_path), (caller, &caller_path)] {
+            file_set.insert(id, VfsPath::new(path.to_string_lossy().as_ref()));
+        }
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        if base_registered {
+            db.set_file_source_root(base, SourceRootId(0));
+        }
+        for id in [ext, caller] {
+            db.set_file_source_root(id, SourceRootId(0));
+        }
+        db.set_file_text(ext, "Функция П() Экспорт КонецФункции");
+        db.set_file_text(caller, caller_source);
+        if base_registered {
+            if base_unread {
+                db.set_file_unreadable(base);
+            } else {
+                db.set_file_text(base, "Функция П() Экспорт КонецФункции");
+            }
+        }
+        db.set_all_config_paths(fixture.config_paths());
+
+        let surface = hir::Resolver::with_workspace_scope(ModuleId::new(caller))
+            .global_common_module_exports(&db);
+        let complete = surface.is_complete();
+        let entries = surface
+            .entries
+            .into_iter()
+            .map(|entry| match entry.definition {
+                hir::GlobalExportDefinition::Method(id) => {
+                    (id.module, entry.name.as_str().to_string(), true)
+                }
+                hir::GlobalExportDefinition::Variable(id) => {
+                    (id.module, entry.name.as_str().to_string(), false)
+                }
+            })
+            .collect();
+        (entries, complete)
+    }
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let readable_fixture = builder.build();
+    let (control, complete) = exports_of(&readable_fixture, false, true);
+    assert!(complete, "every readable candidate makes the common-module surface complete");
+    assert!(
+        control.iter().any(|(module, name, is_method)| {
+            *module == ModuleId::new(FileId(0)) && name == "П" && *is_method
+        }),
+        "control: a readable global base body must export method П"
+    );
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let (exports, complete) = exports_of(&fixture, true, true);
+    assert!(!complete, "an unread body must leave an explicit completeness gap");
+    assert!(
+        !exports.iter().any(|(_, name, _)| name == "П"),
+        "an unread base body bars its own symbols from the global context: {exports:?}"
+    );
+
+    let mut builder = CfeFixtureBuilder::new("");
+    builder.add_extension("Расш", "");
+    let fixture = builder.build();
+    let (_, complete) = exports_of(&fixture, false, false);
+    assert!(
+        !complete,
+        "a metadata-declared global module without a locatable body is a surface gap"
+    );
+}
+
+#[test]
+fn application_module_exports_are_typed_and_preserve_unread_gaps() {
+    use hir::{GlobalExportDefinition, GlobalExportHost, GlobalSurfaceGap};
+    use test_fixture::CfeFixtureBuilder;
+
+    fn surface(kind: hir::ApplicationModuleKind, unread: bool) -> hir::GlobalExports {
+        let fixture = CfeFixtureBuilder::new("").build();
+        let app_path = fixture.root().join(kind.relative_path());
+        std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+        let app_source = "Перем ГлобальнаяПеременная Экспорт;\n\
+                          Процедура ГлобальнаяПроцедура() Экспорт\n\
+                          КонецПроцедуры";
+        std::fs::write(&app_path, app_source).unwrap();
+        let caller_path = write_cfe_common_module(
+            fixture.root(),
+            "Caller",
+            false,
+            "Процедура Тест() Экспорт КонецПроцедуры",
+        );
+
+        let app = FileId(0);
+        let caller = FileId(1);
+        let mut db = RootDatabaseImpl::new();
+        let mut file_set = FileSet::new();
+        file_set.insert(app, VfsPath::new(app_path.to_string_lossy().as_ref()));
+        file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        for file in [app, caller] {
+            db.set_file_source_root(file, SourceRootId(0));
+        }
+        if unread {
+            db.set_file_unreadable(app);
+        } else {
+            db.set_file_text(app, app_source);
+        }
+        db.set_file_text(caller, "Процедура Тест() Экспорт КонецПроцедуры");
+        db.set_all_config_paths(fixture.config_paths());
+
+        hir::Resolver::with_workspace_scope(ModuleId::new(caller)).application_module_exports(&db)
+    }
+
+    let readable = surface(hir::ApplicationModuleKind::Managed, false);
+    assert!(readable.is_complete(), "all fixed application paths were enumerable");
+    let variable = readable
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_str() == "ГлобальнаяПеременная")
+        .expect("exported application variable");
+    assert!(matches!(variable.definition, GlobalExportDefinition::Variable(_)));
+    assert_eq!(variable.capabilities.readable_as_value, Some(true));
+    assert_eq!(
+        variable.host,
+        GlobalExportHost::ApplicationModule(hir::ApplicationModuleKind::Managed)
+    );
+    let method = readable
+        .entries
+        .iter()
+        .find(|entry| entry.name.as_str() == "ГлобальнаяПроцедура")
+        .expect("exported application method");
+    assert!(matches!(method.definition, GlobalExportDefinition::Method(_)));
+    assert_eq!(method.capabilities.callable, Some(true));
+    assert_eq!(method.capabilities.readable_as_value, Some(false));
+
+    let unread = surface(hir::ApplicationModuleKind::Managed, true);
+    assert!(unread.entries.is_empty(), "unread body contributes no guessed exports");
+    assert!(unread.gaps.iter().any(|gap| matches!(
+        gap,
+        GlobalSurfaceGap::UnreadApplicationModule { kind: hir::ApplicationModuleKind::Managed }
+    )));
+
+    let external = surface(hir::ApplicationModuleKind::ExternalConnection, false);
+    assert!(
+        external.entries.iter().any(|entry| {
+            entry.name.as_str() == "ГлобальнаяПеременная"
+                && entry.host
+                    == GlobalExportHost::ApplicationModule(
+                        hir::ApplicationModuleKind::ExternalConnection,
+                    )
+        }),
+        "external-connection module exports belong to its global context"
+    );
+}
+
+#[test]
+fn common_module_body_lookup_marks_declared_but_unmapped_body() {
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let caller_source = "Процедура Тест() Экспорт\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, caller_source);
+    let missing_path = write_cfe_common_module(
+        fixture.root(),
+        "DeclaredWithoutBody",
+        false,
+        "Процедура Метод() Экспорт\nКонецПроцедуры",
+    );
+    std::fs::remove_file(missing_path).expect("remove enrolled body from fixture");
+
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, caller_source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let bodies = db.resolve_common_module_files_for_file(caller, "DeclaredWithoutBody");
+    assert!(bodies.is_empty());
+    assert!(
+        bodies.has_missing_expected_body(),
+        "a metadata declaration without a mapped body must preserve the completeness gap"
+    );
+}
+
+#[test]
+fn module_cfgs_reuses_the_module_level_cfg_allocation() {
+    let file = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/Ext/ManagedApplicationModule.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Значение = 1;");
+
+    let input = base_db::FileIdInput::new(&db, file);
+    let cfgs = <RootDatabaseImpl as RootDatabase>::module_cfgs(&db, input);
+    let module = <RootDatabaseImpl as RootDatabase>::module_level_cfg(&db, ModuleId::new(file));
+    assert!(
+        std::sync::Arc::ptr_eq(cfgs.module_code().expect("module-code CFG"), &module),
+        "module CFG aggregation must share the module-level query allocation"
+    );
+}
+
+#[test]
+fn platform_global_read_does_not_force_reaching_definitions() {
+    use hir::HirDatabase;
+
+    let file = FileId(0);
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let mut file_set = FileSet::new();
+    file_set.insert(file, VfsPath::new("/test.bsl"));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(file, SourceRootId(0));
+    db.set_file_text(file, "Процедура Тест()\nРезультат = Метаданные;\nКонецПроцедуры");
+
+    let _ = db.infer(file);
+    let rows = db.salsa_event_report().expect("event counters enabled");
+    assert!(
+        rows.iter().all(|row| !row.name.contains("module_reaching_definitions")),
+        "a read with no same-named assignment has no reason to build module dataflow"
+    );
+}
+
+#[test]
+fn application_module_path_scan_is_memoized_across_method_bodies() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = (0..12)
+        .map(|index| {
+            format!(
+                "Процедура Тест{index}() Экспорт\nЗначение{index} = Метаданные;\nКонецПроцедуры\n"
+            )
+        })
+        .collect::<String>();
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, &source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new_with_salsa_events();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, &source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let _ = db.infer(caller);
+    let rows = db.salsa_event_report().expect("event counters enabled");
+    let query = rows
+        .iter()
+        .find(|row| row.name.contains("application_module_files_query"))
+        .expect("tracked application-module lookup must execute");
+    assert_eq!(
+        query.execute,
+        hir::ApplicationModuleKind::ALL.len() as u64,
+        "each fixed host path is scanned once per file, not once per inferred body"
+    );
+}
+
+#[test]
+fn application_export_shadows_same_named_platform_property_for_reads() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let app_path = fixture.root().join("Ext/ManagedApplicationModule.bsl");
+    std::fs::create_dir_all(app_path.parent().unwrap()).unwrap();
+    let app_source = "Перем Метаданные Экспорт;";
+    std::fs::write(&app_path, app_source).unwrap();
+    let caller_source = "Процедура Тест() Экспорт\nРезультат = Метаданные;\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, caller_source);
+
+    let app = FileId(0);
+    let caller = FileId(1);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(app, VfsPath::new(app_path.to_string_lossy().as_ref()));
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for file in [app, caller] {
+        db.set_file_source_root(file, SourceRootId(0));
+    }
+    db.set_file_text(app, app_source);
+    db.set_file_text(caller, caller_source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    assert!(
+        !db.infer(caller).var_types.contains_key("результат"),
+        "the user export has Unknown type; a platform-property type here would prove wrong precedence"
+    );
+}
+
+#[test]
+fn target_platform_version_invalidates_unresolved_name_certainty() {
+    use hir::HirDatabase;
+    use std::sync::Arc;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = "Процедура Тест() Экспорт\n\
+                  Результат = ЗаведомоНеизвестноеИмя;\n\
+                  КонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, source);
+    db.set_all_config_paths(fixture.config_paths());
+
+    let unresolved_count = |db: &RootDatabaseImpl| {
+        db.infer(caller)
+            .diagnostics
+            .iter()
+            .filter(|(_, diagnostic)| {
+                matches!(diagnostic, hir::InferenceDiagnostic::UnresolvedName { .. })
+            })
+            .count()
+    };
+    assert_eq!(unresolved_count(&db), 1, "bundled 8.3.27 target is complete");
+
+    db.set_target_platform_version(Some(Arc::<str>::from("8.3.28")));
+    assert_eq!(
+        unresolved_count(&db),
+        0,
+        "a newer runtime target must invalidate the inference query and restore Indeterminate"
+    );
+}
+
+#[test]
+fn boot_window_keeps_user_global_surface_indeterminate() {
+    use hir::HirDatabase;
+    use test_fixture::CfeFixtureBuilder;
+
+    let fixture = CfeFixtureBuilder::new("").build();
+    let source = "Процедура Тест() Экспорт\nНеизвестныйМодуль.Метод();\nКонецПроцедуры";
+    let caller_path = write_cfe_common_module(fixture.root(), "Caller", false, source);
+    let caller = FileId(0);
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(caller, VfsPath::new(caller_path.to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(caller, SourceRootId(0));
+    db.set_file_text(caller, source);
+    db.set_all_config_paths(fixture.config_paths());
+    db.set_workspace_load_complete(false);
+
+    let unresolved_count = |db: &RootDatabaseImpl| {
+        db.infer(caller)
+            .diagnostics
+            .iter()
+            .filter(|(_, diagnostic)| {
+                matches!(diagnostic, hir::InferenceDiagnostic::UnresolvedName { .. })
+            })
+            .count()
+    };
+    assert_eq!(unresolved_count(&db), 0, "boot metadata is not a complete surface");
+
+    db.set_workspace_load_complete(true);
+    assert_eq!(
+        unresolved_count(&db),
+        1,
+        "the load-state input must invalidate inference once the empty fixture is complete"
+    );
+}
+
 /// A `Движения.<Регистр>` movement must resolve to the register's `Mdo` node — and the
 /// Salsa fold and the resident index must agree — given a configuration that supplies the
 /// register's metadata type. Uses the checked-in designer fixture (which defines the
@@ -5263,5 +5787,97 @@ fn salsa_event_window_resets_and_reports_full_key_set() {
         parse_row.name.contains("/window.bsl"),
         "keys must decode to module paths in the window's revision, got {:?}",
         parse_row.name
+    );
+}
+
+/// A root counts as warmed only once its own configuration is loaded.
+///
+/// Going through `module_metadata` does not establish that: for a service module
+/// whose service resolves out of the DECLARED roots the query returns before it
+/// ever reads the attributed root, and the per-root dedup would then skip that
+/// root's remaining modules — leaving the whole-config load to happen lazily
+/// inside the build's worker pool, which is what the warm-up exists to prevent.
+#[test]
+fn warming_loads_the_attributed_root_of_a_service_module() {
+    use hir::ConfigsDatabase as _;
+
+    fn http_service_xml(name: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<HTTPService uuid=\"00000000-0000-0000-0000-000000000040\">",
+                "<Properties><Name>{}</Name><RootURL>http</RootURL></Properties>",
+                "</HTTPService></MetaDataObject>"
+            ),
+            name
+        )
+    }
+
+    let ws =
+        std::env::temp_dir().join(format!("bsl_warm_roots_{}_{}", std::process::id(), line!()));
+    let deep = ws.join("deep");
+
+    // The SAME service name in both configurations: the declared root's copy is
+    // what the early return finds, standing in for the nested root that still
+    // has to be loaded.
+    for root in [&ws, &deep] {
+        std::fs::create_dir_all(root.join("HTTPServices/Сервис/Ext")).unwrap();
+        std::fs::write(root.join("HTTPServices/Сервис.xml"), http_service_xml("Сервис")).unwrap();
+        std::fs::write(root.join("HTTPServices/Сервис/Ext/Module.bsl"), "").unwrap();
+    }
+    // `CommonModules/` is what stops the attribution walk at `deep` — the nested
+    // directory is a configuration root that nothing declared.
+    std::fs::create_dir_all(deep.join("CommonModules/Модуль/Ext")).unwrap();
+    std::fs::write(deep.join("CommonModules/Модуль/Ext/Module.bsl"), "").unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let cache = Arc::new(crate::GraphConfigCache::default());
+    db.set_graph_config_cache(Arc::clone(&cache));
+
+    let service_file = FileId(0);
+    let module_file = FileId(1);
+    let mut file_set = FileSet::new();
+    let path_of = |p: std::path::PathBuf| VfsPath::new(p.to_string_lossy().into_owned());
+    file_set.insert(service_file, path_of(deep.join("HTTPServices/Сервис/Ext/Module.bsl")));
+    file_set.insert(module_file, path_of(deep.join("CommonModules/Модуль/Ext/Module.bsl")));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    db.set_file_source_root(service_file, SourceRootId(1));
+    db.set_file_source_root(module_file, SourceRootId(1));
+    db.set_all_config_paths(vec![(None, ws.clone())]);
+
+    // The service module first, so it is the representative the dedup keeps.
+    db.warm_config_roots(&[ModuleId::new(service_file), ModuleId::new(module_file)]);
+
+    // Spelled through the very function the key is built with: the cache is keyed
+    // by the interned path, which on Windows is lower-cased and slash-normalized,
+    // so a raw `PathBuf` would miss there while passing here.
+    let key = |path: &std::path::Path| {
+        std::path::PathBuf::from(crate::metadata::canonicalize_configuration_path(
+            &path.to_string_lossy(),
+        ))
+    };
+
+    assert!(
+        cache.contains_key(&key(&ws)),
+        "sanity: the declared root is loaded, so the early return has something to find"
+    );
+    assert!(cache.contains_key(&key(&deep)), "the attributed root must be loaded by the warm-up");
+
+    std::fs::remove_dir_all(&ws).ok();
+}
+
+#[test]
+fn a_case_variant_configuration_xml_names_the_configuration_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("cf");
+    std::fs::create_dir_all(root.join("Catalogs/X/Ext")).unwrap();
+    std::fs::write(root.join("CONFIGURATION.XML"), "<Configuration/>").unwrap();
+    let module = root.join("Catalogs/X/Ext/ObjectModule.bsl");
+    std::fs::write(&module, "").unwrap();
+    let db = crate::RootDatabaseImpl::default();
+    assert_eq!(
+        db.find_configuration_root(&module),
+        Some(root.clone()),
+        "корень опознан по CONFIGURATION.XML"
     );
 }

@@ -122,6 +122,7 @@ mod tests {
     fn doc(fixture: DocFixture<'_>) -> IndexedDocument {
         IndexedDocument {
             collection: fixture.collection.to_owned(),
+            root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
             path: fixture.path.to_owned(),
             symbol_name: fixture.symbol_name.to_owned(),
             kind: fixture.kind.to_owned(),
@@ -195,7 +196,7 @@ mod tests {
         ];
         let mut overlay = SearchOverlay::new(baseline_ref.clone());
         overlay.replace_file(
-            DocumentPath::new("code", "CommonModules/A.bsl"),
+            DocumentPath::configuration("code", "CommonModules/A.bsl"),
             vec![doc(DocFixture {
                 collection: "code",
                 path: "CommonModules/A.bsl",
@@ -243,7 +244,7 @@ mod tests {
             }),
         ];
         let mut overlay = SearchOverlay::new(baseline_ref.clone());
-        overlay.delete_file(DocumentPath::new("code", "CommonModules/A.bsl"));
+        overlay.delete_file(DocumentPath::configuration("code", "CommonModules/A.bsl"));
 
         let view = InMemoryResolvedViewResolver
             .resolve_view(baseline_ref, baseline_documents, overlay)
@@ -280,7 +281,7 @@ mod tests {
         ];
         let mut overlay = SearchOverlay::new(baseline_ref.clone());
         overlay.replace_file(
-            DocumentPath::new("code", "CommonModules/B.bsl"),
+            DocumentPath::configuration("code", "CommonModules/B.bsl"),
             vec![doc(DocFixture {
                 collection: "code",
                 path: "CommonModules/B.bsl",

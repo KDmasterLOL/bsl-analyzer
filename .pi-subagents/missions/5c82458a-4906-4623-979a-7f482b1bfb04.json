@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "5c82458a-4906-4623-979a-7f482b1bfb04",
+  "title": "Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review. ...",
+  "objective": "Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review. Confirmed HIGH: production refresh_search_roots_after_graph currently calls apply_workspace_roots_transition under SharedSearchEngine mutex, and apply performs a second full SourceSet scan + fs::read/hash for every file, blocking searches. Redesign core API so the expensive second validation happens off the outer MCP engine mutex (e.g. a public revalidate/validated-plan phase), while guarded apply under mutex does only in-memory epoch/cache checks + SQLite/cache/vector atomic mutation. Preserve core standalone safe API if needed, but production must use validated apply. Document watcher-backed race semantics: hub is rearmed before hook; any create/modify/delete after off-lock validation is queued and, after apply, attributed via new roots. Add a deterministic test proving filesystem scan/read validation does not execute while the outer engine mutex is held (use a test seam/barrier/counter, no sleeps).\n\nAlso address related review findings correctly: unchanged-root provider replacement must fence old overlay plans; do not silently swap provider. Avoid infinite expensive retry semantics beyond the existing 30s obligation—on incomplete scan keep last-known-good and retry, but do not add busy loops. Preserve pending embedding signals even if provider installation fails after an Applied transition. Critically inspect current replace_published_graph_context_provider design: stable overlay entries need not be discarded lexically, but stale semantic plans must be fenced and future point refreshes must use new provider. Add focused tests.\n\nRun cargo fmt, cargo test -p bsl-search, targeted/full cargo test -p mcp-server, and clippy -D warnings as practical. Leave diff uncommitted for OneCPI rerun. Do not use wt/worktree or nested agents.",
+  "status": "failed",
+  "createdAt": "2026-08-12T08:55:01.205Z",
+  "updatedAt": "2026-08-12T08:55:01.230Z",
+  "runs": [
+    {
+      "runId": "call_z9IHN4dGXZuXaKXV37Iba4ZT|fc_00cb2b9ffd5becd8016a7c34d69e748191931aa3f605c385e7",
+      "mode": "workflow",
+      "status": "failed",
+      "startedAt": "2026-08-12T08:55:01.230Z",
+      "completedAt": "2026-08-12T08:55:01.230Z"
+    }
+  ],
+  "workflowChildren": [],
+  "decisions": [],
+  "artifacts": [],
+  "receipts": [],
+  "cwd": "/home/itrous/src/tools_migration/lsp/bsl-analyzer",
+  "ownerSessionId": "/home/itrous/.pi/agent/sessions/--home-itrous-src-tools_migration-lsp-bsl-analyzer--/2026-08-11T16-56-01-712Z_019ff1c0-a3b0-721b-9877-80bd2c0f5039.jsonl",
+  "summary": "Workflow failed: workflowScript must be valid JavaScript.\nIf task text contains Markdown fences or backticks, use an array joined with \"\\n\" or escaped strings instead of a raw backtick template literal.\n\nOriginal SyntaxError:\nworkflow-script.js:2\nreturn runs.run('fix-lock-review',{agent:'worker',task:'Fix the current uncommitted issue #209 integration diff in this task branch after OneCPI review. Confirmed HIGH: production refresh_search_roots_after_graph currently calls apply_workspace_roots_transition under SharedSearchEngine mutex, and apply performs a second full SourceSet scan + fs::read/hash for every file, blocking searches. Redesign core API so the expensive second validation happens off the outer MCP engine mutex (e.g. a public revalidate/validated-plan phase), while guarded apply under mutex does only in-memory epoch/cache checks + SQLite/cache/vector atomic mutation. Preserve core standalone safe API if needed, but production must use validated apply. Document watcher-backed race semantics: hub is rearmed before hook; any create/modify/delete after off-lock validation is queued and, after apply, attributed via new roots. Add a deterministic test proving filesystem scan/read validation does not execute while the outer engine mutex is held (use a test seam/barrier/counter, no sleeps).\n                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^..."
+}

@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bsl-conventions.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
@@ -16,7 +17,14 @@ blake3 = "1.8"
 base-db.workspace = true
 bsl-metadata = { path = "../bsl-metadata" }
 stdx.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true
+
+# Test-only: creating a FIFO is the one way to reproduce a blocking open, and
+# the guard against it has no other observable failure than a hang.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

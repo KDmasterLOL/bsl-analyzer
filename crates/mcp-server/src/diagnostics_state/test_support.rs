@@ -52,7 +52,101 @@ pub(super) fn module_path(root: &Path, name: &str) -> PathBuf {
     root.join(format!("CommonModules/{name}/Ext/Module.bsl"))
 }
 
-pub(super) fn wait_ready(state: &DiagnosticsState) {
+/// The module both roots hold, spelled relative to whichever root owns it.
+pub(crate) const SHARED_MODULE_REL: &str = "CommonModules/Общий/Ext/Module.bsl";
+
+pub(crate) const CONFIGURATION_SYMBOL: &str = "ФункцияКонфигурации";
+pub(crate) const EXTENSION_SYMBOL: &str = "ФункцияРасширения";
+
+/// A workspace whose configuration IS the workspace directory and whose extension lives
+/// outside it, both holding a module at [`SHARED_MODULE_REL`].
+///
+/// Every part of the shape is load-bearing:
+///
+/// - the extension is OUTSIDE the workspace because a root that canonically lies inside the
+///   configuration is rejected rather than registered, and a stand built that way measures
+///   the rejection instead of the subject;
+/// - the configuration is the workspace directory itself, so a path read against the
+///   workspace — today's reading — lands on a REAL file. A configuration in a subdirectory
+///   would make the wrong reading miss instead, and a miss cannot tell "answered from the
+///   namesake" from "answered from nothing";
+/// - the two modules differ in TEXT. Identical bytes would make the two files
+///   indistinguishable in any answer derived from content, and the whole point is telling
+///   them apart.
+///
+/// Returns the temporary directory (kept alive by the caller), the workspace and the
+/// extension root.
+pub(crate) fn workspace_with_an_outside_extension() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    let extension = dir.path().join("outside-ext");
+    for (root, name) in [(&workspace, "Конфа"), (&extension, "Расш")] {
+        fs::create_dir_all(root).unwrap();
+        fs::write(
+            root.join("Configuration.xml"),
+            format!("<Configuration><Name>{name}</Name></Configuration>"),
+        )
+        .unwrap();
+    }
+    write_common_module_xml(&workspace, "Общий", true);
+    write(
+        &workspace,
+        SHARED_MODULE_REL,
+        &format!("&НаСервере\nФункция {CONFIGURATION_SYMBOL}() Экспорт Возврат 1; КонецФункции\n"),
+    );
+    write_common_module_xml(&extension, "Общий", true);
+    write(
+        &extension,
+        SHARED_MODULE_REL,
+        &format!("&НаСервере\nФункция {EXTENSION_SYMBOL}() Экспорт Возврат 2; КонецФункции\n"),
+    );
+    fs::write(
+        workspace.join("bsl-analyzer.toml"),
+        format!(
+            "[source]\nroot = \".\"\nextensions = [{{ name = \"a\", path = {extension:?} }}]\n"
+        ),
+    )
+    .unwrap();
+    (dir, workspace, extension)
+}
+
+/// The identifier the root table gives the extension of
+/// [`workspace_with_an_outside_extension`]. Read from the table rather than spelled out: a
+/// root outside the workspace is identified by its absolute spelling, and hard-coding that
+/// would pin the test to a rule it is not testing.
+pub(crate) fn extension_root_id(workspace: &Path, extension: &Path) -> String {
+    let project = crate::project::at(workspace).expect("the fixture is a valid project");
+    let (roots, _rejected) = crate::project::workspace_roots(&project);
+    let file = extension.join(SHARED_MODULE_REL);
+    let canonical = file.canonicalize().expect("the extension's module exists");
+    roots.root_of(&file, &canonical).expect("the extension's file has an owning root").root_id
+}
+
+/// A workspace whose configuration sits in a SUBDIRECTORY, with no extensions at all.
+/// This is the shape where the configuration's own hits are already unreadable back: their
+/// paths are spelled against the configuration root while the resident reads a bare relative
+/// path against the project root, and the two differ only when the configuration is nested.
+pub(crate) fn workspace_with_a_nested_configuration() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().to_path_buf();
+    let configuration = workspace.join("src").join("cf");
+    fs::create_dir_all(&configuration).unwrap();
+    fs::write(
+        configuration.join("Configuration.xml"),
+        "<Configuration><Name>Конфа</Name></Configuration>",
+    )
+    .unwrap();
+    write_common_module_xml(&configuration, "Общий", true);
+    write(
+        &configuration,
+        SHARED_MODULE_REL,
+        &format!("&НаСервере\nФункция {CONFIGURATION_SYMBOL}() Экспорт Возврат 1; КонецФункции\n"),
+    );
+    fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+    (dir, workspace)
+}
+
+pub(crate) fn wait_ready(state: &DiagnosticsState) {
     for _ in 0..300 {
         match state.status() {
             DiagnosticsStatus::Ready { .. } => return,

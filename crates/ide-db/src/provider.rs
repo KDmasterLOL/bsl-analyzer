@@ -199,16 +199,21 @@ pub trait AnalysisProvider {
             .unwrap_or_default()
     }
 
-    /// The `Ext/Module.bsl` body file id(s) of the common module `name` visible to
-    /// `file_id`, for diagnostics that validate the module body (handler method
-    /// existence/export, required parameters). The default resolves bodies by
-    /// root-relative URI across the file's visible configs; the salsa-backed
-    /// provider overrides it with the substrate, scoped base + the file's own
-    /// extension.
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    /// The `Ext/Module.bsl` bodies of the common module `name` visible to `file_id`,
+    /// for diagnostics that validate the module body (handler method existence/export,
+    /// required parameters). The default resolves bodies by root-relative URI across
+    /// the file's visible configs and reports them all readable — it has no reader that
+    /// could have failed; the salsa-backed provider overrides it with the substrate,
+    /// scoped base + the file's own extension, where readability is known.
+    ///
+    /// Both produce the same MERGED, extension-first order the trait method promises:
+    /// `visible_configurations` runs base-first, so the default reverses it at the end.
+    /// Without that a provider written to this contract would measure a different
+    /// body's signature than the production one.
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         use bsl_metadata::traits::Module;
 
-        let mut out = Vec::new();
+        let mut out = hir::CommonModuleBodies::default();
         for visible in self.visible_configurations(file_id) {
             let Some(uri) =
                 visible.config.configuration.find_common_module(name).and_then(|m| m.uri())
@@ -222,11 +227,10 @@ pub trait AnalysisProvider {
                 self.resolve_vfs_path(SourceRootId(0), &vfs_path)
             };
             if let Some(fid) = resolved {
-                if !out.contains(&fid) {
-                    out.push(fid);
-                }
+                out.push(fid, false);
             }
         }
+        out.reverse_priority();
         out
     }
 
@@ -321,6 +325,20 @@ pub trait AnalysisProvider {
     ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
 
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
+
+    /// [`Self::resolve_vfs_path`] for a CONSTRUCTED candidate: the last
+    /// `tail_modes.len()` components match by the caller's case policy (see
+    /// `bsl_conventions::SegmentMatch`). The default is the exact lookup —
+    /// a provider without a file universe cannot widen it.
+    fn resolve_vfs_path_ci(
+        &self,
+        source_root_id: SourceRootId,
+        candidate: &std::path::Path,
+        _tail_modes: &[bsl_conventions::SegmentMatch],
+    ) -> Option<FileId> {
+        let vfs_path = VfsPath::new(candidate.to_string_lossy().into_owned());
+        self.resolve_vfs_path(source_root_id, &vfs_path)
+    }
 
     fn resolve_module_file(&self, relative_uri: &str) -> Option<FileId>;
 

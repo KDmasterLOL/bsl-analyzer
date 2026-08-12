@@ -415,6 +415,37 @@ impl From<&RawContextAvailability> for ContextAvailability {
     }
 }
 
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RawPlatformGlobalKind {
+    Function,
+    Property,
+    SystemEnum,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformGlobalSymbol {
+    pub canonical_ru: &'static str,
+    pub canonical_en: &'static str,
+    pub kind: RawPlatformGlobalKind,
+    /// Bit layout is attested in `data/global_catalog.json`.
+    pub environment_mask: u8,
+    pub writable: bool,
+}
+
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct RawPlatformGlobalCatalogMetadata {
+    pub schema_version: u32,
+    pub platform_version: &'static str,
+    pub edt_version: &'static str,
+    pub global_context_sha256: &'static str,
+    pub system_enums_sha256: &'static str,
+    pub complete_global_context: bool,
+    pub complete_system_enums: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct MethodDocs {
     pub method_id: u32,

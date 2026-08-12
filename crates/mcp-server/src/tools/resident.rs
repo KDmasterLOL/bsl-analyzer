@@ -16,14 +16,33 @@ use crate::tools::response::structured;
 /// The `status` action's body: the resident lifecycle snapshot. Always available (it
 /// needs no built resident), so an agent can poll readiness and progress instead of
 /// firing a data action just to read its `loading` envelope.
-pub(crate) fn status(report: &StatusReport) -> CallToolResult {
+pub(crate) fn status(
+    report: &StatusReport,
+    owns_caches: bool,
+    standalone_extension: Option<&str>,
+) -> CallToolResult {
     let mut body = json!({
         "state": report.state,
         "generation": report.generation,
         "reload": report.reload,
+        // A superseded backend keeps answering from what it already holds but
+        // produces no new derived state. Without saying so, its answers slowly
+        // drift from the sources with nothing in the protocol to explain why.
+        "owns_caches": owns_caches,
     });
+    // The workspace is an extension with no main configuration behind it. Its
+    // calls into that configuration cannot resolve, so the findings this backend
+    // is about to report are wrong in a way only the project shape explains.
+    if let Some(notice) = standalone_extension {
+        body["standalone_extension"] = json!(notice);
+    }
     if let Some(files) = report.files {
         body["files"] = json!(files);
+    }
+    // Assembled field by field, so a new one has to be added here explicitly or the
+    // internal report is right while nothing shows outside.
+    if let Some(unread) = report.unread_files {
+        body["unread_files"] = json!(unread);
     }
     if let Some(ms) = report.elapsed_ms {
         body["elapsed_ms"] = json!(ms);
@@ -77,6 +96,7 @@ mod tests {
             state: "ready",
             generation: 3,
             files: Some(17),
+            unread_files: Some(0),
             reload: "none",
             error: None,
             elapsed_ms: None,
@@ -89,13 +109,38 @@ mod tests {
     /// reads the same fields.
     #[test]
     fn status_reports_the_lifecycle_snapshot() {
-        let body = status(&ready_report()).structured_content.expect("structuredContent");
+        let body =
+            status(&ready_report(), true, None).structured_content.expect("structuredContent");
 
         assert_eq!(body["state"], "ready");
         assert_eq!(body["generation"], 3);
         assert_eq!(body["files"], 17);
         assert_eq!(body["reload"], "none");
         assert_eq!(body["watch"]["mode"], "event-driven");
+    }
+
+    #[test]
+    fn status_carries_the_standalone_extension_notice_when_there_is_one() {
+        let silent = status(&ready_report(), true, None).structured_content.expect("structured");
+        let warned = status(&ready_report(), true, Some("/ws/ext is a configuration extension"))
+            .structured_content
+            .expect("structured");
+
+        assert!(silent.get("standalone_extension").is_none(), "no notice, no field");
+        assert_eq!(warned["standalone_extension"], "/ws/ext is a configuration extension");
+    }
+
+    #[test]
+    fn status_states_whether_this_backend_owns_the_derived_caches() {
+        // A superseded backend answers from what it holds and produces no new
+        // derived state; a client has no other way to learn that.
+        let owning =
+            status(&ready_report(), true, None).structured_content.expect("structuredContent");
+        let superseded =
+            status(&ready_report(), false, None).structured_content.expect("structuredContent");
+
+        assert_eq!(owning["owns_caches"], true);
+        assert_eq!(superseded["owns_caches"], false);
     }
 
     /// A failed build reports the reason instead of an eternal "loading": an agent polling
@@ -106,13 +151,15 @@ mod tests {
             state: "failed",
             generation: 0,
             files: None,
+            unread_files: None,
             reload: "none",
             error: Some("builder panicked".to_owned()),
             elapsed_ms: None,
             watch: None,
         };
 
-        let status_body = status(&report).structured_content.expect("structuredContent");
+        let status_body =
+            status(&report, true, None).structured_content.expect("structuredContent");
         assert_eq!(status_body["state"], "failed");
         assert_eq!(status_body["error"], "builder panicked");
 

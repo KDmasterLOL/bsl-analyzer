@@ -30,7 +30,7 @@ pub const ENTRIES: &[SecurityEntry] = &[
     fs_ctor("ЗаписьДанных", "DataWriter"),
     fs_ctor("ЧтениеДанных", "DataReader"),
     fs_method_path("ЗначениеВФайл", "ValueToFile"),
-    fs_method_path("КопироватьФайл", "FileCopy"),
+    fs_method_path("КопироватьФайл", "CopyFile"),
     fs_method_path("ОбъединитьФайлы", "MergeFiles"),
     fs_method_path("ПереместитьФайл", "MoveFile"),
     fs_method_path("РазделитьФайл", "SplitFile"),
@@ -83,9 +83,9 @@ pub const ENTRIES: &[SecurityEntry] = &[
     ext_app_method("ЗапуститьПриложение", "RunApp"),
     ext_app_method("НачатьЗапускПриложения", "BeginRunningApplication"),
     ext_app_method("ЗапуститьПриложениеАсинх", "RunAppAsync"),
-    ext_app_method_ru_only("ЗапуститьПрограмму"),
-    ext_app_method_ru_only("ОткрытьПроводник"),
-    ext_app_method_ru_only("ОткрытьФайл"),
+    ext_app_module_method("ЗапуститьПрограмму", RUN_PROGRAM_MODULES),
+    ext_app_module_method("ОткрытьПроводник", OPEN_EXPLORER_MODULES),
+    ext_app_module_method("ОткрытьФайл", OPEN_FILE_MODULES),
     SecurityEntry {
         ru: "ПользователиОС",
         en: "OSUsers",
@@ -247,6 +247,23 @@ const fn ext_app_method(ru: &'static str, en: &'static str) -> SecurityEntry {
     }
 }
 
-const fn ext_app_method_ru_only(ru: &'static str) -> SecurityEntry {
-    ext_app_method(ru, "")
+/// Owners are listed per method, not per library: a module that does not export
+/// the method cannot be calling it, and accepting it back would reopen the very
+/// class this lookup exists to close. Launching a program has a server-side
+/// counterpart, while handing a file or a path to the shell is client-only;
+/// `РаботаСФайламиКлиент` predates the split and still exports `ОткрытьФайл`.
+const RUN_PROGRAM_MODULES: &[&str] = &["ФайловаяСистема", "ФайловаяСистемаКлиент"];
+const OPEN_EXPLORER_MODULES: &[&str] = &["ФайловаяСистемаКлиент"];
+const OPEN_FILE_MODULES: &[&str] = &["ФайловаяСистемаКлиент", "РаботаСФайламиКлиент"];
+
+const fn ext_app_module_method(ru: &'static str, owners: &'static [&'static str]) -> SecurityEntry {
+    SecurityEntry {
+        ru,
+        en: "",
+        kind: EntryKind::ModuleMethod { owners },
+        category: Category::ExternalApp,
+        severity: Severity::Major,
+        params: CMD_ARG0,
+        lifetime: None,
+    }
 }

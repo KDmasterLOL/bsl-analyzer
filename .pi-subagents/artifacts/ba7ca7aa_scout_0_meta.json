@@ -1,0 +1,145 @@
+{
+  "runId": "ba7ca7aa",
+  "agent": "scout",
+  "task": "Issue #209 implementation reconnaissance, read-only. Inspect mcp-server graph publish hook/types/state/build, project snapshot, bootstrap, sync, embed/status. Produce exact wiring changes for forced project reload on root config changes, current-project-derived roots tied to published topology, separate root retry outcome, wake-loop integration, and deterministic tests. Do not edit files.\n\n---\n**Output:**\nWrite your findings to exactly this path: /home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/outputs/ba7ca7aa/context.md\nThis path is authoritative for this run.\nIgnore any other output filename or output path mentioned elsewhere, including output destinations in the base agent prompt, system prompt, or task instructions.",
+  "exitCode": 0,
+  "processSignal": "SIGTERM",
+  "usage": {
+    "input": 59796,
+    "output": 4132,
+    "cacheRead": 177152,
+    "cacheWrite": 0,
+    "cost": 0.5115160000000001,
+    "turns": 7
+  },
+  "model": "openai-codex/gpt-5.6-sol:low",
+  "attemptedModels": [
+    "openai-codex/gpt-5.6-sol:low"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openai-codex/gpt-5.6-sol:low",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 59796,
+        "output": 4132,
+        "cacheRead": 177152,
+        "cacheWrite": 0,
+        "cost": 0.5115160000000001,
+        "turns": 7
+      }
+    }
+  ],
+  "durationMs": 189763,
+  "toolCount": 20,
+  "launchContractDigest": "41bcffb1cca0a4f023e3a3ec9822d6b37f8f35b9b44c98eccf409283febf23f3",
+  "launchResolvedExtensions": {
+    "version": 1,
+    "source": "launch-resolved",
+    "disableAmbientExtensions": false,
+    "runtime": [
+      "sha256:e414f01f6029c834"
+    ],
+    "configured": [],
+    "effective": [
+      "sha256:e414f01f6029c834"
+    ],
+    "omitted": {
+      "runtime": 0,
+      "configured": 0,
+      "effective": 0
+    }
+  },
+  "acceptance": {
+    "status": "attested",
+    "evidenceStatus": "attested",
+    "explicit": false,
+    "effectiveAcceptance": {
+      "level": "attested",
+      "explicit": false,
+      "inferredReason": [
+        "read-only/reviewer-style agent"
+      ],
+      "criteria": [
+        {
+          "id": "criterion-1",
+          "must": "Return concrete findings with file paths and severity when applicable",
+          "evidence": [
+            "review-findings",
+            "residual-risks"
+          ],
+          "severity": "required"
+        }
+      ],
+      "evidence": [
+        "review-findings",
+        "residual-risks"
+      ],
+      "verify": [],
+      "stopRules": []
+    },
+    "inferredReason": [
+      "read-only/reviewer-style agent"
+    ],
+    "criteria": [
+      {
+        "id": "criterion-1",
+        "must": "Return concrete findings with file paths and severity when applicable",
+        "evidence": [
+          "review-findings",
+          "residual-risks"
+        ],
+        "severity": "required"
+      }
+    ],
+    "runtimeChecks": [],
+    "verifyRuns": [],
+    "childReport": {
+      "criteriaSatisfied": [
+        {
+          "id": "criterion-1",
+          "status": "satisfied",
+          "evidence": "Concrete high/medium findings and exact wiring recommendations cite graph/types.rs, graph/state.rs, graph/build.rs, state/bootstrap.rs, state/sync.rs, state/embed.rs, and overlay_retry.rs with line ranges."
+        }
+      ],
+      "changedFiles": [],
+      "testsAddedOrUpdated": [],
+      "commandsRun": [
+        {
+          "command": "targeted repository find/grep/read inspection",
+          "result": "passed",
+          "summary": "Mapped graph publish, project snapshot, bootstrap, sync, embed/status, and retry paths."
+        }
+      ],
+      "validationOutput": [
+        "Read-only reconnaissance; no source edits or test execution requested.",
+        "Artifact written to the authoritative context.md path."
+      ],
+      "residualRisks": [
+        "WorkspaceRoots replacement/removal semantics in bsl-search require verification.",
+        "Cached graph adoption needs a topology-fenced source for the matching root table.",
+        "Invalid config fallback policy must be explicitly chosen."
+      ],
+      "noStagedFiles": true,
+      "diffSummary": "No source diff; one reconnaissance artifact created.",
+      "reviewFindings": [
+        "high: crates/mcp-server/src/state/sync.rs:198-228 - config changes are not a forced reload.",
+        "high: crates/mcp-server/src/state/bootstrap.rs:665-676 - engine roots remain boot-derived after topology changes.",
+        "high: crates/mcp-server/src/graph/types.rs:14-41 - publish topology is not accompanied by its project-derived roots.",
+        "medium: crates/mcp-server/src/graph/state.rs:311-320 - boolean hook outcome cannot represent independent root retry.",
+        "medium: crates/mcp-server/src/state/overlay_retry.rs:249-274 - retry state has no separate root obligation."
+      ],
+      "manualNotes": "No files were edited except the required output artifact."
+    }
+  },
+  "effects": {
+    "fileMutation": {
+      "status": "not-applicable",
+      "expected": false,
+      "attempted": true
+    }
+  },
+  "transcriptPath": "/home/itrous/src/tools_migration/lsp/bsl-analyzer/.pi-subagents/artifacts/ba7ca7aa_scout_0_transcript.jsonl",
+  "timestamp": 1786480077062
+}

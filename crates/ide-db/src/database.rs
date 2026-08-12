@@ -166,6 +166,7 @@ impl RootDatabaseImpl {
         let _ = FeaturesInput::builder(
             defaults.type_narrowing,
             hir::execution_env::EnvOptions::default(),
+            None,
         )
         .durability(Durability::MEDIUM)
         .new(&db);
@@ -1801,25 +1802,33 @@ impl RootDatabaseImpl {
     /// sees the merged surface. The scoped counterpart of the former all-config
     /// `find_common_module_files_anywhere`: body ids come straight from the substrate
     /// when bootstrapped, otherwise from a scoped root-relative URI scan.
-    pub fn resolve_common_module_files_for_file(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    pub fn resolve_common_module_files_for_file(
+        &self,
+        file_id: FileId,
+        name: &str,
+    ) -> hir::CommonModuleBodies {
+        let mut out = hir::CommonModuleBodies::default();
         let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
-            return Vec::new();
+            return out;
         };
-
-        let mut out: Vec<FileId> = Vec::new();
 
         if bootstrapped {
             for listing in
                 chain_listings.iter().rev().cloned().chain(std::iter::once(main_listing)).flatten()
             {
-                if let Some(fid) =
-                    metadata::common_module_index(self, listing).lookup_module_file(name)
-                {
-                    if !out.contains(&fid) {
-                        out.push(fid);
-                    }
+                let index = metadata::common_module_index(self, listing);
+                let readable = index.lookup_module_file(name);
+                let unread = index.lookup_unread_module_file(name);
+                if let Some(fid) = readable {
+                    out.push(fid, false);
+                }
+                if let Some(fid) = unread {
+                    out.push(fid, true);
+                }
+                if index.lookup(name).is_some() && readable.is_none() && unread.is_none() {
+                    out.mark_missing_expected_body();
                 }
             }
             return out;
@@ -1832,22 +1841,36 @@ impl RootDatabaseImpl {
         };
         let paths = RootDatabaseImpl::all_config_paths(self);
 
-        let body_in = |root: &std::path::Path| -> Option<FileId> {
+        let body_in = |root: &std::path::Path| -> (bool, Option<FileId>) {
             let path_input = metadata::intern_configuration_path(
                 self,
                 &root.to_string_lossy(),
                 self.config_root_revision_for_path(root),
             );
             let config = self.load_configuration(path_input);
-            let uri = config.find_common_module(name)?.uri()?;
-            let vfs_path = vfs::VfsPath::new(root.join(uri).to_string_lossy().into_owned());
-            self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            let Some(module) = config.find_common_module(name) else {
+                return (false, None);
+            };
+            let body = module.uri().and_then(|uri| {
+                let vfs_path = vfs::VfsPath::new(root.join(uri).to_string_lossy().into_owned());
+                self.resolve_vfs_path(SourceRootId(0), &vfs_path)
+            });
+            (true, body)
+        };
+
+        // The scan resolves a URI to an id without ever reading it, so readability is
+        // asked here — the same question the substrate branch answers from its index.
+        let admit = |out: &mut hir::CommonModuleBodies, fid: FileId| {
+            out.push(fid, self.file_is_unread(fid))
         };
 
         if paths.is_empty() {
             if let Some(root) = vfs_helpers::find_configuration_root(self, &file_path) {
-                if let Some(fid) = body_in(&root) {
-                    out.push(fid);
+                let (declared, body) = body_in(&root);
+                if let Some(fid) = body {
+                    admit(&mut out, fid);
+                } else if declared {
+                    out.mark_missing_expected_body();
                 }
             }
             return out;
@@ -1857,13 +1880,61 @@ impl RootDatabaseImpl {
             return out;
         };
         for root in roots.chain.iter().rev().map(|(_, p)| p).chain(roots.main.as_ref()) {
-            if let Some(fid) = body_in(root) {
-                if !out.contains(&fid) {
-                    out.push(fid);
-                }
+            let (declared, body) = body_in(root);
+            if let Some(fid) = body {
+                admit(&mut out, fid);
+            } else if declared {
+                out.mark_missing_expected_body();
             }
         }
         out
+    }
+
+    /// Fixed application-module body files visible to `file_id`, in overlay
+    /// composition order (base first). An empty result is complete: every visible
+    /// root was examined and none contained that fixed path.
+    pub fn resolve_application_module_files_for_file(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        queries::application_module_files_query(self, file_id_input, kind)
+    }
+
+    fn resolve_application_module_files_uncached_impl(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        use base_db::SourceDatabase;
+
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let roots = if RootDatabaseImpl::all_config_paths(self).is_empty() {
+            vec![vfs_helpers::find_configuration_root(self, &file_path)?]
+        } else {
+            let visible = self.visible_roots_for_file(file_id)?;
+            visible
+                .main
+                .into_iter()
+                .chain(visible.chain.into_iter().map(|(_, path)| path))
+                .collect()
+        };
+        let source_root_id = self.file_source_root_input(file_id).source_root_id(self);
+        let source_root = self.source_root_input(source_root_id);
+        let relative_path = kind.relative_path();
+        let modes =
+            hir::module_path_segment_modes(&relative_path.to_string_lossy()).unwrap_or_default();
+        let mut bodies = hir::CommonModuleBodies::default();
+        for root in roots {
+            let candidate = root.join(&relative_path).to_string_lossy().into_owned();
+            if let Some(found) =
+                base_db::resolve_vfs_path_ci_query(self, source_root, candidate, &modes)
+            {
+                bodies.push(found, self.file_is_unread(found));
+            }
+        }
+        Some(bodies)
     }
 
     fn features(&self) -> FeaturesInput {
@@ -1890,6 +1961,16 @@ impl RootDatabaseImpl {
         input.set_env_options(self).to(options);
     }
 
+    pub fn target_platform_version(&self) -> Option<Arc<str>> {
+        self.features().target_platform_version(self)
+    }
+
+    pub fn set_target_platform_version(&mut self, version: Option<Arc<str>>) {
+        use salsa::Setter;
+        let input = self.features();
+        input.set_target_platform_version(self).to(version);
+    }
+
     pub(crate) fn get_file_path(&self, file_id: FileId) -> Option<PathBuf> {
         let source_root_input = self.file_source_root_input(file_id);
         let source_root_id = source_root_input.source_root_id(self);
@@ -1898,6 +1979,26 @@ impl RootDatabaseImpl {
         let file_set = source_root.file_set();
         let vfs_path = file_set.path_for_file(&file_id)?;
         Some(PathBuf::from(vfs_path.as_path()))
+    }
+
+    /// The whole-config load key for `file_path`: the root attributed from disk,
+    /// carried at the revision of the declared root the file sits under.
+    ///
+    /// Shared by the lazy read and the pre-pool warm-up on purpose. The two parts
+    /// come from different places — the path from the filesystem walk, the
+    /// revision from the declared-root prefix — so a warm-up building the key its
+    /// own way would memoise under a key the readers never ask for, and warm
+    /// nothing.
+    pub(crate) fn configuration_input_for_path<'db>(
+        &'db self,
+        file_path: &Path,
+    ) -> Option<metadata::ConfigurationPathInput<'db>> {
+        let config_root = self.find_configuration_root(file_path)?;
+        Some(metadata::intern_configuration_path(
+            self,
+            &config_root.to_string_lossy(),
+            self.config_root_revision_for_path(file_path),
+        ))
     }
 
     pub(crate) fn find_configuration_root(&self, file_path: &Path) -> Option<PathBuf> {
@@ -1910,8 +2011,12 @@ impl RootDatabaseImpl {
                 return Some(current.to_path_buf());
             }
 
-            let config_xml = current.join("Configuration.xml");
-            if config_xml.is_file() {
+            let config_xml = bsl_conventions::find_child_ci(
+                current,
+                bsl_conventions::ConventionalName::ConfigurationXml.canonical(),
+            )
+            .filter(|p| p.is_file());
+            if config_xml.is_some() {
                 tracing::debug!(?current, "Found configuration root via Configuration.xml");
                 return Some(current.to_path_buf());
             }
@@ -1970,6 +2075,15 @@ impl SourceDatabase for RootDatabaseImpl {
     fn set_file_text(&mut self, file_id: FileId, text: &str) {
         let files = self.files.clone();
         files.set_file_text_smart(self, file_id, text);
+    }
+
+    fn set_file_unreadable(&mut self, file_id: FileId) {
+        let files = self.files.clone();
+        files.set_file_unreadable(self, file_id);
+    }
+
+    fn file_is_unread(&self, file_id: FileId) -> bool {
+        self.files.file_is_unread(self, file_id)
     }
 
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
@@ -2160,6 +2274,34 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
             .collect()
     }
 
+    fn warm_config_roots(&self, modules: &[ModuleId]) {
+        // Load each root through its own key rather than through
+        // `module_metadata`: that query returns early for service modules whose
+        // service resolves out of the DECLARED roots, so a representative can
+        // report success without its attributed root ever being read — and the
+        // dedup below would then skip every remaining module of that root.
+        //
+        // Deduped on the interned key, not the root path: two files of one root
+        // under different declared roots carry different revisions, and it is
+        // the key that the loader memoises.
+        let mut warmed = rustc_hash::FxHashSet::default();
+        for module in modules {
+            let Some(path) = vfs_helpers::get_file_path(self, module.file_id) else {
+                continue;
+            };
+            let Some(path_input) = self.configuration_input_for_path(&path) else {
+                continue;
+            };
+            if warmed.insert(path_input) {
+                let _ = metadata::MetadataDb::load_configuration(self, path_input);
+                // The per-file memos a batch also parks on (the extension merge
+                // above all) hang off `module_metadata`, so one representative
+                // still pays for them here rather than inside the pool.
+                let _ = hir::DefDatabase::module_metadata(self, *module);
+            }
+        }
+    }
+
     fn resolve_metadata_object(
         &self,
         file_id: FileId,
@@ -2206,12 +2348,20 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         &self,
         file_id: FileId,
         name: &str,
-    ) -> Option<Vec<FileId>> {
+    ) -> Option<hir::CommonModuleBodies> {
         // The helper orders extension-first for merged-surface validation;
         // qualified resolution wants the base declaration to win, so reverse.
-        let mut files = self.resolve_common_module_files_for_file(file_id, name);
-        files.reverse();
-        Some(files)
+        let mut bodies = self.resolve_common_module_files_for_file(file_id, name);
+        bodies.reverse_priority();
+        Some(bodies)
+    }
+
+    fn resolve_application_module_file_candidates(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        self.resolve_application_module_files_for_file(file_id, kind)
     }
 
     fn resolve_event_subscription(
@@ -2435,6 +2585,14 @@ impl hir::HirDatabase for RootDatabaseImpl {
         RootDatabaseImpl::env_options(self)
     }
 
+    fn target_platform_version(&self) -> Option<Arc<str>> {
+        RootDatabaseImpl::target_platform_version(self)
+    }
+
+    fn workspace_load_complete(&self) -> bool {
+        RootDatabaseImpl::workspace_load_complete(self)
+    }
+
     fn proc_signature(
         &self,
         method_input: hir::MethodIdInput<'_>,
@@ -2475,12 +2633,7 @@ impl hir::HirDatabase for RootDatabaseImpl {
 impl RootDatabase for RootDatabaseImpl {
     fn get_configuration(&self, file_id: FileId) -> Option<Arc<bsl_metadata::Configuration>> {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
-        let config_root = vfs_helpers::find_configuration_root(self, &file_path)?;
-        let path_input = metadata::intern_configuration_path(
-            self,
-            &config_root.to_string_lossy(),
-            self.config_root_revision_for_path(&file_path),
-        );
+        let path_input = self.configuration_input_for_path(&file_path)?;
         Some(self.load_configuration(path_input))
     }
 
@@ -2558,8 +2711,16 @@ impl RootDatabase for RootDatabaseImpl {
         RootDatabaseImpl::integration_service_for_file_id(self, module_file_id)
     }
 
-    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> Vec<FileId> {
+    fn resolve_common_module_files(&self, file_id: FileId, name: &str) -> hir::CommonModuleBodies {
         RootDatabaseImpl::resolve_common_module_files_for_file(self, file_id, name)
+    }
+
+    fn resolve_application_module_files_uncached(
+        &self,
+        file_id: FileId,
+        kind: hir::ApplicationModuleKind,
+    ) -> Option<hir::CommonModuleBodies> {
+        self.resolve_application_module_files_uncached_impl(file_id, kind)
     }
 
     fn all_sdbl_in_file(

@@ -14,7 +14,7 @@ pub(crate) enum GraphStatus {
 }
 
 /// What the graph hands its publish hook after a build publishes.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct GraphPublishSignal {
     /// A fresher reload is already catching up: a fast-path hint the consumer may use to
     /// skip this round and let that reload's publish do the re-render. Not correctness-bearing.
@@ -35,6 +35,27 @@ pub(crate) struct GraphPublishSignal {
     /// rendering contexts from a foreign topology would write wrong answers into the
     /// persisted search index.
     pub(crate) topology: u64,
+    /// Whether the consumer must compare/install the search root table carried by this
+    /// publication. False for a context-only retry, so a root transition failure never
+    /// inflates into an unrelated whole-collection context refresh.
+    pub(crate) roots_refresh_requested: bool,
+    /// Search roots paired with this publication. A fresh build carries the exact
+    /// [`crate::graph::ProjectSnapshot`] it built from; cached adoption carries the current
+    /// validated project snapshot after proving its graph fingerprint matches the artifact.
+    /// `None` means project loading failed; consumers keep their last-known-good table and
+    /// report the root request unhandled.
+    pub(crate) workspace_roots: Option<bsl_search::WorkspaceRoots>,
+}
+
+/// Independent results of one graph publish hook invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GraphPublishOutcome {
+    pub(crate) topology_handled: bool,
+    pub(crate) roots_handled: bool,
+}
+
+impl GraphPublishOutcome {
+    pub(crate) const HANDLED: Self = Self { topology_handled: true, roots_handled: true };
 }
 
 /// What a [`crate::graph::GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight
@@ -67,6 +88,9 @@ pub(crate) struct GraphStatusReport {
     pub state: &'static str,
     /// Indexed `.bsl` file count (when `ready`).
     pub files: Option<usize>,
+    /// Modules the build could not read (when `ready`). They contributed no nodes and
+    /// no edges, so the graph is incomplete in a way no fingerprint reveals.
+    pub unread_files: Option<usize>,
     /// Served snapshot generation (when `ready`).
     pub revision: Option<u64>,
     /// Whether the workspace drifted on disk since the build (when `ready`).

@@ -10,7 +10,9 @@ use crate::graph_query::GraphDb;
 
 #[cfg(test)]
 use super::input::GRAPH_SOURCE_ROOT;
-use super::scan::{classify_changes, workspace_fingerprint};
+use super::scan::classify_changes;
+#[cfg(test)]
+use super::scan::workspace_fingerprint;
 use super::state::{lock_recover, GraphState, Published, ReloadState};
 use super::types::GraphStatus;
 
@@ -45,7 +47,7 @@ impl GraphState {
         if built.force_stale {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
-        self.adopt_prebuilt(generation, built.fp_pre, built.files);
+        self.adopt_prebuilt(generation, built.fp_pre, built.files, built.search_roots.clone());
         self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
         // The fused sink just wrote every indexed document's context from THIS
         // build — nothing persisted predates it, so no whole-collection re-render.
@@ -96,12 +98,18 @@ impl GraphState {
         // drift stamped after this point carries a higher seq, is left for a later build, and
         // is guaranteed one by the pending-nudge machinery (every xml mark also nudges).
         let build_start_seq = self.current_mark_seq();
+        let project_reload_epoch = self.project_reload_epoch();
+        let force_project_reload = project_reload_epoch
+            > self.completed_project_reload_epoch.load(std::sync::atomic::Ordering::SeqCst);
 
         // On the initial load, reuse a cached build from a previous process run if it
         // still matches the workspace — turning a multi-minute rebuild into a stat
         // walk plus an open. A reload is skipped here: it only fires once drift has
         // been detected, so the on-disk file is known stale and must be rebuilt.
-        if !is_reload && self.try_publish_cached(&workspace_root, build_start_seq) {
+        if !force_project_reload
+            && !is_reload
+            && self.try_publish_cached(&workspace_root, build_start_seq)
+        {
             return;
         }
 
@@ -109,7 +117,10 @@ impl GraphState {
         // the reload lifecycle (its failure path keeps the snapshot and flags
         // `reload="failed"`, unlike this initial load's `Failed`). The catch-up build
         // recomputes its own generation from the just-published revision.
-        if !is_reload && self.try_publish_stale_and_catch_up(&workspace_root) {
+        if !force_project_reload
+            && !is_reload
+            && self.try_publish_stale_and_catch_up(&workspace_root)
+        {
             return;
         }
 
@@ -133,7 +144,10 @@ impl GraphState {
         // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
         // those modules instead of the whole config. On any ineligibility or failure
         // it returns false and we fall through to a full rebuild.
-        if is_reload && self.try_incremental_reload(&workspace_root, generation, build_start_seq) {
+        if !force_project_reload
+            && is_reload
+            && self.try_incremental_reload(&workspace_root, generation, build_start_seq)
+        {
             return;
         }
 
@@ -173,10 +187,13 @@ impl GraphState {
                         fingerprint: built.fp_pre,
                         stale: false,
                         reload: ReloadState::Idle,
+                        force_stale: built.force_stale,
+                        search_roots: built.search_roots.clone(),
                     });
                     inner.status = GraphStatus::Ready { files: built.files };
                 }
                 self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+                self.complete_project_reload_through(project_reload_epoch);
                 self.notify_published(build_start_seq, topology_changed);
                 tracing::info!(
                     files = built.files,
@@ -216,9 +233,10 @@ impl GraphState {
         if stored_fp.is_empty() {
             return false; // no per-file record (older build) → full rebuild
         }
-        // ONE project snapshot serves the eligibility diff, the topology gate, the
-        // patch and the straddle bracket, so a config edit mid-operation cannot mix
-        // two topologies.
+        // ONE project snapshot and ONE scanned universe serve the eligibility diff,
+        // the profile recompute, the pre-fingerprint and the patch, so neither a
+        // config edit nor a file landing mid-operation can hand two passes two
+        // different trees. Only the straddle check walks again.
         let project = crate::graph::ProjectSnapshot::load(workspace_root);
         // A topology change re-shapes visibility for ANY module even when only
         // `.bsl` bodies drifted on disk — never body-patch across it.
@@ -227,8 +245,15 @@ impl GraphState {
                 if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
             _ => return false,
         }
-        let diff =
-            classify_changes(&stored_fp, &super::scan::scan_stats_over_roots(&project.scan_roots));
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        // Before the diff, not inside the bracket: a diff against a short scan reads
+        // hidden files as removals, and an unreadable EMPTY subtree does not move the
+        // stats at all — the diff cannot see incompleteness, only the verdict can.
+        if !pre.clean() {
+            tracing::info!("incremental reload: incomplete workspace scan; full rebuild");
+            return false;
+        }
+        let diff = classify_changes(&stored_fp, &pre.stats);
 
         // Body-only shape: at least one `.bsl` modified, nothing added/removed, no
         // metadata drift (an `.xml` change can flip visibility for any module).
@@ -244,7 +269,8 @@ impl GraphState {
         // Recompute each modified module's profile and partition into body-only
         // (signature unchanged) and signature-changed.
         let profiles =
-            match crate::graph_db::recompute_module_profiles(workspace_root, &modified_paths) {
+            match crate::graph_db::recompute_module_profiles(&project, &pre.files, &modified_paths)
+            {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("incremental reload: profile recompute failed: {e}");
@@ -295,7 +321,7 @@ impl GraphState {
             // 2.6 GB copy) is cheaper than reprojecting most modules. Compare against
             // the `.bsl` module count only — `changed_paths` are modules, while
             // `stored_fp` also counts `.xml`, which would skew the threshold.
-            let module_total = stored_fp.keys().filter(|p| p.ends_with(".bsl")).count();
+            let module_total = bsl_module_total(&stored_fp);
             if changed_paths.len() * 2 > module_total {
                 tracing::info!(
                     changed = changed_paths.len(),
@@ -306,14 +332,16 @@ impl GraphState {
             }
         }
 
-        // Bracket the patch with fingerprint scans, mirroring the full build's
-        // straddle detection: a write landing mid-patch marks the snapshot stale.
-        let fp_pre = super::scan::workspace_fingerprint_over(&project);
+        // Bracket the patch with the shared pre-scan and a fresh post-scan,
+        // mirroring the full build's straddle detection: a write landing after the
+        // pre-scan marks the snapshot stale.
+        let fp_pre = super::scan::fingerprint_of(&pre.stats, &project.configs);
         let tmp_path = db_path.with_extension(format!("db.building.{}", std::process::id()));
         let built_at = chrono::Utc::now().to_rfc3339();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let summary = crate::graph_db::update_graph_database_bodies(
                 &project,
+                &pre,
                 &db_path,
                 &tmp_path,
                 &changed_paths,
@@ -325,10 +353,12 @@ impl GraphState {
                     built_at,
                 },
             )?;
-            let fp_post = super::scan::workspace_fingerprint_over(
-                &crate::graph::ProjectSnapshot::load(workspace_root),
-            );
-            let force_stale = fp_pre != fp_post;
+            let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
+            let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
+            let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
+            // `pre.clean()` is guaranteed above; it stays in the formula so the two
+            // decisions cannot drift apart if the gate ever moves.
+            let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
             {
                 let conn = rusqlite::Connection::open(&tmp_path)?;
                 conn.execute(
@@ -355,6 +385,8 @@ impl GraphState {
                         fingerprint: fp,
                         stale: false,
                         reload: ReloadState::Idle,
+                        force_stale,
+                        search_roots: project.search_roots.clone(),
                     });
                     inner.status = GraphStatus::Ready { files };
                 }
@@ -393,11 +425,10 @@ impl GraphState {
         let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
             return false;
         };
-        let fp_now = workspace_fingerprint(workspace_root);
-        // Reuse only an exact, clean match: a fingerprint mismatch means the
-        // workspace moved since the build, and `force_stale` means the build
-        // straddled a write and was never a coherent snapshot.
-        if force_stale || fingerprint != fp_now {
+        let project = crate::graph::ProjectSnapshot::load(workspace_root);
+        let now = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let fp_now = super::scan::fingerprint_of(&now.stats, &project.configs);
+        if !cache_is_reusable(force_stale, fingerprint, fp_now, now.clean()) {
             return false;
         }
         let files = graph.files().unwrap_or(0);
@@ -409,6 +440,8 @@ impl GraphState {
             fingerprint,
             stale: false,
             reload: ReloadState::Idle,
+            force_stale: false,
+            search_roots: project.search_roots.clone(),
         });
         inner.status = GraphStatus::Ready { files };
         drop(inner);
@@ -473,6 +506,8 @@ impl GraphState {
                 stale: true,
                 // Pre-claimed: the catch-up spawned below owns the one reload slot.
                 reload: ReloadState::Running,
+                force_stale: false,
+                search_roots: None,
             });
             inner.status = GraphStatus::Ready { files };
         }
@@ -529,9 +564,26 @@ fn build_and_publish_graph_file(
     graph: &GraphState,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
 ) -> anyhow::Result<PublishedBuild> {
-    // ONE project snapshot serves the pre-scan, the build and the post-scan.
+    // ONE project snapshot and ONE scanned universe serve the pre-fingerprint,
+    // the build and the persisted `files` rows: every pre-publication pass sees
+    // the same tree by construction. Only the straddle check walks again.
     let project = crate::graph::ProjectSnapshot::load(workspace_root);
-    let fp_pre = super::scan::workspace_fingerprint_over(&project);
+    let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+    build_and_publish_scanned(workspace_root, &project, &pre, generation, graph, chunk_sink)
+}
+
+/// The publication over an ALREADY-SCANNED universe — split from
+/// [`build_and_publish_graph_file`] so a test can mutate the tree between the
+/// pre-scan and the build and observe that the build does not see the mutation.
+fn build_and_publish_scanned(
+    workspace_root: &Path,
+    project: &crate::graph::ProjectSnapshot,
+    pre: &crate::graph::universe::ScannedUniverse,
+    generation: u64,
+    graph: &GraphState,
+    chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
+) -> anyhow::Result<PublishedBuild> {
+    let fp_pre = super::scan::fingerprint_of(&pre.stats, &project.configs);
     let out_path = graph.graph_db_path().expect("workspace graph has cache layout");
     // Pid-suffixed temp: two daemons over the same workspace (an old topology
     // generation draining while a new one starts) must not interleave writes into
@@ -549,23 +601,28 @@ fn build_and_publish_graph_file(
     };
     let summary = match chunk_sink {
         Some(sink) => crate::graph_db::build_graph_database_fused(
-            &project,
+            project,
+            pre,
             &tmp_path,
             GRAPH_BUILD_BATCH,
             &meta,
             sink,
         )?,
-        None => {
-            crate::graph_db::build_graph_database(&project, &tmp_path, GRAPH_BUILD_BATCH, &meta)?
-        }
+        None => crate::graph_db::build_graph_database(
+            project,
+            pre,
+            &tmp_path,
+            GRAPH_BUILD_BATCH,
+            &meta,
+        )?,
     };
-    // The post-scan derives a FRESH project snapshot: the straddle check must see
-    // the world as it is now, or a topology/root change landing mid-build would
-    // compare the frozen snapshot against itself and publish clean.
-    let fp_post = super::scan::workspace_fingerprint_over(&crate::graph::ProjectSnapshot::load(
-        workspace_root,
-    ));
-    let force_stale = fp_pre != fp_post;
+    // The post-scan derives a FRESH project snapshot AND a fresh walk: the straddle
+    // check must see the world as it is now, or a topology/root change landing
+    // mid-build would compare the frozen snapshot against itself and publish clean.
+    let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
+    let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
+    let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
+    let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
     {
         let conn = rusqlite::Connection::open(&tmp_path)?;
         conn.execute(
@@ -582,8 +639,38 @@ fn build_and_publish_graph_file(
         files: summary.modules,
         fp_pre,
         force_stale,
-        scan_roots: project.scan_roots,
+        scan_roots: project.scan_roots.clone(),
+        search_roots: project.search_roots.clone(),
     })
+}
+
+/// Whether a finished build must be marked `force_stale` — never served as a
+/// coherent snapshot. Two ways to lose the claim: the tree moved while the build
+/// ran (the fingerprints differ), or either bracketing scan could not speak for
+/// the whole tree (short coverage or degraded identity). The second term is what
+/// a fingerprint comparison alone cannot see: an unreadable EMPTY subtree leaves
+/// both fingerprints equal while hiding an unknown amount of tree.
+fn publish_force_stale(
+    fp_pre: crate::graph_db::GraphFp,
+    fp_post: crate::graph_db::GraphFp,
+    pre_clean: bool,
+    post_clean: bool,
+) -> bool {
+    fp_pre != fp_post || !pre_clean || !post_clean
+}
+
+/// Whether an on-disk build may be adopted as FRESH. `force_stale` means it never
+/// was a coherent snapshot; a fingerprint mismatch means the workspace moved since
+/// it was built; an unclean scan means `fp_now` describes only the part of the
+/// tree the scan could see — equality against it proves nothing, so adoption is
+/// refused even when the values match.
+fn cache_is_reusable(
+    force_stale: bool,
+    stored: crate::graph_db::GraphFp,
+    fp_now: crate::graph_db::GraphFp,
+    scan_clean: bool,
+) -> bool {
+    !force_stale && scan_clean && stored == fp_now
 }
 
 /// Rename a finished build into the shared path, or throw it away.
@@ -623,6 +710,7 @@ struct PublishedBuild {
     fp_pre: crate::graph_db::GraphFp,
     force_stale: bool,
     scan_roots: Vec<PathBuf>,
+    search_roots: Option<bsl_search::WorkspaceRoots>,
 }
 
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
@@ -633,16 +721,36 @@ struct PublishedBuild {
 /// files.
 struct FusedChunkWriter<'e> {
     engine: &'e mut SearchEngine,
-    /// Canonical, `/`-normalised search source root: derives the stored relative path
-    /// and excludes files outside it (e.g. extension modules the local index omits).
+    /// The engine's root table, cloned so writing through `engine` stays possible while
+    /// attributing paths. Every registered root is indexed, and a file's key is decided by the
+    /// same longest-prefix attribution the rest of the index uses.
+    roots: Option<bsl_search::WorkspaceRoots>,
+    /// Canonical, `/`-normalised search source root. Only used when no root table is
+    /// configured — then the corpus is the configuration alone, as it always was.
     source_prefix: String,
 }
 
 impl<'e> FusedChunkWriter<'e> {
     fn new(engine: &'e mut SearchEngine, source_path: PathBuf) -> Self {
+        let roots = engine.workspace_roots().cloned();
         let source_prefix =
             source_path.canonicalize().unwrap_or(source_path).to_string_lossy().replace('\\', "/");
-        Self { engine, source_prefix }
+        Self { engine, roots, source_prefix }
+    }
+
+    /// The store key of one emitted module, or `None` when it belongs to no registered root.
+    fn key_of(&self, abs: &str) -> Option<bsl_search::FileKey> {
+        let Some(roots) = self.roots.as_ref() else {
+            let prefix = self.source_prefix.trim_end_matches('/');
+            let rel = abs
+                .strip_prefix(prefix)
+                .filter(|rest| rest.starts_with('/'))
+                .map(|s| s.trim_start_matches('/'))?;
+            return (!rel.is_empty()).then(|| bsl_search::FileKey::configuration(rel));
+        };
+        let walked = std::path::Path::new(abs);
+        let canonical = walked.canonicalize().ok()?;
+        roots.root_of(walked, &canonical)
     }
 }
 
@@ -671,21 +779,14 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             ctxs.push(row.graph_context.clone());
         }
 
-        let prefix = self.source_prefix.trim_end_matches('/');
         for (abs, chunks, ctxs) in &groups {
-            // Require a path-separator boundary after the prefix so a sibling whose name
-            // merely starts with the source dir's string (e.g. `…/cf` vs `…/cf_ext`) is
-            // not mistaken for a file inside the source root.
-            let Some(rel) = abs
-                .strip_prefix(prefix)
-                .filter(|rest| rest.starts_with('/'))
-                .map(|s| s.trim_start_matches('/'))
-            else {
-                continue; // outside the search source root (e.g. an extension module)
-            };
-            if rel.is_empty() {
+            // A module outside every registered root is not this index's business. With a table
+            // configured that means "under no declared root"; without one it means "outside the
+            // configuration", which is the prefix check this used to be — a separator boundary
+            // included, so `…/cf_ext` is never mistaken for a file inside `…/cf`.
+            let Some(key) = self.key_of(abs) else {
                 continue;
-            }
+            };
             let bytes = match std::fs::read(abs) {
                 Ok(b) => b,
                 Err(_) => continue, // unreadable now → leave for the standalone indexer
@@ -704,11 +805,12 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             // cross-file staleness in the embedding's context rather than re-embed every caller
             // of any changed symbol — embeddings are an approximation and this self-heals on the
             // next edit of the affected file.
-            if self.engine.store().file_hash(rel).ok().flatten().as_deref() == Some(hash.as_slice())
+            if self.engine.store().file_hash(&key.root_id, &key.path).ok().flatten().as_deref()
+                == Some(hash.as_slice())
             {
                 continue;
             }
-            self.engine.ingest_fused_file(rel, &hash, chunks, ctxs)?;
+            self.engine.ingest_fused_file(&key, &hash, chunks, ctxs)?;
         }
         Ok(())
     }
@@ -717,6 +819,15 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
 /// Read the stored per-file fingerprints from a built graph's `files` table. Any
 /// open/query failure (missing file, older schema without the table) yields an empty
 /// map, which classifies every current file as `added` → conservative full rebuild.
+/// The `.bsl` module count of a stored fingerprint map — the denominator of the
+/// incremental-reload breadth threshold (`.xml` rows would skew it).
+fn bsl_module_total(stored_fp: &std::collections::HashMap<String, u64>) -> usize {
+    stored_fp
+        .keys()
+        .filter(|p| bsl_conventions::str_has_extension(p, bsl_conventions::BSL_EXTENSION))
+        .count()
+}
+
 pub(crate) fn read_stored_fingerprints(db_path: &Path) -> std::collections::HashMap<String, u64> {
     let mut map = std::collections::HashMap::new();
     // Read-only open: never create the file as a side effect. A missing/older DB
@@ -768,6 +879,24 @@ pub(crate) fn read_stored_sig_hashes(
 }
 
 #[cfg(test)]
+mod module_total_tests {
+    use super::bsl_module_total;
+
+    #[test]
+    fn the_incremental_threshold_counts_case_variant_modules() {
+        let mut stored = std::collections::HashMap::new();
+        stored.insert("cfg/CommonModules/A/Ext/Module.bsl".to_string(), 1u64);
+        stored.insert("cfg/CommonModules/B/Ext/Module.BSL".to_string(), 2u64);
+        stored.insert("cfg/CommonModules/B.xml".to_string(), 3u64);
+        assert_eq!(
+            bsl_module_total(&stored),
+            2,
+            "Module.BSL — модуль и участвует в знаменателе порога"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::super::input::{enumerate_bsl_files, load_workspace_db, scan_roots};
     use super::super::scan::{scan_file_stats, scan_stats_over_roots, FileStat, WorkspaceDiff};
@@ -784,6 +913,83 @@ mod tests {
     use std::fs;
     use std::time::{Duration, UNIX_EPOCH};
     use walkdir::WalkDir;
+
+    /// The fused pass writes the search rows itself, so it must key them the way the rest of the
+    /// index does: a module of a declared extension belongs to that extension, not to the
+    /// configuration and not to nowhere. Dropping it (the old behaviour) leaves the extension out
+    /// of a fused cold boot entirely, and the deletion reconcile cannot put it back — it only
+    /// removes.
+    #[test]
+    fn the_fused_writer_keys_each_module_by_its_own_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = dir.path().join("outside-ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let configuration_module = configuration.join("A.bsl");
+        let extension_module = extension.join("B.bsl");
+        fs::write(&configuration_module, "Процедура Первая()\nКонецПроцедуры").unwrap();
+        fs::write(&extension_module, "Процедура Вторая()\nКонецПроцедуры").unwrap();
+        let outsider = dir.path().join("nowhere").join("C.bsl");
+        fs::create_dir_all(outsider.parent().unwrap()).unwrap();
+        fs::write(&outsider, "Процедура Третья()\nКонецПроцедуры").unwrap();
+
+        let mut engine = bsl_search::SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let (roots, _rejected) = bsl_search::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        );
+        let extension_key = roots
+            .root_of(&extension_module, &extension_module.canonicalize().unwrap())
+            .expect("the extension's module has an owner");
+        engine.set_workspace_roots(roots);
+
+        let row = |path: &std::path::Path, symbol: &str| ide::ChunkRow {
+            path: path.to_string_lossy().replace('\\', "/"),
+            symbol: symbol.to_owned(),
+            kind: bsl_search::ChunkKind::Procedure,
+            is_export: false,
+            annotations: Vec::new(),
+            line_start: 1,
+            line_end: 2,
+            text: format!("Процедура {symbol}()\nКонецПроцедуры"),
+            graph_context: None,
+        };
+        {
+            let mut writer = FusedChunkWriter::new(&mut engine, configuration.clone());
+            ide::FusedChunkSink::emit_chunks(
+                &mut writer,
+                &[
+                    row(&configuration_module, "Первая"),
+                    row(&extension_module, "Вторая"),
+                    row(&outsider, "Третья"),
+                ],
+            )
+            .expect("the sink writes its batch");
+        }
+
+        let rows: Vec<(String, String)> = engine
+            .store()
+            .all_files_in_collection("code")
+            .unwrap()
+            .into_iter()
+            .map(|(key, _hash)| (key.root_id, key.path))
+            .collect();
+        assert!(
+            rows.contains(&(String::new(), "A.bsl".to_owned())),
+            "the configuration's module keeps its key: {rows:?}",
+        );
+        assert!(
+            rows.contains(&(extension_key.root_id.clone(), extension_key.path.clone())),
+            "the extension's module is written under its own root: {rows:?}",
+        );
+        assert!(
+            !rows.iter().any(|(_, path)| path.ends_with("C.bsl")),
+            "a module under no registered root is still not this index's business: {rows:?}",
+        );
+    }
 
     /// End-to-end through `GraphState`: a first use builds the SQLite graph off
     /// the workspace and serves overview/node/neighbors from the opened handle.
@@ -867,6 +1073,346 @@ mod tests {
         assert_eq!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
+    /// Test shorthand for the profile recompute: pairs the enumeration with the
+    /// snapshot it came from, as the production incremental path does.
+    fn recompute_profiles_for_test(
+        root: &Path,
+        changed: &[std::path::PathBuf],
+    ) -> anyhow::Result<rustc_hash::FxHashMap<String, crate::graph_db::ModuleProfile>> {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        crate::graph_db::recompute_module_profiles(&project, &universe.files, changed)
+    }
+
+    /// Test shorthand for the incremental patch: ONE loaded snapshot and ONE
+    /// scanned universe feed the body-only update, as production does.
+    fn update_bodies_for_test(
+        root: &Path,
+        src: &Path,
+        out: &Path,
+        changed: &[std::path::PathBuf],
+        batch_size: usize,
+        meta: &crate::graph_db::GraphMeta,
+    ) -> anyhow::Result<ide::GraphBuildSummary> {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        update_graph_database_bodies(&project, &universe, src, out, changed, batch_size, meta)
+    }
+
+    /// Test shorthand for the production pairing: ONE loaded snapshot and ONE
+    /// scanned universe feed a whole-config build.
+    fn build_whole_graph(
+        root: &Path,
+        out: &Path,
+        batch_size: usize,
+        meta: &crate::graph_db::GraphMeta,
+    ) -> anyhow::Result<ide::GraphBuildSummary> {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        build_graph_database(&project, &universe, out, batch_size, meta)
+    }
+
+    /// The straddle verdict is more than a fingerprint comparison: either
+    /// bracketing scan failing to cover the whole tree loses the coherence claim
+    /// even when the fingerprints match exactly.
+    #[test]
+    fn coherence_is_lost_to_an_unclean_scan_even_with_equal_fingerprints() {
+        let fp = crate::graph_db::GraphFp::default();
+        let moved = crate::graph_db::GraphFp { files: 1, ..Default::default() };
+        assert!(!publish_force_stale(fp, fp, true, true), "clean equal brackets publish clean");
+        assert!(publish_force_stale(fp, moved, true, true), "a moved tree straddles");
+        assert!(publish_force_stale(fp, fp, false, true), "a short pre-scan cannot claim the tree");
+        assert!(
+            publish_force_stale(fp, fp, true, false),
+            "a short post-scan with equal fingerprints is exactly what the comparison cannot see"
+        );
+    }
+
+    /// Fresh adoption needs a clean scan behind the compared value: equality
+    /// against a fingerprint that describes only part of the tree proves nothing.
+    #[test]
+    fn fresh_adoption_requires_a_clean_matching_scan() {
+        let fp = crate::graph_db::GraphFp::default();
+        let moved = crate::graph_db::GraphFp { files: 1, ..Default::default() };
+        assert!(cache_is_reusable(false, fp, fp, true));
+        assert!(!cache_is_reusable(true, fp, fp, true), "a straddled build is never coherent");
+        assert!(!cache_is_reusable(false, fp, moved, true), "the workspace moved");
+        assert!(
+            !cache_is_reusable(false, fp, fp, false),
+            "an unclean scan's fingerprint matching the stored one proves nothing"
+        );
+    }
+
+    /// A subtree the scan cannot enter — even an EMPTY one, invisible to the
+    /// fingerprint — must mark the published build `force_stale`.
+    #[cfg(unix)]
+    #[test]
+    fn a_publication_with_a_hidden_subtree_is_marked_force_stale() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let closed = root.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            // Permissions do not bind this user (UID 0): the input cannot exist.
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        assert_eq!(
+            meta_string(&graph_db_path(root), "force_stale"),
+            "1",
+            "an unreadable empty subtree leaves the fingerprints equal — only the \
+             scan verdict can catch it"
+        );
+        // While the subtree stays hidden, the marker must NOT drive a rebuild
+        // loop: every rebuild would come out unclean again.
+        {
+            let snap = graph.snapshot().expect("ready graph snapshots");
+            let fresh = graph.freshness(&snap);
+            assert!(fresh.stale, "a force_stale build is served as stale");
+            assert_eq!(fresh.reload, "none", "an unclean scan must not chase its own tail");
+        }
+
+        // Once the tree heals, the SAME fingerprints plus a clean scan retire the
+        // incoherent build with exactly one fresh rebuild.
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+        *lock_recover(&graph.scan) = None;
+        let claimed = {
+            let snap = graph.snapshot().expect("ready graph snapshots");
+            graph.freshness(&snap).reload == "running"
+        };
+        assert!(claimed, "recovery must schedule the clean rebuild the marker was waiting for");
+        for _ in 0..300 {
+            if meta_string(&graph_db_path(root), "force_stale") == "0" {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the recovery rebuild never published a clean snapshot");
+    }
+
+    /// The positive control for the verdict wiring: a healthy tree publishes clean.
+    #[test]
+    fn a_publication_over_a_healthy_tree_is_not_force_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        assert_eq!(meta_string(&graph_db_path(root), "force_stale"), "0");
+    }
+
+    /// A matching cache is NOT adopted as fresh when the scan behind the comparison
+    /// could not cover the whole tree: an unreadable EMPTY subtree changes no stats
+    /// row, so the fingerprints still match — only the verdict refuses.
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_is_not_adopted_fresh_over_an_unclean_scan() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root));
+        let closed = root.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        let adopted = graph.try_publish_cached(root, 0);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!adopted, "equality against a short scan is not a match");
+        assert!(
+            graph.try_publish_cached(root, 0),
+            "the same cache is adopted once the scan is clean"
+        );
+    }
+
+    /// The build lowers the PRE-scanned universe: a file landing between the
+    /// pre-scan and the build is absent from the persisted `files` rows, and the
+    /// post-scan bracket reports the straddle instead.
+    #[test]
+    fn the_build_does_not_see_files_added_after_the_pre_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let fp_pre = crate::graph::scan::fingerprint_of(&pre.stats, &project.configs);
+
+        write_common_module(root, "Опоздавший", true, "Процедура П() Экспорт КонецПроцедуры");
+
+        let out = root.join(".build/graph.db");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            &project,
+            &pre,
+            &out,
+            GRAPH_BUILD_BATCH,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: fp_pre,
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .unwrap();
+
+        let late_rows: i64 = Connection::open(&out)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path LIKE '%Опоздавший%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(late_rows, 0, "the files table describes the universe the build lowered");
+
+        // The straddle bracket is what reports the late file instead.
+        let post = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let fp_post = crate::graph::scan::fingerprint_of(&post.stats, &project.configs);
+        assert!(publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean()));
+    }
+
+    /// A config edit may change only the declared spelling of a root while preserving
+    /// canonical graph topology. Even then the publication must carry roots from its frozen
+    /// pre-build project, not reload the newer project after the build.
+    #[cfg(unix)]
+    #[test]
+    fn published_roots_come_from_the_same_project_snapshot_as_the_graph() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let configuration = root.join("cf");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::write(configuration.join("Configuration.xml"), "<Configuration/>").unwrap();
+        sample_workspace(&configuration);
+        symlink(&configuration, root.join("alias-a")).unwrap();
+        symlink(&configuration, root.join("alias-b")).unwrap();
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-a\"\n").unwrap();
+
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-b\"\n").unwrap();
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        let built = build_and_publish_scanned(root, &project, &pre, 1, &graph, None).unwrap();
+        let published = built.search_roots.as_ref().unwrap();
+        let live = crate::graph::ProjectSnapshot::load(root).search_roots.unwrap();
+
+        assert!(published.configuration().unwrap().ends_with("alias-a"));
+        assert!(live.configuration().unwrap().ends_with("alias-b"));
+        assert_eq!(
+            built.fp_pre,
+            crate::graph::scan::workspace_fingerprint(root),
+            "the alias-only edit is deliberately invisible to GraphFp"
+        );
+    }
+
+    /// One full publication is exactly TWO traversals: the shared pre-scan and the
+    /// straddle bracket's post-scan. A third walk means some pass walked on its
+    /// own — the regression this whole seam exists to prevent. Counted through the
+    /// scanner's own per-thread counter: both scans of a publication are initiated
+    /// on the calling thread, and parallel tests cannot pollute the reading.
+    #[test]
+    fn a_full_publication_walks_the_tree_exactly_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        build_and_publish_scanned(root, &project, &pre, 1, &graph, None)
+            .expect("the publication succeeds");
+        let walks = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert!(walks > 0, "a zero count means the instrumentation broke, not that no walk ran");
+        assert_eq!(walks, 2, "pre-scan + straddle post-scan, nothing else");
+    }
+
+    /// One incremental reload is also exactly TWO traversals: the shared pre-scan
+    /// (eligibility diff + profiles + fingerprint + patch) and the straddle
+    /// bracket's post-scan. Historically this path walked six times.
+    #[test]
+    fn an_incremental_reload_walks_the_tree_exactly_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        // Body-only: the signature line is untouched, so the fast path is eligible.
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 1;\nВозврат Значение;\nКонецФункции",
+        );
+
+        let before = project_model::source_set::scans_performed_on_thread();
+        let took_fast_path = graph.try_incremental_reload(root, 2, 0);
+        let walks = project_model::source_set::scans_performed_on_thread() - before;
+
+        assert!(took_fast_path, "a body-only edit takes the incremental path");
+        assert!(walks > 0, "a zero count means the instrumentation broke");
+        assert_eq!(walks, 2, "shared pre-scan + straddle post-scan, nothing else");
+    }
+
+    /// A scan that cannot cover the whole tree disables the incremental path
+    /// BEFORE the eligibility diff: a diff against a short scan reads hidden
+    /// files as removals, and an unreadable EMPTY subtree does not move the
+    /// stats at all — only the verdict can see it.
+    #[cfg(unix)]
+    #[test]
+    fn an_unclean_scan_disables_the_incremental_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 2;\nВозврат Значение;\nКонецФункции",
+        );
+        let closed = root.join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&closed).is_ok() {
+            fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let refused = !graph.try_incremental_reload(root, 2, 0);
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(refused, "an incomplete scan must fall back to the full rebuild");
+        assert!(
+            graph.try_incremental_reload(root, 3, 0),
+            "positive control: the same edit goes incremental once the scan is clean"
+        );
+    }
+
     /// A cached build whose fingerprint no longer matches the workspace (it moved
     /// since the build) is served immediately as a stale snapshot — answers now beat
     /// "still indexing" — while the pre-claimed catch-up reload replaces it.
@@ -917,6 +1463,7 @@ mod tests {
         let walk = workspace_fingerprint(root);
         let project = crate::graph::ProjectSnapshot::load(root);
         let mut entries: Vec<(String, u128, u64)> = scan_stats_over_roots(&project.scan_roots)
+            .0
             .into_iter()
             .map(|s| (s.path, s.mtime, s.len))
             .collect();
@@ -951,6 +1498,151 @@ mod tests {
         assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
+    /// The graph's half of the node: it cannot PREVENT the loss (an unreadable module
+    /// yields no rows to any build), so it must not be silent about it. The artefact
+    /// records which modules it could not read, and a patch never clears an inherited
+    /// one — only a build that rewrites the module restores its rows.
+    #[test]
+    fn an_unreadable_module_is_recorded_in_the_artefact() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let blind = root.join("CommonModules/Слепой/Ext/Module.bsl");
+        fs::create_dir_all(blind.parent().unwrap()).unwrap();
+        fs::write(&blind, [0xFF, 0xFE]).unwrap();
+
+        let out = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        let meta = crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        crate::graph_db::build_graph_database(&project, &universe, &out, 1, &meta)
+            .expect("graph database builds");
+
+        // The walk verdict cannot see this: `stat` needs no read permission.
+        assert!(universe.clean(), "the tree walk is clean, which is exactly the trap");
+
+        {
+            // No intermediate write: the BUILDER records the key, so an artefact is
+            // never at the current schema version while silently claiming zero holes.
+            let conn = Connection::open(&out).unwrap();
+            let stored = crate::graph_db::read_unread_paths(&conn);
+            assert!(
+                stored.iter().any(|p| p.ends_with("Слепой/Ext/Module.bsl")),
+                "the builder records the module it could not read: {stored:?}"
+            );
+            // ONE path, not one per pass: `open_batch` is called by every pass, and a
+            // counter would multiply the same file.
+            assert_eq!(stored.len(), 1);
+        }
+
+        // Positive control: the same tree, readable, records nothing.
+        fs::write(&blind, "&НаСервере\nПроцедура Пусто() Экспорт КонецПроцедуры").unwrap();
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let out2 = root.join(".build/bsl-graph2.db");
+        crate::graph_db::build_graph_database(&project, &universe, &out2, 1, &meta)
+            .expect("graph database builds");
+        let conn = Connection::open(&out2).unwrap();
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "control: nothing unread over a readable tree"
+        );
+    }
+
+    /// A patch may only speak about the modules it rewrote. Its index pass opens the
+    /// WHOLE universe, so it learns about holes it neither deleted nor replaced rows
+    /// for — and recording one would claim rows are absent when they are merely stale,
+    /// with no way back: the inherited set is released only for paths a later patch
+    /// rewrites, and a module nobody edits is never rewritten again.
+    #[test]
+    fn a_patch_records_only_the_holes_whose_rows_it_rewrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        write_common_module(
+            root,
+            "Сосед",
+            true,
+            "&НаСервере\nПроцедура Соседняя() Экспорт КонецПроцедуры",
+        );
+        let bystander = root.join("CommonModules/Сосед/Ext/Module.bsl");
+
+        let meta = crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let src = root.join(".build/bsl-graph.db");
+        fs::create_dir_all(src.parent().unwrap()).unwrap();
+        build_whole_graph(root, &src, 1, &meta).expect("the whole graph builds");
+        let rows_before = node_rows_for(&src, &bystander);
+        assert!(rows_before > 0, "the neighbour is in the artefact to begin with");
+
+        // The neighbour goes dark, and someone else is edited. The patch never touches
+        // the neighbour's rows — they stay exactly as the build left them.
+        fs::write(&bystander, [0xFF, 0xFE]).unwrap();
+        let edited = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&edited, "&НаСервере\nПроцедура Правка() Экспорт КонецПроцедуры").unwrap();
+        let out = root.join(".build/bsl-graph-patched.db");
+        update_bodies_for_test(root, &src, &out, &[edited], 1, &meta).expect("the patch applies");
+
+        let conn = Connection::open(&out).unwrap();
+        assert_eq!(
+            node_rows_for(&out, &bystander),
+            rows_before,
+            "the patch left the neighbour's rows in place"
+        );
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "so it must not report the neighbour as a module the artefact is missing: {:?}",
+            crate::graph_db::read_unread_paths(&conn)
+        );
+        drop(conn);
+
+        // Positive control, without which the filter above could be silently swallowing
+        // every hole: the SAME unreadable module, this time inside the patch. Its rows
+        // are deleted and nothing replaces them, so now the artefact owes the record.
+        let dark = root.join(".build/bsl-graph-dark.db");
+        update_bodies_for_test(root, &out, &dark, std::slice::from_ref(&bystander), 1, &meta)
+            .expect("the patch applies over an unreadable module");
+        let conn = Connection::open(&dark).unwrap();
+        assert_eq!(node_rows_for(&dark, &bystander), 0, "its rows went with the patch");
+        assert!(
+            crate::graph_db::read_unread_paths(&conn)
+                .iter()
+                .any(|p| p.ends_with("Сосед/Ext/Module.bsl")),
+            "and a module the patch could not lower IS recorded"
+        );
+        drop(conn);
+
+        // And the record is released by the pass that restores the rows, not before.
+        fs::write(&bystander, "&НаСервере\nПроцедура Снова() Экспорт КонецПроцедуры").unwrap();
+        let healed = root.join(".build/bsl-graph-healed.db");
+        update_bodies_for_test(root, &dark, &healed, std::slice::from_ref(&bystander), 1, &meta)
+            .expect("the patch applies over the restored module");
+        let conn = Connection::open(&healed).unwrap();
+        assert!(node_rows_for(&healed, &bystander) > 0, "the rows are back");
+        assert!(
+            crate::graph_db::read_unread_paths(&conn).is_empty(),
+            "so the record goes with them"
+        );
+    }
+
+    /// Node rows the artefact holds for one module. `nodes.file` is the absolute path
+    /// with separators normalised, the spelling the encoder writes.
+    fn node_rows_for(db: &Path, module: &Path) -> i64 {
+        let key = module.to_string_lossy().replace('\\', "/");
+        let conn = Connection::open(db).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM nodes WHERE file = ?1", [key], |r| r.get(0)).unwrap()
+    }
+
     /// The streaming SQLite build must reproduce the in-memory graph: identical
     /// node-kind tallies, edge counts, durable ids, dispatch and in-degree.
     #[test]
@@ -965,8 +1657,8 @@ mod tests {
 
         let out = root.join(".build/bsl-graph.db");
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        let summary = build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        let summary = build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1052,8 +1744,8 @@ mod tests {
 
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1124,8 +1816,8 @@ mod tests {
         let (_db, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1161,8 +1853,8 @@ mod tests {
         let (_db, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1253,8 +1945,8 @@ mod tests {
 
         let out = root.join(".build/bsl-graph.db");
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1293,8 +1985,8 @@ mod tests {
 
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1376,8 +2068,8 @@ mod tests {
         let (_db, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1460,8 +2152,12 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         let mut sink = CollectingSink::default();
+        let fused_project = crate::graph::ProjectSnapshot::load(root);
+        let fused_universe =
+            crate::graph::universe::ScannedUniverse::scan(&fused_project.scan_roots);
         crate::graph_db::build_graph_database_fused(
-            &crate::graph::ProjectSnapshot::load(root),
+            &fused_project,
+            &fused_universe,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1619,8 +2315,8 @@ mod tests {
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
         // A batch_size far above the module count puts every module in one batch.
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             100,
             &crate::graph_db::GraphMeta {
@@ -1709,8 +2405,8 @@ mod tests {
 
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1777,8 +2473,8 @@ mod tests {
         let files = enumerate_bsl_files(&crate::graph::ProjectSnapshot::load(root)).len();
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -1908,8 +2604,13 @@ mod tests {
                 if signal.topology_changed {
                     requested.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
-                true
-            }) as Arc<dyn Fn(crate::graph::GraphPublishSignal) -> bool + Send + Sync>
+                crate::graph::GraphPublishOutcome::HANDLED
+            })
+                as Arc<
+                    dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
+                        + Send
+                        + Sync,
+                >
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();
@@ -1983,8 +2684,8 @@ mod tests {
 
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -2064,8 +2765,7 @@ mod tests {
                 .unwrap()
         };
 
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
-            .expect("builds");
+        build_whole_graph(root, &out, 1, &meta()).expect("builds");
         let base = server_sig(&out);
 
         // Body-only edit: same signature `Функция Считать() Экспорт`, new body.
@@ -2074,8 +2774,7 @@ mod tests {
             "CommonModules/Сервер/Ext/Module.bsl",
             "&НаСервере\nФункция Считать() Экспорт\nА = 1; Возврат А;\nКонецФункции",
         );
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
-            .expect("rebuilds");
+        build_whole_graph(root, &out, 1, &meta()).expect("rebuilds");
         assert_eq!(server_sig(&out), base, "a body-only edit leaves the signature hash unchanged");
 
         // Signature edit: rename the function. The hash must move.
@@ -2084,8 +2783,7 @@ mod tests {
             "CommonModules/Сервер/Ext/Module.bsl",
             "&НаСервере\nФункция Считать2() Экспорт КонецФункции",
         );
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &out, 1, &meta())
-            .expect("rebuilds");
+        build_whole_graph(root, &out, 1, &meta()).expect("rebuilds");
         assert_ne!(server_sig(&out), base, "renaming a method changes the signature hash");
     }
 
@@ -2290,8 +2988,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Body-only edit of Бета: same signature `Процедура ШагБ() Экспорт`. Drops the
         // Контрагенты manager-create (orphaning that catalog's Mdo node) and adds a
@@ -2305,19 +3002,11 @@ mod tests {
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild of edited tree");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild of edited tree");
 
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
@@ -2361,8 +3050,8 @@ mod tests {
         let (_, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -2438,8 +3127,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Body-only edit of the form module: same handler signature, different body.
         let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
@@ -2451,19 +3139,11 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
 
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
@@ -2503,8 +3183,8 @@ mod tests {
         let (_, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -2610,8 +3290,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         let module_rel = "Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
         write(
@@ -2622,19 +3301,11 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
 
         let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, ..) = dump_data(&db_full);
@@ -2672,8 +3343,8 @@ mod tests {
         let (_, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -2765,8 +3436,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         let module_rel = "CommonModules/Альфа/Ext/Module.bsl";
         write(
@@ -2777,19 +3447,11 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
 
         let (inc_nodes, inc_edges, inc_indeg, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, ..) = dump_data(&db_full);
@@ -2821,8 +3483,8 @@ mod tests {
         let (_, files) = load_workspace_db(root).expect("workspace loads");
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -2961,8 +3623,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         let module_rel = "Catalogs/Контрагенты/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
         write(
@@ -2973,19 +3634,11 @@ mod tests {
         let changed = vec![root.join(module_rel).canonicalize().unwrap()];
 
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("incremental update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("incremental update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
 
         let (inc_nodes, inc_edges, ..) = dump_data(&db_inc);
         let (full_nodes, full_edges, ..) = dump_data(&db_full);
@@ -3029,8 +3682,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Бета references the SAME catalog with a different spelling.
         write(
@@ -3041,14 +3693,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "casing drift must bail to full rebuild, got {result:?}");
     }
 
@@ -3074,8 +3719,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Бета drops its query; Альфа still references Номенклатура (it survives).
         write(
@@ -3085,14 +3729,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "dropping a shared aux ref must bail, got {result:?}");
     }
 
@@ -3130,8 +3767,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // The build recorded the inconsistent casing.
         let variants: String = Connection::open(&db_pre)
@@ -3153,14 +3789,7 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Альфа/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        let result = update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        );
+        let result = update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta());
         assert!(result.is_err(), "touching a recorded casing variant must bail, got {result:?}");
     }
 
@@ -3195,8 +3824,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Both modules now reference Товары with inconsistent casing.
         write(
@@ -3216,15 +3844,8 @@ mod tests {
             root.join("CommonModules/Бета/Ext/Module.bsl").canonicalize().unwrap(),
         ];
         let db_inc = root.join(".build/inc.db");
-        update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("multi-file body-only update succeeds (current result is still correct)");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("multi-file body-only update succeeds (current result is still correct)");
 
         // The newly-introduced inconsistency is now persisted, so a later reload bails.
         let variants: String = Connection::open(&db_inc)
@@ -3238,8 +3859,7 @@ mod tests {
 
         // And the incremental DB is still byte-identical to a full rebuild of this tree.
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
         let (inc_nodes, inc_edges, _, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, _, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -3290,8 +3910,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Remove Ядро.М (keep Н) — a signature change that only shrinks the resolvable
         // surface, so it is caller-delta-safe.
@@ -3303,9 +3922,7 @@ mod tests {
         let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
         let core_key = core_path.to_string_lossy().into_owned();
 
-        let profiles =
-            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
-                .unwrap();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
         let profile = profiles.get(&core_key).expect("profiled Ядро");
         let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
             .unwrap()
@@ -3316,19 +3933,11 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("caller-delta update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -3366,8 +3975,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // The build recorded Алиса's unresolved call to Ядро.Новый, and stored no edge.
         let (_, pre_edges, _, pre_unres) = dump_data(&db_pre);
@@ -3384,9 +3992,7 @@ mod tests {
         write(root, "CommonModules/Ядро/Ext/Module.bsl", "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры");
         let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
         let core_key = core_path.to_string_lossy().into_owned();
-        let profiles =
-            crate::graph_db::recompute_module_profiles(root, std::slice::from_ref(&core_path))
-                .unwrap();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
         let profile = profiles.get(&core_key).unwrap();
         let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
             .unwrap()
@@ -3397,19 +4003,11 @@ mod tests {
         let mut changed = vec![core_path];
         changed.extend(callers);
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("caller-delta update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("caller-delta update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
         let (inc_nodes, inc_edges, inc_indeg, inc_unres) = dump_data(&db_inc);
         let (full_nodes, full_edges, full_indeg, full_unres) = dump_data(&db_full);
         assert_eq!(inc_nodes, full_nodes, "nodes match a full rebuild");
@@ -3423,6 +4021,309 @@ mod tests {
         assert!(
             !inc_unres.iter().any(|u| u.contains("common/Ядро") && u.contains("новый")),
             "the resolved call is no longer in the unresolved index: {inc_unres:?}"
+        );
+    }
+
+    /// The published graph must not depend on how the build was batched. A body whose
+    /// bytes could not be read is registered as unreadable only by the batch that read
+    /// it, so a caller in another batch asks a database that never heard of that file
+    /// and is told "readable" — after which a lower-priority body answers for the one
+    /// nobody could read. The barrier therefore has to travel with the index, which
+    /// every batch shares, not with the per-batch database.
+    ///
+    /// Batch size 1 puts every module in its own database, which is the whole point:
+    /// with the caller and the unread base together the case hides.
+    #[test]
+    fn a_cross_batch_unread_base_body_still_bars_the_extension_from_answering() {
+        fn build_and_dump(base_body_unreadable: bool) -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+            write_common_module(
+                root,
+                "Сервер",
+                true,
+                "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+            );
+
+            // The extension adopts Сервер (a second body of the same module) and calls
+            // it from a module of its own — common modules are extension-private, so
+            // the caller has to live inside the extension to see both bodies.
+            let ext = root.join("cfe/Расш");
+            std::fs::create_dir_all(&ext).unwrap();
+            std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+            write_common_module(
+                &ext,
+                "Сервер",
+                true,
+                "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+            );
+            write_common_module(
+                &ext,
+                "Вызов",
+                true,
+                "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+            );
+
+            if base_body_unreadable {
+                fs::write(root.join("CommonModules/Сервер/Ext/Module.bsl"), [0xff, 0xfe]).unwrap();
+            }
+
+            let meta = crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            };
+            let db = root.join(".build/graph.db");
+            fs::create_dir_all(db.parent().unwrap()).unwrap();
+            build_whole_graph(root, &db, 1, &meta).expect("build");
+            let (_, edges, _, _) = dump_data(&db);
+            edges
+        }
+
+        // Control: with every body readable the call resolves, so the absence below is
+        // the barrier speaking and not a fixture that never resolved anything.
+        let control = build_and_dump(false);
+        assert!(
+            control.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a readable base body must resolve the call: {control:?}"
+        );
+
+        let unread = build_and_dump(true);
+        assert!(
+            !unread.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "a body behind an unread one must not answer for it, whatever the batching: {unread:?}"
+        );
+    }
+
+    /// A body crossing the readable↔unread barrier changes how OTHER modules' calls
+    /// resolve — calls that resolve into a SIBLING body of the same common module, in
+    /// another file entirely. Nothing in the stored graph ties those callers to this
+    /// file, so the body-only fast path cannot widen its delta to reach them and must
+    /// decline outright. Its own signature hash has to move too, or the transition is
+    /// never even offered to the plan: an empty readable body and an unread one declare
+    /// exactly the same nothing.
+    #[test]
+    fn an_incremental_unread_transition_declines_the_body_only_fast_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        // Readable but empty: the call falls through to the extension body.
+        write_common_module(root, "Сервер", true, "");
+
+        let ext = root.join("cfe/Расш");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            &ext,
+            "Вызов",
+            true,
+            "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+        let (_, pre_edges, _, _) = dump_data(&db_pre);
+        assert!(
+            pre_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: while the base body is readable the call resolves: {pre_edges:?}"
+        );
+
+        // The base body stops being readable. Its declarations do not change — it had
+        // none — so only the barrier moves.
+        let base_body = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&base_body, [0xff, 0xfe]).unwrap();
+
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert!(
+            !full_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a full rebuild bars the call once the base body is unread: {full_edges:?}"
+        );
+
+        // The caller that must change is `Вызов`, whose edge points at the EXTENSION
+        // body's node — nothing in the stored graph connects it to this file, so the
+        // body-only fast path has no way to widen its delta and must decline.
+        let canonical = base_body.canonicalize().unwrap();
+        let key = canonical.to_string_lossy().into_owned();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&canonical)).unwrap();
+        let plan = crate::graph_db::caller_delta_plan(
+            &db_pre,
+            &[(key.as_str(), profiles.get(&key).unwrap())],
+        )
+        .unwrap();
+        assert!(
+            plan.is_none(),
+            "a body crossing the unread barrier is not eligible for the body-only path: {plan:?}"
+        );
+    }
+
+    /// Healing a body lifts the barrier, and the calls that were barred resolve into a
+    /// SIBLING body of the same common module — so the healed file's own declarations
+    /// say nothing about who has to be reprojected. Looking for callers by the names
+    /// this file newly exports finds none of them when the disputed method is declared
+    /// next door; they have to be found by the module SCOPE they were barred from.
+    #[test]
+    fn healing_a_body_reprojects_callers_barred_into_a_sibling_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Сервер", true, "");
+
+        let ext = root.join("cfe/Расш");
+        std::fs::create_dir_all(&ext).unwrap();
+        std::fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "Сервер",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры",
+        );
+        write_common_module(
+            &ext,
+            "Вызов",
+            true,
+            "&НаСервере\nПроцедура Т() Экспорт\nСервер.П();\nКонецПроцедуры",
+        );
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let base_body = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(&base_body, [0xff, 0xfe]).unwrap();
+
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+        let (_, pre_edges, _, _) = dump_data(&db_pre);
+        assert!(
+            !pre_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: the barrier holds while the base body is unread: {pre_edges:?}"
+        );
+
+        // Healed, and it declares nothing at all — least of all the disputed П.
+        fs::write(&base_body, "").unwrap();
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert!(
+            full_edges.iter().any(|e| e.contains("method/common/Сервер/П")),
+            "control: a full rebuild resolves the call once the barrier lifts: {full_edges:?}"
+        );
+
+        let canonical = base_body.canonicalize().unwrap();
+        let key = canonical.to_string_lossy().into_owned();
+
+        // The plan matches the recorded unread paths against these very keys, verbatim.
+        // Pin that they are one spelling: the comparison is only sound because both
+        // sides come from the same scanned canonical path, and this is the assertion
+        // that would notice either producer starting to normalise.
+        let recorded = {
+            let conn = rusqlite::Connection::open(&db_pre).unwrap();
+            crate::graph_db::read_unread_paths(&conn)
+        };
+        assert!(
+            recorded.contains(&key),
+            "the artefact records the unread body under the same spelling the plan is keyed by: \
+             {recorded:?} vs {key}"
+        );
+
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&canonical)).unwrap();
+        let plan = crate::graph_db::caller_delta_plan(
+            &db_pre,
+            &[(key.as_str(), profiles.get(&key).unwrap())],
+        )
+        .unwrap();
+        // Insisting on `Some` is the point. A full rebuild (`None`) would also publish
+        // the right graph, so accepting it would let the scope lookup rot away unnoticed
+        // — the gate would pass on a build that simply gave up.
+        let callers = plan.expect("healing keeps the body-only fast path, it does not decline it");
+        assert!(
+            callers.iter().any(|p| p.to_string_lossy().contains("Вызов")),
+            "the caller barred into the sibling body must be reprojected: {callers:?}"
+        );
+    }
+
+    /// A target whose body could not be read at build time still owes its callers a
+    /// reverse reference. Name resolution refuses to conclude anything about an unread
+    /// module — correctly — but if that refusal also erases the reference, then healing
+    /// the body reprojects nobody: `caller_delta_plan` finds no callers, and the
+    /// incremental graph is published as current while missing an edge the full rebuild
+    /// has. The batch size is 2 so the target shares its database with the caller;
+    /// across batches an unregistered file answers "readable" and the case hides.
+    #[test]
+    fn caller_delta_update_heals_a_target_that_was_unread_at_build_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(root, "Ядро", true, "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры");
+        write_common_module(
+            root,
+            "Алиса",
+            true,
+            "&НаСервере\nПроцедура ШагА() Экспорт\nЯдро.Новый();\nКонецПроцедуры",
+        );
+        // Two bytes `read_to_string` refuses under any UID — the stand does not depend
+        // on permissions, which root ignores.
+        fs::write(root.join("CommonModules/Ядро/Ext/Module.bsl"), [0xff, 0xfe]).unwrap();
+
+        let meta = || crate::graph_db::GraphMeta {
+            revision: 1,
+            fingerprint: crate::graph_db::GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        };
+        let db_pre = root.join(".build/pre.db");
+        fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        build_whole_graph(root, &db_pre, 2, &meta()).expect("pre build");
+
+        // Heal the body, exporting the method the caller was already asking for.
+        write(
+            root,
+            "CommonModules/Ядро/Ext/Module.bsl",
+            "&НаСервере\nПроцедура М() Экспорт КонецПроцедуры\nПроцедура Новый() Экспорт КонецПроцедуры",
+        );
+        let core_path = root.join("CommonModules/Ядро/Ext/Module.bsl").canonicalize().unwrap();
+        let core_key = core_path.to_string_lossy().into_owned();
+        let profiles = recompute_profiles_for_test(root, std::slice::from_ref(&core_path)).unwrap();
+        let profile = profiles.get(&core_key).unwrap();
+        let callers = crate::graph_db::caller_delta_plan(&db_pre, &[(core_key.as_str(), profile)])
+            .unwrap()
+            .expect("addition is eligible via the unresolved index");
+        assert_eq!(callers.len(), 1, "the caller of the healed body is discovered: {callers:?}");
+
+        let mut changed = vec![core_path];
+        changed.extend(callers);
+        let db_inc = root.join(".build/inc.db");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 2, &meta())
+            .expect("caller-delta update");
+
+        let db_full = root.join(".build/full.db");
+        build_whole_graph(root, &db_full, 2, &meta()).expect("full rebuild");
+        let (_, inc_edges, _, _) = dump_data(&db_inc);
+        let (_, full_edges, _, _) = dump_data(&db_full);
+        assert_eq!(inc_edges, full_edges, "edges match a full rebuild");
+        assert!(
+            inc_edges.iter().any(|e| e.contains("method/common/Ядро/Новый")),
+            "the edge into the healed body appears: {inc_edges:?}"
         );
     }
 
@@ -3450,8 +4351,7 @@ mod tests {
         };
         let db_pre = root.join(".build/pre.db");
         fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_pre, 1, &meta())
-            .expect("pre build");
+        build_whole_graph(root, &db_pre, 1, &meta()).expect("pre build");
 
         // Body-only edit (ШагА signature unchanged): add a call to the missing Ядро.Завтра.
         write(
@@ -3461,19 +4361,11 @@ mod tests {
         );
         let changed = vec![root.join("CommonModules/Алиса/Ext/Module.bsl").canonicalize().unwrap()];
         let db_inc = root.join(".build/inc.db");
-        crate::graph_db::update_graph_database_bodies(
-            &crate::graph::ProjectSnapshot::load(root),
-            &db_pre,
-            &db_inc,
-            &changed,
-            1,
-            &meta(),
-        )
-        .expect("body-only update");
+        update_bodies_for_test(root, &db_pre, &db_inc, &changed, 1, &meta())
+            .expect("body-only update");
 
         let db_full = root.join(".build/full.db");
-        build_graph_database(&crate::graph::ProjectSnapshot::load(root), &db_full, 1, &meta())
-            .expect("full rebuild");
+        build_whole_graph(root, &db_full, 1, &meta()).expect("full rebuild");
         let (_, _, _, inc_unres) = dump_data(&db_inc);
         let (_, _, _, full_unres) = dump_data(&db_full);
         assert!(
@@ -3493,8 +4385,8 @@ mod tests {
 
         let out = graph_db_path(root);
         fs::create_dir_all(out.parent().unwrap()).unwrap();
-        build_graph_database(
-            &crate::graph::ProjectSnapshot::load(root),
+        build_whole_graph(
+            root,
             &out,
             1,
             &crate::graph_db::GraphMeta {
@@ -3687,7 +4579,7 @@ mod tests {
         roots.push(file_root.clone());
 
         let key = |s: &FileStat| (s.path.clone(), s.fingerprint());
-        let mut got: Vec<_> = scan_stats_over_roots(&roots).iter().map(key).collect();
+        let mut got: Vec<_> = scan_stats_over_roots(&roots).0.iter().map(key).collect();
         let mut want: Vec<_> = scan_stats_over_roots_reference(&roots).iter().map(key).collect();
         got.sort();
         want.sort();
@@ -3699,5 +4591,82 @@ mod tests {
             got.iter().any(|(p, _)| *p == file_root_canonical),
             "a file scan-root must be stat'd, not dropped",
         );
+    }
+}
+
+#[cfg(test)]
+mod form_twin_tests {
+    use super::super::test_support::{sample_workspace, write};
+    use super::GRAPH_BUILD_BATCH;
+    use crate::graph_db::build_graph_database;
+    use rusqlite::Connection;
+    use std::path::Path;
+
+    fn build(root: &Path, out: &Path) {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_graph_database(
+            &project,
+            &universe,
+            out,
+            GRAPH_BUILD_BATCH,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn shape(out: &Path) -> (i64, i64, Vec<(String, String)>) {
+        let conn = Connection::open(out).unwrap();
+        let nodes: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0)).unwrap();
+        let edges: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0)).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT name, qualified FROM nodes WHERE name = 'ПриОткрытии' ORDER BY id")
+            .unwrap();
+        let form_nodes = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        (nodes, edges, form_nodes)
+    }
+
+    /// Дерево с форменным модулем `Module.BSL` собирается в тот же граф, что его
+    /// нижнерегистровый близнец: узлы, рёбра и квалифицированное имя форменного
+    /// обработчика совпадают.
+    #[test]
+    fn a_case_variant_form_module_builds_the_same_graph_shape() {
+        let body = "&НаКлиенте\nПроцедура ПриОткрытии() Сервер.Считать();\nКонецПроцедуры";
+        let lower = tempfile::tempdir().unwrap();
+        sample_workspace(lower.path());
+        write(lower.path(), "Catalogs/C/Forms/F/Ext/Form/Module.bsl", body);
+        let lower_out = lower.path().join("out/graph.db");
+        build(lower.path(), &lower_out);
+
+        let upper = tempfile::tempdir().unwrap();
+        sample_workspace(upper.path());
+        write(upper.path(), "Catalogs/C/Forms/F/Ext/Form/Module.BSL", body);
+        let upper_out = upper.path().join("out/graph.db");
+        build(upper.path(), &upper_out);
+
+        let (lower_nodes, lower_edges, lower_form) = shape(&lower_out);
+        let (upper_nodes, upper_edges, upper_form) = shape(&upper_out);
+
+        // Положительный контроль: форменный обработчик действительно в графе.
+        assert!(!lower_form.is_empty(), "обработчик формы обязан быть узлом графа");
+        assert_eq!(lower_nodes, upper_nodes, "число узлов");
+        assert_eq!(lower_edges, upper_edges, "число рёбер");
+        // Квалификация здесь путевая (метаданных в фикстуре нет), а написание
+        // самого файла у близнецов и ДОЛЖНО отличаться — сравниваем структуру
+        // с точностью до ASCII-регистра пути.
+        let fold = |v: Vec<(String, String)>| -> Vec<(String, String)> {
+            v.into_iter().map(|(n, q)| (n, q.to_ascii_lowercase())).collect()
+        };
+        assert_eq!(fold(lower_form), fold(upper_form), "квалификация форменного обработчика");
     }
 }

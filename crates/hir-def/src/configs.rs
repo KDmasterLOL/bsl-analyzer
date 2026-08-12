@@ -10,6 +10,183 @@ use crate::DefDatabase;
 
 use bsl_config::VisibleConfig;
 
+/// The body files of one common module, each carrying whether its bytes could be read.
+///
+/// The distinction is the whole point: a resolver handed only the readable ones cannot
+/// tell "the module does not export this method" from "the method may live in the body
+/// nobody could read", and answering the first when the second is true blames a file
+/// that did nothing wrong.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CommonModuleBodies {
+    /// A visible configuration declares this module but its body file could not be
+    /// mapped. This is a completeness gap, distinct from an enrolled unread body.
+    missing_expected_body: bool,
+
+    /// Every body of the module, readable or not, in the order its producer chose.
+    ///
+    /// One ordered list rather than two, because for the producer that orders by
+    /// PRIORITY the order is semantic: the base declaration wins over an extension's,
+    /// so a method found in a later body is only the answer if every earlier body was
+    /// readable and did not have it. Two separate lists lose exactly that relation, and
+    /// the loss is invisible — the wrong body simply answers.
+    ///
+    /// Not every producer orders by priority: the metadata substrate builds a MERGED
+    /// surface extension-first and qualified resolution reverses it. So the order is a
+    /// property of who built the list, and the walk must match it —
+    /// [`CommonModuleBodies::search`] for priority order,
+    /// [`CommonModuleBodies::search_merged_surface`] otherwise.
+    ///
+    /// Private, because a public field is a third walk past the barrier that looks
+    /// more innocent than the one this type removed: `bodies.iter().filter(|b|
+    /// !b.unread)` is just a loop over a field, and it loses exactly what `search`
+    /// exists to keep.
+    bodies: Vec<CommonModuleBody>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommonModuleBody {
+    pub file: FileId,
+    /// The file exists but its bytes could not be read, so it says nothing about
+    /// what the module does or does not export.
+    pub unread: bool,
+}
+
+/// What a walk over a module's bodies found — the only shape in which an answer about
+/// a common module may be phrased, because it keeps "not there" apart from "could not
+/// look".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodySearch<T> {
+    /// The first body that answered. Every body ahead of it was readable and did not.
+    Found(T),
+    /// Every body was readable and none of them answered: the module really has no
+    /// such thing, and saying so is fair.
+    Absent,
+    /// The walk reached a body whose bytes could not be read. What that body declares
+    /// is unknown, and a lower-priority body must not answer in its place — so nothing
+    /// is derivable about this module, least of all against whoever asked.
+    Unread,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ApplicationModuleKind {
+    Managed,
+    Ordinary,
+    Generic,
+    ExternalConnection,
+}
+
+impl ApplicationModuleKind {
+    pub const ALL: [Self; 4] =
+        [Self::Managed, Self::Ordinary, Self::Generic, Self::ExternalConnection];
+
+    pub fn relative_path(self) -> std::path::PathBuf {
+        use bsl_conventions::ConventionalName as Conv;
+
+        let file = match self {
+            Self::Managed => Conv::ManagedApplicationModule,
+            Self::Ordinary => Conv::OrdinaryApplicationModule,
+            Self::Generic => Conv::ApplicationModule,
+            Self::ExternalConnection => Conv::ExternalConnectionModule,
+        };
+        std::path::Path::new(Conv::Ext.canonical()).join(file.canonical())
+    }
+
+    pub fn module_type(self) -> bsl_metadata::ModuleType {
+        match self {
+            Self::Managed => bsl_metadata::ModuleType::ManagedApplicationModule,
+            Self::Ordinary => bsl_metadata::ModuleType::OrdinaryApplicationModule,
+            Self::Generic => bsl_metadata::ModuleType::ApplicationModule,
+            Self::ExternalConnection => bsl_metadata::ModuleType::ExternalConnectionModule,
+        }
+    }
+}
+
+impl CommonModuleBodies {
+    /// No body of this module is known at all. The signal to degrade to the
+    /// path-derived module index.
+    pub fn is_empty(&self) -> bool {
+        self.bodies.is_empty()
+    }
+
+    /// Walk the bodies in priority order, stopping at the first one that answers — and
+    /// at the first one that cannot be read.
+    ///
+    /// Stopping at the unread body is the whole barrier: it is what keeps a
+    /// lower-priority body from answering for a higher-priority one whose surface is
+    /// unknown. There is deliberately no iterator over the readable bodies — every
+    /// consumer handed one walked straight past the barrier and lost it silently.
+    pub fn search<T>(&self, mut probe: impl FnMut(FileId) -> Option<T>) -> BodySearch<T> {
+        for body in &self.bodies {
+            if body.unread {
+                return BodySearch::Unread;
+            }
+            if let Some(found) = probe(body.file) {
+                return BodySearch::Found(found);
+            }
+        }
+        BodySearch::Absent
+    }
+
+    /// Look through the whole MERGED surface, answering only when all of it was
+    /// readable.
+    ///
+    /// The counterpart of [`Self::search`] for consumers handed the bodies in merged
+    /// order rather than priority order (see the reversal in the metadata substrate):
+    /// there is no "first" body to stop at, so position cannot say whose declaration
+    /// wins. What stays true regardless of order is that an unread body leaves the
+    /// surface partly unknown, and a verdict drawn from the rest is a guess — so any
+    /// unread body at all yields [`BodySearch::Unread`].
+    pub fn search_merged_surface<T>(
+        &self,
+        probe: impl FnMut(FileId) -> Option<T>,
+    ) -> BodySearch<T> {
+        if self.bodies.iter().any(|b| b.unread) {
+            return BodySearch::Unread;
+        }
+        self.search(probe)
+    }
+
+    /// Every body, readable or not, for callers that record a RELATION to the module
+    /// rather than read anything out of it — the call graph's reverse references, which
+    /// must survive a body becoming readable. Never a substitute for [`Self::search`].
+    pub fn all_for_reference(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.bodies.iter().map(|b| b.file)
+    }
+
+    /// The bodies that exist but could not be read, in priority order.
+    pub fn unread(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.bodies.iter().filter(|b| b.unread).map(|b| b.file)
+    }
+
+    pub fn push(&mut self, file: FileId, unread: bool) {
+        if !self.bodies.iter().any(|b| b.file == file) {
+            self.bodies.push(CommonModuleBody { file, unread });
+        }
+    }
+
+    pub fn mark_missing_expected_body(&mut self) {
+        self.missing_expected_body = true;
+    }
+
+    pub fn has_missing_expected_body(&self) -> bool {
+        self.missing_expected_body
+    }
+
+    /// Flip the list between the two orders a producer may build it in — merged
+    /// (extension-first) and priority (base-first). Named for what it does to meaning,
+    /// not to the vector, because that is the only reason to do it.
+    pub fn reverse_priority(&mut self) {
+        self.bodies.reverse();
+    }
+
+    /// Each body with its readability, in the producer's order. For building another
+    /// composition out of this one — never for deciding what the module declares,
+    /// which is what [`Self::search`] is for.
+    pub fn iter(&self) -> impl Iterator<Item = CommonModuleBody> + '_ {
+        self.bodies.iter().copied()
+    }
+}
+
 #[salsa::db]
 pub trait ConfigsDatabase: DefDatabase {
     /// The configurations VISIBLE to `file_id` as separate entries (no merge):
@@ -22,6 +199,18 @@ pub trait ConfigsDatabase: DefDatabase {
     /// per-file dependency-scoped visibility; semantic resolution must use
     /// [`Self::configurations`].
     fn configurations_inventory(&self) -> Vec<VisibleConfig>;
+
+    /// Load, on the CALLING thread, every configuration root `modules` can reach,
+    /// so a parallel region over them never enters the internally-parallel
+    /// whole-config loader from a worker.
+    ///
+    /// A module's root is attributed from its own path on disk, which is NOT the
+    /// declared-root set of [`Self::configurations_inventory`]: a workspace whose
+    /// configuration was never discovered is itself the only declared root, while
+    /// its files attribute to whatever nested directory actually holds their
+    /// metadata. Warming the declared roots alone therefore leaves those nested
+    /// roots to be loaded lazily, from inside the pool.
+    fn warm_config_roots(&self, modules: &[crate::ModuleId]);
 
     fn merged_visible_configuration(&self, file_id: FileId) -> Option<Arc<Configuration>>;
 
@@ -80,16 +269,29 @@ pub trait ConfigsDatabase: DefDatabase {
     /// other extension's adoption is visible to this file.
     ///
     /// `None` means the provider has no visibility-scoped body lookup — the
-    /// caller falls back to the path-derived module index. An empty `Some`
-    /// means the configs know the module but no body file mapped (metadata-URI
-    /// drift); callers should degrade to the path index rather than report the
-    /// module missing.
+    /// caller falls back to the path-derived module index. An empty `Some` means
+    /// the configs know the module but no body file mapped (metadata-URI drift);
+    /// callers should degrade to the path index rather than report the module
+    /// missing.
     fn resolve_common_module_file_candidates(
         &self,
         file_id: FileId,
         name: &str,
-    ) -> Option<Vec<FileId>> {
+    ) -> Option<CommonModuleBodies> {
         let _ = (file_id, name);
+        None
+    }
+
+    /// Application-module bodies visible to `file_id`, base first and the
+    /// caller's extension/dependency chain afterwards. `Some(empty)` proves the
+    /// fixed module path is absent from every visible root; `None` means the
+    /// provider cannot enumerate the surface and callers must stay conservative.
+    fn resolve_application_module_file_candidates(
+        &self,
+        file_id: FileId,
+        kind: ApplicationModuleKind,
+    ) -> Option<CommonModuleBodies> {
+        let _ = (file_id, kind);
         None
     }
 

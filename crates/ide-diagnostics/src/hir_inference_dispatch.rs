@@ -3,6 +3,7 @@ use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, RedundantAc
 use ide_db::TextRange;
 
 pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::UnresolvedName,
     DiagnosticCode::UnresolvedMethodCall,
     DiagnosticCode::MismatchedArgCount,
     DiagnosticCode::TypeMismatch,
@@ -15,6 +16,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::MissedRequiredParameter,
     DiagnosticCode::UnavailableInEnvironment,
     DiagnosticCode::ModuleAccessibility,
+    DiagnosticCode::ExternalAppStarting,
 ];
 
 pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -83,6 +85,7 @@ fn dispatch_pairs(
 
 fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
     match diag {
+        InferenceDiagnostic::UnresolvedName { expr, .. } => *expr,
         InferenceDiagnostic::UnresolvedMethodCall { expr, .. } => *expr,
         InferenceDiagnostic::MismatchedArgCount { call_expr, .. } => *call_expr,
         InferenceDiagnostic::TypeMismatch { expr, .. } => *expr,
@@ -96,6 +99,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
+        InferenceDiagnostic::ExternalAppStarting { expr } => *expr,
     }
 }
 
@@ -109,7 +113,15 @@ fn dispatch_inference_diagnostic(
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
     match diag {
+        InferenceDiagnostic::UnresolvedName { name, .. } => {
+            handlers::unresolved_name::from_hir(name, range, ctx)
+        }
         InferenceDiagnostic::UnresolvedMethodCall { receiver_name, method_name, kind, .. } => {
+            if *kind == hir::UnresolvedMethodKind::ReceiverNameAbsent
+                && !ctx.config.is_disabled(DiagnosticCode::UnresolvedName)
+            {
+                return None;
+            }
             handlers::unresolved_method_call::from_hir(
                 receiver_name,
                 method_name,
@@ -197,6 +209,9 @@ fn dispatch_inference_diagnostic(
         }
         InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {
             handlers::module_accessibility::from_hir(name, *callee_kind, *missing, range, ctx)
+        }
+        InferenceDiagnostic::ExternalAppStarting { .. } => {
+            handlers::external_app_starting::from_hir(range, ctx)
         }
     }
 }

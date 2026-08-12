@@ -82,6 +82,9 @@ pub struct McpServeArgs {
 
     #[arg(long, default_value = "")]
     onec_password: String,
+
+    #[command(flatten)]
+    source_set: super::source_set::SourceSetArgs,
 }
 
 impl McpCommand {
@@ -116,6 +119,15 @@ impl McpCommand {
 
         let McpCommand::Serve(args) = self else { return None };
         if !matches!(args.mode, McpServeMode::Daemon) {
+            return None;
+        }
+        // Logging is prepared before the arguments are validated, and preparing an explicit
+        // cache root CREATES it — so a command that is about to be rejected would leave a
+        // directory, and a log inside it, at a path the caller named. Ask the validator
+        // rather than restating some of its rules here: every reason it rejects for
+        // (`--host` outside http mode, a bad port, an empty allowlist) reaches this code
+        // just the same.
+        if validate_serve_args(args).is_err() {
             return None;
         }
         let log_path = match opt_in.map(str::trim) {
@@ -265,6 +277,17 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     let (source_dir, workspace_cache) =
         resolve_workspace_inputs(profile, args.source_dir.clone(), args.cache_dir.as_deref())?;
 
+    // Installed before any mode runs, because the broker computes its backend key
+    // from the project *before* a server exists — a source set installed later
+    // would leave that key derived from the on-disk config alone, and two
+    // clients with different sets would rendezvous on one daemon.
+    if let Some(ref source_dir) = args.source_dir {
+        let root = source_dir.canonicalize().unwrap_or_else(|_| source_dir.clone());
+        let installed =
+            mcp_server::project::set_source_set_override(args.source_set.resolve(&root)?);
+        debug_assert!(installed, "the source set must be installed exactly once per process");
+    }
+
     match resolve_serve_mode(args.mode, profile)? {
         McpServeMode::Stdio => run_mcp_server(
             profile,
@@ -308,12 +331,27 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
             "reference profile does not accept --cache-dir",
         ));
     }
+    // An unset shell variable expands to an empty argument, which resolves to the current
+    // directory — the multi-gigabyte databases would land wherever the client was started.
+    if args.cache_dir.as_deref().is_some_and(|dir| dir.as_os_str().is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--cache-dir must not be empty"));
+    }
     if matches!(args.runtime_profile, McpProfileCli::Reference)
         && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "reference profile does not accept --onec-url/--onec-user/--onec-password",
+        ));
+    }
+
+    // The reference profile has no workspace to describe, and relative flag paths
+    // would have no root to resolve against.
+    if matches!(args.runtime_profile, McpProfileCli::Reference) && !args.source_set.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reference profile does not accept source-set flags \
+             (--configuration-root/--extension/--extension-depends-on/--no-extensions)",
         ));
     }
 
@@ -369,12 +407,18 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
 fn resolve_workspace_cache(
     canonical_source_dir: &Path,
     cache_dir: Option<&Path>,
-    current_dir: &Path,
 ) -> io::Result<mcp_server::WorkspaceCacheLayout> {
-    match cache_dir {
-        Some(path) => mcp_server::WorkspaceCacheLayout::prepare_explicit(path, current_dir),
-        None => Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir)),
-    }
+    let Some(path) = cache_dir else {
+        // The default root is a function of the workspace, so it needs no current directory —
+        // and it stays lazy: a read-only source tree must still bring the daemon up with
+        // search disabled rather than fail at startup.
+        return Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir));
+    };
+    // Read the working directory only when it is what an absolute path never needs: a base to
+    // resolve against. A daemon started from a directory that has since been deleted must not
+    // fail over a value it would not have used.
+    let base = if path.is_absolute() { PathBuf::new() } else { env::current_dir()? };
+    mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &base)
 }
 
 fn resolve_workspace_inputs(
@@ -394,8 +438,7 @@ fn resolve_workspace_inputs(
             format!("failed to canonicalize --source-dir {}: {error}", source_dir.display()),
         )
     })?;
-    let current_dir = env::current_dir()?;
-    let cache = resolve_workspace_cache(&canonical_source, cache_dir, &current_dir)?;
+    let cache = resolve_workspace_cache(&canonical_source, cache_dir)?;
     Ok((Some(canonical_source), Some(cache)))
 }
 
@@ -483,10 +526,18 @@ fn daemon_command(
         .arg("workspace")
         .arg("--source-dir")
         .arg(source_dir)
-        .arg("--cache-dir")
-        .arg(workspace_cache.root())
         .arg("--mode")
         .arg("daemon");
+    // Only an explicitly requested root travels to the child. Passing the default one would
+    // turn it into an explicit `--cache-dir`, which the daemon must create at startup or
+    // fail — the default is deliberately lazy, and a read-only source tree has to keep
+    // bringing the daemon up with search disabled instead of looping through respawns.
+    if args.cache_dir.is_some() {
+        cmd.arg("--cache-dir").arg(workspace_cache.root());
+    }
+    // The daemon must resolve the same project this proxy keyed on, and its own
+    // config file cannot tell it about a source set that came from argv.
+    cmd.args(args.source_set.to_args());
     if let Some(url) = &args.onec_url {
         cmd.arg("--onec-url").arg(url);
     }
@@ -1430,6 +1481,19 @@ mod tests {
         assert!(err.to_string().contains("--cache-dir"));
     }
 
+    /// `--cache-dir "$UNSET_VAR"` reaches the process as an empty argument, which resolves to
+    /// the working directory the client happened to start in.
+    #[test]
+    fn empty_cache_dir_is_refused_rather_than_resolved_to_the_working_directory() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.cache_dir = Some(PathBuf::new());
+
+        let err = validate_serve_args(&args).expect_err("an empty cache root names nothing");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--cache-dir"));
+    }
+
     #[test]
     fn explicit_default_cache_matches_implicit_default_after_resolution() {
         let parent = tempfile::tempdir().unwrap();
@@ -1438,10 +1502,8 @@ mod tests {
         let canonical_source = source.canonicalize().unwrap();
         let default_cache = canonical_source.join(".build");
 
-        let implicit = resolve_workspace_cache(&canonical_source, None, parent.path()).unwrap();
-        let explicit =
-            resolve_workspace_cache(&canonical_source, Some(&default_cache), parent.path())
-                .unwrap();
+        let implicit = resolve_workspace_cache(&canonical_source, None).unwrap();
+        let explicit = resolve_workspace_cache(&canonical_source, Some(&default_cache)).unwrap();
 
         assert_eq!(implicit.root(), explicit.root());
     }
@@ -1455,7 +1517,8 @@ mod tests {
             cache_parent.path(),
         )
         .unwrap();
-        let args = serve_args(McpServeMode::Broker, None);
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.cache_dir = Some(PathBuf::from("кеш с пробелом"));
 
         let command = daemon_command(
             PathBuf::from("bsl-analyzer").as_path(),
@@ -1469,6 +1532,29 @@ mod tests {
 
         assert!(argv[flag + 1].is_absolute());
         assert_eq!(argv[flag + 1], cache.root());
+    }
+
+    /// Without the flag the child must derive the default itself. Handing it the resolved
+    /// default would make the daemon create `<source>/.build` at startup or die trying,
+    /// where it used to come up with search disabled.
+    #[test]
+    fn broker_child_receives_no_cache_dir_when_none_was_requested() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical_source = source.path().canonicalize().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&canonical_source);
+        let args = serve_args(McpServeMode::Broker, None);
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &canonical_source,
+            &cache,
+            &args,
+            42,
+        );
+        let argv = command.get_args().map(PathBuf::from).collect::<Vec<_>>();
+
+        assert!(argv.iter().all(|arg| arg != "--cache-dir"), "argv: {argv:?}");
+        assert!(!canonical_source.join(".build").exists(), "the default stays lazy");
     }
 
     #[test]
@@ -1507,6 +1593,7 @@ mod tests {
             onec_url: None,
             onec_user: String::new(),
             onec_password: String::new(),
+            source_set: Default::default(),
         }
     }
 
@@ -1568,6 +1655,46 @@ mod tests {
 
         assert_eq!(path, cache.canonicalize().unwrap().join("bsl-analyzer-daemon.log"));
         assert!(!source.path().join(".build").exists());
+    }
+
+    /// The log destination is resolved before the arguments are validated, so a combination
+    /// that validation is about to reject must not create the directory on its way out.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_for_a_command_validation_will_reject() {
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("должен-остаться-несозданным");
+        let mut command = serve_command(McpServeMode::Daemon, parent.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.runtime_profile = McpProfileCli::Reference;
+            args.source_dir = None;
+            args.cache_dir = Some(cache.clone());
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "the combination is indeed rejected");
+    }
+
+    /// A second member of the same class, rejected for a reason that has nothing to do with
+    /// the cache: the guard must ask the validator, not restate the rules it happens to know.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_when_an_unrelated_flag_is_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("несозданный-кеш");
+        let mut command = serve_command(McpServeMode::Daemon, source.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.cache_dir = Some(cache.clone());
+            args.host = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "--host outside http mode is rejected");
     }
 
     #[test]

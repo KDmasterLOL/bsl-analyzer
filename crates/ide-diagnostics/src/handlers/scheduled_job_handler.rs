@@ -49,7 +49,10 @@ fn is_session_module(ctx: &DiagnosticsContext) -> bool {
         None => return false,
     };
 
-    file_path.ends_with("/Ext/SessionModule.bsl") || file_path.ends_with("\\Ext\\SessionModule.bsl")
+    bsl_conventions::path_ends_with_ext_child(
+        &file_path,
+        bsl_conventions::ConventionalName::SessionModule,
+    )
 }
 
 fn check_scheduled_job(
@@ -125,8 +128,8 @@ fn check_method(
     code: DiagnosticCode,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let module_files = ctx.common_module_body_files(&handler.module_name);
-    if module_files.is_empty() {
+    let bodies = ctx.common_module_bodies(&handler.module_name);
+    if bodies.is_empty() {
         return;
     }
 
@@ -138,14 +141,12 @@ fn check_method(
         is_export: bool,
         params_empty: bool,
     }
-    let mut resolved: Option<Resolved> = None;
+    let mut non_exported: Option<Resolved> = None;
 
-    for module_file_id in module_files {
+    let found = bodies.search_merged_surface(|module_file_id| {
         let module_id = ModuleId::new(module_file_id);
         let symbol_tree = ctx.symbol_tree_for(module_id);
-        let Some(method) = symbol_tree.find_method(&method_name_obj) else {
-            continue;
-        };
+        let method = symbol_tree.find_method(&method_name_obj)?;
         let candidate = Resolved {
             module_id,
             local_id: method.id.local_id,
@@ -153,13 +154,22 @@ fn check_method(
             params_empty: method.params.is_empty(),
         };
         if candidate.is_export {
-            resolved = Some(candidate);
-            break;
+            return Some(candidate);
         }
-        if resolved.is_none() {
-            resolved = Some(candidate);
+        if non_exported.is_none() {
+            non_exported = Some(candidate);
         }
-    }
+        None
+    });
+
+    let resolved = match found {
+        hir::BodySearch::Found(candidate) => Some(candidate),
+        hir::BodySearch::Absent => non_exported,
+        // Every verdict here — missing, non-exported, parameterized, empty — is a claim
+        // about the method that would really run, and part of the module's surface
+        // could not be read: the handler may well be declared exactly there.
+        hir::BodySearch::Unread => return,
+    };
 
     let Some(resolved) = resolved else {
         diagnostics.push(create_diagnostic(
@@ -466,5 +476,66 @@ mod tests {
         let diagnostics = check(&ctx);
 
         expect![[r#""#]].assert_eq(&format_diags("Процедура Тест()\nКонецПроцедуры", &diagnostics));
+    }
+
+    /// "The module does not declare this job handler" is a claim about the whole module,
+    /// and an unread body makes it underivable: the method may well be declared there,
+    /// and a readable body behind it says nothing about the one ahead of it.
+    #[test]
+    fn an_unread_base_body_bars_the_missing_job_handler_verdict() {
+        use crate::test_utils::check_cfe_at_with_unreadable;
+        use test_fixture::CfeFixtureBuilder;
+
+        let job_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.4">
+    <ScheduledJob uuid="0de0c839-4427-46d9-be68-302f88ac162c">
+        <Properties>
+            <Name>Задание</Name>
+            <MethodName>CommonModule.Сервер.Обработчик</MethodName>
+            <Use>true</Use>
+            <Predefined>false</Predefined>
+        </Properties>
+    </ScheduledJob>
+</MetaDataObject>"#;
+
+        // Both bodies lack the handler, so the verdict is derivable — until one of them
+        // stops being readable. Only the unreadable flag differs between the two runs.
+        let fixture = || {
+            let mut builder = CfeFixtureBuilder::new("");
+            builder
+                .add_base_module("Сервер", "Процедура Иное() Экспорт КонецПроцедуры")
+                .add_extension("Расш", "")
+                .add_extension_module("Расш", "Сервер", "Процедура Иное() Экспорт КонецПроцедуры");
+            let fixture = builder.build();
+            let dir = fixture.root().join("ScheduledJobs");
+            std::fs::create_dir_all(&dir).expect("create ScheduledJobs directory");
+            std::fs::write(dir.join("Задание.xml"), job_xml).expect("write ScheduledJob");
+            fixture
+        };
+        let session_module = "Процедура Маркер()\nКонецПроцедуры\n";
+
+        let control = check_cfe_at_with_unreadable(
+            "Ext/SessionModule.bsl",
+            session_module,
+            fixture(),
+            &[],
+            check,
+        );
+        assert!(
+            control.iter().any(|d| d.code == DiagnosticCode::ScheduledJobHandler),
+            "control: a readable module without the handler must be reported, got {control:?}"
+        );
+
+        let unread = check_cfe_at_with_unreadable(
+            "Ext/SessionModule.bsl",
+            session_module,
+            fixture(),
+            &["CommonModules/Сервер/Ext/Module.bsl"],
+            check,
+        );
+        assert!(
+            unread.iter().all(|d| d.code != DiagnosticCode::ScheduledJobHandler),
+            "an unread body may declare the handler, so absence is not provable: {unread:?}"
+        );
     }
 }

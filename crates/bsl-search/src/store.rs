@@ -1,5 +1,6 @@
 use crate::document::Document;
 use crate::error::SearchError;
+use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
 use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,33 @@ pub type ChunkContextRow = (i64, String, String, Option<String>);
 /// `embedding_generation` they were read at, as one consistent snapshot.
 pub type EmbeddingsSnapshot = (i64, Vec<(i64, Vec<f32>)>);
 
+/// One file prepared off-lock for an atomic workspace-root transition.
+pub(crate) struct WorkspaceTransitionFile {
+    pub(crate) key: FileKey,
+    pub(crate) hash: Vec<u8>,
+    pub(crate) chunks: Vec<Chunk>,
+    pub(crate) graph_contexts: Vec<Option<String>>,
+}
+
+/// Persistent mutation set for one workspace-root transition.
+pub(crate) struct WorkspaceStoreTransition<'a> {
+    /// Entire keyspaces whose binding changed. Cleaning by id also reaches negative state and
+    /// persisted overlay rows that are deliberately absent from the positive carrier snapshot.
+    pub(crate) changed_root_ids: &'a HashSet<String>,
+    pub(crate) cleanup: &'a HashSet<FileKey>,
+    pub(crate) tombstones: &'a HashSet<FileKey>,
+    pub(crate) upserts: &'a [WorkspaceTransitionFile],
+    pub(crate) dimension: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fail after the transition has mutated its transaction but before the vector candidate is
+    /// built, proving that dropping the transaction restores every persistent carrier.
+    pub(crate) static FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
 /// Bumped whenever the embedding text composed by
 /// `document::semantic_text_for_indexed_document` changes shape. Stored in the SQLite
 /// `user_version` pragma; on mismatch the store clears file hashes so the next index
@@ -50,13 +78,111 @@ pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 /// leaves the schema intact. A pre-versioning database (no `meta` row) is treated as
 /// already current — the additive migrations keep it compatible — so upgrading does not
 /// trigger a needless full re-index.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+/// The tables whose row identity is the pair `(root_id, path)` rather than the
+/// path alone, and the body each is created with.
+///
+/// One definition serves both the create path and the migration below, so the
+/// shape a fresh store is born with and the shape an upgraded one is rebuilt
+/// into cannot drift apart.
+struct RootKeyedTable {
+    name: &'static str,
+    body: &'static str,
+    suffix: &'static str,
+}
+
+const ROOT_KEYED_TABLES: &[RootKeyedTable] = &[
+    RootKeyedTable {
+        name: "files",
+        body: "
+            id         INTEGER PRIMARY KEY,
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            hash       BLOB    NOT NULL,
+            indexed_at INTEGER NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "baseline_manifest_files",
+        body: "
+            root_id          TEXT    NOT NULL DEFAULT '',
+            collection       TEXT    NOT NULL DEFAULT 'code',
+            path             TEXT    NOT NULL,
+            file_fingerprint TEXT    NOT NULL,
+            PRIMARY KEY (collection, root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_tombstones",
+        body: "
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            deleted_at TEXT    NOT NULL,
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_files",
+        body: "
+            id         INTEGER PRIMARY KEY,
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            hash       BLOB    NOT NULL,
+            indexed_at INTEGER NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            UNIQUE (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "overlay_fingerprint_cache",
+        body: "
+            root_id              TEXT    NOT NULL DEFAULT '',
+            path                 TEXT    NOT NULL,
+            collection           TEXT    NOT NULL DEFAULT 'code',
+            file_size            INTEGER NOT NULL,
+            file_mtime_secs      INTEGER NOT NULL,
+            file_mtime_nanos     INTEGER NOT NULL,
+            content_fingerprint  TEXT    NOT NULL,
+            manifest_snapshot_id TEXT    NOT NULL,
+            canonical            TEXT    NOT NULL DEFAULT '',
+            PRIMARY KEY (root_id, path)
+        ",
+        suffix: "",
+    },
+    RootKeyedTable {
+        name: "context_dirty",
+        body: "
+            root_id    TEXT    NOT NULL DEFAULT '',
+            path       TEXT    NOT NULL,
+            collection TEXT    NOT NULL DEFAULT 'code',
+            marked_at  INTEGER NOT NULL,
+            seq        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (root_id, path, collection)
+        ",
+        suffix: " WITHOUT ROWID",
+    },
+];
+
+impl RootKeyedTable {
+    fn create_as(&self, name: &str) -> String {
+        format!("CREATE TABLE IF NOT EXISTS {name} ({}){};", self.body, self.suffix)
+    }
+}
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
+        store.migrate_root_keyed_tables()?;
         store.migrate_structural_schema()?;
         store.migrate_embed_text_version()?;
         store.seed_mark_seq()?;
@@ -78,6 +204,35 @@ impl Store {
     /// writer) while the overlay watcher keeps writing through the live engine. Without
     /// a timeout a writer that finds the WAL lock held returns `SQLITE_BUSY`
     /// immediately; with it SQLite retries internally for the configured window.
+    /// Open an EXISTING store without migrating anything: pragmas only, schema version
+    /// validated, mismatch is an error. For a standalone pass that may run while another
+    /// daemon owns the workspace — the migrating [`Self::open`] could wipe and recreate the
+    /// owner's tables on a version mismatch, and a pass has no business doing either.
+    /// `seed_mark_seq` still runs: it only raises the in-memory counter floor.
+    pub fn open_existing(path: &Path) -> Result<Self, SearchError> {
+        // No CREATE flag: the default open would materialize an empty file for a missing
+        // path — a side effect the "existing" contract (and the ownership discipline of the
+        // standalone pass) forbids.
+        let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
+        store.apply_pragmas()?;
+        let stored: Option<String> = store
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |row| row.get(0))
+            .optional()?;
+        match stored.and_then(|value| value.parse::<i64>().ok()) {
+            Some(version) if version == SCHEMA_VERSION => {}
+            other => {
+                return Err(SearchError::Index(format!(
+                    "store schema mismatch: found {other:?}, need {SCHEMA_VERSION}; \
+                     a migrating open must do this"
+                )));
+            }
+        }
+        store.seed_mark_seq()?;
+        Ok(store)
+    }
+
     fn apply_pragmas(&self) -> Result<(), SearchError> {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -85,6 +240,114 @@ impl Store {
              PRAGMA busy_timeout = 30000;
              PRAGMA foreign_keys = ON;",
         )?;
+        Ok(())
+    }
+
+    /// Give the path-keyed tables their `root_id` column without losing a row.
+    ///
+    /// The identity of a row moved from `path` to `(root_id, path)`, and SQLite
+    /// cannot alter a `UNIQUE`/`PRIMARY KEY` clause in place: each table has to
+    /// be rebuilt. The ordinary route for a shape change — bump the version and
+    /// let the store be wiped — is exactly what must not happen here, because a
+    /// wipe costs a full re-index and re-embedding of a corpus that has not
+    /// changed at all. Every existing row is the configuration's, which is what
+    /// the reserved empty id means, so the default value alone carries them over.
+    ///
+    /// The entry condition is the shape of the table, not the recorded version:
+    /// a store written before versioning existed reports no version at all and
+    /// would sail past a version check into the new code with its old
+    /// constraints intact.
+    ///
+    /// One consequence is deliberate. A daemon of the previous release keeps a
+    /// connection to this file open while it drains, and the lease does not gate
+    /// the lexical side of the index, so its upserts start failing against the
+    /// new constraint the moment this runs. That process keeps serving the index
+    /// it already holds and exits with its last session; the store itself stays
+    /// consistent and belongs to the newer daemon. Splitting the file per schema
+    /// would remove the window at the price of copying the whole store on every
+    /// upgrade.
+    fn migrate_root_keyed_tables(&self) -> Result<(), SearchError> {
+        let pending: Vec<&RootKeyedTable> = ROOT_KEYED_TABLES
+            .iter()
+            .filter(|table| Self::table_awaits_root_id(&self.conn, table.name))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        // Dropping `files` with foreign keys enforced would cascade its chunks
+        // away — the embeddings this migration exists to preserve. The pragma is
+        // a no-op inside a transaction, so the window is opened here and closed
+        // whatever happens, including on a failed rebuild.
+        self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+        let rebuilt = self.rebuild_root_keyed_tables(&pending);
+        let restored = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
+        rebuilt?;
+        restored?;
+        Ok(())
+    }
+
+    /// Whether the table exists and still lacks `root_id`. A missing table is
+    /// not pending: it will be created in the current shape.
+    fn table_awaits_root_id(conn: &Connection, table: &str) -> bool {
+        let columns = Self::column_names(conn, table);
+        !columns.is_empty() && !columns.iter().any(|column| column == "root_id")
+    }
+
+    fn column_names(conn: &Connection, table: &str) -> Vec<String> {
+        let Ok(mut stmt) = conn.prepare("SELECT name FROM pragma_table_info(?1)") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(params![table], |row| row.get::<_, String>(0)) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    fn rebuild_root_keyed_tables(&self, pending: &[&RootKeyedTable]) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for table in pending {
+            let staging = format!("{}_root_id_migration", table.name);
+            tx.execute_batch(&table.create_as(&staging))?;
+            // The columns to carry over are read off both tables rather than
+            // written out here: a store old enough to predate one of the
+            // additive column adds would otherwise fail on a column that its
+            // copy of the table never had.
+            let carried: Vec<String> = Self::column_names(&tx, table.name)
+                .into_iter()
+                .filter(|column| Self::column_names(&tx, &staging).contains(column))
+                .collect();
+            let carried = carried.join(", ");
+            tx.execute_batch(&format!(
+                "INSERT INTO {staging} ({carried}) SELECT {carried} FROM {};
+                 DROP TABLE {};
+                 ALTER TABLE {staging} RENAME TO {};",
+                table.name, table.name, table.name
+            ))?;
+        }
+
+        // The rebuild leaves `chunks` pointing at a table that was dropped and
+        // recreated under the same name; this is where a mistake in that dance
+        // shows up, while the transaction can still be rolled back.
+        let violations: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get(0))?;
+        if violations != 0 {
+            return Err(SearchError::Index(format!(
+                "root_id migration left {violations} dangling foreign key reference(s)"
+            )));
+        }
+
+        // Stamped forward here, inside the same transaction, so the structural
+        // migration that runs next sees a current store and leaves it alone
+        // instead of wiping the rows just carried over. A store with no `meta`
+        // table at all is stamped by that migration instead.
+        if !Self::column_names(&tx, "meta").is_empty() {
+            tx.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                params![SCHEMA_VERSION.to_string()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -107,12 +370,42 @@ impl Store {
             }
         }
         Self::create_schema(&tx)?;
+        // Additive columns are added in place, NOT via a SCHEMA_VERSION bump: a version
+        // mismatch wipes every derived table, which is exactly what an additive change
+        // exists to avoid. `create_schema` only creates missing tables, so an existing
+        // database needs the column grafted onto its live table, data intact.
+        Self::ensure_column(
+            &tx,
+            "overlay_fingerprint_cache",
+            "canonical",
+            "TEXT NOT NULL DEFAULT ''",
+        )?;
+
         Self::ensure_embedding_generation(&tx, &self.path)?;
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
             params![SCHEMA_VERSION.to_string()],
         )?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Add `column` to `table` when it is missing — the in-place half of an additive schema
+    /// change. A no-op on a fresh database, whose `CREATE TABLE` already carries the column.
+    fn ensure_column(
+        tx: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), SearchError> {
+        let mut stmt = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .filter_map(|name| name.ok())
+            .any(|name| name == column);
+        if !exists {
+            tx.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"), [])?;
+        }
         Ok(())
     }
 
@@ -212,25 +505,25 @@ impl Store {
         let store =
             Self { conn, path: PathBuf::from(":memory:"), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
+        store.migrate_root_keyed_tables()?;
         store.migrate_structural_schema()?;
         store.seed_mark_seq()?;
         Ok(store)
     }
 
     fn create_schema(conn: &Connection) -> Result<(), SearchError> {
+        // Created first, and from the shared definitions: `chunks` and
+        // `overlay_chunks` reference them, and their shape must be the one the
+        // migration rebuilds into.
+        for table in ROOT_KEYED_TABLES {
+            conn.execute_batch(&table.create_as(table.name))?;
+        }
+
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS files (
-                id         INTEGER PRIMARY KEY,
-                path       TEXT    NOT NULL UNIQUE,
-                hash       BLOB   NOT NULL,
-                indexed_at INTEGER NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code'
             );
 
             CREATE TABLE IF NOT EXISTS chunks (
@@ -276,33 +569,12 @@ impl Store {
                 fetched_at      TEXT    NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS baseline_manifest_files (
-                collection       TEXT    NOT NULL DEFAULT 'code',
-                path             TEXT    NOT NULL,
-                file_fingerprint TEXT    NOT NULL,
-                PRIMARY KEY (collection, path)
-            );
-
             -- Tombstones for deleted baseline files.
             -- When a baseline file is deleted locally, its path is recorded here
             -- so the merge layer can hide the baseline hit.
-            CREATE TABLE IF NOT EXISTS overlay_tombstones (
-                path       TEXT    NOT NULL UNIQUE,
-                collection TEXT    NOT NULL DEFAULT 'code',
-                deleted_at TEXT    NOT NULL
-            );
-
             -- Overlay files: files that are locally modified or new relative to
             -- the baseline manifest. These are separate from the main `files`
             -- table so baseline rows never appear in local storage.
-            CREATE TABLE IF NOT EXISTS overlay_files (
-                id         INTEGER PRIMARY KEY,
-                path       TEXT    NOT NULL UNIQUE,
-                hash       BLOB   NOT NULL,
-                indexed_at INTEGER NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code'
-            );
-
             -- Overlay chunks: lexical chunks belonging to overlay files.
             CREATE TABLE IF NOT EXISTS overlay_chunks (
                 id          INTEGER PRIMARY KEY,
@@ -329,16 +601,6 @@ impl Store {
 
             -- Persisted overlay fingerprint cache: avoids re-reading and
             -- re-hashing unchanged files on MCP server restart.
-            CREATE TABLE IF NOT EXISTS overlay_fingerprint_cache (
-                path                TEXT NOT NULL PRIMARY KEY,
-                collection          TEXT NOT NULL DEFAULT 'code',
-                file_size           INTEGER NOT NULL,
-                file_mtime_secs     INTEGER NOT NULL,
-                file_mtime_nanos    INTEGER NOT NULL,
-                content_fingerprint TEXT NOT NULL,
-                manifest_snapshot_id TEXT NOT NULL
-            );
-
             -- Persisted overlay embedding cache: avoids re-embedding
             -- unchanged overlay chunks on MCP server restart. Keyed by the
             -- embedding key (hash of the embedded text), not raw chunk text.
@@ -362,13 +624,6 @@ impl Store {
             -- start-seq, so a drift that lands after the build started is never cleared
             -- against the pre-drift graph. Re-marking a row bumps its `seq`, so a clear
             -- bounded by an older start-seq skips a row a fresher drift just re-stamped.
-            CREATE TABLE IF NOT EXISTS context_dirty (
-                path       TEXT    NOT NULL,
-                collection TEXT    NOT NULL DEFAULT 'code',
-                marked_at  INTEGER NOT NULL,
-                seq        INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (path, collection)
-            ) WITHOUT ROWID;
             ",
         )?;
 
@@ -452,18 +707,21 @@ impl Store {
         Ok(())
     }
 
-    pub fn file_hash(&self, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
+    pub fn file_hash(&self, root_id: &str, path: &str) -> Result<Option<Vec<u8>>, SearchError> {
         let hash = self
             .conn
-            .query_row("SELECT hash FROM files WHERE path = ?1", params![path], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })
+            .query_row(
+                "SELECT hash FROM files WHERE root_id = ?1 AND path = ?2",
+                params![root_id, path],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
             .optional()?;
         Ok(hash)
     }
 
     pub fn upsert_file(
         &self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -474,10 +732,10 @@ impl Store {
             .as_secs() as i64;
 
         self.conn.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -486,20 +744,27 @@ impl Store {
     /// from `collection`, atomically. The FTS delete and the `files` delete run in one
     /// transaction so a failure between them cannot leave an orphaned FTS row or a
     /// `files` row without its FTS. The delete is scoped to `collection` so a same-named
-    /// path in another collection is never touched.
-    pub fn remove_file(&self, path: &str, collection: &str) -> Result<(), SearchError> {
+    /// path in another collection is never touched, and to `root_id` so the same
+    /// relative path under another source root — which a `cfe` extension repeats
+    /// wholesale — keeps its own row.
+    pub fn remove_file(
+        &self,
+        root_id: &str,
+        path: &str,
+        collection: &str,
+    ) -> Result<(), SearchError> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (
                  SELECT c.id FROM chunks c
                  JOIN files f ON f.id = c.file_id
-                 WHERE f.path = ?1 AND f.collection = ?2
+                 WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3
              )",
-            params![path, collection],
+            params![root_id, path, collection],
         )?;
         tx.execute(
-            "DELETE FROM files WHERE path = ?1 AND collection = ?2",
-            params![path, collection],
+            "DELETE FROM files WHERE root_id = ?1 AND path = ?2 AND collection = ?3",
+            params![root_id, path, collection],
         )?;
         tx.commit()?;
         Ok(())
@@ -511,15 +776,16 @@ impl Store {
     pub fn chunk_ids_for_file(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
     ) -> Result<Vec<i64>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id FROM chunks c
              JOIN files f ON f.id = c.file_id
-             WHERE f.path = ?1 AND f.collection = ?2",
+             WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3",
         )?;
         let ids = stmt
-            .query_map(params![path, collection], |row| row.get::<_, i64>(0))?
+            .query_map(params![root_id, path, collection], |row| row.get::<_, i64>(0))?
             .collect::<Result<Vec<i64>, _>>()?;
         Ok(ids)
     }
@@ -626,7 +892,12 @@ impl Store {
     /// or reads changed), so a later reindex/embed pass re-renders it. A hint only: it
     /// carries no foreign key, and re-marking an already-dirty path is a cheap upsert that
     /// bumps the row's monotonic `seq`.
-    pub fn mark_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+    pub fn mark_context_dirty(
+        &self,
+        collection: &str,
+        root_id: &str,
+        path: &str,
+    ) -> Result<(), SearchError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -637,10 +908,10 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let seq = Self::next_mark_seq(&tx)?;
         tx.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?3, seq = ?4",
-            params![path, collection, now, seq],
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?4, seq = ?5",
+            params![root_id, path, collection, now, seq],
         )?;
         tx.commit()?;
         self.observe_mark_seq(seq);
@@ -664,9 +935,9 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let seq = Self::next_mark_seq(&tx)?;
         let count = tx.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             SELECT root_id, path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?2, seq = ?3",
             params![collection, now, seq],
         )?;
         tx.commit()?;
@@ -694,9 +965,9 @@ impl Store {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let count = self.conn.execute(
-            "INSERT INTO context_dirty (path, collection, marked_at, seq)
-             SELECT path, collection, ?2, ?3 FROM files WHERE collection = ?1
-             ON CONFLICT(path, collection) DO UPDATE SET marked_at = ?2, seq = ?3
+            "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+             SELECT root_id, path, collection, ?2, ?3 FROM files WHERE collection = ?1
+             ON CONFLICT(root_id, path, collection) DO UPDATE SET marked_at = ?2, seq = ?3
              WHERE context_dirty.seq <= ?3",
             params![collection, now, stamp_seq],
         )?;
@@ -706,11 +977,12 @@ impl Store {
     /// The set of paths currently marked context-dirty in `collection`, regardless of
     /// mark `seq`. Used for status/assertions; the consuming refresh uses the bounded
     /// [`Self::context_dirty_paths_bounded`] variant.
-    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<String>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path FROM context_dirty WHERE collection = ?1")?;
+    pub fn context_dirty_paths(&self, collection: &str) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt =
+            self.conn.prepare("SELECT root_id, path FROM context_dirty WHERE collection = ?1")?;
         let rows = stmt
-            .query_map(params![collection], |row| row.get::<_, String>(0))?
-            .collect::<Result<HashSet<String>, _>>()?;
+            .query_map(params![collection], file_key_row)?
+            .collect::<Result<HashSet<FileKey>, _>>()?;
         Ok(rows)
     }
 
@@ -722,21 +994,26 @@ impl Store {
         &self,
         collection: &str,
         seq_bound: i64,
-    ) -> Result<HashSet<String>, SearchError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path FROM context_dirty WHERE collection = ?1 AND seq <= ?2")?;
+    ) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT root_id, path FROM context_dirty WHERE collection = ?1 AND seq <= ?2",
+        )?;
         let rows = stmt
-            .query_map(params![collection, seq_bound], |row| row.get::<_, String>(0))?
-            .collect::<Result<HashSet<String>, _>>()?;
+            .query_map(params![collection, seq_bound], file_key_row)?
+            .collect::<Result<HashSet<FileKey>, _>>()?;
         Ok(rows)
     }
 
     /// Clear one path's context-dirty mark (a reindex/embed pass re-rendered it).
-    pub fn clear_context_dirty(&self, collection: &str, path: &str) -> Result<(), SearchError> {
+    pub fn clear_context_dirty(
+        &self,
+        collection: &str,
+        root_id: &str,
+        path: &str,
+    ) -> Result<(), SearchError> {
         self.conn.execute(
-            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2",
-            params![collection, path],
+            "DELETE FROM context_dirty WHERE collection = ?1 AND root_id = ?2 AND path = ?3",
+            params![collection, root_id, path],
         )?;
         Ok(())
     }
@@ -748,12 +1025,14 @@ impl Store {
     pub fn clear_context_dirty_bounded(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
         seq_bound: i64,
     ) -> Result<(), SearchError> {
         self.conn.execute(
-            "DELETE FROM context_dirty WHERE collection = ?1 AND path = ?2 AND seq <= ?3",
-            params![collection, path, seq_bound],
+            "DELETE FROM context_dirty
+             WHERE collection = ?1 AND root_id = ?2 AND path = ?3 AND seq <= ?4",
+            params![collection, root_id, path, seq_bound],
         )?;
         Ok(())
     }
@@ -795,29 +1074,202 @@ impl Store {
 
     pub fn reindex_file(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, None)
+        self.reindex_file_in_collection(root_id, path, hash, "code", chunks, embeddings, None)
+    }
+
+    /// Apply every persistent part of a workspace-root transition in one SQLite transaction.
+    ///
+    /// The external baseline manifest and value-keyed embedding cache are deliberately not
+    /// touched: neither belongs to the mutable workspace keyspace. The live vector candidate is
+    /// built from the transaction's uncommitted rows, so a vector-build failure rolls SQL back.
+    pub(crate) fn apply_workspace_roots_transition(
+        &mut self,
+        change: WorkspaceStoreTransition<'_>,
+    ) -> Result<crate::index::VectorIndex, SearchError> {
+        let tx = self.conn.transaction()?;
+
+        for root_id in change.changed_root_ids {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1
+                 )",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM files WHERE collection = 'code' AND root_id = ?1",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM overlay_chunks c
+                     JOIN overlay_files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1
+                 )",
+                params![root_id],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_files WHERE collection = 'code' AND root_id = ?1",
+                params![root_id],
+            )?;
+            for table in ["overlay_fingerprint_cache", "context_dirty", "overlay_tombstones"] {
+                let sql = format!("DELETE FROM {table} WHERE root_id = ?1");
+                tx.execute(&sql, params![root_id])?;
+            }
+        }
+
+        for key in change.cleanup {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1 AND f.path = ?2
+                 )",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM files WHERE collection = 'code' AND root_id = ?1 AND path = ?2",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_chunks_fts WHERE rowid IN (
+                     SELECT c.id FROM overlay_chunks c
+                     JOIN overlay_files f ON f.id = c.file_id
+                     WHERE f.collection = 'code' AND f.root_id = ?1 AND f.path = ?2
+                 )",
+                params![key.root_id, key.path],
+            )?;
+            tx.execute(
+                "DELETE FROM overlay_files WHERE collection = 'code' AND root_id = ?1 AND path = ?2",
+                params![key.root_id, key.path],
+            )?;
+            for table in ["overlay_fingerprint_cache", "context_dirty", "overlay_tombstones"] {
+                let sql = format!("DELETE FROM {table} WHERE root_id = ?1 AND path = ?2");
+                tx.execute(&sql, params![key.root_id, key.path])?;
+            }
+        }
+
+        let deleted_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        for key in change.tombstones {
+            tx.execute(
+                "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+                 VALUES (?1, ?2, 'code', ?3)
+                 ON CONFLICT(root_id, path) DO UPDATE SET collection = 'code', deleted_at = ?3",
+                params![key.root_id, key.path, deleted_at],
+            )?;
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        for file in change.upserts {
+            if file.chunks.is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+                 VALUES (?1, ?2, ?3, ?4, 'code')
+                 ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4,
+                                                        collection = 'code'",
+                params![file.key.root_id, file.key.path, file.hash, now],
+            )?;
+            let file_id: i64 = tx.query_row(
+                "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+                params![file.key.root_id, file.key.path],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+                params![file_id],
+            )?;
+            tx.execute("DELETE FROM chunks WHERE file_id = ?1", params![file_id])?;
+
+            let mut chunk_stmt = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding, graph_context)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9)",
+            )?;
+            let mut fts_stmt =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+            for (index, chunk) in file.chunks.iter().enumerate() {
+                let kind = match chunk.kind {
+                    code_chunk::ChunkKind::ModuleHeader => "header",
+                    code_chunk::ChunkKind::Procedure => "procedure",
+                    code_chunk::ChunkKind::Function => "function",
+                };
+                let annotations =
+                    (!chunk.annotations.is_empty()).then(|| chunk.annotations.join(","));
+                let graph_context =
+                    file.graph_contexts.get(index).and_then(|context| context.as_deref());
+                chunk_stmt.execute(params![
+                    file_id,
+                    kind,
+                    chunk.name,
+                    chunk.is_export as i32,
+                    annotations,
+                    chunk.line_start,
+                    chunk.line_end,
+                    chunk.text,
+                    graph_context,
+                ])?;
+                let chunk_id = tx.last_insert_rowid();
+                fts_stmt.execute(params![chunk_id, chunk.name, chunk.text])?;
+            }
+        }
+
+        #[cfg(test)]
+        if FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(std::cell::Cell::get) {
+            return Err(SearchError::Index(
+                "forced workspace transition vector preparation failure".to_owned(),
+            ));
+        }
+
+        let embeddings = Self::read_all_embeddings(&tx, change.dimension)?;
+        let index = crate::index::VectorIndex::build(change.dimension, &embeddings)?;
+        tx.commit()?;
+        Ok(index)
     }
 
     /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
     /// `chunks`) so a later reconstruction re-embeds with the same enriched text.
     pub fn reindex_file_with_context(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         chunks: &[Chunk],
         embeddings: Option<&[Vec<f32>]>,
         graph_contexts: Option<&[Option<String>]>,
     ) -> Result<i64, SearchError> {
-        self.reindex_file_in_collection(path, hash, "code", chunks, embeddings, graph_contexts)
+        self.reindex_file_in_collection(
+            root_id,
+            path,
+            hash,
+            "code",
+            chunks,
+            embeddings,
+            graph_contexts,
+        )
     }
 
+    // Every argument is a distinct input of one write — which row, what it now
+    // holds, and the optional vectors and rendered contexts that go with it.
+    // Bundling them into a context struct would only rename the same fields, so
+    // the one-over-limit arity is accepted here.
+    #[allow(clippy::too_many_arguments)]
     pub fn reindex_file_in_collection(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -833,13 +1285,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -912,15 +1367,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![virtual_path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![CONFIGURATION_ROOT_ID, virtual_path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![virtual_path], |row| {
-                row.get(0)
-            })?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![CONFIGURATION_ROOT_ID, virtual_path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -955,6 +1411,7 @@ impl Store {
 
     pub fn reindex_indexed_documents_in_collection(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -969,13 +1426,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM files WHERE path = ?1", params![path], |row| row.get(0))?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
@@ -1092,13 +1552,14 @@ impl Store {
             .conn
             .query_row(
                 "SELECT c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                        c.annotations, c.is_export, f.path, f.collection
+                        c.annotations, c.is_export, f.path, f.collection, f.root_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.id = ?1",
                 params![chunk_id],
                 |row| {
                     Ok(ChunkInfo {
+                        root_id: row.get(9)?,
                         file_path: row.get(7)?,
                         collection: row.get(8)?,
                         kind: row.get(0)?,
@@ -1134,7 +1595,7 @@ impl Store {
             let placeholders = std::iter::repeat_n("?", batch.len()).collect::<Vec<_>>().join(",");
             let sql = format!(
                 "SELECT c.id, c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                        c.annotations, c.is_export, f.path, f.collection
+                        c.annotations, c.is_export, f.path, f.collection, f.root_id
                  FROM chunks c
                  JOIN files f ON f.id = c.file_id
                  WHERE c.id IN ({placeholders})"
@@ -1144,6 +1605,7 @@ impl Store {
                 Ok((
                     row.get::<_, i64>(0)?,
                     ChunkInfo {
+                        root_id: row.get(10)?,
                         file_path: row.get(8)?,
                         collection: row.get(9)?,
                         kind: row.get(1)?,
@@ -1164,10 +1626,9 @@ impl Store {
         Ok(out)
     }
 
-    pub fn all_files(&self) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path, hash FROM files")?;
-        let rows =
-            stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)))?;
+    pub fn all_files(&self) -> Result<Vec<(FileKey, Vec<u8>)>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT root_id, path, hash FROM files")?;
+        let rows = stmt.query_map([], |row| Ok((file_key_row(row)?, row.get::<_, Vec<u8>>(2)?)))?;
 
         let mut result = Vec::new();
         for row in rows {
@@ -1179,10 +1640,11 @@ impl Store {
     pub fn all_files_in_collection(
         &self,
         collection: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, SearchError> {
-        let mut stmt = self.conn.prepare("SELECT path, hash FROM files WHERE collection = ?1")?;
+    ) -> Result<Vec<(FileKey, Vec<u8>)>, SearchError> {
+        let mut stmt =
+            self.conn.prepare("SELECT root_id, path, hash FROM files WHERE collection = ?1")?;
         let rows = stmt.query_map(params![collection], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((file_key_row(row)?, row.get::<_, Vec<u8>>(2)?))
         })?;
 
         let mut result = Vec::new();
@@ -1217,17 +1679,17 @@ impl Store {
     ) -> Result<Vec<crate::IndexedDocument>, SearchError> {
         let query = if collection.is_some() {
             "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
-                    c.graph_context
+                    c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1
-             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+             ORDER BY f.collection, f.root_id, f.path, c.line_start, c.line_end, c.symbol_name"
         } else {
             "SELECT f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end, c.text,
-                    c.graph_context
+                    c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
-             ORDER BY f.collection, f.path, c.line_start, c.line_end, c.symbol_name"
+             ORDER BY f.collection, f.root_id, f.path, c.line_start, c.line_end, c.symbol_name"
         };
 
         let mut stmt = self.conn.prepare(query)?;
@@ -1236,6 +1698,7 @@ impl Store {
                 let text: String = row.get(6)?;
                 Ok(crate::IndexedDocument {
                     collection: row.get(0)?,
+                    root_id: row.get(8)?,
                     path: row.get(1)?,
                     symbol_name: row.get(2)?,
                     kind: row.get(3)?,
@@ -1252,6 +1715,7 @@ impl Store {
                 let text: String = row.get(6)?;
                 Ok(crate::IndexedDocument {
                     collection: row.get(0)?,
+                    root_id: row.get(8)?,
                     path: row.get(1)?,
                     symbol_name: row.get(2)?,
                     kind: row.get(3)?,
@@ -1279,11 +1743,11 @@ impl Store {
     ) -> Result<Vec<(i64, crate::IndexedDocument)>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, f.collection, f.path, c.symbol_name, c.kind, c.line_start, c.line_end,
-                    c.text, c.graph_context
+                    c.text, c.graph_context, f.root_id
              FROM chunks c
              JOIN files f ON f.id = c.file_id
              WHERE f.collection = ?1 AND c.embedding IS NULL
-             ORDER BY f.path, c.line_start, c.line_end, c.symbol_name",
+             ORDER BY f.root_id, f.path, c.line_start, c.line_end, c.symbol_name",
         )?;
         let rows = stmt
             .query_map(params![collection], |row| {
@@ -1293,6 +1757,7 @@ impl Store {
                     id,
                     crate::IndexedDocument {
                         collection: row.get(1)?,
+                        root_id: row.get(9)?,
                         path: row.get(2)?,
                         symbol_name: row.get(3)?,
                         kind: row.get(4)?,
@@ -1315,16 +1780,17 @@ impl Store {
     pub fn chunks_with_context_for_file(
         &self,
         collection: &str,
+        root_id: &str,
         path: &str,
     ) -> Result<Vec<ChunkContextRow>, SearchError> {
         let mut stmt = self.conn.prepare(
             "SELECT c.id, c.symbol_name, c.kind, c.graph_context
              FROM chunks c
              JOIN files f ON f.id = c.file_id
-             WHERE f.path = ?1 AND f.collection = ?2",
+             WHERE f.root_id = ?1 AND f.path = ?2 AND f.collection = ?3",
         )?;
         let rows = stmt
-            .query_map(params![path, collection], |row| {
+            .query_map(params![root_id, path, collection], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1518,11 +1984,17 @@ impl Store {
         tx.execute("DELETE FROM baseline_manifest_files", [])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO baseline_manifest_files (collection, path, file_fingerprint)
-                 VALUES (?1, ?2, ?3)",
+                "INSERT INTO baseline_manifest_files
+                 (root_id, collection, path, file_fingerprint)
+                 VALUES (?1, ?2, ?3, ?4)",
             )?;
             for file in &manifest.files {
-                stmt.execute(params![file.collection, file.path, file.file_fingerprint])?;
+                stmt.execute(params![
+                    file.root_id,
+                    file.collection,
+                    file.path,
+                    file.file_fingerprint
+                ])?;
             }
         }
         tx.commit()?;
@@ -1552,7 +2024,7 @@ impl Store {
     pub fn load_baseline_manifest_fingerprints(
         &self,
         collection: &str,
-    ) -> Result<Option<HashMap<String, String>>, SearchError> {
+    ) -> Result<Option<HashMap<FileKey, String>>, SearchError> {
         let has_manifest = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM baseline_manifest WHERE id = 1)",
             [],
@@ -1563,17 +2035,17 @@ impl Store {
         }
 
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_fingerprint
+            "SELECT root_id, path, file_fingerprint
              FROM baseline_manifest_files
              WHERE collection = ?1",
         )?;
         let rows = stmt.query_map(params![collection], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((file_key_row(row)?, row.get::<_, String>(2)?))
         })?;
         let mut fingerprints = HashMap::new();
         for row in rows {
-            let (path, fingerprint) = row?;
-            fingerprints.insert(path, fingerprint);
+            let (key, fingerprint) = row?;
+            fingerprints.insert(key, fingerprint);
         }
         Ok(Some(fingerprints))
     }
@@ -1612,6 +2084,7 @@ impl Store {
 
     pub fn insert_overlay_tombstone(
         &self,
+        root_id: &str,
         path: &str,
         collection: &str,
     ) -> Result<(), SearchError> {
@@ -1620,31 +2093,35 @@ impl Store {
             .unwrap_or_default()
             .as_secs();
         self.conn.execute(
-            "INSERT INTO overlay_tombstones (path, collection, deleted_at)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(path) DO UPDATE SET collection = ?2, deleted_at = ?3",
-            params![path, collection, deleted_at.to_string()],
+            "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(root_id, path) DO UPDATE SET collection = ?3, deleted_at = ?4",
+            params![root_id, path, collection, deleted_at.to_string()],
         )?;
         Ok(())
     }
 
-    pub fn remove_overlay_tombstone(&self, path: &str) -> Result<(), SearchError> {
-        self.conn.execute("DELETE FROM overlay_tombstones WHERE path = ?1", params![path])?;
+    pub fn remove_overlay_tombstone(&self, root_id: &str, path: &str) -> Result<(), SearchError> {
+        self.conn.execute(
+            "DELETE FROM overlay_tombstones WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+        )?;
         Ok(())
     }
 
     pub fn overlay_tombstone_paths(
         &self,
         collection: &str,
-    ) -> Result<HashSet<String>, SearchError> {
-        let mut stmt =
-            self.conn.prepare("SELECT path FROM overlay_tombstones WHERE collection = ?1")?;
-        let rows = stmt.query_map(params![collection], |row| row.get::<_, String>(0))?;
-        let mut paths = HashSet::new();
+    ) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT root_id, path FROM overlay_tombstones WHERE collection = ?1")?;
+        let rows = stmt.query_map(params![collection], file_key_row)?;
+        let mut keys = HashSet::new();
         for row in rows {
-            paths.insert(row?);
+            keys.insert(row?);
         }
-        Ok(paths)
+        Ok(keys)
     }
 
     pub fn clear_overlay_tombstones(&self, collection: &str) -> Result<(), SearchError> {
@@ -1655,6 +2132,7 @@ impl Store {
 
     pub fn upsert_overlay_file_with_chunks(
         &mut self,
+        root_id: &str,
         path: &str,
         hash: &[u8],
         collection: &str,
@@ -1669,15 +2147,16 @@ impl Store {
             .as_secs() as i64;
 
         tx.execute(
-            "INSERT INTO overlay_files (path, hash, indexed_at, collection)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(path) DO UPDATE SET hash = ?2, indexed_at = ?3, collection = ?4",
-            params![path, hash, now, collection],
+            "INSERT INTO overlay_files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(root_id, path) DO UPDATE SET hash = ?3, indexed_at = ?4, collection = ?5",
+            params![root_id, path, hash, now, collection],
         )?;
-        let file_id: i64 =
-            tx.query_row("SELECT id FROM overlay_files WHERE path = ?1", params![path], |row| {
-                row.get(0)
-            })?;
+        let file_id: i64 = tx.query_row(
+            "SELECT id FROM overlay_files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+            |row| row.get(0),
+        )?;
 
         tx.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (SELECT id FROM overlay_chunks WHERE file_id = ?1)",
@@ -1731,16 +2210,19 @@ impl Store {
         Ok(file_id)
     }
 
-    pub fn remove_overlay_file(&self, path: &str) -> Result<(), SearchError> {
+    pub fn remove_overlay_file(&self, root_id: &str, path: &str) -> Result<(), SearchError> {
         self.conn.execute(
             "DELETE FROM overlay_chunks_fts WHERE rowid IN (
                  SELECT c.id FROM overlay_chunks c
                  JOIN overlay_files f ON f.id = c.file_id
-                 WHERE f.path = ?1
+                 WHERE f.root_id = ?1 AND f.path = ?2
              )",
-            params![path],
+            params![root_id, path],
         )?;
-        self.conn.execute("DELETE FROM overlay_files WHERE path = ?1", params![path])?;
+        self.conn.execute(
+            "DELETE FROM overlay_files WHERE root_id = ?1 AND path = ?2",
+            params![root_id, path],
+        )?;
         Ok(())
     }
 
@@ -1790,7 +2272,7 @@ impl Store {
         let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let query = format!(
             "SELECT c.kind, c.symbol_name, c.line_start, c.line_end, c.text,
-                    c.annotations, c.is_export, f.path, f.collection
+                    c.annotations, c.is_export, f.path, f.collection, f.root_id
              FROM overlay_chunks c
              JOIN overlay_files f ON f.id = c.file_id
              WHERE c.id IN ({})",
@@ -1801,6 +2283,7 @@ impl Store {
             chunk_ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
         let rows = stmt.query_map(rusqlite::params_from_iter(params_vec.iter()), |row| {
             Ok(ChunkInfo {
+                root_id: row.get(9)?,
                 file_path: row.get(7)?,
                 collection: row.get(8)?,
                 kind: row.get(0)?,
@@ -1870,27 +2353,29 @@ impl Store {
     pub fn load_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
-    ) -> Result<Option<HashMap<String, PersistedFingerprint>>, SearchError> {
+    ) -> Result<Option<HashMap<FileKey, PersistedFingerprint>>, SearchError> {
         let mut stmt = self.conn.prepare(
-            "SELECT path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint
+            "SELECT root_id, path, file_size, file_mtime_secs, file_mtime_nanos,
+                    content_fingerprint, canonical
              FROM overlay_fingerprint_cache
              WHERE manifest_snapshot_id = ?1",
         )?;
         let rows = stmt.query_map(params![manifest_snapshot_id], |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                file_key_row(row)?,
                 PersistedFingerprint {
-                    file_size: row.get::<_, i64>(1)? as u64,
-                    file_mtime_secs: row.get::<_, i64>(2)?,
-                    file_mtime_nanos: row.get::<_, u32>(3)?,
-                    content_fingerprint: row.get::<_, String>(4)?,
+                    file_size: row.get::<_, i64>(2)? as u64,
+                    file_mtime_secs: row.get::<_, i64>(3)?,
+                    file_mtime_nanos: row.get::<_, u32>(4)?,
+                    content_fingerprint: row.get::<_, String>(5)?,
+                    canonical: row.get::<_, String>(6)?,
                 },
             ))
         })?;
         let mut map = HashMap::new();
         for row in rows {
-            let (path, entry) = row?;
-            map.insert(path, entry);
+            let (key, entry) = row?;
+            map.insert(key, entry);
         }
         if map.is_empty() {
             let any_rows: bool = self.conn.query_row(
@@ -1909,29 +2394,66 @@ impl Store {
     pub fn save_overlay_fingerprint_cache(
         &self,
         manifest_snapshot_id: &str,
-        entries: &HashMap<String, PersistedFingerprint>,
+        entries: &HashMap<FileKey, PersistedFingerprint>,
     ) -> Result<(), SearchError> {
-        self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
-        let mut stmt = self.conn.prepare(
-            "INSERT INTO overlay_fingerprint_cache
-             (path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint, manifest_snapshot_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for (path, entry) in entries {
-            stmt.execute(params![
-                path,
-                entry.file_size as i64,
-                entry.file_mtime_secs,
-                entry.file_mtime_nanos,
-                entry.content_fingerprint,
-                manifest_snapshot_id,
-            ])?;
+        // One transaction end to end: a failed INSERT rolls the DELETE back too, so `Err`
+        // means "the table is exactly as it was" — a committed half-replacement would leave
+        // survivors telling a story no pass ever proved.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO overlay_fingerprint_cache
+                 (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
+                  manifest_snapshot_id, canonical)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (key, entry) in entries {
+                stmt.execute(params![
+                    key.root_id,
+                    key.path,
+                    entry.file_size as i64,
+                    entry.file_mtime_secs,
+                    entry.file_mtime_nanos,
+                    entry.content_fingerprint,
+                    manifest_snapshot_id,
+                    entry.canonical,
+                ])?;
+            }
         }
+        tx.commit()?;
         Ok(())
+    }
+
+    /// Every key the fingerprint cache holds, whatever snapshot it was written for.
+    ///
+    /// Deliberately not [`Self::load_overlay_fingerprint_cache`]: that one takes a snapshot id
+    /// and CLEARS the whole table when the rows belong to another one, which is right for a
+    /// refresh reading its own snapshot but destructive for a caller that only wants to know
+    /// which keys still have a row. It also needs no manifest header, so a reconcile of a
+    /// local index does not depend on a carrier that mode does not serve.
+    pub fn overlay_fingerprint_keys(&self) -> Result<HashSet<FileKey>, SearchError> {
+        let mut stmt = self.conn.prepare("SELECT root_id, path FROM overlay_fingerprint_cache")?;
+        let rows = stmt.query_map([], file_key_row)?.collect::<Result<HashSet<FileKey>, _>>()?;
+        Ok(rows)
     }
 
     pub fn clear_overlay_fingerprint_cache(&self) -> Result<(), SearchError> {
         self.conn.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+        Ok(())
+    }
+
+    /// Drop exactly these keys' fingerprint rows, leaving every other row alone. A row asserts
+    /// "this file was verified against the manifest", so the caller that failed to stat or read a
+    /// file must retract the claim for THAT file without wiping the verified neighbours — a
+    /// table-wide delete here would cost a full re-read of the workspace on the next plan.
+    pub fn delete_overlay_fingerprint_entries(&self, keys: &[FileKey]) -> Result<(), SearchError> {
+        let mut stmt = self
+            .conn
+            .prepare("DELETE FROM overlay_fingerprint_cache WHERE root_id = ?1 AND path = ?2")?;
+        for key in keys {
+            stmt.execute(params![key.root_id, key.path])?;
+        }
         Ok(())
     }
 
@@ -2017,8 +2539,16 @@ pub struct TextSearchResult {
     pub rank: f64,
 }
 
+/// The identity of a row whose first two selected columns are `root_id, path`.
+/// Every listing query selects them in that order so the key is read the same
+/// way everywhere.
+fn file_key_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileKey> {
+    Ok(FileKey::new(row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+}
+
 #[derive(Debug, Clone)]
 pub struct ChunkInfo {
+    pub root_id: String,
     pub file_path: String,
     pub collection: String,
     pub kind: String,
@@ -2044,12 +2574,501 @@ pub struct PersistedFingerprint {
     pub file_mtime_secs: i64,
     pub file_mtime_nanos: u32,
     pub content_fingerprint: String,
+    /// The physical spelling of the file the row was verified against. An empty string is a row
+    /// from before the column existed: it must NOT count as a match — the gate re-reads and the
+    /// re-save writes the spelling, so old rows heal themselves.
+    pub canonical: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use code_chunk::{Chunk, ChunkKind};
+
+    /// The `canonical` column lands via an in-place ALTER, not via the version-bump wipe: rows
+    /// written before the column keep living (in the altered table AND in its neighbours), and
+    /// the grafted column arrives empty. Dropping the column emulates a database of the release
+    /// before it — "column present and working" alone would not tell the ALTER from a wipe that
+    /// recreated everything.
+    #[test]
+    fn the_canonical_column_is_added_in_place_without_wiping() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        {
+            let store = Store::open(&db_path).unwrap();
+            store.upsert_file(CONFIGURATION_ROOT_ID, "Neighbour.bsl", b"hash", "code").unwrap();
+            store
+                .save_overlay_fingerprint_cache(
+                    "snap",
+                    &std::collections::HashMap::from([(
+                        FileKey::configuration("Cached.bsl"),
+                        PersistedFingerprint {
+                            file_size: 7,
+                            file_mtime_secs: 1,
+                            file_mtime_nanos: 2,
+                            content_fingerprint: "fp".to_owned(),
+                            canonical: "/spelled".to_owned(),
+                        },
+                    )]),
+                )
+                .unwrap();
+        }
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute("ALTER TABLE overlay_fingerprint_cache DROP COLUMN canonical", [])
+                .unwrap();
+        }
+
+        let store = Store::open(&db_path).unwrap();
+        let rows = store.load_overlay_fingerprint_cache("snap").unwrap().unwrap_or_default();
+        let row = rows.get(&FileKey::configuration("Cached.bsl")).expect("the row survived");
+        assert_eq!(
+            (row.file_size, row.canonical.as_str()),
+            (7, ""),
+            "data intact, the grafted column arrives empty"
+        );
+        assert_eq!(
+            store.all_files_in_collection("code").unwrap().len(),
+            1,
+            "the neighbouring table survived too"
+        );
+    }
+
+    /// The replace-save is one transaction: an INSERT that fails mid-way must leave the table
+    /// in its ORIGINAL state — a committed DELETE with partial inserts would mean `Err` no
+    /// longer implies "nothing changed on disk", and the survivors would tell a half-story.
+    #[test]
+    fn a_failed_replace_save_leaves_the_table_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        let store = Store::open(&db_path).unwrap();
+        let row = |fp: &str| PersistedFingerprint {
+            file_size: 1,
+            file_mtime_secs: 1,
+            file_mtime_nanos: 0,
+            content_fingerprint: fp.to_owned(),
+            canonical: String::new(),
+        };
+        store
+            .save_overlay_fingerprint_cache(
+                "snap",
+                &std::collections::HashMap::from([(FileKey::configuration("Old.bsl"), row("old"))]),
+            )
+            .unwrap();
+
+        let saboteur = Connection::open(&db_path).unwrap();
+        saboteur
+            .execute_batch(
+                "CREATE TRIGGER deny_b_insert BEFORE INSERT ON overlay_fingerprint_cache \
+                 WHEN NEW.path = 'B.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
+            )
+            .unwrap();
+        let result = store.save_overlay_fingerprint_cache(
+            "snap",
+            &std::collections::HashMap::from([
+                (FileKey::configuration("A.bsl"), row("a")),
+                (FileKey::configuration("B.bsl"), row("b")),
+            ]),
+        );
+        assert!(result.is_err(), "the denied insert surfaces as an error");
+        let rows = store.load_overlay_fingerprint_cache("snap").unwrap().unwrap_or_default();
+        assert_eq!(rows.len(), 1, "the original table survived intact");
+        assert!(rows.contains_key(&FileKey::configuration("Old.bsl")));
+    }
+
+    /// `open_existing` opens EXISTING stores only: a missing path is an error and no empty
+    /// file is materialized — the standalone pass has no business creating shared state.
+    #[test]
+    fn open_existing_does_not_create_a_missing_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.db");
+        assert!(Store::open_existing(&path).is_err());
+        assert!(!path.exists(), "the refusal must leave no file behind");
+    }
+
+    /// A store in the shape the release before composite keys wrote, built with
+    /// raw SQL on purpose.
+    ///
+    /// A fixture assembled by today's `create_schema` would stop modelling the
+    /// old state the moment the schema changes, and would then keep passing
+    /// without the migration ever running. This one is frozen: it is what is
+    /// actually on disk in front of an upgrading user.
+    ///
+    /// Ids are deliberately sparse and out of order — a rebuild that renumbers
+    /// rows would still satisfy a row count.
+    fn write_pre_root_id_store(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema_version', '1');
+            INSERT INTO meta (key, value) VALUES ('embedding_generation', '17');
+
+            CREATE TABLE files (
+                id         INTEGER PRIMARY KEY,
+                path       TEXT    NOT NULL UNIQUE,
+                hash       BLOB    NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code'
+            );
+            CREATE TABLE chunks (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                kind        TEXT    NOT NULL,
+                symbol_name TEXT    NOT NULL,
+                is_export   INTEGER NOT NULL DEFAULT 0,
+                annotations TEXT,
+                line_start  INTEGER NOT NULL,
+                line_end    INTEGER NOT NULL,
+                text        TEXT    NOT NULL,
+                embedding   BLOB,
+                graph_context TEXT
+            );
+            CREATE INDEX idx_chunks_file ON chunks(file_id);
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(symbol_name, text, tokenize='unicode61');
+
+            CREATE TABLE baseline_manifest (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                snapshot_id TEXT NOT NULL,
+                fingerprint TEXT,
+                manifest_files INTEGER NOT NULL DEFAULT 0,
+                fetched_at TEXT NOT NULL
+            );
+            CREATE TABLE baseline_manifest_files (
+                collection       TEXT NOT NULL DEFAULT 'code',
+                path             TEXT NOT NULL,
+                file_fingerprint TEXT NOT NULL,
+                PRIMARY KEY (collection, path)
+            );
+            CREATE TABLE overlay_tombstones (
+                path       TEXT NOT NULL UNIQUE,
+                collection TEXT NOT NULL DEFAULT 'code',
+                deleted_at TEXT NOT NULL
+            );
+            CREATE TABLE overlay_files (
+                id         INTEGER PRIMARY KEY,
+                path       TEXT    NOT NULL UNIQUE,
+                hash       BLOB    NOT NULL,
+                indexed_at INTEGER NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code'
+            );
+            CREATE TABLE overlay_chunks (
+                id          INTEGER PRIMARY KEY,
+                file_id     INTEGER NOT NULL REFERENCES overlay_files(id) ON DELETE CASCADE,
+                kind        TEXT    NOT NULL,
+                symbol_name TEXT    NOT NULL,
+                is_export   INTEGER NOT NULL DEFAULT 0,
+                annotations TEXT,
+                line_start  INTEGER NOT NULL,
+                line_end    INTEGER NOT NULL,
+                text        TEXT    NOT NULL,
+                embedding   BLOB
+            );
+            CREATE INDEX idx_overlay_chunks_file ON overlay_chunks(file_id);
+            CREATE VIRTUAL TABLE overlay_chunks_fts USING fts5(symbol_name, text, tokenize='unicode61');
+
+            CREATE TABLE overlay_fingerprint_cache (
+                path                 TEXT NOT NULL PRIMARY KEY,
+                collection           TEXT NOT NULL DEFAULT 'code',
+                file_size            INTEGER NOT NULL,
+                file_mtime_secs      INTEGER NOT NULL,
+                file_mtime_nanos     INTEGER NOT NULL,
+                content_fingerprint  TEXT NOT NULL,
+                manifest_snapshot_id TEXT NOT NULL
+            );
+            CREATE TABLE overlay_embedding_cache (
+                embedding_key TEXT NOT NULL PRIMARY KEY,
+                model_id      TEXT NOT NULL,
+                dimension     INTEGER NOT NULL,
+                embedding     BLOB NOT NULL
+            );
+            CREATE TABLE context_dirty (
+                path       TEXT    NOT NULL,
+                collection TEXT    NOT NULL DEFAULT 'code',
+                marked_at  INTEGER NOT NULL,
+                seq        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (path, collection)
+            ) WITHOUT ROWID;
+
+            INSERT INTO files (id, path, hash, indexed_at, collection)
+                VALUES (7, 'CommonModules/A/Ext/Module.bsl', x'0a', 100, 'code'),
+                       (9, 'CommonModules/B/Ext/Module.bsl', x'0b', 100, 'code');
+            INSERT INTO chunks (id, file_id, kind, symbol_name, line_start, line_end, text, embedding)
+                VALUES (21, 7, 'procedure', 'ПерваяПроцедура', 1, 2, 'Процедура ПерваяПроцедура()', x'cafe'),
+                       (23, 9, 'procedure', 'ВтораяПроцедура', 1, 2, 'Процедура ВтораяПроцедура()', x'beef');
+            INSERT INTO chunks_fts (rowid, symbol_name, text)
+                VALUES (21, 'ПерваяПроцедура', 'Процедура ПерваяПроцедура()'),
+                       (23, 'ВтораяПроцедура', 'Процедура ВтораяПроцедура()');
+
+            INSERT INTO baseline_manifest_files (collection, path, file_fingerprint)
+                VALUES ('code', 'CommonModules/A/Ext/Module.bsl', 'fp-a');
+            INSERT INTO overlay_tombstones (path, collection, deleted_at)
+                VALUES ('CommonModules/C/Ext/Module.bsl', 'code', '2026-01-01');
+            INSERT INTO overlay_files (id, path, hash, indexed_at, collection)
+                VALUES (31, 'CommonModules/D/Ext/Module.bsl', x'0d', 100, 'code');
+            INSERT INTO overlay_chunks (id, file_id, kind, symbol_name, line_start, line_end, text)
+                VALUES (41, 31, 'procedure', 'ЧетвёртаяПроцедура', 1, 2, 'Процедура ЧетвёртаяПроцедура()');
+            INSERT INTO overlay_fingerprint_cache
+                    (path, collection, file_size, file_mtime_secs, file_mtime_nanos,
+                     content_fingerprint, manifest_snapshot_id)
+                VALUES ('CommonModules/A/Ext/Module.bsl', 'code', 10, 1, 2, 'fp-a', 'snap-1');
+            INSERT INTO context_dirty (path, collection, marked_at, seq)
+                VALUES ('CommonModules/B/Ext/Module.bsl', 'code', 5, 3);
+            ",
+        )
+        .unwrap();
+    }
+
+    /// Rows of a table, as `(root_id, path)` pairs, ordered.
+    fn keys_of(store: &Store, table: &str) -> Vec<(String, String)> {
+        let mut stmt = store
+            .conn
+            .prepare(&format!("SELECT root_id, path FROM {table} ORDER BY path"))
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    #[test]
+    fn a_store_written_before_root_ids_keeps_every_row_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        // Ids, not counts: a rebuild that renumbered rows would orphan every
+        // child row while leaving the counts untouched.
+        assert_eq!(
+            keys_of(&store, "files"),
+            vec![
+                (String::new(), "CommonModules/A/Ext/Module.bsl".to_owned()),
+                (String::new(), "CommonModules/B/Ext/Module.bsl".to_owned()),
+            ],
+            "configuration rows keep their meaning under the reserved empty root id"
+        );
+        let joined: Vec<(i64, String)> = store
+            .conn
+            .prepare(
+                "SELECT c.id, f.path FROM chunks c JOIN files f ON f.id = c.file_id ORDER BY c.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            joined,
+            vec![
+                (21, "CommonModules/A/Ext/Module.bsl".to_owned()),
+                (23, "CommonModules/B/Ext/Module.bsl".to_owned()),
+            ],
+            "every chunk still finds its file"
+        );
+        let overlay_joined: Vec<(i64, String)> = store
+            .conn
+            .prepare(
+                "SELECT c.id, f.path FROM overlay_chunks c
+                 JOIN overlay_files f ON f.id = c.file_id ORDER BY c.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            overlay_joined,
+            vec![(41, "CommonModules/D/Ext/Module.bsl".to_owned())],
+            "overlay chunks still find their file too — the overlay parent is rebuilt as well"
+        );
+
+        assert_eq!(store.embedding_generation().unwrap(), 17, "the vector generation is preserved");
+    }
+
+    /// Rebuilding a parent table drops the foreign keys and triggers that hang
+    /// off it. Row counts cannot see that: the damage only shows on the next
+    /// delete, when orphans are left behind and the vector sidecar is never
+    /// invalidated.
+    #[test]
+    fn the_migrated_store_keeps_its_cascades_and_generation_triggers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+        let generation_before = store.embedding_generation().unwrap();
+
+        store.conn.execute("DELETE FROM files WHERE id = 7", []).unwrap();
+
+        let orphans: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM chunks WHERE file_id = 7", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(orphans, 0, "deleting a file must still cascade onto its chunks");
+        assert!(
+            store.embedding_generation().unwrap() > generation_before,
+            "deleting a file must still bump the vector generation"
+        );
+
+        store.conn.execute("DELETE FROM overlay_files WHERE id = 31", []).unwrap();
+        let overlay_orphans: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM overlay_chunks WHERE file_id = 31", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(overlay_orphans, 0, "the overlay cascade survives the rebuild too");
+    }
+
+    /// Files and chunks surviving is not enough: search answers out of the FTS
+    /// projection, and its auto-rebuild only fires on a completely empty index.
+    /// A partially lost projection would leave every other invariant green and
+    /// silently shrink the warm store's results.
+    #[test]
+    fn documents_indexed_before_the_migration_are_still_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        let hits = store.text_search("ПерваяПроцедура", 10, Some("code")).unwrap();
+        assert_eq!(
+            hits.iter().map(|hit| hit.chunk_id).collect::<Vec<_>>(),
+            vec![21],
+            "a document stored before the migration is still searchable"
+        );
+    }
+
+    /// The point of the whole migration: the same relative path may now exist
+    /// under several roots. Checked on every rebuilt table, because a leftover
+    /// old constraint on any one of them blocks exactly one feature each.
+    #[test]
+    fn the_same_path_may_now_exist_under_two_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+        let store = Store::open(&path).unwrap();
+        let taken = "CommonModules/A/Ext/Module.bsl";
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+                 VALUES ('cfe/one', ?1, x'0e', 100, 'code')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO baseline_manifest_files (root_id, collection, path, file_fingerprint)
+                 VALUES ('cfe/one', 'code', ?1, 'fp')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
+                 VALUES ('cfe/one', 'CommonModules/C/Ext/Module.bsl', 'code', '2026-01-01')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_files (root_id, path, hash, indexed_at, collection)
+                 VALUES ('cfe/one', 'CommonModules/D/Ext/Module.bsl', x'0f', 100, 'code')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO overlay_fingerprint_cache
+                        (root_id, path, collection, file_size, file_mtime_secs, file_mtime_nanos,
+                         content_fingerprint, manifest_snapshot_id)
+                 VALUES ('cfe/one', ?1, 'code', 10, 1, 2, 'fp', 'snap-1')",
+                params![taken],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+                 VALUES ('cfe/one', 'CommonModules/B/Ext/Module.bsl', 'code', 5, 3)",
+                [],
+            )
+            .unwrap();
+
+        // Counted per path, not per table: the fixture does not hold the same
+        // number of rows everywhere, and a total would pass on a table that
+        // silently replaced its row instead of adding one.
+        for (table, duplicated) in [
+            ("files", taken),
+            ("baseline_manifest_files", taken),
+            ("overlay_tombstones", "CommonModules/C/Ext/Module.bsl"),
+            ("overlay_files", "CommonModules/D/Ext/Module.bsl"),
+            ("overlay_fingerprint_cache", taken),
+            ("context_dirty", "CommonModules/B/Ext/Module.bsl"),
+        ] {
+            let rows: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE path = ?1"),
+                    params![duplicated],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 2, "{table} must hold one row per root for the same path");
+        }
+    }
+
+    /// A fresh database takes the new shape through the ordinary create path,
+    /// which the migration never touches: "the column is missing" is true of an
+    /// absent table too, so the two cases have to be checked apart.
+    #[test]
+    fn a_fresh_store_is_created_with_root_ids() {
+        let store = Store::in_memory().unwrap();
+
+        for table in ROOT_KEYED_TABLES.iter().map(|table| table.name) {
+            let has_root_id: bool = store
+                .conn
+                .prepare(&format!(
+                    "SELECT 1 FROM pragma_table_info('{table}') WHERE name = 'root_id'"
+                ))
+                .unwrap()
+                .query_row([], |_| Ok(true))
+                .optional()
+                .unwrap()
+                .unwrap_or(false);
+            assert!(has_root_id, "{table} must be created with a root_id");
+        }
+    }
+
+    /// The upgrade must not go through the wipe path: on a real workspace that
+    /// is hours of re-indexing and re-embedding, and the whole point of the
+    /// default value is that rows are kept.
+    #[test]
+    fn the_upgrade_never_wipes_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.file_count().unwrap(), 2);
+        assert_eq!(store.chunk_count().unwrap(), 2);
+        // Stamped forward, so a binary of the previous release rebuilds its
+        // derived cache instead of failing on an upsert whose conflict target
+        // no longer exists.
+        assert_eq!(Store::stored_schema_version(&store.conn).unwrap(), Some(SCHEMA_VERSION));
+    }
 
     fn sample_chunk(name: &str) -> Chunk {
         Chunk {
@@ -2068,8 +3087,15 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test content");
 
-        let file_id =
-            store.reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Тест")], None).unwrap();
+        let file_id = store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Тест")],
+                None,
+            )
+            .unwrap();
 
         assert!(file_id > 0);
         assert_eq!(store.file_count().unwrap(), 1);
@@ -2080,15 +3106,31 @@ mod tests {
     fn context_dirty_marks_are_recorded_cleared_and_do_not_touch_the_vector_generation() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("Owned.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
-        store.reindex_file("Other.bsl", hash.as_bytes(), &[sample_chunk("Д")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "Owned.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "Other.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Д")],
+                None,
+            )
+            .unwrap();
 
         let generation_before = store.embedding_generation().unwrap();
 
-        store.mark_context_dirty("code", "Owned.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Owned.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Owned.bsl")]),
         );
         // The side table must not fire the chunk triggers, or every metadata edit would
         // invalidate the persisted vector index for a mark that changes no embedding.
@@ -2104,10 +3146,10 @@ mod tests {
         assert!(batch_seq > 0, "the batch reports the shared mark seq it stamped");
         assert_eq!(store.context_dirty_paths("code").unwrap().len(), 2);
 
-        store.clear_context_dirty("code", "Owned.bsl").unwrap();
+        store.clear_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Other.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Other.bsl")]),
         );
     }
 
@@ -2121,28 +3163,47 @@ mod tests {
     fn a_topology_batch_leaves_a_fresher_drift_mark_alone() {
         let mut store = Store::in_memory().unwrap();
         for path in ["Stable.bsl", "Drifted.bsl"] {
-            store.reindex_file(path, b"h", &[sample_chunk("П")], None).unwrap();
+            store
+                .reindex_file(CONFIGURATION_ROOT_ID, path, b"h", &[sample_chunk("П")], None)
+                .unwrap();
         }
 
         // A build captured its bound here; then one file drifted, stamped ABOVE it.
         let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
-        store.mark_context_dirty("code", "Drifted.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Drifted.bsl").unwrap();
 
         let marked = store.mark_collection_context_dirty_at("code", build_start_seq).unwrap();
         assert_eq!(marked, 1, "only the file with no fresher mark is stamped by the batch");
 
         let batch = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
-        assert!(batch.contains("Stable.bsl"), "the batch re-renders what the build reflects");
         assert!(
-            !batch.contains("Drifted.bsl"),
+            batch.contains(&FileKey::configuration("Stable.bsl")),
+            "the batch re-renders what the build reflects"
+        );
+        assert!(
+            !batch.contains(&FileKey::configuration("Drifted.bsl")),
             "a drift the build does not reflect is not re-rendered against it",
         );
 
-        store.clear_context_dirty_bounded("code", "Stable.bsl", build_start_seq).unwrap();
-        store.clear_context_dirty_bounded("code", "Drifted.bsl", build_start_seq).unwrap();
+        store
+            .clear_context_dirty_bounded(
+                "code",
+                CONFIGURATION_ROOT_ID,
+                "Stable.bsl",
+                build_start_seq,
+            )
+            .unwrap();
+        store
+            .clear_context_dirty_bounded(
+                "code",
+                CONFIGURATION_ROOT_ID,
+                "Drifted.bsl",
+                build_start_seq,
+            )
+            .unwrap();
         assert_eq!(
             store.context_dirty_paths("code").unwrap(),
-            HashSet::from(["Drifted.bsl".to_owned()]),
+            HashSet::from([FileKey::configuration("Drifted.bsl")]),
             "and its mark survives for the publish that will reflect it",
         );
     }
@@ -2157,28 +3218,33 @@ mod tests {
         let store = Store::in_memory().unwrap();
 
         // Mark P (seq 1), then a build captures the current start-seq (1) and reads the set.
-        store.mark_context_dirty("code", "P.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "P.bsl").unwrap();
         let build_start_seq = store.mark_seq_handle().load(Ordering::SeqCst);
         assert_eq!(build_start_seq, 1);
         let read_set = store.context_dirty_paths_bounded("code", build_start_seq).unwrap();
-        assert!(read_set.contains("P.bsl"), "P is in the build's read set");
+        assert!(
+            read_set.contains(&FileKey::configuration("P.bsl")),
+            "P is in the build's read set"
+        );
 
         // A fresher drift re-marks P (seq 2) while the build is processing its read set.
-        store.mark_context_dirty("code", "P.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "P.bsl").unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
 
         // The build clears P bounded by ITS start-seq (1); P's row now sits at seq 2, so the
         // newer mark is not lost.
-        store.clear_context_dirty_bounded("code", "P.bsl", build_start_seq).unwrap();
+        store
+            .clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", build_start_seq)
+            .unwrap();
         assert!(
-            store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            store.context_dirty_paths("code").unwrap().contains(&FileKey::configuration("P.bsl")),
             "the re-mark stamped after the build started survives the bounded clear",
         );
 
         // The next build (start-seq 2) does consume it.
-        store.clear_context_dirty_bounded("code", "P.bsl", 2).unwrap();
+        store.clear_context_dirty_bounded("code", CONFIGURATION_ROOT_ID, "P.bsl", 2).unwrap();
         assert!(
-            !store.context_dirty_paths("code").unwrap().contains("P.bsl"),
+            !store.context_dirty_paths("code").unwrap().contains(&FileKey::configuration("P.bsl")),
             "a build whose start-seq covers the re-mark clears it",
         );
     }
@@ -2194,18 +3260,18 @@ mod tests {
         let db = dir.path().join("search.db");
         {
             let store = Store::open(&db).unwrap();
-            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
-            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap(); // seq 2
             assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
             // Clear A: the live MAX(seq) drops to 1, but the counter must not rewind.
-            store.clear_context_dirty("code", "A.bsl").unwrap();
-            store.mark_context_dirty("code", "C.bsl").unwrap(); // seq 3, never reused
+            store.clear_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap();
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "C.bsl").unwrap(); // seq 3, never reused
             assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
         }
         // Reopen: B (seq 2) and C (seq 3) persist; the counter seeds above the max.
         let store = Store::open(&db).unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
-        store.mark_context_dirty("code", "D.bsl").unwrap(); // seq 4
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "D.bsl").unwrap(); // seq 4
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 4);
     }
 
@@ -2223,9 +3289,13 @@ mod tests {
 
         let mut seqs = Vec::new();
         for round in 0..3 {
-            first.mark_context_dirty("code", &format!("A{round}.bsl")).unwrap();
+            first
+                .mark_context_dirty("code", CONFIGURATION_ROOT_ID, &format!("A{round}.bsl"))
+                .unwrap();
             seqs.push(first.mark_seq_handle().load(Ordering::SeqCst));
-            second.mark_context_dirty("code", &format!("B{round}.bsl")).unwrap();
+            second
+                .mark_context_dirty("code", CONFIGURATION_ROOT_ID, &format!("B{round}.bsl"))
+                .unwrap();
             seqs.push(second.mark_seq_handle().load(Ordering::SeqCst));
         }
 
@@ -2249,8 +3319,8 @@ mod tests {
         let mine = Store::open(&db).unwrap();
         let other = Store::open(&db).unwrap();
 
-        mine.mark_context_dirty("code", "Mine.bsl").unwrap(); // seq 1
-        other.mark_context_dirty("code", "Theirs.bsl").unwrap(); // seq 2
+        mine.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Mine.bsl").unwrap(); // seq 1
+        other.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Theirs.bsl").unwrap(); // seq 2
 
         assert_eq!(
             mine.mark_seq_handle().load(Ordering::SeqCst),
@@ -2273,14 +3343,14 @@ mod tests {
         let db = dir.path().join("search.db");
         {
             let store = Store::open(&db).unwrap();
-            store.mark_context_dirty("code", "A.bsl").unwrap(); // seq 1
-            store.mark_context_dirty("code", "B.bsl").unwrap(); // seq 2
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "A.bsl").unwrap(); // seq 1
+            store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "B.bsl").unwrap(); // seq 2
             store.conn.execute("DELETE FROM meta WHERE key = 'mark_seq'", []).unwrap();
         }
 
         let store = Store::open(&db).unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 2);
-        store.mark_context_dirty("code", "C.bsl").unwrap();
+        store.mark_context_dirty("code", CONFIGURATION_ROOT_ID, "C.bsl").unwrap();
         assert_eq!(store.mark_seq_handle().load(Ordering::SeqCst), 3);
     }
 
@@ -2291,6 +3361,7 @@ mod tests {
         let vec = vec![1.0f32, 0.0, 0.0];
         store
             .reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 "F.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("П")],
@@ -2298,7 +3369,7 @@ mod tests {
                 Some(&[Some("старый контекст".to_owned())]),
             )
             .unwrap();
-        let chunk_id = store.chunk_ids_for_file("code", "F.bsl").unwrap()[0];
+        let chunk_id = store.chunk_ids_for_file("code", CONFIGURATION_ROOT_ID, "F.bsl").unwrap()[0];
 
         let gen0 = store.embedding_generation().unwrap();
         // Rewriting only graph_context must NOT bump the vector generation — the
@@ -2322,7 +3393,15 @@ mod tests {
     fn remove_file_is_atomic_all_or_nothing() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("t.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "t.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.fts_count().unwrap(), 1);
 
         // Force the second statement (the `files` delete) to abort, so the whole
@@ -2337,7 +3416,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            store.remove_file("t.bsl", "code").is_err(),
+            store.remove_file(CONFIGURATION_ROOT_ID, "t.bsl", "code").is_err(),
             "the aborted delete surfaces an error"
         );
         // The FTS delete rolled back with the aborted files delete — nothing was lost.
@@ -2346,7 +3425,7 @@ mod tests {
 
         store.conn.execute_batch("DROP TRIGGER block_files_delete;").unwrap();
         // With the block lifted the removal now succeeds and clears both together.
-        store.remove_file("t.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "t.bsl", "code").unwrap();
         assert_eq!(store.fts_count().unwrap(), 0);
         assert_eq!(store.file_count().unwrap(), 0);
     }
@@ -2355,15 +3434,23 @@ mod tests {
     fn remove_file_is_scoped_to_the_callers_collection() {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"body");
-        store.reindex_file("only.bsl", hash.as_bytes(), &[sample_chunk("П")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "only.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("П")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.file_count().unwrap(), 1);
 
         // A removal scoped to a different collection must not touch this file.
-        store.remove_file("only.bsl", "platform").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "only.bsl", "platform").unwrap();
         assert_eq!(store.file_count().unwrap(), 1, "a mismatched collection removes nothing");
 
         // The correctly-scoped removal clears it.
-        store.remove_file("only.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "only.bsl", "code").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
     }
 
@@ -2377,7 +3464,13 @@ mod tests {
 
         // Insert two chunks -> two INSERT trigger firings.
         store
-            .reindex_file("m.bsl", b"h0", &[sample_chunk("Один"), sample_chunk("Два")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "m.bsl",
+                b"h0",
+                &[sample_chunk("Один"), sample_chunk("Два")],
+                None,
+            )
             .unwrap();
         let g_after_insert = store.embedding_generation().unwrap();
         assert!(g_after_insert > g0, "insert must advance the generation");
@@ -2402,7 +3495,7 @@ mod tests {
 
         // File removal cascades to chunks; `files_gen_del` guarantees an advance regardless of
         // whether the cascade fires the chunk delete trigger.
-        store.remove_file("m.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "m.bsl", "code").unwrap();
         assert!(
             store.embedding_generation().unwrap() > g_after_update,
             "file removal (cascade delete) must advance the generation"
@@ -2422,7 +3515,15 @@ mod tests {
         {
             let mut store = Store::open(&db_path).unwrap();
             let emb = vec![0.1_f32, 0.2, 0.3, 0.4];
-            store.reindex_file("f.bsl", b"h0", &[sample_chunk("П")], Some(&[emb])).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "f.bsl",
+                    b"h0",
+                    &[sample_chunk("П")],
+                    Some(&[emb]),
+                )
+                .unwrap();
             let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
             let index = VectorIndex::build(DIM, &data).unwrap();
             let key = crate::vector_persist::PersistKey {
@@ -2470,6 +3571,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "f.bsl",
                     b"h0",
                     &[sample_chunk("П")],
@@ -2511,6 +3613,7 @@ mod tests {
             let mut store = Store::open(&db_path).unwrap();
             store
                 .reindex_file(
+                    CONFIGURATION_ROOT_ID,
                     "f.bsl",
                     b"h0",
                     &[sample_chunk("П")],
@@ -2558,6 +3661,7 @@ mod tests {
 
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "mod.bsl",
                 hash1.as_bytes(),
                 &[sample_chunk("Первая"), sample_chunk("Вторая")],
@@ -2566,7 +3670,15 @@ mod tests {
             .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        store.reindex_file("mod.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "mod.bsl",
+                hash2.as_bytes(),
+                &[sample_chunk("Новая")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 1);
         assert_eq!(store.file_count().unwrap(), 1);
     }
@@ -2576,11 +3688,19 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"content");
 
-        assert!(store.file_hash("test.bsl").unwrap().is_none());
+        assert!(store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().is_none());
 
-        store.reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Тест")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Тест")],
+                None,
+            )
+            .unwrap();
 
-        let stored = store.file_hash("test.bsl").unwrap().unwrap();
+        let stored = store.file_hash(CONFIGURATION_ROOT_ID, "test.bsl").unwrap().unwrap();
         assert_eq!(stored, hash.as_bytes());
     }
 
@@ -2592,6 +3712,7 @@ mod tests {
 
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("Тест")],
@@ -2609,7 +3730,13 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test");
         store
-            .reindex_file("path/to/module.bsl", hash.as_bytes(), &[sample_chunk("Метод")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "path/to/module.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Метод")],
+                None,
+            )
             .unwrap();
 
         assert_eq!(store.chunk_count().unwrap(), 1);
@@ -2631,6 +3758,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "path/to/module.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("Альфа"), sample_chunk("Бета"), sample_chunk("Гамма")],
@@ -2682,6 +3810,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("А"), sample_chunk("Б")],
@@ -2690,7 +3819,7 @@ mod tests {
             .unwrap();
         assert_eq!(store.chunk_count().unwrap(), 2);
 
-        store.remove_file("test.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "test.bsl", "code").unwrap();
         assert_eq!(store.file_count().unwrap(), 0);
         assert_eq!(store.chunk_count().unwrap(), 0);
     }
@@ -2701,6 +3830,7 @@ mod tests {
         let hash = blake3::hash(b"test");
         store
             .reindex_file(
+                CONFIGURATION_ROOT_ID,
                 "test.bsl",
                 hash.as_bytes(),
                 &[sample_chunk("ОбработкаПроведения"), sample_chunk("ПриСозданииНаСервере")],
@@ -2724,7 +3854,9 @@ mod tests {
         chunk.text =
             "Процедура Тест()\n    СообщитьПользователю(\"Привет\");\nКонецПроцедуры".to_owned();
 
-        store.reindex_file("test.bsl", hash.as_bytes(), &[chunk], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "test.bsl", hash.as_bytes(), &[chunk], None)
+            .unwrap();
 
         let results = store.text_search("СообщитьПользователю", 10, None).unwrap();
         assert_eq!(results.len(), 1);
@@ -2744,8 +3876,8 @@ mod tests {
             "Процедура Отправщик()\n    ВызватьHTTПМетод(); // отправка запроса\nКонецПроцедуры"
                 .to_owned();
 
-        store.reindex_file("a.bsl", b"h0", &[only_id], None).unwrap();
-        store.reindex_file("b.bsl", b"h1", &[full], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[only_id], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "b.bsl", b"h1", &[full], None).unwrap();
 
         let results = store.text_search("ВызватьHTTПМетод отправка запроса", 10, None).unwrap();
         assert_eq!(results.len(), 2, "OR semantics must surface a chunk matching any term");
@@ -2757,7 +3889,7 @@ mod tests {
         let mut chunk = sample_chunk("Отправщик");
         chunk.text =
             "Процедура Отправщик()\n    КоннекторHTTP.ВызватьМетод();\nКонецПроцедуры".to_owned();
-        store.reindex_file("a.bsl", b"h0", &[chunk], None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[chunk], None).unwrap();
 
         // The dotted call is one quoted token; unicode61 makes it an adjacency phrase that still
         // matches the same dotted call in the body.
@@ -2768,7 +3900,9 @@ mod tests {
     #[test]
     fn fts_punctuation_only_query_is_empty_not_error() {
         let mut store = Store::in_memory().unwrap();
-        store.reindex_file("a.bsl", b"h0", &[sample_chunk("Метод")], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "a.bsl", b"h0", &[sample_chunk("Метод")], None)
+            .unwrap();
         // No usable term -> empty result, never an FTS5 syntax error.
         assert!(store.text_search("()", 10, None).unwrap().is_empty());
         assert!(store.text_search("   ", 10, None).unwrap().is_empty());
@@ -2780,10 +3914,26 @@ mod tests {
         let hash1 = blake3::hash(b"v1");
         let hash2 = blake3::hash(b"v2");
 
-        store.reindex_file("test.bsl", hash1.as_bytes(), &[sample_chunk("Старая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash1.as_bytes(),
+                &[sample_chunk("Старая")],
+                None,
+            )
+            .unwrap();
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 1);
 
-        store.reindex_file("test.bsl", hash2.as_bytes(), &[sample_chunk("Новая")], None).unwrap();
+        store
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash2.as_bytes(),
+                &[sample_chunk("Новая")],
+                None,
+            )
+            .unwrap();
 
         assert_eq!(store.text_search("Старая", 10, None).unwrap().len(), 0);
         assert_eq!(store.text_search("Новая", 10, None).unwrap().len(), 1);
@@ -2794,11 +3944,17 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         let hash = blake3::hash(b"test");
         store
-            .reindex_file("test.bsl", hash.as_bytes(), &[sample_chunk("Удаляемая")], None)
+            .reindex_file(
+                CONFIGURATION_ROOT_ID,
+                "test.bsl",
+                hash.as_bytes(),
+                &[sample_chunk("Удаляемая")],
+                None,
+            )
             .unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 1);
 
-        store.remove_file("test.bsl", "code").unwrap();
+        store.remove_file(CONFIGURATION_ROOT_ID, "test.bsl", "code").unwrap();
         assert_eq!(store.text_search("Удаляемая", 10, None).unwrap().len(), 0);
     }
 
@@ -2806,7 +3962,7 @@ mod tests {
     fn load_indexed_documents_filters_by_collection() {
         let mut store = Store::in_memory().unwrap();
         let code = crate::Chunker::chunk("Процедура Код()\nКонецПроцедуры");
-        store.reindex_file("A.bsl", b"hash-a", &code, None).unwrap();
+        store.reindex_file(CONFIGURATION_ROOT_ID, "A.bsl", b"hash-a", &code, None).unwrap();
         store
             .reindex_documents(
                 "platform",
@@ -2841,6 +3997,7 @@ mod tests {
             snapshot_fingerprint: Some("fp-abc".to_owned()),
             files: vec![
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/A.bsl".to_owned(),
                     file_fingerprint: "fp-a".to_owned(),
@@ -2848,6 +4005,7 @@ mod tests {
                     file_object_id: "obj-a".to_owned(),
                 },
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/B.bsl".to_owned(),
                     file_fingerprint: "fp-b".to_owned(),
@@ -2865,8 +4023,14 @@ mod tests {
 
         let fingerprints = store.load_baseline_manifest_fingerprints("code").unwrap().unwrap();
         assert_eq!(fingerprints.len(), 2);
-        assert_eq!(fingerprints.get("src/A.bsl").map(String::as_str), Some("fp-a"));
-        assert_eq!(fingerprints.get("src/B.bsl").map(String::as_str), Some("fp-b"));
+        assert_eq!(
+            fingerprints.get(&FileKey::configuration("src/A.bsl")).map(String::as_str),
+            Some("fp-a")
+        );
+        assert_eq!(
+            fingerprints.get(&FileKey::configuration("src/B.bsl")).map(String::as_str),
+            Some("fp-b")
+        );
 
         store.clear_baseline_manifest().unwrap();
         assert!(store.load_baseline_manifest().unwrap().is_none());
@@ -2883,6 +4047,7 @@ mod tests {
             snapshot_fingerprint: Some("fp-abc".to_owned()),
             files: vec![
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/A.bsl".to_owned(),
                     file_fingerprint: "fp-a".to_owned(),
@@ -2890,6 +4055,7 @@ mod tests {
                     file_object_id: "obj-a".to_owned(),
                 },
                 crate::BaselineManifestFile {
+                    root_id: crate::CONFIGURATION_ROOT_ID.to_owned(),
                     collection: "code".to_owned(),
                     path: "src/B.bsl".to_owned(),
                     file_fingerprint: "fp-b".to_owned(),
@@ -2920,18 +4086,18 @@ mod tests {
         let store = Store::in_memory().unwrap();
         assert!(store.overlay_tombstone_paths("code").unwrap().is_empty());
 
-        store.insert_overlay_tombstone("src/A.bsl", "code").unwrap();
-        store.insert_overlay_tombstone("src/B.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/A.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/B.bsl", "code").unwrap();
 
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 2);
-        assert!(paths.contains("src/A.bsl"));
-        assert!(paths.contains("src/B.bsl"));
+        assert!(paths.contains(&FileKey::configuration("src/A.bsl")));
+        assert!(paths.contains(&FileKey::configuration("src/B.bsl")));
 
-        store.remove_overlay_tombstone("src/A.bsl").unwrap();
+        store.remove_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/A.bsl").unwrap();
         let paths = store.overlay_tombstone_paths("code").unwrap();
         assert_eq!(paths.len(), 1);
-        assert!(paths.contains("src/B.bsl"));
+        assert!(paths.contains(&FileKey::configuration("src/B.bsl")));
 
         store.clear_overlay_tombstones("code").unwrap();
         assert!(store.overlay_tombstone_paths("code").unwrap().is_empty());
@@ -2945,6 +4111,7 @@ mod tests {
 
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/Overlay.bsl",
                 hash.as_bytes(),
                 "code",
@@ -2959,7 +4126,7 @@ mod tests {
         let results = store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap();
         assert_eq!(results.len(), 1);
 
-        store.remove_overlay_file("src/Overlay.bsl").unwrap();
+        store.remove_overlay_file(CONFIGURATION_ROOT_ID, "src/Overlay.bsl").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
         assert_eq!(store.overlay_chunk_count("code").unwrap(), 0);
         assert_eq!(store.overlay_text_search("OverlayProc", 10, Some("code")).unwrap().len(), 0);
@@ -2971,6 +4138,7 @@ mod tests {
         let hash = blake3::hash(b"overlay");
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/A.bsl",
                 hash.as_bytes(),
                 "code",
@@ -2978,7 +4146,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        store.insert_overlay_tombstone("src/B.bsl", "code").unwrap();
+        store.insert_overlay_tombstone(CONFIGURATION_ROOT_ID, "src/B.bsl", "code").unwrap();
 
         store.clear_overlay_state("code").unwrap();
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);
@@ -2993,6 +4161,7 @@ mod tests {
         let embedding = vec![0.1f32, 0.2, 0.3, 0.4];
         store
             .upsert_overlay_file_with_chunks(
+                CONFIGURATION_ROOT_ID,
                 "src/Emb.bsl",
                 hash.as_bytes(),
                 "code",
@@ -3011,6 +4180,7 @@ mod tests {
         let mut store = Store::in_memory().unwrap();
         store
             .reindex_file_with_context(
+                CONFIGURATION_ROOT_ID,
                 "A.bsl",
                 b"h",
                 &[sample_chunk("Делать")],
@@ -3026,7 +4196,9 @@ mod tests {
         );
 
         // A chunk indexed without context round-trips as `None`.
-        store.reindex_file("B.bsl", b"h2", &[sample_chunk("Плейн")], None).unwrap();
+        store
+            .reindex_file(CONFIGURATION_ROOT_ID, "B.bsl", b"h2", &[sample_chunk("Плейн")], None)
+            .unwrap();
         let b = store
             .load_indexed_documents(Some("code"))
             .unwrap()
@@ -3042,8 +4214,19 @@ mod tests {
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
-            assert_eq!(store.file_hash("A.bsl").unwrap().unwrap(), b"realhash");
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
+            assert_eq!(
+                store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap(),
+                b"realhash"
+            );
             // Simulate a database written by an older embed-text format.
             store.conn.pragma_update(None, "user_version", 0i64).unwrap();
         }
@@ -3051,13 +4234,13 @@ mod tests {
         // re-embeds the file under the current format instead of keeping a stale vector.
         let store = Store::open(&path).unwrap();
         assert!(
-            store.file_hash("A.bsl").unwrap().unwrap().is_empty(),
+            store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap().is_empty(),
             "file hash cleared to force re-embed"
         );
 
         // A second open at the same version is a no-op (does not re-clear).
         let store = Store::open(&path).unwrap();
-        assert!(store.file_hash("A.bsl").unwrap().unwrap().is_empty());
+        assert!(store.file_hash(CONFIGURATION_ROOT_ID, "A.bsl").unwrap().unwrap().is_empty());
     }
 
     #[test]
@@ -3075,7 +4258,15 @@ mod tests {
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
             assert_eq!(store.file_count().unwrap(), 1);
             assert_eq!(store.chunk_count().unwrap(), 1);
             // Simulate a database written under an older structural schema.
@@ -3096,12 +4287,71 @@ mod tests {
     }
 
     #[test]
+    fn a_root_transition_retracts_every_persistent_key_carrier() {
+        let mut store = Store::in_memory().unwrap();
+        let key = FileKey::new("removed-root", "Module.bsl");
+        store.upsert_file(&key.root_id, &key.path, b"hash", "code").unwrap();
+        store
+            .upsert_overlay_file_with_chunks(
+                &key.root_id,
+                &key.path,
+                b"overlay",
+                "code",
+                &[sample_chunk("Overlay")],
+                None,
+            )
+            .unwrap();
+        store.insert_overlay_tombstone(&key.root_id, &key.path, "code").unwrap();
+        store.mark_context_dirty("code", &key.root_id, &key.path).unwrap();
+        store
+            .save_overlay_fingerprint_cache(
+                "snapshot",
+                &HashMap::from([(
+                    key.clone(),
+                    PersistedFingerprint {
+                        file_size: 1,
+                        file_mtime_secs: 2,
+                        file_mtime_nanos: 3,
+                        content_fingerprint: "fingerprint".to_owned(),
+                        canonical: "/removed/Module.bsl".to_owned(),
+                    },
+                )]),
+            )
+            .unwrap();
+
+        let changed_root_ids = HashSet::from([key.root_id.clone()]);
+        store
+            .apply_workspace_roots_transition(WorkspaceStoreTransition {
+                changed_root_ids: &changed_root_ids,
+                cleanup: &HashSet::new(),
+                tombstones: &HashSet::new(),
+                upserts: &[],
+                dimension: 4,
+            })
+            .unwrap();
+
+        assert!(store.file_hash(&key.root_id, &key.path).unwrap().is_none());
+        assert_eq!(store.overlay_file_count("code").unwrap(), 0);
+        assert!(!store.overlay_tombstone_paths("code").unwrap().contains(&key));
+        assert!(!store.context_dirty_paths("code").unwrap().contains(&key));
+        assert!(!store.overlay_fingerprint_keys().unwrap().contains(&key));
+    }
+
+    #[test]
     fn pre_versioning_database_is_kept_and_stamped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.db");
         {
             let mut store = Store::open(&path).unwrap();
-            store.reindex_file("A.bsl", b"realhash", &[sample_chunk("Делать")], None).unwrap();
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"realhash",
+                    &[sample_chunk("Делать")],
+                    None,
+                )
+                .unwrap();
             // Simulate a database created before schema versioning existed.
             store.conn.execute("DELETE FROM meta WHERE key = 'schema_version'", []).unwrap();
         }
