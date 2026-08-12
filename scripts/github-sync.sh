@@ -12,15 +12,17 @@ GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
 GITHUB_REPO_SLUG="itrous/bsl-analyzer"
 GITHUB_BRANCH="develop"
 
+# Только ОТСЛЕЖИВАЕМЫЕ пути, которым не место в публичном зеркале: дерево берётся
+# из HEAD, поэтому неотслеживаемое в зеркало не попадает по построению и
+# перечислять его здесь не нужно.
 EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
+    ".claude/"
     "scripts/ci-status.sh"
     "scripts/*sonar-triage*"
     "docs/diagnostics-audit/"
     "docs/legal/"
-    ".omc/"
-    ".claude/"
     "crates/bsl-launcher/release-source.github.json"
 )
 
@@ -263,16 +265,21 @@ publish_release_notes() {
     persist_notes_for_manual_publish "$tag" "$body_file"
 }
 
-build_rsync_excludes() {
-    local excludes=()
+build_archive_pathspecs() {
+    local pathspecs=(".")
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        excludes+=(--exclude "$pattern")
+        # Завершающий слэш git в pathspec не понимает: каталог задаётся своим именем.
+        pathspecs+=(":(exclude)${pattern%/}")
     done
-    excludes+=(--exclude ".git")
-    excludes+=(--exclude ".git/")
-    excludes+=(--exclude "target/")
-    excludes+=(--exclude "target-*/")
-    echo "${excludes[@]}"
+    printf '%s\n' "${pathspecs[@]}"
+}
+
+assert_tree_committed() {
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no)" ]]; then
+        log_error "В рабочем дереве есть незакоммиченные изменения отслеживаемых файлов."
+        log_error "Зеркало собирается из HEAD, и в него они не попадут — закоммитьте или откатите их."
+        exit 1
+    fi
 }
 
 sync_files() {
@@ -283,10 +290,14 @@ sync_files() {
 
     find "$dst" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-    local excludes
-    excludes=$(build_rsync_excludes)
-    # shellcheck disable=SC2086
-    rsync -a $excludes "$src/" "$dst/"
+    local pathspecs=()
+    while IFS= read -r spec; do
+        pathspecs+=("$spec")
+    done < <(build_archive_pathspecs)
+
+    # Дерево HEAD, а не файловая система: копирование с диска утаскивало в публичное
+    # зеркало любой локальный каталог, не попавший в список исключений.
+    git -C "$src" archive HEAD -- "${pathspecs[@]}" | tar -x -C "$dst"
 }
 
 
@@ -320,7 +331,9 @@ log_info "Проект: bsl-analyzer"
 log_info "Версия: $VERSION"
 log_info "Тег: $COMMIT_TAG"
 log_info "GitHub: $GITHUB_REPO"
+log_info "Источник дерева: HEAD ($(git -C "$PROJECT_ROOT" rev-parse --short HEAD))"
 
+assert_tree_committed
 fetch_last_github_tag
 generate_release_notes "$COMMIT_TAG" "$LAST_GH_TAG"
 
@@ -332,10 +345,17 @@ compose_release_body "$COMMIT_TAG" "$LAST_GH_TAG" "$RELEASE_BODY_FILE"
 if $DRY_RUN; then
     log_warn "DRY RUN — изменения не будут отправлены"
     echo ""
-    log_info "Исключаемые файлы:"
+    log_info "Исключаемые отслеживаемые пути:"
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
         echo "  - $pattern"
     done
+    echo ""
+    DRY_PATHSPECS=()
+    while IFS= read -r spec; do
+        DRY_PATHSPECS+=("$spec")
+    done < <(build_archive_pathspecs)
+    DRY_FILES=$(git -C "$PROJECT_ROOT" archive HEAD -- "${DRY_PATHSPECS[@]}" | tar -t | grep -cv '/$' || true)
+    log_info "Файлов уедет в зеркало: $DRY_FILES"
     echo ""
     log_info "Будет создан коммит: \"Release $COMMIT_TAG\""
     if [[ -s "$RELEASE_BODY_FILE" ]]; then
