@@ -4,7 +4,7 @@ use std::{
     error::Error,
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 
@@ -45,6 +45,11 @@ pub struct McpServeArgs {
     #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
+    /// Directory for workspace-derived graph, search and lease files. Relative
+    /// paths are resolved from the process working directory.
+    #[arg(long = "cache-dir")]
+    cache_dir: Option<PathBuf>,
+
     /// Connection mode. `stdio` (default) serves one client directly. `broker`
     /// connects to a shared per-project backend (launching it if absent) and relays
     /// — so many clients/reviews reuse one heavy process. The backend stays warm across
@@ -84,8 +89,8 @@ pub struct McpServeArgs {
 
 impl McpCommand {
     /// Opt-in on-disk log destination for a daemon backend, enabled by
-    /// `BSL_MCP_DAEMON_LOG` (`1`/`true`/`yes`/`on` → `.build/bsl-analyzer-daemon.log`
-    /// next to the graph and search databases; any other non-empty value is taken
+    /// `BSL_MCP_DAEMON_LOG` (`1`/`true`/`yes`/`on` → `bsl-analyzer-daemon.log`
+    /// in the effective workspace cache, `.build` by default; any other non-empty value is taken
     /// as an explicit path). A daemon is spawned by a broker proxy with no
     /// terminal, so without a file its diagnostics (build heartbeat, stall
     /// watchdog reports) vanish into a closed stderr — set the variable when
@@ -116,13 +121,33 @@ impl McpCommand {
         if !matches!(args.mode, McpServeMode::Daemon) {
             return None;
         }
+        // Logging is prepared before the arguments are validated, and preparing an explicit
+        // cache root CREATES it — so a command that is about to be rejected would leave a
+        // directory, and a log inside it, at a path the caller named. Ask the validator
+        // rather than restating some of its rules here: every reason it rejects for
+        // (`--host` outside http mode, a bad port, an empty allowlist) reaches this code
+        // just the same.
+        if validate_serve_args(args).is_err() {
+            return None;
+        }
         let log_path = match opt_in.map(str::trim) {
             None | Some("" | "0" | "false" | "no" | "off") => return None,
             Some("1" | "true" | "yes" | "on") => {
-                let build_dir =
-                    args.source_dir.as_deref().unwrap_or_else(|| ".".as_ref()).join(".build");
-                std::fs::create_dir_all(&build_dir).ok()?;
-                build_dir.join("bsl-analyzer-daemon.log")
+                let source_dir = args.source_dir.as_deref().unwrap_or_else(|| Path::new("."));
+                let layout = match args.cache_dir.as_deref() {
+                    Some(path) => mcp_server::WorkspaceCacheLayout::prepare_explicit(
+                        path,
+                        &std::env::current_dir().ok()?,
+                    )
+                    .ok()?,
+                    None => {
+                        let source_dir =
+                            source_dir.canonicalize().unwrap_or_else(|_| source_dir.to_path_buf());
+                        mcp_server::WorkspaceCacheLayout::for_workspace(&source_dir)
+                    }
+                };
+                layout.ensure().ok()?;
+                layout.daemon_log_path()
             }
             Some(path) => {
                 // An unpreparable explicit path degrades to stderr like every
@@ -249,6 +274,8 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
         McpProfileCli::Reference => mcp_server::McpProfile::Reference,
     };
+    let (source_dir, workspace_cache) =
+        resolve_workspace_inputs(profile, args.source_dir.clone(), args.cache_dir.as_deref())?;
 
     // Installed before any mode runs, because the broker computes its backend key
     // from the project *before* a server exists — a source set installed later
@@ -262,19 +289,32 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     }
 
     match resolve_serve_mode(args.mode, profile)? {
-        McpServeMode::Stdio => {
-            run_mcp_server(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
+        McpServeMode::Stdio => run_mcp_server(
+            profile,
+            source_dir,
+            workspace_cache,
+            args.onec_url,
+            &args.onec_user,
+            &password,
+        ),
+        McpServeMode::Broker => {
+            run_mcp_broker(profile, &args, source_dir, workspace_cache, &password)
         }
-        McpServeMode::Broker => run_mcp_broker(profile, &args, &password),
-        McpServeMode::Daemon => {
-            run_mcp_daemon(profile, args.source_dir, args.onec_url, &args.onec_user, &password)
-        }
+        McpServeMode::Daemon => run_mcp_daemon(
+            profile,
+            source_dir,
+            workspace_cache,
+            args.onec_url,
+            &args.onec_user,
+            &password,
+        ),
         McpServeMode::Http => {
             let options =
                 http_options.expect("validated HTTP mode must contain HTTP serve options");
             run_mcp_http(
                 profile,
-                args.source_dir,
+                source_dir,
+                workspace_cache,
                 args.onec_url,
                 &args.onec_user,
                 &password,
@@ -285,6 +325,17 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
 }
 
 fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, io::Error> {
+    if matches!(args.runtime_profile, McpProfileCli::Reference) && args.cache_dir.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "reference profile does not accept --cache-dir",
+        ));
+    }
+    // An unset shell variable expands to an empty argument, which resolves to the current
+    // directory — the multi-gigabyte databases would land wherever the client was started.
+    if args.cache_dir.as_deref().is_some_and(|dir| dir.as_os_str().is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--cache-dir must not be empty"));
+    }
     if matches!(args.runtime_profile, McpProfileCli::Reference)
         && (args.onec_url.is_some() || !args.onec_user.is_empty() || !args.onec_password.is_empty())
     {
@@ -351,6 +402,44 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     }
 
     Ok(Some(HttpServeOptions { host, port, allowed_hosts: args.allowed_hosts.clone() }))
+}
+
+fn resolve_workspace_cache(
+    canonical_source_dir: &Path,
+    cache_dir: Option<&Path>,
+) -> io::Result<mcp_server::WorkspaceCacheLayout> {
+    let Some(path) = cache_dir else {
+        // The default root is a function of the workspace, so it needs no current directory —
+        // and it stays lazy: a read-only source tree must still bring the daemon up with
+        // search disabled rather than fail at startup.
+        return Ok(mcp_server::WorkspaceCacheLayout::for_workspace(canonical_source_dir));
+    };
+    // Read the working directory only when it is what an absolute path never needs: a base to
+    // resolve against. A daemon started from a directory that has since been deleted must not
+    // fail over a value it would not have used.
+    let base = if path.is_absolute() { PathBuf::new() } else { env::current_dir()? };
+    mcp_server::WorkspaceCacheLayout::prepare_explicit(path, &base)
+}
+
+fn resolve_workspace_inputs(
+    profile: mcp_server::McpProfile,
+    source_dir: Option<PathBuf>,
+    cache_dir: Option<&Path>,
+) -> io::Result<(Option<PathBuf>, Option<mcp_server::WorkspaceCacheLayout>)> {
+    if !matches!(profile, mcp_server::McpProfile::Workspace) {
+        return Ok((source_dir, None));
+    }
+    let source_dir = source_dir.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "workspace profile requires --source-dir")
+    })?;
+    let canonical_source = source_dir.canonicalize().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("failed to canonicalize --source-dir {}: {error}", source_dir.display()),
+        )
+    })?;
+    let cache = resolve_workspace_cache(&canonical_source, cache_dir)?;
+    Ok((Some(canonical_source), Some(cache)))
 }
 
 /// Resolve the effective serve mode.
@@ -423,30 +512,29 @@ fn env_broker_override() -> Option<bool> {
 /// The broker proxy: connect to (or launch) the shared per-project backend and relay
 /// stdio to it. The backend is this same binary re-executed with `--mode daemon` and
 /// the same launch parameters, so it resolves to the same backend identity.
-fn run_mcp_broker(
-    profile: mcp_server::McpProfile,
+fn daemon_command(
+    executable: &Path,
+    source_dir: &Path,
+    workspace_cache: &mcp_server::WorkspaceCacheLayout,
     args: &McpServeArgs,
-    onec_password: &str,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let source_dir = require_workspace_broker(profile, args.source_dir.clone())?;
-
-    let topology_fp = mcp_server::broker::workspace_topology_fingerprint(&source_dir);
-    let key = mcp_server::broker::BackendKey::new(
-        &source_dir,
-        profile,
-        mcp_server::broker::embedding_config_fingerprint(),
-        topology_fp,
-    );
-
-    let mut cmd = std::process::Command::new(env::current_exe()?);
+    topology_fp: u64,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new(executable);
     cmd.arg("mcp")
         .arg("serve")
         .arg("--profile")
         .arg("workspace")
         .arg("--source-dir")
-        .arg(&source_dir)
+        .arg(source_dir)
         .arg("--mode")
         .arg("daemon");
+    // Only an explicitly requested root travels to the child. Passing the default one would
+    // turn it into an explicit `--cache-dir`, which the daemon must create at startup or
+    // fail — the default is deliberately lazy, and a read-only source tree has to keep
+    // bringing the daemon up with search disabled instead of looping through respawns.
+    if args.cache_dir.is_some() {
+        cmd.arg("--cache-dir").arg(workspace_cache.root());
+    }
     // The daemon must resolve the same project this proxy keyed on, and its own
     // config file cannot tell it about a source set that came from argv.
     cmd.args(args.source_set.to_args());
@@ -456,17 +544,38 @@ fn run_mcp_broker(
     if !args.onec_user.is_empty() {
         cmd.arg("--onec-user").arg(&args.onec_user);
     }
-    // Credential via environment, not argv: the daemon is long-lived, and argv is
-    // visible in `ps`. Passed in the form we received it (possibly `base64:`) so the
-    // daemon decodes it exactly as a direct invocation would.
     if !args.onec_password.is_empty() {
         cmd.env("BSL_ONEC_PASSWORD", &args.onec_password);
     }
-    // The daemon must bind the EXACT key this proxy dials. Re-deriving the
-    // topology in the child races a config edit landing between the two reads —
-    // the daemon would bind a different socket and the proxy would spin through
-    // respawns into the stdio fallback. The frozen value travels via env.
     cmd.env(mcp_server::broker::TOPOLOGY_FP_ENV, topology_fp.to_string());
+    cmd
+}
+
+fn run_mcp_broker(
+    profile: mcp_server::McpProfile,
+    args: &McpServeArgs,
+    source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
+    onec_password: &str,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let source_dir = require_workspace_broker(profile, source_dir)?;
+    let workspace_cache = workspace_cache.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "workspace broker requires a cache layout")
+    })?;
+
+    let topology_fp = mcp_server::broker::workspace_topology_fingerprint(&source_dir);
+    let key = mcp_server::broker::BackendKey::new(
+        &source_dir,
+        workspace_cache.root(),
+        profile,
+        mcp_server::broker::embedding_config_fingerprint(),
+        topology_fp,
+    );
+
+    // Credentials travel via env rather than argv, while source/cache and the frozen
+    // topology are propagated exactly so proxy and daemon derive one backend key.
+    let cmd =
+        daemon_command(&env::current_exe()?, &source_dir, &workspace_cache, args, topology_fp);
 
     tracing::info!(?source_dir, "Starting MCP broker proxy");
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -485,6 +594,7 @@ fn run_mcp_broker(
             run_mcp_server(
                 profile,
                 Some(source_dir),
+                Some(workspace_cache),
                 args.onec_url.clone(),
                 &args.onec_user,
                 onec_password,
@@ -498,11 +608,15 @@ fn run_mcp_broker(
 fn run_mcp_daemon(
     profile: mcp_server::McpProfile,
     source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let source_dir = require_workspace_broker(profile, source_dir)?;
+    let workspace_cache = workspace_cache.ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "workspace daemon requires a cache layout")
+    })?;
 
     // Prefer the frozen identity the spawning proxy passed (see the env write in
     // `run_mcp_broker`); a directly-launched daemon derives its own.
@@ -512,6 +626,7 @@ fn run_mcp_daemon(
         .unwrap_or_else(|| mcp_server::broker::workspace_topology_fingerprint(&source_dir));
     let key = mcp_server::broker::BackendKey::new(
         &source_dir,
+        workspace_cache.root(),
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         topology_fp,
@@ -522,8 +637,15 @@ fn run_mcp_daemon(
     let onec_user = onec_user.to_owned();
     let onec_password = onec_password.to_owned();
     let build = move || {
-        build_server(profile, Some(source_dir), onec_url, &onec_user, &onec_password)
-            .map_err(|e| anyhow::anyhow!("{e}"))
+        build_server(
+            profile,
+            Some(source_dir),
+            Some(workspace_cache),
+            onec_url,
+            &onec_user,
+            &onec_password,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
     };
 
     tracing::info!("Starting MCP broker backend (daemon)");
@@ -703,13 +825,15 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
 fn run_mcp_server(
     profile: mcp_server::McpProfile,
     source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     tracing::info!(?profile, ?source_dir, ?onec_url, "Starting MCP server (stdio)");
 
-    let server = build_server(profile, source_dir, onec_url, onec_user, onec_password)?;
+    let server =
+        build_server(profile, source_dir, workspace_cache, onec_url, onec_user, onec_password)?;
     let shutdown_guard = server.clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -726,6 +850,7 @@ fn run_mcp_server(
 fn run_mcp_http(
     profile: mcp_server::McpProfile,
     source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
@@ -756,7 +881,8 @@ fn run_mcp_http(
     let actual_address = listener.local_addr()?;
     process_record.write_bound_process(actual_address)?;
 
-    let server = build_server(profile, source_dir, onec_url, onec_user, onec_password)?;
+    let server =
+        build_server(profile, source_dir, workspace_cache, onec_url, onec_user, onec_password)?;
     let shutdown_guard = server.clone();
     let serve_result = match process_record.mark_running() {
         Ok(()) => {
@@ -853,6 +979,7 @@ async fn shutdown_signal() -> io::Result<()> {
 fn build_server(
     profile: mcp_server::McpProfile,
     source_dir: Option<PathBuf>,
+    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
@@ -866,8 +993,11 @@ fn build_server(
                 )
             })?;
             let source_dir = source_dir.canonicalize().unwrap_or(source_dir);
-            let mut state = mcp_server::SharedState::workspace(source_dir)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+            let workspace_cache = workspace_cache
+                .unwrap_or_else(|| mcp_server::WorkspaceCacheLayout::for_workspace(&source_dir));
+            let mut state =
+                mcp_server::SharedState::workspace_with_cache(source_dir, workspace_cache)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             if let Some(ref url) = onec_url {
                 tracing::info!(%url, "Configuring 1C HTTP client");
                 state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
@@ -1028,11 +1158,13 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_serve_mode_with_override, validate_serve_args, McpCommand, McpProfileCli,
-        McpServeArgs, McpServeMode, ServeModeContext,
+        daemon_command, resolve_serve_mode_with_override, resolve_workspace_cache,
+        validate_serve_args, McpCommand, McpProfileCli, McpServeArgs, McpServeMode,
+        ServeModeContext,
     };
     use clap::Parser;
     use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
 
     #[derive(Debug, Parser)]
     struct ServeCli {
@@ -1321,6 +1453,111 @@ mod tests {
     }
 
     #[test]
+    fn workspace_cli_accepts_cache_dir() {
+        let cli = ServeCli::try_parse_from([
+            "serve",
+            "--profile",
+            "workspace",
+            "--source-dir",
+            ".",
+            "--cache-dir",
+            "../кеш с пробелом",
+        ])
+        .expect("workspace cache override must parse");
+
+        assert_eq!(cli.args.cache_dir, Some(PathBuf::from("../кеш с пробелом")));
+    }
+
+    #[test]
+    fn reference_profile_rejects_cache_dir() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.runtime_profile = McpProfileCli::Reference;
+        args.source_dir = None;
+        args.cache_dir = Some(PathBuf::from("cache"));
+
+        let err = validate_serve_args(&args).expect_err("reference cache override is ambiguous");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--cache-dir"));
+    }
+
+    /// `--cache-dir "$UNSET_VAR"` reaches the process as an empty argument, which resolves to
+    /// the working directory the client happened to start in.
+    #[test]
+    fn empty_cache_dir_is_refused_rather_than_resolved_to_the_working_directory() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.cache_dir = Some(PathBuf::new());
+
+        let err = validate_serve_args(&args).expect_err("an empty cache root names nothing");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("--cache-dir"));
+    }
+
+    #[test]
+    fn explicit_default_cache_matches_implicit_default_after_resolution() {
+        let parent = tempfile::tempdir().unwrap();
+        let source = parent.path().join("исходники");
+        std::fs::create_dir(&source).unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+        let default_cache = canonical_source.join(".build");
+
+        let implicit = resolve_workspace_cache(&canonical_source, None).unwrap();
+        let explicit = resolve_workspace_cache(&canonical_source, Some(&default_cache)).unwrap();
+
+        assert_eq!(implicit.root(), explicit.root());
+    }
+
+    #[test]
+    fn broker_child_receives_absolute_cache_dir() {
+        let source = tempfile::tempdir().unwrap();
+        let cache_parent = tempfile::tempdir().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::prepare_explicit(
+            PathBuf::from("кеш с пробелом").as_path(),
+            cache_parent.path(),
+        )
+        .unwrap();
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.cache_dir = Some(PathBuf::from("кеш с пробелом"));
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &source.path().canonicalize().unwrap(),
+            &cache,
+            &args,
+            42,
+        );
+        let argv = command.get_args().map(PathBuf::from).collect::<Vec<_>>();
+        let flag = argv.iter().position(|arg| arg == "--cache-dir").unwrap();
+
+        assert!(argv[flag + 1].is_absolute());
+        assert_eq!(argv[flag + 1], cache.root());
+    }
+
+    /// Without the flag the child must derive the default itself. Handing it the resolved
+    /// default would make the daemon create `<source>/.build` at startup or die trying,
+    /// where it used to come up with search disabled.
+    #[test]
+    fn broker_child_receives_no_cache_dir_when_none_was_requested() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical_source = source.path().canonicalize().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&canonical_source);
+        let args = serve_args(McpServeMode::Broker, None);
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &canonical_source,
+            &cache,
+            &args,
+            42,
+        );
+        let argv = command.get_args().map(PathBuf::from).collect::<Vec<_>>();
+
+        assert!(argv.iter().all(|arg| arg != "--cache-dir"), "argv: {argv:?}");
+        assert!(!canonical_source.join(".build").exists(), "the default stays lazy");
+    }
+
+    #[test]
     fn reference_profile_still_rejects_onec_options() {
         let mut args = serve_args(McpServeMode::Stdio, None);
         args.runtime_profile = McpProfileCli::Reference;
@@ -1348,6 +1585,7 @@ mod tests {
         McpServeArgs {
             runtime_profile: McpProfileCli::Workspace,
             source_dir: Some(std::path::PathBuf::from(".")),
+            cache_dir: None,
             mode,
             host: None,
             port,
@@ -1381,7 +1619,7 @@ mod tests {
         let path = serve_command(McpServeMode::Daemon, dir.path())
             .daemon_log_file_for(Some("1"))
             .expect("opt-in enables the default log file");
-        assert_eq!(path, dir.path().join(".build/bsl-analyzer-daemon.log"));
+        assert_eq!(path, dir.path().canonicalize().unwrap().join(".build/bsl-analyzer-daemon.log"));
         assert!(path.parent().unwrap().is_dir(), "`.build` is created eagerly");
 
         // A small live log is left in place: a concurrent daemon candidate must
@@ -1392,7 +1630,7 @@ mod tests {
             .unwrap();
         assert_eq!(again, path);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "live winner log");
-        let prev = dir.path().join(".build/bsl-analyzer-daemon.log.prev");
+        let prev = path.with_file_name("bsl-analyzer-daemon.log.prev");
         assert!(!prev.exists());
 
         // An oversized log rotates to `.prev` (sparse file keeps the test cheap).
@@ -1400,6 +1638,63 @@ mod tests {
         serve_command(McpServeMode::Daemon, dir.path()).daemon_log_file_for(Some("1")).unwrap();
         assert!(prev.exists());
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn daemon_log_opt_in_uses_external_cache_without_touching_source() {
+        let source = tempfile::tempdir().unwrap();
+        let cache_parent = tempfile::tempdir().unwrap();
+        let cache = cache_parent.path().join("кеш с пробелом");
+        let mut command = serve_command(McpServeMode::Daemon, source.path());
+        let McpCommand::Serve(args) = &mut command else { unreachable!() };
+        args.cache_dir = Some(cache.clone());
+
+        let path = command
+            .daemon_log_file_for(Some("1"))
+            .expect("external daemon log path must be prepared");
+
+        assert_eq!(path, cache.canonicalize().unwrap().join("bsl-analyzer-daemon.log"));
+        assert!(!source.path().join(".build").exists());
+    }
+
+    /// The log destination is resolved before the arguments are validated, so a combination
+    /// that validation is about to reject must not create the directory on its way out.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_for_a_command_validation_will_reject() {
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("должен-остаться-несозданным");
+        let mut command = serve_command(McpServeMode::Daemon, parent.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.runtime_profile = McpProfileCli::Reference;
+            args.source_dir = None;
+            args.cache_dir = Some(cache.clone());
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "the combination is indeed rejected");
+    }
+
+    /// A second member of the same class, rejected for a reason that has nothing to do with
+    /// the cache: the guard must ask the validator, not restate the rules it happens to know.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_when_an_unrelated_flag_is_rejected() {
+        let source = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("несозданный-кеш");
+        let mut command = serve_command(McpServeMode::Daemon, source.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.cache_dir = Some(cache.clone());
+            args.host = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "--host outside http mode is rejected");
     }
 
     #[test]

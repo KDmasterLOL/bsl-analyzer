@@ -17,7 +17,7 @@ mod workspace_lease;
 pub use baseline::{
     resolve_project_baseline_diagnostics, BaselineConfigDiagnostics, BaselineResolutionSummary,
 };
-pub use cache::graph_db_path;
+pub use cache::WorkspaceCacheLayout;
 pub use graph_db::{
     read_source_root_scoped_sqlite_method_call_digest, read_sqlite_method_call_digest,
 };
