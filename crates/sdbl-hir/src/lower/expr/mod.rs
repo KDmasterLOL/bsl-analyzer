@@ -54,26 +54,23 @@ impl LoweringContext<'_> {
     }
 
     fn lower_column_ref(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
-        let text = node.text().to_string();
-        let str_parts: Vec<&str> = text.split('.').collect();
-
-        let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
-
-        tracing::debug!(
-            text = %text,
-            parts_count = parts.len(),
-            "lower_column_ref called"
-        );
-
-        let ident_ranges: Vec<TextRange> = node
-            .children_with_tokens()
-            .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
-                    Some(token.text_range())
-                }
-                _ => None,
-            })
+        // Составное имя собирается из токенов, а не из текста узла: хвостовая
+        // тривия закрывается внутрь узла, и текст унёс бы комментарий в имя
+        // поля, а точку из комментария — в разделитель частей.
+        let name_tokens: Vec<(TextRange, String)> = syntax::ast_utils::direct_name_tokens(node)
+            .map(|token| (token.text_range(), token.text().to_string()))
             .collect();
+
+        let parts: Vec<Name> =
+            name_tokens.iter().map(|(_, text)| Name::from(text.as_str())).collect();
+
+        tracing::debug!(parts_count = parts.len(), "lower_column_ref called");
+
+        if parts.is_empty() {
+            return ExprHir::Missing { range: node.text_range() };
+        }
+
+        let ident_ranges: Vec<TextRange> = name_tokens.iter().map(|(range, _)| *range).collect();
 
         let (table_alias_str, column_name_str) = if parts.len() >= 2 {
             (Some(parts[0].as_str()), parts[1].as_str())
@@ -98,10 +95,16 @@ impl LoweringContext<'_> {
         }
 
         tracing::debug!(
-            text = %text,
             resolved_type = ?ty,
             "resolved column type from scope"
         );
+
+        // Ссылка кончается на последнем имени: тривия за ним в подсветку
+        // и в диапазон находки не входит.
+        let ref_range = match (ident_ranges.first(), ident_ranges.last()) {
+            (Some(first), Some(last)) => TextRange::new(first.start(), last.end()),
+            _ => node.text_range(),
+        };
 
         if ty == SdblType::Unknown {
             if let Some(alias) = table_alias_str {
@@ -129,17 +132,17 @@ impl LoweringContext<'_> {
             self.diagnostics.push(SdblDiagnostic::AmbiguousColumnRef {
                 column_name: column_name_str.to_string(),
                 possible_tables,
-                range: node.text_range(),
+                range: ref_range,
             });
         }
 
-        for (idx, range) in ident_ranges.iter().enumerate() {
+        for (idx, (range, token_text)) in name_tokens.iter().enumerate() {
             if idx == 0 && parts.len() >= 2 {
                 self.source_map.add_token(
                     crate::source_map::TokenInfo::new(
                         *range,
                         syntax::SyntaxKind::IDENT,
-                        str_parts[idx].trim(),
+                        token_text.as_str(),
                     ),
                     crate::source_map::TokenCategory::TableAlias,
                 );
@@ -167,20 +170,22 @@ impl LoweringContext<'_> {
                     crate::source_map::TokenInfo::new(
                         *range,
                         syntax::SyntaxKind::IDENT,
-                        str_parts[idx].trim(),
+                        token_text.as_str(),
                     ),
                     category,
                 );
             }
         }
 
-        ExprHir::ColumnRef { parts, ty, range: node.text_range() }
+        ExprHir::ColumnRef { parts, ty, range: ref_range }
     }
 
     fn lower_literal(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
         use crate::hir::LiteralValue;
 
-        let text = node.text().to_string().trim().to_string();
+        let text: String = syntax::ast_utils::significant_tokens(node)
+            .map(|token| token.text().to_string())
+            .collect();
 
         for child in node.children_with_tokens() {
             if let Some(token) = child.as_token() {
@@ -232,7 +237,10 @@ impl LoweringContext<'_> {
             self.diagnostics.push(SdblDiagnostic::MultilineString { range: node.text_range() });
         }
 
-        let text = node.text().to_string();
+        let text: String = syntax::ast_utils::significant_tokens(node)
+            .map(|token| token.text().to_string())
+            .collect();
+
         ExprHir::Literal {
             value: LiteralValue::String(text),
             ty: SdblType::string(),
@@ -475,8 +483,10 @@ impl LoweringContext<'_> {
     }
 
     fn lower_parameter(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
-        let text = node.text().to_string();
-        let name = text.trim_start_matches('&').to_string();
+        let name = syntax::ast_utils::direct_name_tokens(node)
+            .next()
+            .map(|token| token.text().to_string())
+            .unwrap_or_default();
 
         ExprHir::Parameter {
             name: Name::from(name.as_str()),
@@ -503,22 +513,16 @@ impl LoweringContext<'_> {
                 .collect();
         };
 
-        let text = col_ref.text().to_string();
-        let str_parts: Vec<&str> = text.split('.').collect();
-        let parts: Vec<Name> = str_parts.iter().map(|s| Name::from(s.trim())).collect();
+        let ident_ranges: Vec<(TextRange, String)> =
+            syntax::ast_utils::direct_name_tokens(&col_ref)
+                .map(|token| (token.text_range(), token.text().to_string()))
+                .collect();
 
-        let ident_ranges: Vec<(TextRange, String)> = col_ref
-            .children_with_tokens()
-            .filter_map(|child| match child {
-                syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
-                    Some((token.text_range(), token.text().to_string()))
-                }
-                _ => None,
-            })
-            .collect();
+        let parts: Vec<Name> =
+            ident_ranges.iter().map(|(_, text)| Name::from(text.as_str())).collect();
 
         let mdo_type_parsed =
-            str_parts.first().and_then(|s| s.trim().parse::<bsl_metadata::MdoType>().ok());
+            ident_ranges.first().and_then(|(_, text)| text.parse::<bsl_metadata::MdoType>().ok());
 
         if let Some(mdo_type) = mdo_type_parsed {
             if let Some((range, text)) = ident_ranges.first() {
@@ -536,8 +540,8 @@ impl LoweringContext<'_> {
             }
 
             if let Some((range, text)) = ident_ranges.get(2) {
-                let object_name = str_parts.get(1).map(|s| s.trim()).unwrap_or("");
-                let value_name = text.trim();
+                let object_name = ident_ranges.get(1).map(|(_, name)| name.as_str()).unwrap_or("");
+                let value_name = text.as_str();
 
                 let is_empty_ref = {
                     let lower = value_name.fold_lower();

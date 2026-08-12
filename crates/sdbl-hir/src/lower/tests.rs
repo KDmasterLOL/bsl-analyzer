@@ -592,6 +592,54 @@ fn test_in_expression_not_in() {
 }
 
 #[test]
+fn each_operator_in_a_chain_is_its_own() {
+    // Операция берётся от своего токена: подстрока в тексте узла не различает,
+    // какая из двух операций цепочки чья, и первая же выигрывала за обе.
+    use crate::hir::{BinaryOp, ExprHir};
+
+    let hir = lower_query("ВЫБРАТЬ Т.А ИЗ Справочник.Валюты КАК Т ГДЕ Т.Цена = 100 - 10 + 1");
+
+    let mut ops = Vec::new();
+    let mut expr = hir.where_clause.as_ref().expect("ГДЕ разобран");
+    while let ExprHir::BinaryOp { lhs, op, .. } = expr {
+        ops.push(*op);
+        expr = lhs;
+    }
+    ops.reverse();
+
+    assert_eq!(ops, vec![BinaryOp::Eq], "верхний уровень — сравнение");
+
+    let ExprHir::BinaryOp { rhs, .. } = hir.where_clause.as_ref().unwrap() else {
+        panic!("ожидалось сравнение");
+    };
+
+    let mut arithmetic = Vec::new();
+    let mut expr = rhs.as_ref();
+    while let ExprHir::BinaryOp { lhs, op, .. } = expr {
+        arithmetic.push(*op);
+        expr = lhs;
+    }
+    arithmetic.reverse();
+
+    assert_eq!(arithmetic, vec![BinaryOp::Sub, BinaryOp::Add]);
+}
+
+#[test]
+fn a_literal_containing_a_keyword_is_not_an_operator() {
+    // Текст узла включает содержимое литерала, и союз внутри строки
+    // превращал сравнение в конъюнкцию.
+    use crate::hir::{BinaryOp, ExprHir};
+
+    let hir = lower_query("ВЫБРАТЬ Т.А ИЗ Справочник.Валюты КАК Т ГДЕ Т.Имя = \" И \"");
+
+    let ExprHir::BinaryOp { op, .. } = hir.where_clause.as_ref().expect("ГДЕ разобран")
+    else {
+        panic!("ожидалось сравнение");
+    };
+    assert_eq!(*op, BinaryOp::Eq);
+}
+
+#[test]
 fn test_into_clause_russian() {
     let hir = lower_query("ВЫБРАТЬ Поле1 ПОМЕСТИТЬ ВременнаяТаблица ИЗ Справочник.Валюты");
 

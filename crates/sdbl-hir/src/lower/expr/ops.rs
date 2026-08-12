@@ -50,59 +50,45 @@ impl LoweringContext<'_> {
             return ExprHir::Missing { range: node.text_range() };
         }
 
-        let text = node.text().to_string();
-        let op = if text.contains(" И ") || text.contains(" AND ") {
-            BinaryOp::And
-        } else if text.contains(" ИЛИ ") || text.contains(" OR ") {
-            BinaryOp::Or
-        } else if text.contains("<=") {
-            BinaryOp::Le
-        } else if text.contains(">=") {
-            BinaryOp::Ge
-        } else if text.contains("<>") {
-            BinaryOp::Ne
-        } else if text.contains('<') {
-            BinaryOp::Lt
-        } else if text.contains('>') {
-            BinaryOp::Gt
-        } else if text.contains('=') {
-            BinaryOp::Eq
-        } else if text.contains('+') {
-            BinaryOp::Add
-        } else if text.contains('-') {
-            BinaryOp::Sub
-        } else if text.contains('*') {
-            BinaryOp::Mul
-        } else if text.contains('/') {
-            BinaryOp::Div
-        } else if text.contains('%') {
-            BinaryOp::Mod
-        } else {
-            BinaryOp::Eq
+        // Операция берётся из токена перед операндом, а не из подстроки в
+        // тексте узла: текст узла содержит и литералы, и комментарии, а в
+        // цепочке `а + б - в` подстрока не различает, какая операция чья.
+        let default_op = match node.kind() {
+            SyntaxKind::SDBL_LOGICAL_AND_EXPR => BinaryOp::And,
+            SyntaxKind::SDBL_LOGICAL_OR_EXPR => BinaryOp::Or,
+            _ => BinaryOp::Eq,
         };
 
-        let ty = if op.is_comparison() || op.is_logical() {
-            SdblType::Boolean
-        } else if op.is_arithmetic() {
-            SdblType::number()
-        } else {
-            SdblType::Unknown
-        };
+        let mut result: Option<ExprHir> = None;
+        let mut pending_op: Option<BinaryOp> = None;
 
-        let mut result = self.lower_expr(&children[0]);
-
-        for child in &children[1..] {
-            let rhs = self.lower_expr(child);
-            result = ExprHir::BinaryOp {
-                lhs: Box::new(result),
-                op,
-                rhs: Box::new(rhs),
-                ty: ty.clone(),
-                range: node.text_range(),
-            };
+        for element in node.children_with_tokens() {
+            match element {
+                syntax::NodeOrToken::Token(token) => {
+                    if let Some(op) = binary_op_of(token.kind()) {
+                        pending_op = Some(op);
+                    }
+                }
+                syntax::NodeOrToken::Node(child) => {
+                    let operand = self.lower_expr(&child);
+                    result = Some(match result {
+                        None => operand,
+                        Some(lhs) => {
+                            let op = pending_op.take().unwrap_or(default_op);
+                            ExprHir::BinaryOp {
+                                lhs: Box::new(lhs),
+                                op,
+                                rhs: Box::new(operand),
+                                ty: result_ty(op),
+                                range: node.text_range(),
+                            }
+                        }
+                    });
+                }
+            }
         }
 
-        result
+        result.unwrap_or_else(|| ExprHir::Missing { range: node.text_range() })
     }
 
     pub(super) fn lower_unary_expr(&mut self, node: &syntax::SyntaxNode) -> ExprHir {
@@ -114,23 +100,56 @@ impl LoweringContext<'_> {
             .map(|n| self.lower_expr(&n))
             .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
 
-        let text = node.text().to_string().to_uppercase();
-        let (op, ty) = if text.contains("НЕ") || text.contains("NOT") {
-            for element in node.descendants_with_tokens() {
-                if let Some(token) = element.as_token() {
-                    if token.kind() == syntax::SyntaxKind::KW_NOT {
-                        self.record_token(token, crate::source_map::TokenCategory::Operator);
-                        break;
-                    }
-                }
-            }
+        let not_token = node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|token| token.kind() == syntax::SyntaxKind::KW_NOT);
+
+        let (op, ty) = if let Some(token) = not_token {
+            self.record_token(&token, crate::source_map::TokenCategory::Operator);
             (UnaryOp::Not, SdblType::Boolean)
-        } else if text.starts_with('-') {
+        } else if node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|token| token.kind() == syntax::SyntaxKind::MINUS)
+        {
             (UnaryOp::Neg, SdblType::number())
         } else {
             (UnaryOp::Pos, expr.ty().clone())
         };
 
         ExprHir::UnaryOp { op, expr: Box::new(expr), ty, range: node.text_range() }
+    }
+}
+
+fn binary_op_of(kind: syntax::SyntaxKind) -> Option<crate::hir::BinaryOp> {
+    use crate::hir::BinaryOp;
+    use syntax::SyntaxKind;
+
+    Some(match kind {
+        SyntaxKind::KW_AND => BinaryOp::And,
+        SyntaxKind::KW_OR => BinaryOp::Or,
+        SyntaxKind::EQ => BinaryOp::Eq,
+        SyntaxKind::NEQ => BinaryOp::Ne,
+        SyntaxKind::LT => BinaryOp::Lt,
+        SyntaxKind::LE => BinaryOp::Le,
+        SyntaxKind::GT => BinaryOp::Gt,
+        SyntaxKind::GE => BinaryOp::Ge,
+        SyntaxKind::PLUS => BinaryOp::Add,
+        SyntaxKind::MINUS => BinaryOp::Sub,
+        SyntaxKind::STAR => BinaryOp::Mul,
+        SyntaxKind::SLASH => BinaryOp::Div,
+        SyntaxKind::PERCENT => BinaryOp::Mod,
+        _ => return None,
+    })
+}
+
+fn result_ty(op: crate::hir::BinaryOp) -> SdblType {
+    if op.is_comparison() || op.is_logical() {
+        SdblType::Boolean
+    } else if op.is_arithmetic() {
+        SdblType::number()
+    } else {
+        SdblType::Unknown
     }
 }
