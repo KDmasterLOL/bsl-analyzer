@@ -1,10 +1,11 @@
 //! The single owner of the per-workspace derived-cache directory.
 //!
 //! Every SQLite index the server builds from a workspace (the call graph and the
-//! code-search index) lives under `<workspace>/.build`. Centralising the path here
-//! keeps the directory layout in one place instead of being reconstructed ad-hoc at
-//! each call site. The directory is a rebuildable cache: it is safe to delete and is
-//! re-created on demand.
+//! code-search index) lives under one root: `<workspace>/.build` by default, or the
+//! directory `mcp serve --cache-dir` names. Centralising the path here keeps the
+//! directory layout in one place instead of being reconstructed ad-hoc at each call
+//! site. The directory is a rebuildable cache: it is safe to delete and is re-created
+//! on demand.
 //!
 //! Workspace-independent caches (the platform reference-search database) live in the
 //! user's OS cache directory, not here — see `state::reference_search_db_path`.

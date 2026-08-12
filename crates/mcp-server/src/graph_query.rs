@@ -1,8 +1,9 @@
 //! Read-only serving of the workspace call graph from the SQLite store.
 //!
 //! Mirrors the agent-facing shapes of `ide::Analysis::graph_*` (the same response
-//! structs, hence the same JSON), but every fact comes from the `.build` database
-//! built by [`crate::graph_db`] rather than from a resident Salsa database — so a
+//! structs, hence the same JSON), but every fact comes from the on-disk database in
+//! the workspace cache root built by [`crate::graph_db`] rather than from a resident
+//! Salsa database — so a
 //! 25k-module config can be served without holding the whole graph in RAM.
 //!
 //! Source text is read on demand from the file + byte ranges stored per node, so
@@ -1037,7 +1038,7 @@ impl GraphDb {
 
 /// A [`bsl_search::GraphContextProvider`] backed by the on-disk graph
 /// ([`GraphDb`]). This is the production source for bulk index enrichment: reading a
-/// method's outbound facts from the prebuilt `.build/bsl-graph.db` is RAM-bounded and
+/// method's outbound facts from the prebuilt `bsl-graph.db` is RAM-bounded and
 /// shares the graph's freshness, unlike rendering from a whole-workspace `Analysis`.
 ///
 /// `GraphDb` holds a non-`Sync` rusqlite connection; the [`Mutex`] makes the provider

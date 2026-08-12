@@ -121,6 +121,15 @@ impl McpCommand {
         if !matches!(args.mode, McpServeMode::Daemon) {
             return None;
         }
+        // Logging is prepared before the arguments are validated, and preparing an explicit
+        // cache root CREATES it. A daemon only ever serves the workspace profile, so any other
+        // combination reaching here is one `validate_serve_args` is about to reject — and a
+        // rejected command must not leave a directory behind.
+        if !matches!(args.runtime_profile, McpProfileCli::Workspace)
+            || args.cache_dir.as_deref().is_some_and(|dir| dir.as_os_str().is_empty())
+        {
+            return None;
+        }
         let log_path = match opt_in.map(str::trim) {
             None | Some("" | "0" | "false" | "no" | "off") => return None,
             Some("1" | "true" | "yes" | "on") => {
@@ -1642,6 +1651,26 @@ mod tests {
 
         assert_eq!(path, cache.canonicalize().unwrap().join("bsl-analyzer-daemon.log"));
         assert!(!source.path().join(".build").exists());
+    }
+
+    /// The log destination is resolved before the arguments are validated, so a combination
+    /// that validation is about to reject must not create the directory on its way out.
+    #[test]
+    fn daemon_log_setup_creates_no_cache_for_a_command_validation_will_reject() {
+        let parent = tempfile::tempdir().unwrap();
+        let cache = parent.path().join("должен-остаться-несозданным");
+        let mut command = serve_command(McpServeMode::Daemon, parent.path());
+        {
+            let McpCommand::Serve(args) = &mut command else { unreachable!() };
+            args.runtime_profile = McpProfileCli::Reference;
+            args.source_dir = None;
+            args.cache_dir = Some(cache.clone());
+        }
+
+        assert!(command.daemon_log_file_for(Some("1")).is_none());
+        assert!(!cache.exists(), "a rejected command created {}", cache.display());
+        let McpCommand::Serve(args) = &command else { unreachable!() };
+        assert!(validate_serve_args(args).is_err(), "the combination is indeed rejected");
     }
 
     #[test]
