@@ -177,7 +177,7 @@ mod tests {
         check_with_unlimited_catalog(
             "ВЫБРАТЬ Т.Номер ИЗ Справочник.Лог КАК Т ГДЕ Т.ПредложеноAI <> &Пусто",
             expect![[r#"
-                UnlimitedLengthStringUsageInQuery @ 3:65..3:80
+                UnlimitedLengthStringUsageInQuery @ 3:65..3:79
                   message: Поле неограниченной длины "Т.ПредложеноAI" нельзя использовать в операции сравнения. Приведите значение к ограниченной длине: ВЫРАЗИТЬ(... КАК СТРОКА(N))
                   severity: Critical"#]],
         );

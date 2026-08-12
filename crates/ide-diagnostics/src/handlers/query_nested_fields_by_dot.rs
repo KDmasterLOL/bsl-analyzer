@@ -223,19 +223,19 @@ mod tests {
             code,
             DiagnosticCode::QueryNestedFieldsByDot,
             expect![[r#"
-                QueryNestedFieldsByDot @ 22:4..22:42
+                QueryNestedFieldsByDot @ 22:4..22:41
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 23:4..23:41
+                QueryNestedFieldsByDot @ 23:4..23:40
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 24:4..24:38
+                QueryNestedFieldsByDot @ 24:4..24:37
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 25:4..25:45
+                QueryNestedFieldsByDot @ 25:4..25:44
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 30:4..30:35
+                QueryNestedFieldsByDot @ 30:4..30:34
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
                 QueryNestedFieldsByDot @ 54:7..54:40
@@ -247,13 +247,13 @@ mod tests {
                 QueryNestedFieldsByDot @ 54:80..54:117
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 102:8..102:63
+                QueryNestedFieldsByDot @ 102:8..102:62
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 103:8..103:66
+                QueryNestedFieldsByDot @ 103:8..103:65
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 104:8..104:67
+                QueryNestedFieldsByDot @ 104:8..104:66
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
                 QueryNestedFieldsByDot @ 116:4..116:84
@@ -343,6 +343,47 @@ mod tests {
     }
 
     #[test]
+    fn inline_tabular_fields_are_not_a_dereference_hop() {
+        // `Т.ТЧ.(А, Б)` — выбор полей табличной части. Разыменования ссылки
+        // здесь нет, глубина пути равна двум, и при пороге по умолчанию
+        // находки быть не должно.
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Товары.(Номенклатура, Количество) ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(3);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn a_dereference_before_inline_tabular_fields_still_fires() {
+        let code = r#"
+Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ T.Ссылка.Товары.(Номенклатура) ИЗ Документ.Заказ КАК T";
+КонецПроцедуры
+"#;
+        let config = config_with_min_path_depth(3);
+        let diagnostics = check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
+            .collect();
+        expect![[r#"
+            QueryNestedFieldsByDot @ 4:29..4:44
+              message: Обнаружено разыменование ссылочного поля
+              severity: Warning"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
     fn test_min_path_depth_two_emits_two_part_normal_context() {
         let code = r#"
 Процедура Тест()
@@ -357,7 +398,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
             .collect();
         expect![[r#"
-            QueryNestedFieldsByDot @ 4:29..4:36
+            QueryNestedFieldsByDot @ 4:29..4:35
               message: Обнаружено разыменование ссылочного поля
               severity: Warning"#]]
         .assert_eq(&format_diags(code, &diagnostics));

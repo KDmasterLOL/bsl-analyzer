@@ -288,6 +288,38 @@ fn has_annotation_comments(
     false
 }
 
+/// Токены-имена, лежащие непосредственно в узле, в порядке текста.
+///
+/// Составное имя собирается отсюда, а не из `node.text()`: тривия узла —
+/// пробелы, переводы строк и комментарии — лежит внутри него и ушла бы в имя.
+pub fn direct_name_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + '_ {
+    node.children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|token| token.kind().is_name_token())
+}
+
+/// Значимые токены узла на любой глубине: всё, кроме тривии.
+pub fn significant_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + '_ {
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|token| !token.kind().is_trivia())
+}
+
+/// Два узла состоят из одних и тех же значимых токенов, то есть различаются
+/// только тривией.
+pub fn same_significant_tokens(left: &SyntaxNode, right: &SyntaxNode) -> bool {
+    let mut left = significant_tokens(left);
+    let mut right = significant_tokens(right);
+
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(l), Some(r)) if l.kind() == r.kind() && l.text() == r.text() => continue,
+            _ => return false,
+        }
+    }
+}
+
 pub fn field_tail_name_token(field_expr: &SyntaxNode) -> Option<SyntaxToken> {
     if field_expr.kind() != SyntaxKind::FIELD_EXPR {
         return None;
