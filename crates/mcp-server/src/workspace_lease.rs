@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 const LEASE_FILE: &str = "writer.lease";
 /// The file locked for the read-modify-write of a claim. Separate from the record so the
 /// record itself is only ever replaced by an atomic rename and readers need no lock.
-const LEASE_LOCK_FILE: &str = "writer.lease.lock";
+use crate::cache::LEASE_LOCK_FILE;
 
 /// How often the owner restamps its record so the others can tell it is still alive.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);

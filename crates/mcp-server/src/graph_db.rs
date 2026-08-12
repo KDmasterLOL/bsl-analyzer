@@ -523,7 +523,7 @@ impl Drop for BuildWatchdog {
 /// and each episode appends a timestamped position + thread-state block.
 fn write_stall_report(dir: &Path, stalled_secs: u64, position: &str, threads: &str) {
     use std::io::Write;
-    let path = dir.join("bsl-graph-stall-report.txt");
+    let path = dir.join(crate::cache::STALL_REPORT_FILE);
     let epoch_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
