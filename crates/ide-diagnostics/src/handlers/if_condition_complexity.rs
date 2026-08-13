@@ -1,8 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
-use text_size::TextSize;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -35,7 +33,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         return Vec::new();
     }
     let module_bodies = ctx.module_bodies();
-    let file_text = ctx.file_text();
 
     let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
     local_ids.sort_unstable();
@@ -47,7 +44,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         }
         let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        emit_conditions(ctx, code, &metrics, source_map, &file_text, max_complexity, &mut out);
+        emit_conditions(ctx, code, &metrics, source_map, max_complexity, &mut out);
     }
     if let Some(metrics) = module_metrics.module_code() {
         if !metrics.if_conditions.is_empty() {
@@ -57,7 +54,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                     code,
                     &metrics,
                     &lower_result.source_map,
-                    &file_text,
                     max_complexity,
                     &mut out,
                 );
@@ -72,7 +68,6 @@ fn emit_conditions(
     code: DiagnosticCode,
     metrics: &hir::metrics::HirMethodMetrics,
     source_map: &hir::BodySourceMap,
-    file_text: &str,
     max_complexity: u32,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -81,8 +76,8 @@ fn emit_conditions(
         if complexity <= max_complexity {
             continue;
         }
-        let Some(raw_range) = source_map.expr_range(cond.condition) else { continue };
-        let range = trim_trailing_whitespace(file_text, raw_range);
+        // Подрезать хвостовой пробел не нужно: узел им не кончается.
+        let Some(range) = source_map.expr_range(cond.condition) else { continue };
         out.push(Diagnostic {
             code,
             message: format!(
@@ -95,21 +90,6 @@ fn emit_conditions(
             fixes: vec![],
         });
     }
-}
-
-fn trim_trailing_whitespace(file_text: &str, range: TextRange) -> TextRange {
-    let start: usize = range.start().into();
-    let end: usize = range.end().into();
-    if end > file_text.len() || start >= end {
-        return range;
-    }
-    let slice = &file_text[start..end];
-    let trimmed_len = slice.trim_end().len();
-    if trimmed_len == slice.len() || trimmed_len == 0 {
-        return range;
-    }
-    let new_end = range.start() + TextSize::from(trimmed_len as u32);
-    TextRange::new(range.start(), new_end)
 }
 
 #[cfg(test)]

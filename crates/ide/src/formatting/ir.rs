@@ -382,7 +382,8 @@ fn meaningful_token_before(root: &SyntaxNode, offset: TextSize) -> Option<Syntax
         TokenAtOffset::Single(t) => t,
         TokenAtOffset::Between(left, _) => left,
     };
-    std::iter::successors(Some(start), |t| t.prev_token()).find(|t| !t.kind().is_trivia())
+    std::iter::successors(Some(start), syntax::prev_token_past_empty)
+        .find(|t| !t.kind().is_trivia())
 }
 
 fn is_block_boundary_keyword(kind: SyntaxKind) -> bool {

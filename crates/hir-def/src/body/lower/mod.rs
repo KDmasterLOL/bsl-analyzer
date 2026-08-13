@@ -589,7 +589,7 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
             }
 
             if !stmt::should_skip_semicolon_check(&node) && !stmt::has_trailing_semicolon(&node) {
-                let range = stmt::get_last_meaningful_token_range(&node);
+                let range = stmt::last_token_range(&node);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
         }

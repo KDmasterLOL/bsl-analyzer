@@ -74,12 +74,15 @@ pub(super) fn new_expr_completions<DB: RootDatabase>(
 }
 
 fn is_after_new_keyword(anchor: &SyntaxToken) -> bool {
-    let mut cur =
-        if anchor.kind() == SyntaxKind::IDENT { anchor.prev_token() } else { Some(anchor.clone()) };
+    let mut cur = if anchor.kind() == SyntaxKind::IDENT {
+        syntax::prev_token_past_empty(anchor)
+    } else {
+        Some(anchor.clone())
+    };
     while let Some(t) = cur.clone() {
         match t.kind() {
             SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT => {
-                cur = t.prev_token();
+                cur = syntax::prev_token_past_empty(&t);
             }
             SyntaxKind::KW_NEW => return true,
             _ => return false,

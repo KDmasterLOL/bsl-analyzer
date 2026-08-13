@@ -3,6 +3,7 @@ pub mod ast_utils;
 pub mod sdbl_query;
 mod syntax_kind;
 mod syntax_node;
+mod token_walk;
 
 use std::marker::PhantomData;
 
@@ -13,6 +14,7 @@ pub use crate::{
     ast_utils::{
         extract_leading_comments, extract_leading_comments_at_offset,
         extract_variable_comments_at_offset, has_trailing_comment, has_variable_description,
+        trailing_semicolon,
     },
     sdbl_query::{extract_sdbl_with_corrections, SdblQueryInfo},
     syntax_kind::SyntaxKind,
@@ -20,6 +22,7 @@ pub use crate::{
         clear_shared_node_cache, with_shared_node_cache, BslLanguage, SyntaxElement, SyntaxNode,
         SyntaxNodePtr, SyntaxToken, SyntaxTreeBuilder,
     },
+    token_walk::prev_token_past_empty,
 };
 pub use rowan::{Direction, NodeCache, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 

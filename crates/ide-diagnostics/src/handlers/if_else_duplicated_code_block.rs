@@ -49,7 +49,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCodeBlock @ 3:9..5:5
+            IfElseDuplicatedCodeBlock @ 3:9..4:17
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));
@@ -91,7 +91,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCodeBlock @ 3:9..5:5
+            IfElseDuplicatedCodeBlock @ 3:9..4:17
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));
@@ -149,7 +149,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCodeBlock @ 3:9..5:5
+            IfElseDuplicatedCodeBlock @ 3:9..4:17
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));
@@ -194,7 +194,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCodeBlock @ 3:9..5:5
+            IfElseDuplicatedCodeBlock @ 3:9..4:17
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));
@@ -232,13 +232,13 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCodeBlock)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCodeBlock @ 3:9..12:5
+            IfElseDuplicatedCodeBlock @ 3:9..11:19
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information
-            IfElseDuplicatedCodeBlock @ 4:13..6:9
+            IfElseDuplicatedCodeBlock @ 4:13..5:21
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information
-            IfElseDuplicatedCodeBlock @ 14:13..16:9
+            IfElseDuplicatedCodeBlock @ 14:13..15:21
               message: Ветки Если и Иначе содержат идентичный код
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diags));

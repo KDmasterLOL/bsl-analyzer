@@ -203,25 +203,10 @@ impl LoweringContext<'_> {
         field: &syntax::ast::SdblSelectedField,
         alias_node: Option<&syntax::ast::SdblAlias>,
     ) -> syntax::TextRange {
+        // Обратного шага через хвостовую тривию здесь нет: узел ею не
+        // кончается, это норма привязки.
         let expr_range = if let Some(expr) = field.expression() {
-            let last_non_trivia = expr.last_token().and_then(|t| {
-                let mut token = t;
-                while matches!(
-                    token.kind(),
-                    syntax::SyntaxKind::WHITESPACE
-                        | syntax::SyntaxKind::COMMENT
-                        | syntax::SyntaxKind::NEWLINE
-                ) {
-                    token = token.prev_token()?;
-                }
-                Some(token)
-            });
-
-            if let (Some(first), Some(last)) = (expr.first_token(), last_non_trivia) {
-                syntax::TextRange::new(first.text_range().start(), last.text_range().end())
-            } else {
-                expr.text_range()
-            }
+            expr.text_range()
         } else {
             field.syntax().text_range()
         };

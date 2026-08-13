@@ -7,7 +7,7 @@ use bsl_platform::deprecation::{
     DisplayKind as DeprecationDisplay, ElementKind as DeprecationElement,
     LifecycleGroup as DeprecationGroup, Lookup as DeprecationLookup,
 };
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
+use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::body::BodyDiagnostic;
@@ -641,12 +641,8 @@ pub(crate) fn extend_range_with_semicolon(
     node: &SyntaxNode,
     original_range: TextRange,
 ) -> TextRange {
-    if let Some(NodeOrToken::Token(token)) = node.next_sibling_or_token() {
-        if token.kind() == SyntaxKind::SEMICOLON {
-            return original_range.cover(token.text_range());
-        }
-    }
-    original_range
+    syntax::trailing_semicolon(node)
+        .map_or(original_range, |token| original_range.cover(token.text_range()))
 }
 
 const EXTERNAL_CODE_TOOLS: &[&str] = &[
