@@ -58,7 +58,8 @@ uri: bsl-analyzer://contract
         "backend_pid_required": true,
         "auto_launch": false,
         "stdio_fallback": false,
-        "peer_identity": "supervised-pid+platform-trust"
+        "peer_identity": "supervised-pid+platform-trust",
+        "platforms": ["linux", "windows"]
       }
     }
   },
@@ -128,6 +129,10 @@ uri: bsl-analyzer://contract
 - `transports.workspace.broker-required` объявляет контролируемый режим, в
   котором proxy требует PID уже запущенного daemon, не запускает его сам и не
   возвращается к прямому stdio.
+- `platforms` у этого режима — не список текущей сборки, а вся поддерживаемая
+  область: привязка к процессу опирается на PID пира в учётных данных сокета, а
+  его несут только Windows и `ucred`-платформы. На macOS PID недоступен, поэтому
+  режим там отвергается при старте, а не отказывает на каждом соединении.
 - Для инструмента с версионированным `structuredContent`
   `output_schema_fingerprint` фиксирует точную опубликованную `outputSchema`;
   потребитель проверяет и версию, и отпечаток, не разбирая текстовое описание.

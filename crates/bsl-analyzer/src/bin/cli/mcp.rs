@@ -335,6 +335,41 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     }
 }
 
+/// Gate `--backend-pid` and the mode that needs it.
+///
+/// `peer_pid_available` is a parameter rather than a direct read of the platform constant so the
+/// refusal can be exercised from a platform that does supply peer PIDs — a check only reachable
+/// on macOS would ship untested.
+fn validate_backend_pid(
+    mode: McpServeMode,
+    backend_pid: Option<u32>,
+    peer_pid_available: bool,
+) -> Result<(), io::Error> {
+    if !matches!(mode, McpServeMode::BrokerRequired) {
+        if backend_pid.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--backend-pid is only valid with --mode broker-required",
+            ));
+        }
+        return Ok(());
+    }
+    if !peer_pid_available {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "--mode broker-required is unavailable on this platform: peer credentials carry no \
+             process id, so the supervised backend cannot be identified. Use --mode broker.",
+        ));
+    }
+    if backend_pid == Some(0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--backend-pid must be greater than zero",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, io::Error> {
     if matches!(args.runtime_profile, McpProfileCli::Reference) && args.cache_dir.is_some() {
         return Err(io::Error::new(
@@ -366,6 +401,10 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
         ));
     }
 
+    // Ahead of the per-mode blocks below: a flag belonging to one mode has to be rejected in
+    // every other mode, http included, and a check living inside one mode's block cannot do it.
+    validate_backend_pid(args.mode, args.backend_pid, mcp_server::broker::PEER_PID_AVAILABLE)?;
+
     if !matches!(args.mode, McpServeMode::Http) {
         if args.host.is_some() {
             return Err(io::Error::new(
@@ -383,18 +422,6 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "--allowed-host is only valid with --mode http",
-            ));
-        }
-        if !matches!(args.mode, McpServeMode::BrokerRequired) && args.backend_pid.is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--backend-pid is only valid with --mode broker-required",
-            ));
-        }
-        if matches!(args.mode, McpServeMode::BrokerRequired) && args.backend_pid == Some(0) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "--backend-pid must be greater than zero",
             ));
         }
         return Ok(None);
@@ -1216,10 +1243,11 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         daemon_command, resolve_serve_mode_with_override, resolve_workspace_cache,
-        validate_serve_args, McpCommand, McpProfileCli, McpServeArgs, McpServeMode,
-        ServeModeContext,
+        validate_backend_pid, validate_serve_args, McpCommand, McpProfileCli, McpServeArgs,
+        McpServeMode, ServeModeContext,
     };
     use clap::Parser;
+    use std::io;
     use std::net::{IpAddr, Ipv4Addr};
     use std::path::PathBuf;
 
@@ -1457,11 +1485,32 @@ mod tests {
 
     #[test]
     fn backend_pid_is_rejected_outside_required_broker_mode() {
-        let mut args = serve_args(McpServeMode::Broker, None);
-        args.backend_pid = Some(42);
+        // Every mode but the one that needs it, http included: http takes its own validation
+        // path, and a check written for the others alone silently skips it.
+        for mode in
+            [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon, McpServeMode::Http]
+        {
+            let port = matches!(mode, McpServeMode::Http).then_some(8021);
+            let mut args = serve_args(mode, port);
+            args.backend_pid = Some(42);
 
-        let error = validate_serve_args(&args).expect_err("ordinary broker must reject peer pin");
-        assert!(error.to_string().contains("--backend-pid"));
+            let error = validate_serve_args(&args)
+                .err()
+                .unwrap_or_else(|| panic!("{mode:?} must reject a peer pin"));
+            assert!(error.to_string().contains("--backend-pid"), "{mode:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn required_broker_is_refused_where_peer_credentials_carry_no_pid() {
+        let refused = validate_backend_pid(McpServeMode::BrokerRequired, Some(42), false)
+            .expect_err("a platform without peer PIDs cannot identify the supervised backend");
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(refused.to_string().contains("--mode broker-required"), "{refused}");
+
+        validate_backend_pid(McpServeMode::BrokerRequired, Some(42), true)
+            .expect("a platform with peer PIDs serves the supervised mode");
+        assert!(validate_backend_pid(McpServeMode::BrokerRequired, Some(0), true).is_err());
     }
 
     #[test]

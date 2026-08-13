@@ -4,6 +4,7 @@ use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::fmt::Write;
 
 /// A large platform type unfolds its constructors, methods and properties in full, so the
@@ -12,13 +13,15 @@ use std::fmt::Write;
 const BUDGET_NOTE: &str = "\n-- карточка усечена под max_output_tokens; повысьте бюджет или \
                            запросите один метод: name=\"ИмяМетода\", type_name=\"ИмяТипа\" --\n";
 
+/// Both flags are always serialized: the published `outputSchema` requires them, and a client
+/// validating the card against that schema must not have to treat an absent flag as `false`.
 #[derive(JsonSchema, Serialize)]
 pub(crate) struct SyntaxHelpResponse {
     schema_version: SyntaxHelpSchemaVersion,
     #[serde(flatten)]
     item: SyntaxHelpItem,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     text_truncated: bool,
+    budget_exhausted: bool,
 }
 
 #[derive(JsonSchema, Serialize)]
@@ -134,13 +137,81 @@ pub fn bsl_syntax_help(
 ) -> Result<CallToolResult, McpError> {
     let (mut text, item) = syntax_help_card(name, type_name)?;
     let text_truncated = truncate_text_to_budget(&mut text, max_output_tokens, BUDGET_NOTE);
-    let body = serde_json::to_value(SyntaxHelpResponse {
+    // The flag is a property of the serialized card, so the card is built first and the flag
+    // written into it afterwards rather than guessed before the trimming that decides it.
+    let mut body = serde_json::to_value(SyntaxHelpResponse {
         schema_version: SyntaxHelpSchemaVersion::V1,
         item,
         text_truncated,
+        budget_exhausted: false,
     })
     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let budget_exhausted = fit_card_to_budget(&mut body, max_output_tokens, text.len());
+    body["budget_exhausted"] = json!(budget_exhausted);
     Ok(structured_with_text(text, body))
+}
+
+/// Fit the card into what the Markdown left of `max_output_tokens`, reporting whether the pair
+/// still exceeds it.
+///
+/// The response carries the rendering and the card together, so both are charged to one ceiling
+/// — budgeting the text alone overshoots it by the card's size, which for a large platform type
+/// is the larger half (see [`crate::tools::response::structured_with_text`]). The text is served
+/// first, because clients have parsed it since before the card existed; the card's listings then
+/// take what is left, in the order and with the floors [`LISTINGS`] gives them. A pair that is
+/// still over the ceiling says so through this flag instead of going out silently oversized.
+fn fit_card_to_budget(body: &mut Value, max_output_tokens: usize, text_bytes: usize) -> bool {
+    let ceiling = max_output_tokens.saturating_mul(4);
+    let mut listings = Vec::new();
+    for (key, keep_one) in LISTINGS {
+        if let Some(array) = body.get_mut(key).and_then(Value::as_array_mut) {
+            listings.push((key, std::mem::take(array), keep_one));
+        }
+    }
+
+    // With the listings taken out, what remains is the identity of the card — the kind, the
+    // names, the flags — which no budget may drop: a card that cannot say what it describes is
+    // worse than a card that says it is partial.
+    let mut left = ceiling.saturating_sub(text_bytes + serialized_bytes(body));
+    let mut dropped = false;
+    for (key, mut items, keep_one) in listings {
+        let (used, cut) = fit_listing(&mut items, left, keep_one);
+        left = left.saturating_sub(used);
+        dropped |= cut;
+        body[key] = Value::Array(items);
+    }
+    dropped || text_bytes + serialized_bytes(body) > ceiling
+}
+
+/// The card's listings, in the order they are paid for, each with whether its first entry
+/// survives a budget too small for it.
+///
+/// `matches` is the answer to the lookup itself, and an empty one would read as "nothing found";
+/// a type's constructors and methods are supplementary, and the Markdown note already points at
+/// the single-member lookup that returns them affordably.
+const LISTINGS: [(&str, bool); 3] =
+    [("matches", true), ("constructors", false), ("methods", false)];
+
+/// Keep the leading entries of a listing that fit `budget_bytes`, reporting the bytes kept and
+/// whether anything was dropped.
+fn fit_listing(items: &mut Vec<Value>, budget_bytes: usize, keep_one: bool) -> (usize, bool) {
+    let mut used = 0usize;
+    let mut keep = 0usize;
+    for (i, item) in items.iter().enumerate() {
+        let next = used + serialized_bytes(item) + usize::from(i > 0);
+        if next > budget_bytes && !(keep_one && keep == 0) {
+            break;
+        }
+        used = next;
+        keep = i + 1;
+    }
+    let dropped = keep < items.len();
+    items.truncate(keep);
+    (used, dropped)
+}
+
+fn serialized_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_string(value).map(|s| s.len()).unwrap_or(0)
 }
 
 fn syntax_help_card(
@@ -397,10 +468,10 @@ fn example(example: &bsl_platform::CodeExample) -> SyntaxExample {
     SyntaxExample { code: example.code.clone(), description: example.description.clone() }
 }
 
+/// An entry with no availability markup is available everywhere, so an empty list here means
+/// exactly one thing: the platform marked the entry available in no context at all.
 fn context_names(context: Option<bsl_platform::ContextAvailability>) -> Vec<SyntaxContext> {
-    let Some(context) = context else {
-        return Vec::new();
-    };
+    let context = bsl_platform::ContextAvailability::effective(context.as_ref());
     [
         (context.thick_client, SyntaxContext::ThickClient),
         (context.thin_client, SyntaxContext::ThinClient),
@@ -717,6 +788,84 @@ mod tests {
             structured(&bsl_syntax_help("Массив", None, 100).unwrap())["text_truncated"],
             true
         );
+    }
+
+    fn pair_bytes(result: &CallToolResult) -> usize {
+        extract_text(result).len() + serde_json::to_string(structured(result)).unwrap().len()
+    }
+
+    /// The response carries the Markdown and the card, so the ceiling covers both. `ЧтениеДанных`
+    /// is the input that shows it: charging the text alone shipped 76 KB against a declared
+    /// budget of 6000 tokens, of which 60 KB was the card nobody bounded.
+    #[test]
+    fn the_card_and_the_markdown_share_one_budget() {
+        for name in ["ЧтениеДанных", "COMSafeArray", "Массив"] {
+            let result = bsl_syntax_help(name, None, 6000).unwrap();
+
+            assert!(pair_bytes(&result) <= 6000 * 4, "{name}: {} bytes", pair_bytes(&result));
+        }
+        assert_eq!(
+            structured(&bsl_syntax_help("ЧтениеДанных", None, 6000).unwrap())["budget_exhausted"],
+            true
+        );
+    }
+
+    /// What a budget can never take away is the card's identity — its kind and names. A budget
+    /// smaller than that goes out over the ceiling by the identity's size and says so, instead of
+    /// answering with a card that cannot name what it describes.
+    #[test]
+    fn a_budget_below_the_cards_identity_overshoots_by_that_much_and_says_so() {
+        let result = bsl_syntax_help("Массив", None, 600).unwrap();
+        let card = structured(&result);
+
+        assert_eq!(card["budget_exhausted"], true);
+        assert_eq!(card["name"], "Массив");
+        assert!(card["methods"].as_array().expect("methods listing").is_empty());
+        assert!(pair_bytes(&result) <= 600 * 4 + 1024, "{} bytes", pair_bytes(&result));
+    }
+
+    /// A lookup that found something never answers with an empty listing: `matches` is the answer
+    /// itself, and emptying it would read as "nothing found" rather than "trimmed".
+    #[test]
+    fn a_matched_lookup_keeps_one_entry_at_any_budget() {
+        let platform = PlatformDataInner::instance();
+        let method = &platform.all_methods()[0];
+
+        let result = bsl_syntax_help(&method.name, Some(&method.type_name), 1).unwrap();
+        let card = structured(&result);
+
+        assert_eq!(card["budget_exhausted"], true);
+        assert_eq!(card["matches"].as_array().expect("matches listing").len(), 1);
+    }
+
+    /// The syntax helper marks availability only where the platform limits it, so an unmarked
+    /// entry is available everywhere. Not hypothetical: every constructor in the data is
+    /// unmarked, and an empty list would tell a machine consumer the exact opposite.
+    #[test]
+    fn an_unmarked_availability_reads_as_every_context() {
+        let card = structured(&bsl_syntax_help("Граница", None, 6000).unwrap()).clone();
+
+        assert_eq!(
+            card["constructors"][0]["contexts"],
+            json!([
+                "thick_client",
+                "thin_client",
+                "web_client",
+                "server",
+                "mobile_client",
+                "external_connection"
+            ])
+        );
+    }
+
+    /// Nothing was cut, so nothing may claim it was: a flag that is true either way tells a
+    /// consumer nothing about whether the card it holds is complete.
+    #[test]
+    fn a_card_within_the_budget_is_not_flagged() {
+        let card = structured(&bsl_syntax_help("Если", None, 6000).unwrap()).clone();
+
+        assert_eq!(card["budget_exhausted"], false);
+        assert_eq!(card["text_truncated"], false);
     }
 
     #[test]

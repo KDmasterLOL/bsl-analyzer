@@ -48,7 +48,8 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
             "backend_pid_required": true,
             "auto_launch": false,
             "stdio_fallback": false,
-            "peer_identity": "supervised-pid+platform-trust"
+            "peer_identity": "supervised-pid+platform-trust",
+            "platforms": ["linux", "windows"]
         })
     );
 

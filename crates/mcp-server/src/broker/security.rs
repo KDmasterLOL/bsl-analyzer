@@ -179,6 +179,23 @@ pub(crate) fn verify_pipe_server_trusted(conn: &TokioStream) -> bool {
     }
 }
 
+/// Platforms whose peer credentials carry the peer's PID, which is the identity the
+/// supervised broker pins to.
+///
+/// `interprocess` reads Windows pipe credentials and `ucred` on Linux/Android and the
+/// `ucred`-shaped BSDs, all of which carry a PID; Darwin's `xucred` does not, so there the PID
+/// is always absent and pinning cannot be verified at all — the mode is refused up front
+/// instead of failing every connection as an identity mismatch.
+pub const PEER_PID_AVAILABLE: bool = cfg!(any(
+    windows,
+    target_os = "linux",
+    target_os = "android",
+    target_os = "openbsd",
+    target_os = "fuchsia",
+    target_os = "redox",
+    target_os = "freebsd",
+));
+
 /// Verify that a broker connection terminates at the exact backend process a
 /// supervisor launched.
 ///
@@ -392,5 +409,24 @@ mod tests {
         let actual = peer_identity_from_raw(Some(&exe), Some("S-1-5-21-1-2-3-1001"));
 
         assert!(peer_identity_trusted(&expected, &actual));
+    }
+
+    /// The constant is what the CLI refuses the supervised mode by, so it has to answer for the
+    /// platform actually running — not for the one whose `cfg` arm was edited last. Darwin is
+    /// the case that matters: `xucred` carries no PID, and claiming otherwise turns every
+    /// connection there into an identity mismatch.
+    #[test]
+    fn peer_pid_availability_answers_for_the_running_platform() {
+        let carries_pid = !matches!(
+            std::env::consts::OS,
+            "macos" | "ios" | "tvos" | "watchos" | "netbsd" | "dragonfly"
+        );
+
+        assert_eq!(
+            super::PEER_PID_AVAILABLE,
+            carries_pid,
+            "peer credentials on {} carry a PID: {carries_pid}",
+            std::env::consts::OS
+        );
     }
 }

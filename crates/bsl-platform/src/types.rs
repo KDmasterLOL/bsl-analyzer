@@ -391,6 +391,27 @@ pub struct ContextAvailability {
     pub external_connection: bool,
 }
 
+impl ContextAvailability {
+    /// Availability of an entry the syntax helper leaves unmarked. The helper writes a
+    /// "Доступность" list only where the platform restricts an entry, so a missing list means
+    /// "everywhere" — the opposite of an entry marked available in no context at all.
+    pub const UNRESTRICTED: Self = Self {
+        thick_client: true,
+        thin_client: true,
+        web_client: true,
+        server: true,
+        mobile_client: true,
+        external_connection: true,
+    };
+
+    /// Availability of an entry whose markup may be absent, with [`Self::UNRESTRICTED`]
+    /// standing in for the missing one. Every consumer must read a missing markup the same
+    /// way, so the rule lives here rather than in each of them.
+    pub fn effective(context: Option<&Self>) -> Self {
+        context.copied().unwrap_or(Self::UNRESTRICTED)
+    }
+}
+
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
 pub struct RawContextAvailability {

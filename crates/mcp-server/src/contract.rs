@@ -184,6 +184,9 @@ pub fn document() -> Value {
     doc.insert("contract_version".into(), json!(CONTRACT_VERSION));
     doc.insert("build_version".into(), json!(env!("CARGO_PKG_VERSION")));
     doc.insert("mcp".into(), mcp_surface());
+    // `platforms` is the same list for every build, not the running one: a consumer picks a
+    // transport while deciding what to deploy where, so the declaration has to name the whole
+    // supported set rather than the host that happened to answer.
     doc.insert(
         "transports".into(),
         json!({
@@ -192,7 +195,8 @@ pub fn document() -> Value {
                     "backend_pid_required": true,
                     "auto_launch": false,
                     "stdio_fallback": false,
-                    "peer_identity": "supervised-pid+platform-trust"
+                    "peer_identity": "supervised-pid+platform-trust",
+                    "platforms": ["linux", "windows"]
                 }
             }
         }),
@@ -443,6 +447,69 @@ mod tests {
         }
     }
 
+    /// A published schema is what a machine consumer validates against, so a field the schema
+    /// requires and the card omits is not an edge case: it fails every ordinary response of that
+    /// shape. Each of the four card kinds is checked, root fields and the kind's own branch.
+    #[test]
+    fn syntax_help_cards_carry_every_field_the_schema_requires() {
+        let schema = output_schema(McpProfile::Reference, "syntax_help").expect("outputSchema");
+        let platform = bsl_platform::PlatformDataInner::instance();
+        let method = platform.all_methods()[0].clone();
+        let lookups: [(&str, Option<&str>); 4] = [
+            ("Массив", None),
+            (method.name.as_str(), Some(method.type_name.as_str())),
+            ("Сообщить", None),
+            ("Если", None),
+        ];
+
+        for (name, type_name) in lookups {
+            let result = crate::tools::platform::bsl_syntax_help(name, type_name, 6000).unwrap();
+            let card = result.structured_content.expect("structuredContent");
+            for key in required_keys(&schema) {
+                assert!(card.get(&key).is_some(), "{name}: card omits required `{key}`");
+            }
+            let branch = schema["oneOf"]
+                .as_array()
+                .expect("the card is a tagged union")
+                .iter()
+                .find(|variant| variant["properties"]["kind"]["const"] == card["kind"])
+                .unwrap_or_else(|| panic!("{name}: no schema branch for kind {}", card["kind"]));
+            for key in required_keys(branch) {
+                assert!(card.get(&key).is_some(), "{name}: card omits required `{key}`");
+            }
+        }
+    }
+
+    fn required_keys(schema: &Value) -> Vec<String> {
+        schema["required"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The declaration tells a consumer where the supervised transport can be deployed; the
+    /// constant decides where the CLI accepts it. Drift between them is a contract that promises
+    /// a mode the binary refuses.
+    #[test]
+    fn declared_transport_platforms_match_the_supervised_pid_gate() {
+        let doc = document();
+        let platforms = doc["transports"]["workspace"]["broker-required"]["platforms"]
+            .as_array()
+            .expect("the supervised transport declares its platforms")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        let os = std::env::consts::OS;
+
+        if matches!(os, "linux" | "windows" | "macos") {
+            assert_eq!(
+                platforms.contains(&os),
+                crate::broker::PEER_PID_AVAILABLE,
+                "{os}: declared platforms {platforms:?}"
+            );
+        }
+    }
+
     #[test]
     fn unknown_action_lists_the_declared_actions() {
         let err = unknown_action(McpProfile::Workspace, "query", "validte");
@@ -535,7 +602,7 @@ mod tests {
                       {
                         "actions": [],
                         "name": "syntax_help",
-                        "output_schema_fingerprint": "blake3:77ab89c5868110d089b431d81c0ec5c3f1cbb4d755e1396f963ab4bbff72fa8e",
+                        "output_schema_fingerprint": "blake3:8cc2b3e9c800f1719664beacf9815c506b04d48f1ba82ebdad9a15ac14a48bbc",
                         "output_schema_version": "1",
                         "params": [
                           {
