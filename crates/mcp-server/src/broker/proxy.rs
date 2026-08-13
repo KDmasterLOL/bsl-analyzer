@@ -80,7 +80,10 @@ pub async fn connect_required(key: BackendKey, expected_pid: u32) -> anyhow::Res
     relay_stdio(stream).await
 }
 
-/// Testable connection half of [`connect_required`].
+/// Connection half of [`connect_required`], split out so an integration test can exercise the
+/// identity check without the stdio relay. Public only because integration tests are separate
+/// crates; not part of the transport's contract, which is the whole operation.
+#[doc(hidden)]
 #[cfg(any(unix, windows))]
 pub async fn connect_existing(key: &BackendKey, expected_pid: u32) -> anyhow::Result<TokioStream> {
     let stream = TokioStream::connect(backend_name(key)?)

@@ -56,10 +56,11 @@ uri: bsl-analyzer://contract
     "workspace": {
       "broker-required": {
         "backend_pid_required": true,
+        "backend_pid_source": "mcp serve --mode daemon --pid-file",
         "auto_launch": false,
         "stdio_fallback": false,
         "peer_identity": "supervised-pid+platform-trust",
-        "platforms": ["linux", "windows"]
+        "platforms": ["android", "freebsd", "fuchsia", "linux", "netbsd", "openbsd", "redox", "windows"]
       }
     }
   },
@@ -130,9 +131,15 @@ uri: bsl-analyzer://contract
   котором proxy требует PID уже запущенного daemon, не запускает его сам и не
   возвращается к прямому stdio.
 - `platforms` у этого режима — не список текущей сборки, а вся поддерживаемая
-  область: привязка к процессу опирается на PID пира в учётных данных сокета, а
-  его несут только Windows и `ucred`-платформы. На macOS PID недоступен, поэтому
-  режим там отвергается при старте, а не отказывает на каждом соединении.
+  область: привязка к процессу опирается на PID пира в учётных данных сокета.
+  На macOS и DragonFly BSD его там нет, поэтому режим отвергается при старте, а
+  не отказывает на каждом соединении. Публикуется тот же список, по которому
+  CLI пускает режим, поэтому разойтись они не могут.
+- `backend_pid_source` называет, откуда взять значение для `--backend-pid`:
+  демон записывает свой PID в файл из `--pid-file`, когда его сокет уже
+  принимает соединения. Читать PID запущенного процесса нельзя: установленный
+  `bsl-analyzer` — лаунчер, он запускает анализатор ребёнком, и сокет
+  принадлежит не тому процессу, который видит супервизор.
 - Для инструмента с версионированным `structuredContent`
   `output_schema_fingerprint` фиксирует точную опубликованную `outputSchema`;
   потребитель проверяет и версию, и отпечаток, не разбирая текстовое описание.

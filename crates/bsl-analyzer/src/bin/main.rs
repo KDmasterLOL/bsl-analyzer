@@ -520,6 +520,7 @@ mod contract_surface {
                   onec-password
                   onec-url
                   onec-user
+                  pid-file
                   port
                   profile = workspace | reference
                   source-dir (-s)

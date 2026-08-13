@@ -186,17 +186,19 @@ pub fn document() -> Value {
     doc.insert("mcp".into(), mcp_surface());
     // `platforms` is the same list for every build, not the running one: a consumer picks a
     // transport while deciding what to deploy where, so the declaration has to name the whole
-    // supported set rather than the host that happened to answer.
+    // supported set rather than the host that happened to answer. It is the very list the CLI
+    // gate reads, so the declaration cannot outlive the gate's truth.
     doc.insert(
         "transports".into(),
         json!({
             "workspace": {
                 "broker-required": {
                     "backend_pid_required": true,
+                    "backend_pid_source": "mcp serve --mode daemon --pid-file",
                     "auto_launch": false,
                     "stdio_fallback": false,
                     "peer_identity": "supervised-pid+platform-trust",
-                    "platforms": ["linux", "windows"]
+                    "platforms": crate::broker::SUPERVISED_PID_PLATFORMS
                 }
             }
         }),
@@ -487,11 +489,11 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// The declaration tells a consumer where the supervised transport can be deployed; the
-    /// constant decides where the CLI accepts it. Drift between them is a contract that promises
-    /// a mode the binary refuses.
+    /// The declaration tells a consumer where the supervised transport can be deployed; the same
+    /// list decides where the CLI accepts it. Published as a copy it would drift for every target
+    /// nobody runs the suite on, so what is asserted here is that it is not a copy.
     #[test]
-    fn declared_transport_platforms_match_the_supervised_pid_gate() {
+    fn declared_transport_platforms_are_the_supervised_pid_gate() {
         let doc = document();
         let platforms = doc["transports"]["workspace"]["broker-required"]["platforms"]
             .as_array()
@@ -499,15 +501,9 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect::<Vec<_>>();
-        let os = std::env::consts::OS;
 
-        if matches!(os, "linux" | "windows" | "macos") {
-            assert_eq!(
-                platforms.contains(&os),
-                crate::broker::PEER_PID_AVAILABLE,
-                "{os}: declared platforms {platforms:?}"
-            );
-        }
+        assert_eq!(platforms, crate::broker::SUPERVISED_PID_PLATFORMS);
+        assert_eq!(platforms.contains(&std::env::consts::OS), crate::broker::peer_pid_available());
     }
 
     #[test]

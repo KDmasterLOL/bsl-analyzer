@@ -61,10 +61,31 @@ pub async fn run<F>(
 where
     F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
 {
+    run_announcing(build, key, orphan_grace, idle_ttl, || Ok(())).await
+}
+
+/// [`run`], plus a hook for a backend somebody is waiting to be told about.
+///
+/// `on_bound` runs once this process owns the name and is accepting, before the resident state
+/// is built — the moment a supervisor may point a client at this backend. It is not called when
+/// another backend already owns the name, because then this process is not the backend it would
+/// be announcing. A failure there stops the daemon: whoever asked to be told is waiting for it.
+pub async fn run_announcing<F, B>(
+    build: F,
+    key: BackendKey,
+    orphan_grace: Duration,
+    idle_ttl: Duration,
+    on_bound: B,
+) -> anyhow::Result<()>
+where
+    F: FnOnce() -> anyhow::Result<McpServer> + Send + 'static,
+    B: FnOnce() -> anyhow::Result<()>,
+{
     let Some(listener) = bind(&key).await? else {
         tracing::info!("backend already serving this project; nothing to do");
         return Ok(());
     };
+    on_bound()?;
 
     // Build off the async runtime, and start accepting immediately. A bound socket that
     // isn't being accepted looks dead to a second daemon's liveness probe during the
