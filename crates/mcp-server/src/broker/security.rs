@@ -3,9 +3,9 @@ use std::io;
 #[cfg(any(windows, test))]
 use std::path::Path;
 
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 use interprocess::local_socket::tokio::Stream as TokioStream;
-#[cfg(windows)]
+#[cfg(any(unix, windows))]
 use interprocess::local_socket::traits::StreamCommon as _;
 #[cfg(windows)]
 use interprocess::os::windows::security_descriptor::SecurityDescriptor;
@@ -176,6 +176,41 @@ pub(crate) fn verify_pipe_server_trusted(conn: &TokioStream) -> bool {
             "named-pipe server identity does not match the current process; dropping unverified stream"
         );
         false
+    }
+}
+
+/// Verify that a broker connection terminates at the exact backend process a
+/// supervisor launched.
+///
+/// The PID check is the supervised-mode identity. The ordinary transport trust
+/// checks still apply as defense in depth: same effective user on Unix and the
+/// existing image/owner check on Windows.
+#[cfg(any(unix, windows))]
+pub(crate) fn verify_supervised_backend(conn: &TokioStream, expected_pid: u32) -> bool {
+    let actual_pid = conn
+        .peer_creds()
+        .ok()
+        .and_then(|creds| creds.pid())
+        .and_then(|pid| u32::try_from(pid).ok());
+    if actual_pid != Some(expected_pid) {
+        tracing::warn!(
+            expected_pid,
+            actual_pid,
+            "broker backend PID does not match the supervised process"
+        );
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        match conn.peer_creds() {
+            Ok(creds) => creds.euid().is_some_and(|uid| uid == crate::broker::name::current_euid()),
+            Err(_) => false,
+        }
+    }
+    #[cfg(windows)]
+    {
+        verify_pipe_server_trusted(conn)
     }
 }
 
