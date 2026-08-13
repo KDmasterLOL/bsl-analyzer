@@ -316,36 +316,23 @@ EndProcedure
         check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
     }
 
-    /// Блочной области видимости в BSL нет: присваивание где угодно в теле
-    /// объявляет переменную всего метода, поэтому имя принадлежит ему целиком, а
-    /// вызов в соседней ветви обращается к ней, а не к глобальному контексту.
-    /// Достижимость присваивания тут ни при чём — вопрос о владении именем, а не
-    /// о потоке управления.
+    /// Идиома БСП: локаль называется как платформенная функция и получает её же
+    /// значение. Платформа различает переменные и методы по пространствам имён,
+    /// поэтому `Имя()` в правой части — вызов, а не обращение к переменной, и
+    /// замечание обязано остаться. На proit_crm таких мест 17.
     #[test]
-    fn test_assignment_in_sibling_branch_owns_the_name() {
-        let code = r#"Процедура Тест(Условие)
-    Если Условие Тогда
-        КопироватьФайл = Неопределено;
-    Иначе
-        КопироватьФайл("src", "dest");
-    КонецЕсли;
+    fn test_local_named_after_the_global_keeps_the_call() {
+        let code = r#"Процедура Тест()
+    КаталогПрограммы = КаталогПрограммы();
 КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
-    }
-
-    /// Тот же вопрос владения с другой стороны: присваивание встречается ПОЗЖЕ
-    /// вызова. Ответ обязан совпасть — иначе вердикт зависит от порядка обхода,
-    /// а не от текста метода.
-    #[test]
-    fn test_assignment_in_later_branch_owns_the_name() {
-        let code = r#"Процедура Тест(Условие)
-    Если Условие Тогда
-        КопироватьФайл("src", "dest");
-    Иначе
-        КопироватьФайл = Неопределено;
-    КонецЕсли;
-КонецПроцедуры"#;
-        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 2:24..2:40
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
     }
 
     /// Сбор фактов инференса отсекается списком включённых кодов раньше
