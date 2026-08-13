@@ -52,8 +52,12 @@
 
 - JSON-инструменты (`graph`, `diagnostics`, `event_log`) ставят на конверт
   `budget_exhausted: true` и `budget_hint` с подсказкой, чем сузить выборку;
-- текстовые (`metadata`, `query`, `execute`, `syntax_help`, `its_help`, `debug`)
+- текстовые (`metadata`, `query`, `execute`, `its_help`, `debug`)
   режут вывод по границе строки и дописывают в конец пояснение;
+- `syntax_help` сохраняет такой же ограниченный Markdown для старых клиентов и
+  одновременно возвращает типизированный `structuredContent` версии `1`;
+  `kind` различает тип, метод, глобальную функцию и ключевое слово, поэтому
+  машинному потребителю не нужно разбирать Markdown;
 - `search` делает и то и другое: режет по границе находки, дописывает строку
   `-- showing N of M results … --` и ставит `budget_exhausted: true` в `structuredContent`.
   Бюджет считается по паре «текст + структура», потому что ответ несёт обе; если бы

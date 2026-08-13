@@ -509,12 +509,13 @@ mod contract_surface {
               mcp
                 serve
                   allowed-host
+                  backend-pid
                   cache-dir
                   configuration-root
                   extension !no-extensions
                   extension-depends-on
                   host
-                  mode = stdio | broker | daemon | http
+                  mode = stdio | broker | broker-required | daemon | http
                   no-extensions !extension
                   onec-password
                   onec-url

@@ -71,6 +71,34 @@ pub async fn connect_or_launch(
     Ok(ProxyOutcome::Served)
 }
 
+/// Connect only to the exact backend process launched by a supervisor.
+///
+/// Unlike [`connect_or_launch`], this performs one connection attempt, never
+/// starts a daemon, and never returns an outcome that permits stdio fallback.
+pub async fn connect_required(key: BackendKey, expected_pid: u32) -> anyhow::Result<()> {
+    let stream = connect_existing(&key, expected_pid).await?;
+    relay_stdio(stream).await
+}
+
+/// Testable connection half of [`connect_required`].
+#[cfg(any(unix, windows))]
+pub async fn connect_existing(key: &BackendKey, expected_pid: u32) -> anyhow::Result<TokioStream> {
+    let stream = TokioStream::connect(backend_name(key)?)
+        .await
+        .map_err(|error| anyhow::anyhow!("required broker backend is unavailable: {error}"))?;
+    if !crate::broker::security::verify_supervised_backend(&stream, expected_pid) {
+        return Err(anyhow::anyhow!(
+            "required broker backend identity does not match supervised PID {expected_pid}"
+        ));
+    }
+    tracing::info!(
+        backend_pid = expected_pid,
+        backend_key = %key.digest(),
+        "connected to supervised broker backend"
+    );
+    Ok(stream)
+}
+
 async fn connect_with_launch(
     key: &BackendKey,
     mut daemon_cmd: Command,

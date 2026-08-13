@@ -1,7 +1,9 @@
-use crate::tools::response::text_within_budget;
+use crate::tools::response::{structured_with_text, truncate_text_to_budget};
 use bsl_platform::PlatformDataInner;
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
+use schemars::JsonSchema;
+use serde::Serialize;
 use std::fmt::Write;
 
 /// A large platform type unfolds its constructors, methods and properties in full, so the
@@ -10,16 +12,141 @@ use std::fmt::Write;
 const BUDGET_NOTE: &str = "\n-- карточка усечена под max_output_tokens; повысьте бюджет или \
                            запросите один метод: name=\"ИмяМетода\", type_name=\"ИмяТипа\" --\n";
 
+#[derive(JsonSchema, Serialize)]
+pub(crate) struct SyntaxHelpResponse {
+    schema_version: SyntaxHelpSchemaVersion,
+    #[serde(flatten)]
+    item: SyntaxHelpItem,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    text_truncated: bool,
+}
+
+#[derive(JsonSchema, Serialize)]
+enum SyntaxHelpSchemaVersion {
+    #[serde(rename = "1")]
+    V1,
+}
+
+#[derive(JsonSchema, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SyntaxHelpItem {
+    Type {
+        name: String,
+        english_name: String,
+        min_version: Option<String>,
+        contexts: Vec<SyntaxContext>,
+        iterable_element_types: Vec<String>,
+        xdto_name: Option<String>,
+        constructors: Vec<SyntaxCallable>,
+        methods: Vec<SyntaxMethodSummary>,
+    },
+    Method {
+        matches: Vec<SyntaxCallable>,
+    },
+    GlobalFunction {
+        function: SyntaxCallable,
+    },
+    Keyword {
+        name: String,
+        english_name: String,
+        syntax: String,
+        description: String,
+        parameters: Vec<SyntaxDocParameter>,
+        min_version: Option<String>,
+    },
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxCallable {
+    name: String,
+    english_name: Option<String>,
+    owner_type: Option<String>,
+    variant_name: Option<String>,
+    return_type: Option<String>,
+    parameters: Vec<SyntaxParameter>,
+    variants: Vec<SyntaxVariant>,
+    min_version: Option<String>,
+    contexts: Vec<SyntaxContext>,
+    documentation: Option<SyntaxDocumentation>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxMethodSummary {
+    name: String,
+    english_name: String,
+    return_type: Option<String>,
+    min_version: Option<String>,
+    contexts: Vec<SyntaxContext>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxVariant {
+    name: Option<String>,
+    parameters: Vec<SyntaxParameter>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxParameter {
+    name: String,
+    parameter_type: Option<String>,
+    optional: bool,
+    variadic: bool,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxDocumentation {
+    syntax: String,
+    description: String,
+    parameters: Vec<SyntaxDocParameter>,
+    examples: Vec<SyntaxExample>,
+    notes: Option<String>,
+    see_also: Vec<String>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxDocParameter {
+    name: String,
+    description: String,
+    default_value: Option<String>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SyntaxExample {
+    code: String,
+    description: Option<String>,
+}
+
+#[derive(JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyntaxContext {
+    ThickClient,
+    ThinClient,
+    WebClient,
+    Server,
+    MobileClient,
+    ExternalConnection,
+}
+
 pub fn bsl_syntax_help(
     name: &str,
     type_name: Option<&str>,
     max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
-    let card = syntax_help_card(name, type_name)?;
-    Ok(text_within_budget(card, max_output_tokens, BUDGET_NOTE))
+    let (mut text, item) = syntax_help_card(name, type_name)?;
+    let text_truncated = truncate_text_to_budget(&mut text, max_output_tokens, BUDGET_NOTE);
+    let body = serde_json::to_value(SyntaxHelpResponse {
+        schema_version: SyntaxHelpSchemaVersion::V1,
+        item,
+        text_truncated,
+    })
+    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    Ok(structured_with_text(text, body))
 }
 
-fn syntax_help_card(name: &str, type_name: Option<&str>) -> Result<String, McpError> {
+fn syntax_help_card(
+    name: &str,
+    type_name: Option<&str>,
+) -> Result<(String, SyntaxHelpItem), McpError> {
     let platform = PlatformDataInner::instance();
 
     if let Some(tn) = type_name {
@@ -27,7 +154,12 @@ fn syntax_help_card(name: &str, type_name: Option<&str>) -> Result<String, McpEr
     }
 
     if let Some(func) = platform.get_global_function(name) {
-        return Ok(format_global_function(platform, func));
+        return Ok((
+            format_global_function(platform, func),
+            SyntaxHelpItem::GlobalFunction {
+                function: callable_from_global_function(platform, func),
+            },
+        ));
     }
 
     let types = platform.all_types();
@@ -35,7 +167,31 @@ fn syntax_help_card(name: &str, type_name: Option<&str>) -> Result<String, McpEr
     if let Some(pt) = types.iter().find(|t| {
         t.name.to_lowercase() == name_lower || t.english_name.to_lowercase() == name_lower
     }) {
-        return Ok(format_type_info(platform, pt));
+        return Ok((
+            format_type_info(platform, pt),
+            SyntaxHelpItem::Type {
+                name: pt.name.to_string(),
+                english_name: pt.english_name.to_string(),
+                min_version: pt.min_version.as_ref().map(ToString::to_string),
+                contexts: context_names(pt.context),
+                iterable_element_types: pt
+                    .iter_element_types
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                xdto_name: pt.xdto_name.as_ref().map(ToString::to_string),
+                constructors: platform
+                    .get_constructors(&pt.name)
+                    .into_iter()
+                    .map(|ctor| callable_from_constructor(platform, ctor))
+                    .collect(),
+                methods: platform
+                    .get_type_methods(&pt.name)
+                    .into_iter()
+                    .map(method_summary)
+                    .collect(),
+            },
+        ));
     }
 
     let all_methods = platform.all_methods();
@@ -63,11 +219,29 @@ fn syntax_help_card(name: &str, type_name: Option<&str>) -> Result<String, McpEr
             }
             out.push('\n');
         }
-        return Ok(out);
+        return Ok((
+            out,
+            SyntaxHelpItem::Method {
+                matches: matches
+                    .into_iter()
+                    .map(|method| callable_from_method(platform, method))
+                    .collect(),
+            },
+        ));
     }
 
     if let Some(kw) = platform.get_keyword_docs(name) {
-        return Ok(format_keyword_docs(&kw));
+        return Ok((
+            format_keyword_docs(&kw),
+            SyntaxHelpItem::Keyword {
+                name: kw.keyword_ru.to_string(),
+                english_name: kw.keyword_en.to_string(),
+                syntax: kw.syntax.clone(),
+                description: kw.description.clone(),
+                parameters: kw.params.iter().map(doc_parameter).collect(),
+                min_version: kw.min_version.clone(),
+            },
+        ));
     }
 
     Err(McpError::invalid_params(
@@ -80,7 +254,7 @@ fn search_method(
     platform: &PlatformDataInner,
     type_name: &str,
     method_name: &str,
-) -> Result<String, McpError> {
+) -> Result<(String, SyntaxHelpItem), McpError> {
     if let Some(method) = platform.get_method(type_name, method_name) {
         let mut out = format!(
             "# {}.{} / {}.{}\n\n",
@@ -95,13 +269,150 @@ fn search_method(
         if let Some(docs) = platform.get_method_docs(method.id) {
             format_docs(&mut out, &docs);
         }
-        Ok(out)
+        Ok((out, SyntaxHelpItem::Method { matches: vec![callable_from_method(platform, method)] }))
     } else {
         Err(McpError::invalid_params(
             format!("Метод '{method_name}' не найден у типа '{type_name}'"),
             None,
         ))
     }
+}
+
+fn callable_from_method(
+    platform: &PlatformDataInner,
+    method: &bsl_platform::PlatformMethod,
+) -> SyntaxCallable {
+    SyntaxCallable {
+        name: method.name.to_string(),
+        english_name: Some(method.english_name.to_string()),
+        owner_type: Some(method.type_name.to_string()),
+        variant_name: None,
+        return_type: method.return_type.as_ref().map(ToString::to_string),
+        parameters: method.parameters.iter().map(parameter).collect(),
+        variants: method
+            .variants
+            .iter()
+            .map(|variant| SyntaxVariant {
+                name: variant.variant_name.as_ref().map(ToString::to_string),
+                parameters: variant.parameters.iter().map(parameter).collect(),
+            })
+            .collect(),
+        min_version: method.min_version.as_ref().map(ToString::to_string),
+        contexts: context_names(method.context),
+        documentation: platform.get_method_docs(method.id).as_ref().map(documentation),
+    }
+}
+
+fn callable_from_global_function(
+    platform: &PlatformDataInner,
+    function: &bsl_platform::GlobalFunction,
+) -> SyntaxCallable {
+    SyntaxCallable {
+        name: function.name.to_string(),
+        english_name: Some(function.english_name.to_string()),
+        owner_type: None,
+        variant_name: None,
+        return_type: function.return_type.as_ref().map(ToString::to_string),
+        parameters: function.parameters.iter().map(parameter).collect(),
+        variants: function
+            .variants
+            .iter()
+            .map(|variant| SyntaxVariant {
+                name: variant.variant_name.as_ref().map(ToString::to_string),
+                parameters: variant.parameters.iter().map(parameter).collect(),
+            })
+            .collect(),
+        min_version: function.min_version.as_ref().map(ToString::to_string),
+        contexts: context_names(function.context),
+        documentation: platform.get_global_function_docs(function.id).as_ref().map(documentation),
+    }
+}
+
+fn callable_from_constructor(
+    platform: &PlatformDataInner,
+    constructor: &bsl_platform::PlatformConstructor,
+) -> SyntaxCallable {
+    SyntaxCallable {
+        name: "Новый".to_owned(),
+        english_name: Some("New".to_owned()),
+        owner_type: Some(constructor.type_name.to_string()),
+        variant_name: constructor.variant_name.as_ref().map(ToString::to_string),
+        return_type: Some(constructor.type_name.to_string()),
+        parameters: constructor.parameters.iter().map(parameter).collect(),
+        variants: Vec::new(),
+        min_version: constructor.min_version.as_ref().map(ToString::to_string),
+        contexts: context_names(constructor.context),
+        documentation: platform.get_constructor_docs(constructor.id).as_ref().map(|docs| {
+            SyntaxDocumentation {
+                syntax: docs.syntax.clone(),
+                description: docs.description.clone(),
+                parameters: docs.params.iter().map(doc_parameter).collect(),
+                examples: docs.examples.iter().map(example).collect(),
+                notes: docs.notes.clone(),
+                see_also: docs.see_also.clone(),
+            }
+        }),
+    }
+}
+
+fn method_summary(method: &bsl_platform::PlatformMethod) -> SyntaxMethodSummary {
+    SyntaxMethodSummary {
+        name: method.name.to_string(),
+        english_name: method.english_name.to_string(),
+        return_type: method.return_type.as_ref().map(ToString::to_string),
+        min_version: method.min_version.as_ref().map(ToString::to_string),
+        contexts: context_names(method.context),
+    }
+}
+
+fn parameter(param: &bsl_platform::MethodParam) -> SyntaxParameter {
+    SyntaxParameter {
+        name: param.name.to_string(),
+        parameter_type: param.param_type.as_ref().map(ToString::to_string),
+        optional: param.is_optional,
+        variadic: param.is_variadic,
+    }
+}
+
+fn documentation(docs: &bsl_platform::MethodDocs) -> SyntaxDocumentation {
+    SyntaxDocumentation {
+        syntax: docs.syntax.clone(),
+        description: docs.description.clone(),
+        parameters: docs.params.iter().map(doc_parameter).collect(),
+        examples: docs.examples.iter().map(example).collect(),
+        notes: docs.notes.clone(),
+        see_also: docs.see_also.clone(),
+    }
+}
+
+fn doc_parameter(param: &bsl_platform::ParamDocs) -> SyntaxDocParameter {
+    SyntaxDocParameter {
+        name: param.name.to_string(),
+        description: param.description.clone(),
+        default_value: param.default_value.clone(),
+    }
+}
+
+fn example(example: &bsl_platform::CodeExample) -> SyntaxExample {
+    SyntaxExample { code: example.code.clone(), description: example.description.clone() }
+}
+
+fn context_names(context: Option<bsl_platform::ContextAvailability>) -> Vec<SyntaxContext> {
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    [
+        (context.thick_client, SyntaxContext::ThickClient),
+        (context.thin_client, SyntaxContext::ThinClient),
+        (context.web_client, SyntaxContext::WebClient),
+        (context.server, SyntaxContext::Server),
+        (context.mobile_client, SyntaxContext::MobileClient),
+        (context.external_connection, SyntaxContext::ExternalConnection),
+    ]
+    .into_iter()
+    .filter(|(available, _)| *available)
+    .map(|(_, name)| name)
+    .collect()
 }
 
 fn format_global_function(
@@ -288,6 +599,10 @@ mod tests {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
     }
 
+    fn structured(result: &CallToolResult) -> &serde_json::Value {
+        result.structured_content.as_ref().expect("expected structuredContent")
+    }
+
     #[test]
     fn test_syntax_help_type_lookup() {
         let platform = PlatformDataInner::instance();
@@ -299,6 +614,12 @@ mod tests {
         let text = extract_text(&result);
         assert!(text.contains("Массив"), "should find Array type");
         assert!(text.contains("Array"), "should show english name");
+        let body = structured(&result);
+        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["kind"], "type");
+        assert_eq!(body["name"], "Массив");
+        assert!(body["constructors"].is_array());
+        assert!(body["methods"].is_array());
     }
 
     #[test]
@@ -353,6 +674,11 @@ mod tests {
         let text = extract_text(&result);
         assert!(text.contains(method.name.as_str()), "should contain method name");
         assert!(text.contains("```bsl"), "should have code block");
+        let body = structured(&result);
+        assert_eq!(body["kind"], "method");
+        assert_eq!(body["matches"][0]["name"], method.name.as_str());
+        assert_eq!(body["matches"][0]["owner_type"], method.type_name.as_str());
+        assert!(body["matches"][0]["parameters"].is_array());
     }
 
     #[test]
@@ -365,6 +691,9 @@ mod tests {
         let result = bsl_syntax_help("Сообщить", None, 6000).unwrap();
         let text = extract_text(&result);
         assert!(text.contains("Сообщить") || text.contains("Message"), "should find global fn");
+        let body = structured(&result);
+        assert_eq!(body["kind"], "global_function");
+        assert_eq!(body["function"]["name"], "Сообщить");
     }
 
     #[test]
@@ -383,6 +712,10 @@ mod tests {
             clipped.len() <= 100 * 4,
             "the note is reserved out of the budget, not added on top: {}",
             clipped.len()
+        );
+        assert_eq!(
+            structured(&bsl_syntax_help("Массив", None, 100).unwrap())["text_truncated"],
+            true
         );
     }
 

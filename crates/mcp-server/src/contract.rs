@@ -31,12 +31,12 @@ use crate::{McpProfile, McpServer};
 ///
 /// - **major** — a tool, action or parameter is removed or renamed, a parameter becomes
 ///   required, or the meaning of an existing field changes;
-/// - **minor** — a tool, action, parameter or accepted value is added.
+/// - **minor** — a tool, action, parameter, accepted value or structured output is added.
 ///
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.4";
+pub const CONTRACT_VERSION: &str = "1.5";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -49,6 +49,8 @@ pub struct ToolDecl {
     pub actions: &'static [ActionDecl],
     /// A requirement the JSON schema cannot express (e.g. "one of these two").
     pub note: Option<&'static str>,
+    /// Version carried by this tool's `structuredContent`, when it has a stable output schema.
+    pub output_schema_version: Option<&'static str>,
 }
 
 /// One action of a tool, with the parameters it needs beyond the schema-level required ones.
@@ -64,7 +66,7 @@ const fn action(name: &'static str, required: &'static [&'static str]) -> Action
 }
 
 const fn tool(name: &'static str, actions: &'static [ActionDecl]) -> ToolDecl {
-    ToolDecl { name, actions, note: None }
+    ToolDecl { name, actions, note: None, output_schema_version: None }
 }
 
 const METADATA_ACTIONS: &[ActionDecl] = &[
@@ -139,12 +141,16 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "symbol_info",
         actions: &[],
         note: Some("one of `symbol` or `path`+`line` is required"),
+        output_schema_version: None,
     },
     tool("diagnostics", DIAGNOSTICS_ACTIONS),
 ];
 
-const REFERENCE_TOOLS: &[ToolDecl] =
-    &[tool("search", REFERENCE_SEARCH_ACTIONS), tool("syntax_help", &[]), tool("its_help", &[])];
+const REFERENCE_TOOLS: &[ToolDecl] = &[
+    tool("search", REFERENCE_SEARCH_ACTIONS),
+    ToolDecl { name: "syntax_help", actions: &[], note: None, output_schema_version: Some("1") },
+    tool("its_help", &[]),
+];
 
 fn tools_of(profile: McpProfile) -> &'static [ToolDecl] {
     match profile {
@@ -178,6 +184,19 @@ pub fn document() -> Value {
     doc.insert("contract_version".into(), json!(CONTRACT_VERSION));
     doc.insert("build_version".into(), json!(env!("CARGO_PKG_VERSION")));
     doc.insert("mcp".into(), mcp_surface());
+    doc.insert(
+        "transports".into(),
+        json!({
+            "workspace": {
+                "broker-required": {
+                    "backend_pid_required": true,
+                    "auto_launch": false,
+                    "stdio_fallback": false,
+                    "peer_identity": "supervised-pid+platform-trust"
+                }
+            }
+        }),
+    );
     if let Some(cli) = CLI_SURFACE.get() {
         doc.insert("cli".into(), cli.clone());
     }
@@ -204,11 +223,24 @@ fn profile_surface(profile: McpProfile) -> Value {
     let tools: Vec<Value> = tools_of(profile)
         .iter()
         .map(|decl| {
-            let schema = listed.iter().find(|t| t.name == decl.name).map(|t| &*t.input_schema);
+            let listed_tool = listed.iter().find(|t| t.name == decl.name);
+            let schema = listed_tool.map(|t| &*t.input_schema);
             let mut entry = Map::new();
             entry.insert("name".into(), json!(decl.name));
             if let Some(note) = decl.note {
                 entry.insert("note".into(), json!(note));
+            }
+            if let Some(version) = decl.output_schema_version {
+                entry.insert("output_schema_version".into(), json!(version));
+                let output = listed_tool
+                    .and_then(|tool| tool.output_schema.as_deref())
+                    .expect("declared structured output must publish outputSchema");
+                let encoded =
+                    serde_json::to_vec(output).expect("outputSchema must be serializable");
+                entry.insert(
+                    "output_schema_fingerprint".into(),
+                    json!(format!("blake3:{}", blake3::hash(&encoded).to_hex())),
+                );
             }
             entry.insert(
                 "actions".into(),
@@ -328,6 +360,19 @@ mod tests {
         found.input_schema.get("properties").and_then(Value::as_object).cloned().unwrap_or_default()
     }
 
+    fn output_schema(profile: McpProfile, tool: &str) -> Option<Value> {
+        let router = match profile {
+            McpProfile::Workspace => McpServer::workspace_tool_router(),
+            McpProfile::Reference => McpServer::reference_tool_router(),
+        };
+        router
+            .list_all()
+            .iter()
+            .find(|candidate| candidate.name == tool)
+            .and_then(|found| found.output_schema.as_deref().cloned())
+            .map(Value::Object)
+    }
+
     /// The declaration names parameters that the tool really accepts. A renamed parameter
     /// fails here instead of shipping a contract that points at a field nobody reads.
     #[test]
@@ -379,6 +424,26 @@ mod tests {
     }
 
     #[test]
+    fn declared_structured_outputs_have_published_schemas() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            for decl in tools_of(profile) {
+                if decl.output_schema_version.is_some() {
+                    let schema = output_schema(profile, decl.name).unwrap_or_else(|| {
+                        panic!("{}/{} has no outputSchema", profile.as_str(), decl.name)
+                    });
+                    assert_eq!(schema["type"], "object");
+                    assert!(
+                        schema.to_string().contains("schema_version"),
+                        "{}/{} outputSchema has no schema_version",
+                        profile.as_str(),
+                        decl.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unknown_action_lists_the_declared_actions() {
         let err = unknown_action(McpProfile::Workspace, "query", "validte");
         assert_eq!(err.message, "Unknown action 'validte'. Expected: validate, execute, schema");
@@ -416,7 +481,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.4",
+              "contract_version": "1.5",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -470,6 +535,8 @@ mod tests {
                       {
                         "actions": [],
                         "name": "syntax_help",
+                        "output_schema_fingerprint": "blake3:77ab89c5868110d089b431d81c0ec5c3f1cbb4d755e1396f963ab4bbff72fa8e",
+                        "output_schema_version": "1",
                         "params": [
                           {
                             "name": "max_output_tokens",
