@@ -59,8 +59,9 @@ pub struct McpServeArgs {
     /// (`BSL_MCP_ORPHAN_GRACE_SECS`, default 30s). `http` serves multiple clients over
     /// Streamable HTTP on the required `--port`. `daemon` *is* the broker backend and is
     /// launched internally by a broker proxy. `broker-required` connects only to the
-    /// already-running daemon named by `--backend-pid` (which the daemon records through
-    /// `--pid-file`): it never launches or falls back to direct stdio.
+    /// already-running daemon named by `--backend-pid`, whose value the supervisor knows
+    /// because it started that daemon: it never launches or falls back to direct stdio, and
+    /// it serves the 1C connection the daemon was started with.
     #[arg(long = "mode", value_enum, default_value = "stdio")]
     mode: McpServeMode,
 
@@ -340,6 +341,32 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     }
 }
 
+/// Gate the 1C connection settings against a mode that cannot apply them.
+///
+/// Every other mode either builds the state itself or launches the daemon that will, so the
+/// settings reach the process that connects to 1C. The supervised proxy connects to a backend
+/// that was built before it started: its settings would be silently dropped, and a client
+/// naming one infobase would have its `execute` run against the one the daemon was built with.
+fn validate_onec_settings(
+    mode: McpServeMode,
+    url: Option<&str>,
+    user: &str,
+    password: &str,
+) -> Result<(), io::Error> {
+    if !matches!(mode, McpServeMode::BrokerRequired) {
+        return Ok(());
+    }
+    if url.is_some() || !user.is_empty() || !password.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--onec-url/--onec-user/--onec-password are not valid with --mode broker-required: \
+             the already-running daemon serves the connection it was started with. Pass them to \
+             that daemon instead.",
+        ));
+    }
+    Ok(())
+}
+
 /// Gate `--backend-pid` and the mode that needs it.
 ///
 /// `peer_pid_available` is a parameter rather than a direct read of the platform list so the
@@ -409,6 +436,12 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     // Ahead of the per-mode blocks below: a flag belonging to one mode has to be rejected in
     // every other mode, http included, and a check living inside one mode's block cannot do it.
     validate_backend_pid(args.mode, args.backend_pid, mcp_server::broker::peer_pid_available())?;
+    validate_onec_settings(
+        args.mode,
+        args.onec_url.as_deref(),
+        &args.onec_user,
+        &args.onec_password,
+    )?;
 
     if !matches!(args.mode, McpServeMode::Http) {
         if args.host.is_some() {
@@ -1248,8 +1281,8 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         daemon_command, resolve_serve_mode_with_override, resolve_workspace_cache,
-        validate_backend_pid, validate_serve_args, McpCommand, McpProfileCli, McpServeArgs,
-        McpServeMode, ServeModeContext,
+        validate_backend_pid, validate_onec_settings, validate_serve_args, McpCommand,
+        McpProfileCli, McpServeArgs, McpServeMode, ServeModeContext,
     };
     use clap::Parser;
     use std::io;
@@ -1503,6 +1536,27 @@ mod tests {
                 .err()
                 .unwrap_or_else(|| panic!("{mode:?} must reject a peer pin"));
             assert!(error.to_string().contains("--backend-pid"), "{mode:?}: {error}");
+        }
+    }
+
+    /// A setting the proxy cannot apply must be refused, not dropped: the daemon it connects to
+    /// was built against one infobase, and a client naming another would have its `execute` run
+    /// somewhere it never named.
+    #[test]
+    fn one_c_settings_are_refused_by_the_supervised_proxy() {
+        for (url, user, password) in
+            [(Some("http://base-b"), "", ""), (None, "user", ""), (None, "", "secret")]
+        {
+            let error = validate_onec_settings(McpServeMode::BrokerRequired, url, user, password)
+                .expect_err("the supervised proxy cannot apply 1C settings");
+            assert!(error.to_string().contains("--onec-url"), "{error}");
+        }
+
+        validate_onec_settings(McpServeMode::BrokerRequired, None, "", "")
+            .expect("no settings, nothing to drop");
+        for mode in [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon] {
+            validate_onec_settings(mode, Some("http://base-a"), "user", "secret")
+                .unwrap_or_else(|e| panic!("{mode:?} applies 1C settings itself: {e}"));
         }
     }
 
