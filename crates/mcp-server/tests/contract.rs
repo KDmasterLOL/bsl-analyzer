@@ -46,7 +46,7 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
         doc["transports"]["workspace"]["broker-required"],
         serde_json::json!({
             "backend_pid_required": true,
-            "backend_pid_source": "mcp serve --mode daemon --pid-file",
+            "backend_pid_source": "supervisor launching bsl-analyzer-app directly",
             "auto_launch": false,
             "stdio_fallback": false,
             "peer_identity": "supervised-pid+platform-trust",

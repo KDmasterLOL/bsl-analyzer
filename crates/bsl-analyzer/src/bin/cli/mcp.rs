@@ -2,14 +2,12 @@ use std::{
     collections::BTreeMap,
     env,
     error::Error,
-    fs, io,
+    io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    process,
     time::Duration,
 };
 
-use anyhow::Context as _;
 use clap::{Args, Subcommand, ValueEnum};
 use process_record::ProcessRecordGuard;
 use serde::Deserialize;
@@ -68,15 +66,13 @@ pub struct McpServeArgs {
 
     /// PID of the daemon explicitly launched by a supervisor. Required only for
     /// `--mode broker-required`; the connected socket peer must match it.
+    ///
+    /// The supervisor must launch `bsl-analyzer-app` itself: the installed `bsl-analyzer` is a
+    /// launcher that runs the analyzer as a child, so its pid is not the one that owns the
+    /// socket. The value stays outside the machine's own files on purpose — a pin read from
+    /// something any same-user process may write would certify whoever wrote it.
     #[arg(long, required_if_eq("mode", "broker-required"))]
     backend_pid: Option<u32>,
-
-    /// Where `--mode daemon` records its own PID once its socket is accepting: the value a
-    /// supervisor then passes as `--backend-pid`. The installed `bsl-analyzer` is a launcher
-    /// that runs the analyzer as a child, so the PID a supervisor can observe is not the one
-    /// that owns the socket — this file is written by the process that does.
-    #[arg(long)]
-    pid_file: Option<PathBuf>,
 
     /// IP address for HTTP binding (default: 127.0.0.1).
     #[arg(long)]
@@ -327,7 +323,6 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
             args.onec_url,
             &args.onec_user,
             &password,
-            args.pid_file.clone(),
         ),
         McpServeMode::Http => {
             let options =
@@ -343,25 +338,6 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
             )
         }
     }
-}
-
-/// Gate `--pid-file`, which only the backend itself can honour.
-fn validate_pid_file(mode: McpServeMode, pid_file: Option<&Path>) -> Result<(), io::Error> {
-    let Some(path) = pid_file else {
-        return Ok(());
-    };
-    if !matches!(mode, McpServeMode::Daemon) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--pid-file is only valid with --mode daemon",
-        ));
-    }
-    // An unset shell variable expands to an empty argument, and a supervisor would then wait
-    // for a file that can never appear.
-    if path.as_os_str().is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--pid-file must not be empty"));
-    }
-    Ok(())
 }
 
 /// Gate `--backend-pid` and the mode that needs it.
@@ -433,7 +409,6 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     // Ahead of the per-mode blocks below: a flag belonging to one mode has to be rejected in
     // every other mode, http included, and a check living inside one mode's block cannot do it.
     validate_backend_pid(args.mode, args.backend_pid, mcp_server::broker::peer_pid_available())?;
-    validate_pid_file(args.mode, args.pid_file.as_deref())?;
 
     if !matches!(args.mode, McpServeMode::Http) {
         if args.host.is_some() {
@@ -726,7 +701,6 @@ fn run_mcp_daemon(
     onec_url: Option<String>,
     onec_user: &str,
     onec_password: &str,
-    pid_file: Option<PathBuf>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let source_dir = require_workspace_broker(profile, source_dir)?;
     let workspace_cache = workspace_cache.ok_or_else(|| {
@@ -765,43 +739,14 @@ fn run_mcp_daemon(
 
     tracing::info!("Starting MCP broker backend (daemon)");
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    let announced = pid_file.clone();
-    let result = rt.block_on(mcp_server::broker::daemon::run_announcing(
+    let result = rt.block_on(mcp_server::broker::daemon::run(
         build,
         key,
         broker_orphan_grace(),
         broker_idle_ttl(),
-        move || write_backend_pid(announced.as_deref()),
     ));
-    // Best effort: a crashed daemon leaves the file behind, and that is harmless — the pin it
-    // names is still checked against the peer of a live socket, so a stale PID cannot pass.
-    if let Some(path) = pid_file.as_deref() {
-        let _ = fs::remove_file(path);
-    }
     drop(rt);
     result?;
-    Ok(())
-}
-
-/// Record this process's PID for a supervisor waiting to learn it.
-///
-/// Written through a temporary file in the same directory and renamed, so a supervisor polling
-/// for the file never reads a half-written number. The file is a discovery convenience, not an
-/// authority: what it names is verified against the socket's peer credentials before any client
-/// is served.
-fn write_backend_pid(path: Option<&Path>) -> anyhow::Result<()> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-    let staging = path.with_extension(format!("pid.{}", process::id()));
-    fs::write(&staging, process::id().to_string()).with_context(|| {
-        format!("failed to write the backend pid file at {}", staging.display())
-    })?;
-    fs::rename(&staging, path).with_context(|| {
-        let _ = fs::remove_file(&staging);
-        format!("failed to publish the backend pid file at {}", path.display())
-    })?;
-    tracing::info!(pid = process::id(), path = %path.display(), "published backend pid");
     Ok(())
 }
 
@@ -1303,13 +1248,13 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::{
         daemon_command, resolve_serve_mode_with_override, resolve_workspace_cache,
-        validate_backend_pid, validate_pid_file, validate_serve_args, write_backend_pid,
-        McpCommand, McpProfileCli, McpServeArgs, McpServeMode, ServeModeContext,
+        validate_backend_pid, validate_serve_args, McpCommand, McpProfileCli, McpServeArgs,
+        McpServeMode, ServeModeContext,
     };
     use clap::Parser;
     use std::io;
     use std::net::{IpAddr, Ipv4Addr};
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     #[derive(Debug, Parser)]
     struct ServeCli {
@@ -1561,49 +1506,6 @@ mod tests {
         }
     }
 
-    /// Only the process that owns the socket can record the PID that identifies it, so the flag
-    /// belongs to that one mode — in any other it would name a process nobody can connect to.
-    #[test]
-    fn pid_file_is_rejected_outside_the_daemon() {
-        for mode in [
-            McpServeMode::Stdio,
-            McpServeMode::Broker,
-            McpServeMode::BrokerRequired,
-            McpServeMode::Http,
-        ] {
-            let error = validate_pid_file(mode, Some(Path::new("/tmp/backend.pid")))
-                .err()
-                .unwrap_or_else(|| panic!("{mode:?} must reject --pid-file"));
-            assert!(error.to_string().contains("--pid-file"), "{mode:?}: {error}");
-        }
-
-        validate_pid_file(McpServeMode::Daemon, Some(Path::new("/tmp/backend.pid")))
-            .expect("the daemon records its own pid");
-        assert!(validate_pid_file(McpServeMode::Daemon, Some(Path::new(""))).is_err());
-        validate_pid_file(McpServeMode::Daemon, None).expect("the flag stays optional");
-    }
-
-    /// A supervisor polls for this file, so it must never be readable half-written and must carry
-    /// the pid of the process that owns the socket — this one.
-    #[test]
-    fn the_backend_pid_file_lands_complete() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("backend.pid");
-
-        write_backend_pid(Some(&path)).expect("pid published");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), std::process::id().to_string());
-
-        write_backend_pid(Some(&path)).expect("publishing again replaces the value");
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), std::process::id().to_string());
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name())
-            .filter(|name| name != "backend.pid")
-            .collect();
-        assert!(leftovers.is_empty(), "staging files must not survive: {leftovers:?}");
-    }
-
     #[test]
     fn required_broker_is_refused_where_peer_credentials_carry_no_pid() {
         let refused = validate_backend_pid(McpServeMode::BrokerRequired, Some(42), false)
@@ -1837,7 +1739,6 @@ mod tests {
             cache_dir: None,
             mode,
             backend_pid: None,
-            pid_file: None,
             host: None,
             port,
             allowed_hosts: Vec::new(),

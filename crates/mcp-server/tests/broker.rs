@@ -95,61 +95,6 @@ async fn required_broker_connects_only_to_the_supervised_daemon_pid() {
     backend.abort();
 }
 
-/// The announcement is what a supervisor waits on before pointing a client at the backend, so it
-/// has to happen while the socket is already accepting — not merely before the build starts.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[cfg(any(unix, windows))]
-async fn the_backend_announces_itself_once_its_socket_accepts() {
-    let src = TempDir::new().unwrap();
-    let key = key_for(&src);
-    let (announced_tx, announced_rx) = std::sync::mpsc::channel();
-
-    let backend = tokio::spawn(broker::daemon::run_announcing(
-        || Ok(reference_server()),
-        key_for(&src),
-        Duration::from_secs(30),
-        Duration::from_secs(30),
-        move || {
-            announced_tx.send(std::process::id()).unwrap();
-            Ok(())
-        },
-    ));
-
-    let pid = tokio::task::spawn_blocking(move || {
-        announced_rx.recv_timeout(Duration::from_secs(10)).expect("the backend announced itself")
-    })
-    .await
-    .unwrap();
-    let stream = broker::proxy::connect_existing(&key, pid)
-        .await
-        .expect("the announced pid is the one the socket answers with");
-
-    drop(stream);
-    backend.abort();
-}
-
-/// Whoever asked to be told about the backend is waiting for it, so a daemon that cannot say it
-/// is up must not go on serving as if it had.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[cfg(any(unix, windows))]
-async fn a_backend_that_cannot_announce_itself_stops() {
-    let src = TempDir::new().unwrap();
-    let key = key_for(&src);
-
-    let error = broker::daemon::run_announcing(
-        || Ok(reference_server()),
-        key_for(&src),
-        Duration::from_secs(30),
-        Duration::from_secs(30),
-        || anyhow::bail!("no way to publish the pid"),
-    )
-    .await
-    .expect_err("an unannounceable backend must not serve");
-
-    assert!(error.to_string().contains("publish the pid"), "{error}");
-    assert!(connect(&key).await.is_err(), "the socket must not stay bound behind a failed start");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[cfg(any(unix, windows))]
 async fn backend_survives_client_disconnect_and_stays_reusable() {

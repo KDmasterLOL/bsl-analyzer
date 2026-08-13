@@ -194,7 +194,7 @@ pub fn document() -> Value {
             "workspace": {
                 "broker-required": {
                     "backend_pid_required": true,
-                    "backend_pid_source": "mcp serve --mode daemon --pid-file",
+                    "backend_pid_source": "supervisor launching bsl-analyzer-app directly",
                     "auto_launch": false,
                     "stdio_fallback": false,
                     "peer_identity": "supervised-pid+platform-trust",
