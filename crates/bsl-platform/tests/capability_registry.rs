@@ -239,23 +239,33 @@ fn capability_temp_files_dir_lookup_is_global_method_only() {
     );
 
     assert!(reg
-        .lookup(Category::TemporaryFilesDirectory, EntryKind::Method, "TempFilesDir")
+        .lookup(Category::TemporaryFilesDirectory, EntryKind::AnyReceiverMethod, "TempFilesDir")
         .is_none());
 }
 
 #[test]
-fn capability_form_data_to_value_and_get_form_lookup_covers_global_and_member_calls() {
+fn capability_form_data_to_value_and_get_form_lookup_covers_declared_surfaces() {
     let reg = registry();
 
-    for (category, ru, en) in [
-        (Category::FormDataToValue, "ДанныеФормыВЗначение", "FormDataToValue"),
-        (Category::GetForm, "ПолучитьФорму", "GetForm"),
+    for (category, kind, ru, en) in [
+        (
+            Category::FormDataToValue,
+            EntryKind::GlobalMethod,
+            "ДанныеФормыВЗначение",
+            "FormDataToValue",
+        ),
+        (Category::GetForm, EntryKind::GlobalMethod, "ПолучитьФорму", "GetForm"),
+        (Category::GetForm, EntryKind::AnyReceiverMethod, "ПолучитьФорму", "GetForm"),
     ] {
-        for kind in [EntryKind::GlobalMethod, EntryKind::Method] {
-            let entry = bilingual_entry(reg, (category, kind, ru, en));
-            assert_eq!(entry.replacement, None);
-        }
+        let entry = bilingual_entry(reg, (category, kind, ru, en));
+        assert_eq!(entry.replacement, None);
     }
+
+    // `ДанныеФормыВЗначение` belongs to the global context alone: no platform
+    // type declares it, so a qualified call names something else entirely.
+    assert!(reg
+        .lookup(Category::FormDataToValue, EntryKind::AnyReceiverMethod, "ДанныеФормыВЗначение")
+        .is_none());
 }
 
 #[test]

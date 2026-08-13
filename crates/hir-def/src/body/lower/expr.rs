@@ -480,11 +480,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             check_write_log_event_call(ctx, node);
         }
 
-        if is_file_system_method(&name) {
-            ctx.diagnostics
-                .push(BodyDiagnostic::FileSystemAccess { range: actual_callee.text_range() });
-        }
-
         if is_form_data_to_value_global_method(&name) && !ctx.has_no_context_annotation {
             ctx.diagnostics
                 .push(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
@@ -575,11 +570,6 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         if let Some(method_token) = idents.last() {
             let method_name = method_token.text();
-
-            if is_form_data_to_value_method(method_name) && !ctx.has_no_context_annotation {
-                ctx.diagnostics
-                    .push(BodyDiagnostic::FormDataToValue { range: method_token.text_range() });
-            }
 
             if is_get_form_method(method_name) {
                 ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
@@ -1398,18 +1388,8 @@ fn extract_type_name_from_first_arg(node: &SyntaxNode) -> Option<String> {
     }
 }
 
-fn is_file_system_method(name: &str) -> bool {
-    bsl_platform::security::registry()
-        .lookup_global(name)
-        .is_some_and(|e| matches!(e.category, bsl_platform::security::Category::FileSystem))
-}
-
-fn is_form_data_to_value_method(name: &str) -> bool {
-    has_capability_entry(name, CapabilityCategory::FormDataToValue, CapabilityEntryKind::Method)
-}
-
 fn is_get_form_method(name: &str) -> bool {
-    has_capability_entry(name, CapabilityCategory::GetForm, CapabilityEntryKind::Method)
+    has_capability_entry(name, CapabilityCategory::GetForm, CapabilityEntryKind::AnyReceiverMethod)
 }
 
 fn is_form_data_to_value_global_method(name: &str) -> bool {

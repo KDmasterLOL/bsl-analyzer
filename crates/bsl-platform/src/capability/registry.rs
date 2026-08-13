@@ -3,7 +3,7 @@ use Category::{
     AsyncCall, FormDataToValue, GetForm, ModalWindow, SynchronousCall, SystemInformation,
     TemporaryFilesDirectory, UnixUnavailableObject,
 };
-use EntryKind::{GlobalMethod, Method, Type};
+use EntryKind::{AnyReceiverMethod, GlobalMethod, Type};
 
 macro_rules! replacement {
     ($ru:literal, $en:literal) => {
@@ -192,15 +192,18 @@ pub const ENTRIES: &[CapabilityEntry] = &[
     type_entry("Почта", "Mail", UnixUnavailableObject),
     global_method!("КаталогВременныхФайлов", "TempFilesDir", TemporaryFilesDirectory, None),
     global_method!("ДанныеФормыВЗначение", "FormDataToValue", FormDataToValue, None),
-    method_entry("ДанныеФормыВЗначение", "FormDataToValue", FormDataToValue),
     global_method!("ПолучитьФорму", "GetForm", GetForm, None),
-    method_entry("ПолучитьФорму", "GetForm", GetForm),
+    any_receiver_method("ПолучитьФорму", "GetForm", GetForm),
 ];
 
 const fn type_entry(ru: &'static str, en: &'static str, category: Category) -> CapabilityEntry {
     CapabilityEntry { ru, en, kind: Type, category, replacement: None }
 }
 
-const fn method_entry(ru: &'static str, en: &'static str, category: Category) -> CapabilityEntry {
-    CapabilityEntry { ru, en, kind: Method, category, replacement: None }
+const fn any_receiver_method(
+    ru: &'static str,
+    en: &'static str,
+    category: Category,
+) -> CapabilityEntry {
+    CapabilityEntry { ru, en, kind: AnyReceiverMethod, category, replacement: None }
 }

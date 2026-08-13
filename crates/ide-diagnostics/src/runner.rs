@@ -630,6 +630,10 @@ mod tests {
             DiagnosticCode::RedundantAccessToObject,
             DiagnosticCode::MissedRequiredParameter,
             DiagnosticCode::DeprecatedPlatformApi,
+            // Two emitters by design: the constructor is a syntactic fact and
+            // stays in lowering, the bare call needs the shadowing guard and is
+            // judged in inference.
+            DiagnosticCode::FileSystemAccess,
         ];
 
         let mut duplicates = Vec::new();
