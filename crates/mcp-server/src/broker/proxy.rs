@@ -91,10 +91,23 @@ pub(crate) async fn connect_existing(
     let stream = TokioStream::connect(backend_name(key)?)
         .await
         .map_err(|error| anyhow::anyhow!("required broker backend is unavailable: {error}"))?;
-    if !crate::broker::security::verify_supervised_backend(&stream, expected_pid) {
-        return Err(anyhow::anyhow!(
-            "required broker backend identity does not match supervised PID {expected_pid}"
-        ));
+    // Naming the owner is what tells a supervisor which of two different things happened: its
+    // daemon lost the bind to a backend that was already serving this workspace (and exited),
+    // or the socket is answered by something it should look at.
+    if let Err(mismatch) = crate::broker::security::verify_supervised_backend(&stream, expected_pid)
+    {
+        use crate::broker::security::SupervisedMismatch;
+        return Err(match mismatch {
+            SupervisedMismatch::OtherPid(actual) => anyhow::anyhow!(
+                "required broker backend is pid {actual}, not the supervised pid {expected_pid}: \
+                 this workspace already had a backend, and the supervised daemon exited without \
+                 becoming one"
+            ),
+            SupervisedMismatch::Unknown => anyhow::anyhow!(
+                "required broker backend identity could not be established for supervised pid \
+                 {expected_pid}"
+            ),
+        });
     }
     tracing::info!(
         backend_pid = expected_pid,
@@ -391,7 +404,7 @@ mod tests {
         let mismatch = connect_existing(&key, wrong_pid)
             .await
             .expect_err("a live but different backend PID must be rejected");
-        assert!(mismatch.to_string().contains("identity"), "{mismatch}");
+        assert!(mismatch.to_string().contains("not the supervised pid"), "{mismatch}");
 
         let stream = connect_existing(&key, std::process::id())
             .await

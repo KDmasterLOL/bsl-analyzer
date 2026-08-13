@@ -274,15 +274,8 @@ pub fn run(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
 
 fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     let http_options = validate_serve_args(&args)?;
-
-    // The broker passes the 1C credential to the detached daemon via the environment
-    // (not argv, which `ps` would expose for the backend's whole lifetime), so fall
-    // back to it when the flag is absent.
-    let raw_password = if args.onec_password.is_empty() {
-        env::var("BSL_ONEC_PASSWORD").unwrap_or_default()
-    } else {
-        args.onec_password.clone()
-    };
+    let raw_password =
+        resolve_onec_password(&args.onec_password, env::var("BSL_ONEC_PASSWORD").ok());
     let password = decode_password(&raw_password);
     let profile = match args.runtime_profile {
         McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
@@ -338,6 +331,18 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
                 options,
             )
         }
+    }
+}
+
+/// The 1C credential this process will use. The broker passes it to the detached daemon through
+/// the environment (not argv, which `ps` would expose for the backend's whole lifetime), so the
+/// flag and the variable are two ways in to one value — and anything asking "was a credential
+/// given" has to ask about that value, not about the flag.
+fn resolve_onec_password(flag: &str, from_env: Option<String>) -> String {
+    if flag.is_empty() {
+        from_env.unwrap_or_default()
+    } else {
+        flag.to_owned()
     }
 }
 
@@ -436,11 +441,14 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     // Ahead of the per-mode blocks below: a flag belonging to one mode has to be rejected in
     // every other mode, http included, and a check living inside one mode's block cannot do it.
     validate_backend_pid(args.mode, args.backend_pid, mcp_server::broker::peer_pid_available())?;
+    // Validated against the credential the process will actually use, not the flag alone: a
+    // password arriving through the environment is dropped by a mode that cannot apply it just
+    // as silently, and a check reading only argv passes exactly that case.
     validate_onec_settings(
         args.mode,
         args.onec_url.as_deref(),
         &args.onec_user,
-        &args.onec_password,
+        &resolve_onec_password(&args.onec_password, env::var("BSL_ONEC_PASSWORD").ok()),
     )?;
 
     if !matches!(args.mode, McpServeMode::Http) {
@@ -1280,9 +1288,9 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        daemon_command, resolve_serve_mode_with_override, resolve_workspace_cache,
-        validate_backend_pid, validate_onec_settings, validate_serve_args, McpCommand,
-        McpProfileCli, McpServeArgs, McpServeMode, ServeModeContext,
+        daemon_command, resolve_onec_password, resolve_serve_mode_with_override,
+        resolve_workspace_cache, validate_backend_pid, validate_onec_settings, validate_serve_args,
+        McpCommand, McpProfileCli, McpServeArgs, McpServeMode, ServeModeContext,
     };
     use clap::Parser;
     use std::io;
@@ -1554,6 +1562,19 @@ mod tests {
 
         validate_onec_settings(McpServeMode::BrokerRequired, None, "", "")
             .expect("no settings, nothing to drop");
+
+        // The credential has a second way in, and the mode drops it just as silently. The seam is
+        // what matters: resolution first, then the gate on what resolution produced.
+        let from_env = resolve_onec_password("", Some("secret-from-the-environment".to_owned()));
+        assert_eq!(from_env, "secret-from-the-environment");
+        assert!(
+            validate_onec_settings(McpServeMode::BrokerRequired, None, "", &from_env).is_err(),
+            "a credential from the environment is dropped just the same"
+        );
+        assert_eq!(
+            resolve_onec_password("from-the-flag", Some("ignored".to_owned())),
+            "from-the-flag"
+        );
         for mode in [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon] {
             validate_onec_settings(mode, Some("http://base-a"), "user", "secret")
                 .unwrap_or_else(|e| panic!("{mode:?} applies 1C settings itself: {e}"));

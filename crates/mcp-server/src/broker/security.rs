@@ -198,14 +198,36 @@ pub fn peer_pid_available() -> bool {
     SUPERVISED_PID_PLATFORMS.contains(&std::env::consts::OS)
 }
 
+/// Why a supervised connection was refused, carrying what the socket actually answered with.
+///
+/// A caller reports this to whoever passed the PID, so it names the owner it found: "not the
+/// process you named" and "no process at all" send a supervisor to different places, and so does
+/// learning that the workspace already had a backend of its own.
+#[cfg(any(unix, windows))]
+pub(crate) enum SupervisedMismatch {
+    /// The socket is owned by this other process — typically a backend that was already running
+    /// when the supervised daemon started, which then lost the bind and exited.
+    OtherPid(u32),
+    /// The peer's identity could not be established at all.
+    Unknown,
+}
+
 /// Verify that a broker connection terminates at the exact backend process a
 /// supervisor launched.
 ///
 /// The PID check is the supervised-mode identity. The ordinary transport trust
 /// checks still apply as defense in depth: same effective user on Unix and the
 /// existing image/owner check on Windows.
+///
+/// A PID names a process only while that process lives: the OS reuses the number afterwards, and
+/// nothing in the credentials carries a start time or generation to tell the reuse apart. What
+/// this proves is that the socket is answered by the process holding that number now, run by the
+/// same user, from the same image — not that it is the very process the supervisor spawned.
 #[cfg(any(unix, windows))]
-pub(crate) fn verify_supervised_backend(conn: &TokioStream, expected_pid: u32) -> bool {
+pub(crate) fn verify_supervised_backend(
+    conn: &TokioStream,
+    expected_pid: u32,
+) -> Result<(), SupervisedMismatch> {
     let actual_pid = conn
         .peer_creds()
         .ok()
@@ -217,19 +239,24 @@ pub(crate) fn verify_supervised_backend(conn: &TokioStream, expected_pid: u32) -
             actual_pid,
             "broker backend PID does not match the supervised process"
         );
-        return false;
+        return Err(match actual_pid {
+            Some(pid) => SupervisedMismatch::OtherPid(pid),
+            None => SupervisedMismatch::Unknown,
+        });
     }
 
     #[cfg(unix)]
-    {
-        match conn.peer_creds() {
-            Ok(creds) => creds.euid().is_some_and(|uid| uid == crate::broker::name::current_euid()),
-            Err(_) => false,
-        }
-    }
+    let trusted = match conn.peer_creds() {
+        Ok(creds) => creds.euid().is_some_and(|uid| uid == crate::broker::name::current_euid()),
+        Err(_) => false,
+    };
     #[cfg(windows)]
-    {
-        verify_pipe_server_trusted(conn)
+    let trusted = verify_pipe_server_trusted(conn);
+
+    if trusted {
+        Ok(())
+    } else {
+        Err(SupervisedMismatch::Unknown)
     }
 }
 
