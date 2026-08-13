@@ -1,4 +1,5 @@
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use bsl_platform::security::Category as SecurityCategory;
 use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, RedundantAccessKind};
 use ide_db::TextRange;
 
@@ -17,6 +18,7 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnavailableInEnvironment,
     DiagnosticCode::ModuleAccessibility,
     DiagnosticCode::ExternalAppStarting,
+    DiagnosticCode::FileSystemAccess,
 ];
 
 pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
@@ -99,7 +101,7 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
         InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
         InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
         InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
-        InferenceDiagnostic::ExternalAppStarting { expr } => *expr,
+        InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
     }
 }
 
@@ -210,8 +212,10 @@ fn dispatch_inference_diagnostic(
         InferenceDiagnostic::ModuleAccessibility { name, callee_kind, missing, .. } => {
             handlers::module_accessibility::from_hir(name, *callee_kind, *missing, range, ctx)
         }
-        InferenceDiagnostic::ExternalAppStarting { .. } => {
-            handlers::external_app_starting::from_hir(range, ctx)
-        }
+        InferenceDiagnostic::GuardedCall { category, .. } => match category {
+            SecurityCategory::ExternalApp => handlers::external_app_starting::from_hir(range, ctx),
+            SecurityCategory::FileSystem => handlers::file_system_access::from_hir(range, ctx),
+            _ => None,
+        },
     }
 }

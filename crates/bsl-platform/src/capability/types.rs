@@ -13,7 +13,12 @@ pub enum Category {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EntryKind {
     GlobalMethod,
-    Method,
+    /// A method matched by spelling alone, whatever the receiver turns out to
+    /// be. The over-approximation is deliberate and belongs only to diagnostics
+    /// whose own docs declare that breadth: a name owned by several platform
+    /// types, or by user code, is reported all the same. Where the receiver
+    /// decides, use the security registry's `ModuleMethod` instead.
+    AnyReceiverMethod,
     Constructor,
     Type,
     GlobalProperty,

@@ -301,6 +301,42 @@ EndProcedure
         check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
     }
 
+    /// Имя, объявленное в самой конфигурации, принадлежит ей: вызывают свою
+    /// процедуру, а не глобальный контекст.
+    #[test]
+    fn test_shadowed_global_method_not_detected() {
+        let code = r#"
+Процедура КопироватьФайл(Источник, Приёмник)
+КонецПроцедуры
+
+Процедура Тест()
+    КопироватьФайл("src", "dest");
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
+    }
+
+    /// Сбор фактов инференса отсекается списком включённых кодов раньше
+    /// диспетчера, поэтому одного отображения категории в код мало. Прочие
+    /// тесты идут со всеми включёнными кодами и пропуск в списке не замечают.
+    #[test]
+    fn test_bare_call_survives_only_enabled_config() {
+        let code = r#"
+Процедура Тест()
+    КопироватьФайл("src", "dest");
+КонецПроцедуры
+"#;
+        let mut config = crate::DiagnosticsConfig::all_enabled();
+        config.only_enabled = Some(vec![DiagnosticCode::FileSystemAccess]);
+        let diagnostics =
+            crate::test_utils::check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::FileSystemAccess),
+            "bare guarded call must survive a config that enables only this code, got {:?}",
+            diagnostics.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+    }
+
     /// Справка 8.3.27 переименовала английский синоним `КопироватьФайл`
     /// в `CopyFile`; прежнее написание остаётся вызываемым.
     #[test]

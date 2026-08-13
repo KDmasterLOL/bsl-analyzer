@@ -1,5 +1,6 @@
 use base_db::FileIdInput;
 use bsl_platform::deprecation::{self, ElementKind, Lookup};
+use bsl_platform::security::Category as SecurityCategory;
 use bsl_types::builders::Builders;
 use bsl_types::facet::{DateComponent, FormDataFacet, MdoRefFacet, ProjectionSource};
 use bsl_types::intern::TypeKernelDb;
@@ -363,11 +364,15 @@ pub enum InferenceDiagnostic {
         callee_kind: EnvCalleeKind,
         missing: hir_def::execution_env::EnvFlags,
     },
-    /// A call that hands a command or a path to the operating system. The
-    /// receiver decides it: platform types expose methods spelled like the
-    /// library ones that launch, and only the owner's method launches.
-    ExternalAppStarting {
+    /// A call the security registry guards, already judged by who owns the
+    /// name: a bare call only when nothing in the workspace shadows it, a
+    /// qualified one only when the receiver is a declared owner. Platform types
+    /// spell methods like the guarded ones without doing what they do, so the
+    /// spelling alone never decides. The category travels as data — the
+    /// diagnostic code is picked by the projection, not by this crate.
+    GuardedCall {
         expr: ExprId,
+        category: bsl_platform::security::Category,
     },
 }
 
@@ -1067,7 +1072,7 @@ impl<'db> InferenceContext<'db> {
             InferenceDiagnostic::RedundantAccessToObjectThreeLevel { expr, .. } => *expr,
             InferenceDiagnostic::UnavailableInEnvironment { expr, .. } => *expr,
             InferenceDiagnostic::ModuleAccessibility { expr, .. } => *expr,
-            InferenceDiagnostic::ExternalAppStarting { expr } => *expr,
+            InferenceDiagnostic::GuardedCall { expr, .. } => *expr,
         };
         if self.body.is_recovered(key) {
             return;
@@ -2725,9 +2730,10 @@ impl<'db> InferenceContext<'db> {
             let workspace_receiver_kind = self.db.lookup_type(workspace_receiver_ty);
             if let TypeKind::CommonModule(facet) = &workspace_receiver_kind {
                 let module = hir_def::Name::new(&facet.name);
-                if is_external_app_module_call(&facet.name, method_name.as_str()) {
-                    self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+                if let Some(category) = guarded_module_call(&facet.name, method_name.as_str()) {
+                    self.push_inference_diagnostic(InferenceDiagnostic::GuardedCall {
                         expr: callee,
+                        category,
                     });
                 }
                 // A bare module name as receiver (not a variable that holds a module) keeps the
@@ -3075,10 +3081,13 @@ impl<'db> InferenceContext<'db> {
         // stranger's unreadable body must not silence it.
         if let Some(name) = &bare_callee_name {
             let name = name.clone();
-            if is_external_app_global(name.as_str()) && !self.is_call_name_shadowed(&name) {
-                self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
-                    expr: callee,
-                });
+            if let Some(category) = guarded_global_call(name.as_str()) {
+                if !self.is_call_name_shadowed(&name) {
+                    self.push_inference_diagnostic(InferenceDiagnostic::GuardedCall {
+                        expr: callee,
+                        category,
+                    });
+                }
             }
         }
 
@@ -3608,9 +3617,10 @@ impl<'db> InferenceContext<'db> {
         // Both unresolved verdicts qualify: a name the workspace calls absent is
         // still not evidence that the call is something else, and the call already
         // carries its own unresolved report.
-        if is_external_app_module_call(module_name.as_str(), method_name.as_str()) {
-            self.push_inference_diagnostic(InferenceDiagnostic::ExternalAppStarting {
+        if let Some(category) = guarded_module_call(module_name.as_str(), method_name.as_str()) {
+            self.push_inference_diagnostic(InferenceDiagnostic::GuardedCall {
                 expr: call_expr,
+                category,
             });
         }
         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
@@ -3971,19 +3981,28 @@ fn is_proceed_with_call_name(name: &Name) -> bool {
     matches!(name.as_str().fold_lower().as_str(), "продолжитьвызов" | "proceedwithcall")
 }
 
-/// A library common module handing a command or a path to the operating system.
-fn is_external_app_module_call(receiver: &str, method: &str) -> bool {
-    bsl_platform::security::registry().lookup_module_method(receiver, method).is_some_and(|entry| {
-        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
-    })
+/// Categories whose verdict is drawn here rather than in lowering, because it
+/// depends on who owns the name. Listed one by one on purpose: a category joins
+/// only together with the projection that reports it and with its own measure
+/// on a real configuration.
+const GUARDED_CATEGORIES: &[bsl_platform::security::Category] =
+    &[bsl_platform::security::Category::ExternalApp, bsl_platform::security::Category::FileSystem];
+
+fn guarded_category(entry: &bsl_platform::security::SecurityEntry) -> Option<SecurityCategory> {
+    GUARDED_CATEGORIES.contains(&entry.category).then_some(entry.category)
 }
 
-/// A global-context method that launches. Reachable only as a bare call: a
-/// qualified one names something else that shares the spelling.
-fn is_external_app_global(name: &str) -> bool {
-    bsl_platform::security::registry().lookup_global(name).is_some_and(|entry| {
-        matches!(entry.category, bsl_platform::security::Category::ExternalApp)
-    })
+/// A method of a library common module, matched only under a declared owner.
+fn guarded_module_call(receiver: &str, method: &str) -> Option<SecurityCategory> {
+    bsl_platform::security::registry()
+        .lookup_module_method(receiver, method)
+        .and_then(guarded_category)
+}
+
+/// A global-context method. Reachable only as a bare call: a qualified one names
+/// something else that shares the spelling.
+fn guarded_global_call(name: &str) -> Option<SecurityCategory> {
+    bsl_platform::security::registry().lookup_global(name).and_then(guarded_category)
 }
 
 /// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /

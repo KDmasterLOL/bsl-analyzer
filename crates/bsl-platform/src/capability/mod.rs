@@ -104,7 +104,7 @@ impl LookupMaps {
     fn bucket(&self, kind: EntryKind, category: Category) -> Option<&FxHashMap<String, usize>> {
         match kind {
             EntryKind::GlobalMethod => self.globals.get(&category),
-            EntryKind::Method => self.methods.get(&category),
+            EntryKind::AnyReceiverMethod => self.methods.get(&category),
             EntryKind::Constructor => self.constructors.get(&category),
             EntryKind::Type => self.types.get(&category),
             EntryKind::GlobalProperty => self.global_properties.get(&category),
@@ -114,7 +114,7 @@ impl LookupMaps {
     fn bucket_mut(&mut self, kind: EntryKind, category: Category) -> &mut FxHashMap<String, usize> {
         match kind {
             EntryKind::GlobalMethod => self.globals.entry(category).or_default(),
-            EntryKind::Method => self.methods.entry(category).or_default(),
+            EntryKind::AnyReceiverMethod => self.methods.entry(category).or_default(),
             EntryKind::Constructor => self.constructors.entry(category).or_default(),
             EntryKind::Type => self.types.entry(category).or_default(),
             EntryKind::GlobalProperty => self.global_properties.entry(category).or_default(),

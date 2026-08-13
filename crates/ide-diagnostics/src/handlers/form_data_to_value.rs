@@ -32,7 +32,7 @@ mod tests {
     use crate::DiagnosticCode;
     use expect_test::expect;
     #[test]
-    fn test_qualified_call_in_procedure_no_annotation() {
+    fn test_qualified_call_is_someone_elses_method() {
         let code = r#"Процедура Тест()
     Форма=Док.ПолучитьФорму("ФормаДокумента");
     ДФ = Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -40,11 +40,7 @@ mod tests {
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:16..3:36
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -88,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn test_english_qualified_call_triggers() {
+    fn test_english_qualified_call_is_someone_elses_method() {
         let code = r#"Procedure Test()
     Form = Doc.GetForm("DocumentForm");
     FD = Form.FormDataToValue(Object, Type("ValueTable"));
@@ -96,11 +92,7 @@ EndProcedure"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:15..3:30
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
@@ -136,7 +128,10 @@ EndFunction"#;
     }
 
     #[test]
-    fn test_qualified_call_with_context() {
+    /// Ни один тип платформы не объявляет `ДанныеФормыВЗначение` — метод живёт
+    /// только в глобальном контексте, поэтому `Получатель.ДанныеФормыВЗначение`
+    /// это чужой метод с совпавшим написанием.
+    fn test_qualified_call_with_receiver_not_reported() {
         let code = r#"
 Процедура Тест()
     Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));
@@ -145,11 +140,7 @@ EndFunction"#;
         let diagnostics = check_hir_diagnostic(code);
         let form_diags: Vec<_> =
             diagnostics.into_iter().filter(|d| d.code == DiagnosticCode::FormDataToValue).collect();
-        expect![[r#"
-            FormDataToValue @ 3:11..3:31
-              message: Обнаружено использование метода ДанныеФормыВЗначение
-              severity: Hint"#]]
-        .assert_eq(&format_diags(code, &form_diags));
+        expect![[r#""#]].assert_eq(&format_diags(code, &form_diags));
     }
 
     #[test]
