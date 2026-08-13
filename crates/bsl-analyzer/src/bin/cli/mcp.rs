@@ -441,14 +441,19 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
     // Ahead of the per-mode blocks below: a flag belonging to one mode has to be rejected in
     // every other mode, http included, and a check living inside one mode's block cannot do it.
     validate_backend_pid(args.mode, args.backend_pid, mcp_server::broker::peer_pid_available())?;
-    // Validated against the credential the process will actually use, not the flag alone: a
-    // password arriving through the environment is dropped by a mode that cannot apply it just
-    // as silently, and a check reading only argv passes exactly that case.
+    // Validated against the credential the process will actually use — resolved from either of
+    // its two ways in and decoded, exactly as the serving path does. A check reading the raw
+    // flag alone would both miss a password arriving through the environment and refuse an
+    // encoding of no password at all.
+    let effective_password = decode_password(&resolve_onec_password(
+        &args.onec_password,
+        env::var("BSL_ONEC_PASSWORD").ok(),
+    ));
     validate_onec_settings(
         args.mode,
         args.onec_url.as_deref(),
         &args.onec_user,
-        &resolve_onec_password(&args.onec_password, env::var("BSL_ONEC_PASSWORD").ok()),
+        &effective_password,
     )?;
 
     if !matches!(args.mode, McpServeMode::Http) {
@@ -1575,6 +1580,13 @@ mod tests {
             resolve_onec_password("from-the-flag", Some("ignored".to_owned())),
             "from-the-flag"
         );
+
+        // An encoding of no password is no password: the gate refuses a credential that would be
+        // dropped, and there is nothing here to drop.
+        let mut args = serve_args(McpServeMode::BrokerRequired, None);
+        args.backend_pid = Some(42);
+        args.onec_password = "base64:".to_owned();
+        validate_serve_args(&args).expect("an encoded empty password is still no password");
         for mode in [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon] {
             validate_onec_settings(mode, Some("http://base-a"), "user", "secret")
                 .unwrap_or_else(|e| panic!("{mode:?} applies 1C settings itself: {e}"));
