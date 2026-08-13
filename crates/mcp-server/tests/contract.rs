@@ -42,6 +42,17 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
 
     assert_eq!(doc["contract_version"], contract::CONTRACT_VERSION);
     assert_eq!(doc["build_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        doc["transports"]["workspace"]["broker-required"],
+        serde_json::json!({
+            "backend_pid_required": true,
+            "backend_pid_source": "supervisor launching bsl-analyzer-app directly",
+            "auto_launch": false,
+            "stdio_fallback": false,
+            "peer_identity": "supervised-pid+platform-trust",
+            "platforms": mcp_server::broker::SUPERVISED_PID_PLATFORMS
+        })
+    );
 
     // Both profiles are declared regardless of which one is serving: a consumer choosing a
     // profile must be able to see what it would get before starting that server.
@@ -63,6 +74,35 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
     let file_action =
         diagnostics["actions"].as_array().unwrap().iter().find(|a| a["name"] == "file").unwrap();
     assert_eq!(file_action["required"], serde_json::json!(["path"]));
+
+    let tools = client.list_tools(Default::default()).await.expect("tools/list");
+    let syntax_help =
+        tools.tools.iter().find(|tool| tool.name == "syntax_help").expect("syntax_help is listed");
+    assert!(
+        syntax_help.output_schema.as_ref().is_some_and(|schema| {
+            schema
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("schema_version"))
+        }),
+        "syntax_help publishes a versioned outputSchema"
+    );
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("syntax_help")
+                .with_arguments(Map::from_iter([("name".to_owned(), json!("Массив"))])),
+        )
+        .await
+        .expect("syntax_help call");
+    let body = result.structured_content.expect("syntax_help structuredContent");
+    assert_eq!(body["schema_version"], "1");
+    assert_eq!(body["kind"], "type");
+    assert_eq!(body["name"], "Массив");
+    assert!(
+        result.content.first().and_then(|content| content.raw.as_text()).is_some(),
+        "legacy text content remains available"
+    );
 
     client.cancel().await.expect("session closed");
 }

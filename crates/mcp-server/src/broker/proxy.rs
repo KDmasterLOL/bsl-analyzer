@@ -71,6 +71,52 @@ pub async fn connect_or_launch(
     Ok(ProxyOutcome::Served)
 }
 
+/// Connect only to the exact backend process launched by a supervisor.
+///
+/// Unlike [`connect_or_launch`], this performs one connection attempt, never
+/// starts a daemon, and never returns an outcome that permits stdio fallback.
+pub async fn connect_required(key: BackendKey, expected_pid: u32) -> anyhow::Result<()> {
+    let stream = connect_existing(&key, expected_pid).await?;
+    relay_stdio(stream).await
+}
+
+/// Connection half of [`connect_required`], split out so the identity check can be exercised
+/// without the stdio relay. Crate-private: the transport's contract is the whole operation, and
+/// a raw stream handed to a caller would let it skip the relay the mode exists to guarantee.
+#[cfg(any(unix, windows))]
+pub(crate) async fn connect_existing(
+    key: &BackendKey,
+    expected_pid: u32,
+) -> anyhow::Result<TokioStream> {
+    let stream = TokioStream::connect(backend_name(key)?)
+        .await
+        .map_err(|error| anyhow::anyhow!("required broker backend is unavailable: {error}"))?;
+    // Naming the owner is what tells a supervisor which of two different things happened: its
+    // daemon lost the bind to a backend that was already serving this workspace (and exited),
+    // or the socket is answered by something it should look at.
+    if let Err(mismatch) = crate::broker::security::verify_supervised_backend(&stream, expected_pid)
+    {
+        use crate::broker::security::SupervisedMismatch;
+        return Err(match mismatch {
+            SupervisedMismatch::OtherPid(actual) => anyhow::anyhow!(
+                "required broker backend is pid {actual}, not the supervised pid {expected_pid}: \
+                 this workspace already had a backend, and the supervised daemon exited without \
+                 becoming one"
+            ),
+            SupervisedMismatch::Unknown => anyhow::anyhow!(
+                "required broker backend identity could not be established for supervised pid \
+                 {expected_pid}"
+            ),
+        });
+    }
+    tracing::info!(
+        backend_pid = expected_pid,
+        backend_key = %key.digest(),
+        "connected to supervised broker backend"
+    );
+    Ok(stream)
+}
+
 async fn connect_with_launch(
     key: &BackendKey,
     mut daemon_cmd: Command,
@@ -287,4 +333,85 @@ fn spawn_detached(key: &BackendKey, cmd: &mut Command) -> anyhow::Result<Child> 
     let child = cmd.spawn()?;
     tracing::info!(log = %log_path.display(), "launched broker backend");
     Ok(child)
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use std::time::Duration;
+
+    use rmcp::ServiceExt;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::broker::{self, BackendKey};
+    use crate::{McpProfile, McpServer, SharedState};
+
+    fn reference_server() -> McpServer {
+        McpServer::new(McpProfile::Reference, SharedState::reference(None))
+    }
+
+    fn key_for(src: &TempDir) -> BackendKey {
+        BackendKey::new(
+            src.path(),
+            crate::WorkspaceCacheLayout::for_workspace(src.path()).root(),
+            McpProfile::Workspace,
+            0,
+            0,
+        )
+    }
+
+    async fn connect(key: &BackendKey) -> std::io::Result<TokioStream> {
+        TokioStream::connect(backend_name(key)?).await
+    }
+
+    async fn connect_within(key: &BackendKey, budget: Duration) -> TokioStream {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            if let Ok(s) = connect(key).await {
+                return s;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "backend never became reachable");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn the_supervised_connect_neither_launches_nor_falls_back() {
+        let src = TempDir::new().unwrap();
+        let key = key_for(&src);
+
+        let error = connect_existing(&key, std::process::id())
+            .await
+            .expect_err("required mode must not launch or fall back when no backend exists");
+
+        assert!(error.to_string().contains("unavailable"), "{error}");
+        assert!(connect(&key).await.is_err(), "required connect must not auto-launch a daemon");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_supervised_connect_takes_only_the_named_daemon() {
+        let src = TempDir::new().unwrap();
+        let key = key_for(&src);
+        let backend = tokio::spawn(broker::daemon::run(
+            || Ok(reference_server()),
+            key_for(&src),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        ));
+        let _ = connect_within(&key, Duration::from_secs(10)).await;
+
+        let wrong_pid = std::process::id().checked_add(1).unwrap();
+        let mismatch = connect_existing(&key, wrong_pid)
+            .await
+            .expect_err("a live but different backend PID must be rejected");
+        assert!(mismatch.to_string().contains("not the supervised pid"), "{mismatch}");
+
+        let stream = connect_existing(&key, std::process::id())
+            .await
+            .expect("the exact supervised daemon PID is trusted");
+        let client = ().serve(stream).await.expect("supervised daemon serves MCP");
+        assert!(client.peer_info().is_some(), "session saw the supervised backend");
+        client.cancel().await.ok();
+        backend.abort();
+    }
 }

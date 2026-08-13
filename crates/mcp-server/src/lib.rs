@@ -124,8 +124,10 @@ struct SyntaxHelpParams {
     name: String,
     /// Owning platform type when `name` is a member of a specific type (optional).
     type_name: Option<String>,
-    /// Output budget in tokens (~4 chars each); a large type's card is truncated at a line
-    /// boundary with a note pointing at the single-member lookup (default 6000).
+    /// Output budget in tokens (~4 chars each) covering the compatibility Markdown and the
+    /// structured card together: the Markdown is truncated at a line boundary with a note
+    /// pointing at the single-member lookup, and the card's listings take what is left
+    /// (`budget_exhausted` says when they were cut). Default 6000.
     max_output_tokens: Option<usize>,
 }
 
@@ -1493,9 +1495,16 @@ impl McpServer {
     /// from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
     /// want its exact signature. For free-text doc discovery use `search`; for broader
     /// conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-    /// the member belongs to a specific platform type, optional `max_output_tokens` bounding a
-    /// large type's card.
-    #[tool(name = "syntax_help", annotations(read_only_hint = true))]
+    /// the member belongs to a specific platform type, optional `max_output_tokens` bounding the
+    /// response. Successful responses retain the compatibility Markdown and add a versioned
+    /// structured card, so clients never need to parse the rendering.
+    #[tool(
+        name = "syntax_help",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            tools::platform::SyntaxHelpResponse,
+        >(),
+        annotations(read_only_hint = true)
+    )]
     async fn syntax_help(
         &self,
         params: Parameters<SyntaxHelpParams>,
@@ -1913,10 +1922,13 @@ mod tool_descriptions {
             from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
             want its exact signature. For free-text doc discovery use `search`; for broader
             conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-            the member belongs to a specific platform type, optional `max_output_tokens` bounding a
-            large type's card.
-              - max_output_tokens: Output budget in tokens (~4 chars each); a large type's card is truncated at a line
-            boundary with a note pointing at the single-member lookup (default 6000).
+            the member belongs to a specific platform type, optional `max_output_tokens` bounding the
+            response. Successful responses retain the compatibility Markdown and add a versioned
+            structured card, so clients never need to parse the rendering.
+              - max_output_tokens: Output budget in tokens (~4 chars each) covering the compatibility Markdown and the
+            structured card together: the Markdown is truncated at a line boundary with a note
+            pointing at the single-member lookup, and the card's listings take what is left
+            (`budget_exhausted` says when they were cut). Default 6000.
               - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 

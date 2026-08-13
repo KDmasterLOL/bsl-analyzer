@@ -118,9 +118,7 @@ impl EnvFlags {
     /// availability, so it spans both the managed and the ordinary variant.
     /// `None` (no markup) maps to [`Self::ALL`] — never diagnosed.
     pub fn from_platform_context(context: Option<&bsl_platform::ContextAvailability>) -> EnvFlags {
-        let Some(ctx) = context else {
-            return Self::ALL;
-        };
+        let ctx = bsl_platform::ContextAvailability::effective(context);
         let mut env = Self::EMPTY;
         if ctx.thin_client {
             env = env | Self::THIN_CLIENT;

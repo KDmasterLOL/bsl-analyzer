@@ -16,3 +16,4 @@ pub use name::{
     backend_name, embedding_config_fingerprint, workspace_topology_fingerprint, BackendKey,
     TOPOLOGY_FP_ENV,
 };
+pub use security::{peer_pid_available, SUPERVISED_PID_PLATFORMS};
