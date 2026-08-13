@@ -62,7 +62,7 @@ mod tests {
             code,
             DiagnosticCode::JoinWithVirtualTable,
             expect![[r#"
-                JoinWithVirtualTable @ 3:85..3:121
+                JoinWithVirtualTable @ 3:85..3:120
                   message: Не следует использовать соединения с виртуальными таблицами
                   severity: Warning"#]],
         );
@@ -158,7 +158,7 @@ mod tests {
             code,
             DiagnosticCode::JoinWithVirtualTable,
             expect![[r#"
-                JoinWithVirtualTable @ 3:48..3:84
+                JoinWithVirtualTable @ 3:48..3:83
                   message: Не следует использовать соединения с виртуальными таблицами
                   severity: Warning"#]],
         );
@@ -223,10 +223,10 @@ mod tests {
             code,
             DiagnosticCode::JoinWithVirtualTable,
             expect![[r#"
-                JoinWithVirtualTable @ 5:23..5:59
+                JoinWithVirtualTable @ 5:23..5:58
                   message: Не следует использовать соединения с виртуальными таблицами
                   severity: Warning
-                JoinWithVirtualTable @ 6:23..6:56
+                JoinWithVirtualTable @ 6:23..6:55
                   message: Не следует использовать соединения с виртуальными таблицами
                   severity: Warning"#]],
         );

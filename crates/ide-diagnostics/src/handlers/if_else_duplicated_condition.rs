@@ -67,7 +67,7 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 7:15..7:21
+            IfElseDuplicatedCondition @ 7:15..7:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -114,7 +114,7 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:21
+            IfElseDuplicatedCondition @ 5:15..5:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -138,7 +138,7 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:27
+            IfElseDuplicatedCondition @ 5:15..5:26
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -183,7 +183,7 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:28
+            IfElseDuplicatedCondition @ 5:15..5:27
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -211,10 +211,10 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 6:19..6:25
+            IfElseDuplicatedCondition @ 6:19..6:24
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning
-            IfElseDuplicatedCondition @ 9:15..9:21
+            IfElseDuplicatedCondition @ 9:15..9:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -246,10 +246,10 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 7:15..7:21
+            IfElseDuplicatedCondition @ 7:15..7:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning
-            IfElseDuplicatedCondition @ 11:15..11:27
+            IfElseDuplicatedCondition @ 11:15..11:26
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -285,10 +285,10 @@ mod tests {
             .collect();
 
         expect![[r#"
-            IfElseDuplicatedCondition @ 10:19..10:25
+            IfElseDuplicatedCondition @ 10:19..10:24
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning
-            IfElseDuplicatedCondition @ 15:15..15:21
+            IfElseDuplicatedCondition @ 15:15..15:20
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 2)
               severity: Warning"#]].assert_eq(&format_diags(code, &dupl_diags));
     }
@@ -334,10 +334,10 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::IfElseDuplicatedCondition)
             .collect();
         expect![[r#"
-            IfElseDuplicatedCondition @ 5:15..5:28
+            IfElseDuplicatedCondition @ 5:15..5:27
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning
-            IfElseDuplicatedCondition @ 7:15..7:28
+            IfElseDuplicatedCondition @ 7:15..7:27
               message: Дублированное условие в конструкции 'Если...Тогда...ИначеЕсли' (уже использовано в позиции 1)
               severity: Warning"#]].assert_eq(&format_diags(dup_code, &dupl_diags2));
     }

@@ -12,80 +12,9 @@
 use parser::parse_sdbl;
 use syntax::SyntaxKind;
 
-/// xorshift64*, so a failure is reproducible from its seed alone.
-struct Rng(u64);
+mod common;
 
-impl Rng {
-    fn next(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.0 = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
-    }
-}
-
-/// Pieces of real queries, pieces of broken ones, and pure noise. Mixing
-/// them is what produces the shapes nobody writes down: a clause inside a
-/// group, a separator inside an unclosed brace, a keyword after a dot.
-const FRAGMENTS: &[&str] = &[
-    "ВЫБРАТЬ",
-    "SELECT",
-    "УНИЧТОЖИТЬ ВТ",
-    "А",
-    "Т.Поле",
-    "Т.ИЗ",
-    "Т .\tГДЕ",
-    "ИЗ Справочник.Товары КАК Т",
-    "ГДЕ А = 1",
-    "СГРУППИРОВАТЬ ПО Н",
-    "ИМЕЮЩИЕ СУММА(А) > 0",
-    "УПОРЯДОЧИТЬ ПО Н ИЕРАРХИЯ УБЫВ",
-    "ИТОГИ СУММА(А) ПО Н ТОЛЬКО ИЕРАРХИЯ",
-    "ИТОГИ СУММА(А) ПО П ПЕРИОДАМИ(ДЕНЬ, &Н, &К)",
-    "ОБЪЕДИНИТЬ ВСЕ",
-    "ЛЕВОЕ СОЕДИНЕНИЕ У ПО Т.А = У.А",
-    "ПОМЕСТИТЬ Врем",
-    "ДЛЯ ИЗМЕНЕНИЯ",
-    "{ГДЕ Т.Поле}",
-    "{",
-    "}",
-    "(",
-    ")",
-    "(ВЫБРАТЬ Б ИЗ У)",
-    "ПЕРИОДАМИ(",
-    "КАК",
-    ",",
-    ";",
-    "42",
-    "\"строка\"",
-    "\"незакрытая",
-    "&Параметр",
-    "&",
-    "ЫЫЫ",
-    "%1",
-    "#Имя",
-    " ",
-    "\n",
-    "\t",
-    "// комментарий\n",
-];
-
-fn generate(rng: &mut Rng, pieces: usize) -> String {
-    let mut out = String::new();
-    for _ in 0..pieces {
-        out.push_str(FRAGMENTS[rng.below(FRAGMENTS.len())]);
-        if rng.below(3) == 0 {
-            out.push(' ');
-        }
-    }
-    out
-}
+use common::{generate, Rng, FRAGMENTS};
 
 /// Every property, checked on one input. Returns the first breach found.
 fn breach(input: &str) -> Option<String> {

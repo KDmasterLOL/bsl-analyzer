@@ -256,7 +256,7 @@ mod tests {
                 QueryNestedFieldsByDot @ 104:8..104:66
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning
-                QueryNestedFieldsByDot @ 116:4..116:84
+                QueryNestedFieldsByDot @ 116:4..116:83
                   message: Обнаружено разыменование ссылочного поля
                   severity: Warning"#]],
         );
@@ -336,7 +336,7 @@ mod tests {
             .filter(|d| d.code == DiagnosticCode::QueryNestedFieldsByDot)
             .collect();
         expect![[r#"
-            QueryNestedFieldsByDot @ 5:14..6:6
+            QueryNestedFieldsByDot @ 5:14..5:63
               message: Обнаружено разыменование ссылочного поля
               severity: Warning"#]]
         .assert_eq(&format_diags(code, &diagnostics));

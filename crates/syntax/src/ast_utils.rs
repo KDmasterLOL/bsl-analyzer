@@ -1,5 +1,29 @@
 use crate::{SyntaxKind, SyntaxNode, SyntaxToken};
 
+/// Точка с запятой, стоящая за узлом через одну лишь тривию.
+///
+/// Тривия принадлежит предку, а не узлу, поэтому между оператором и его `;`
+/// стоят пробел, перевод строки или комментарий, а требование
+/// непосредственного соседства даёт «точки с запятой нет» на любом
+/// отформатированном коде.
+///
+/// Соседний УЗЕЛ поиск прекращает: за ним стоит уже другой оператор, и его
+/// точка с запятой этому узлу не принадлежит.
+pub fn trailing_semicolon(node: &SyntaxNode) -> Option<SyntaxToken> {
+    let mut next = node.next_sibling_or_token();
+    while let Some(element) = next {
+        let token = element.as_token()?;
+        if token.kind() == SyntaxKind::SEMICOLON {
+            return Some(token.clone());
+        }
+        if !token.kind().is_trivia() {
+            return None;
+        }
+        next = element.next_sibling_or_token();
+    }
+    None
+}
+
 pub fn extract_leading_comments(node: &SyntaxNode, source_text: &str) -> Option<Vec<String>> {
     let node_start: usize = node.text_range().start().into();
     extract_leading_comments_at_offset(node_start, source_text)

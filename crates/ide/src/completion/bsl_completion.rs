@@ -458,12 +458,12 @@ fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {
         SyntaxKind::R_PAREN | SyntaxKind::L_PAREN | SyntaxKind::COMMA => true,
         SyntaxKind::SEMICOLON => true,
         SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {
-            let mut prev = token.prev_token();
+            let mut prev = syntax::prev_token_past_empty(token);
             while let Some(ref t) = prev {
                 if !t.kind().is_trivia() {
                     break;
                 }
-                prev = t.prev_token();
+                prev = syntax::prev_token_past_empty(t);
             }
             match prev {
                 Some(t) => !matches!(t.kind(), SyntaxKind::DOT),

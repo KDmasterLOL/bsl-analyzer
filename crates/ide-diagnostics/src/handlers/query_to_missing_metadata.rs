@@ -117,7 +117,7 @@ mod tests {
             config_xml,
             &[("ЗапросыМетаданных", common_module)],
             expect![[r#"
-                QueryToMissingMetadata @ 6:57..6:87
+                QueryToMissingMetadata @ 6:57..6:86
                   message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.ЗапросыМетаданных" в запросе
                   severity: Blocker"#]],
         );
@@ -157,7 +157,7 @@ mod tests {
             config_xml,
             &[("ЗапросыМетаданных", common_module)],
             expect![[r#"
-                QueryToMissingMetadata @ 6:57..6:90
+                QueryToMissingMetadata @ 6:57..6:89
                   message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.НесуществующийМодуль" в запросе
                   severity: Blocker"#]],
         );
@@ -205,10 +205,10 @@ mod tests {
             config_xml,
             &[("ЗапросыМетаданных", common_module), ("MetadataQueries", common_module)],
             expect![[r#"
-                QueryToMissingMetadata @ 8:13..8:43
+                QueryToMissingMetadata @ 8:13..8:42
                   message: Исправьте обращение к несуществующему метаданному "ОбщийМодуль.ЗапросыМетаданных" в запросе
                   severity: Blocker
-                QueryToMissingMetadata @ 13:15..13:44
+                QueryToMissingMetadata @ 13:15..13:43
                   message: Исправьте обращение к несуществующему метаданному "CommonModule.MetadataQueries" в запросе
                   severity: Blocker"#]],
         );

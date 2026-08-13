@@ -367,10 +367,10 @@ fn resolve_dot_anchor(
     if !token.kind().is_name_token() {
         return None;
     }
-    let mut cur = token.prev_token();
+    let mut cur = syntax::prev_token_past_empty(token);
     while let Some(t) = cur.clone() {
         if t.kind().is_trivia() {
-            cur = t.prev_token();
+            cur = syntax::prev_token_past_empty(&t);
         } else {
             break;
         }

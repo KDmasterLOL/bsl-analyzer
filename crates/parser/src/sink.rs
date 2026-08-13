@@ -1,5 +1,8 @@
+//! Перевод потока событий парсера в дерево — и место, где объявлено, какому
+//! узлу принадлежит тривия.
+
 use parser_error::{ParseError, RecoveryKind};
-use syntax::{SyntaxTreeBuilder, TextRange, TextSize};
+use syntax::{SyntaxKind, SyntaxTreeBuilder, TextRange, TextSize};
 
 use crate::{
     event::Event,
@@ -9,26 +12,87 @@ use crate::{
 pub struct Sink<'t, 'cache> {
     builder: SyntaxTreeBuilder<'cache>,
     tokens: &'t [lexer::Token],
+    /// Курсор потока лексем: двигается на каждом токенном событии, отдана
+    /// лексема билдеру или отложена.
+    ///
+    /// Диапазоны ошибок считаются по нему, потому что позиции, с которыми их
+    /// сравнивают, приходят из парсера, а тот ходит по лексемам подряд,
+    /// включая тривию.
     token_pos: usize,
+    /// Позиция последней ОТДАННОЙ значимой лексемы в том же сыром счёте.
+    ///
+    /// Ошибка, о которой сообщает потраченный токен, обязана указывать на
+    /// токен, а не на пробел перед ним: с буферизацией предыдущая лексема
+    /// потока и последняя попавшая в дерево — разные вещи.
+    last_significant_pos: Option<usize>,
+    /// Начало непрерывного участка тривии, ещё не отданного билдеру; конец —
+    /// текущее положение курсора.
+    ///
+    /// Участок непрерывен по построению: значимый токен буфер сбрасывает,
+    /// поэтому между отложенными лексемами другой оказаться не может.
+    pending_trivia_start: Option<usize>,
+    /// Открытия и закрытия узлов, ещё не выполненные, в порядке поступления.
+    ///
+    /// Хранится потоком, а не стеком открытий, потому что узел, закрывшийся
+    /// без единого значимого токена, обязан сохранить своё место среди
+    /// отложенных предков: выполнить их открытия ради него значит отдать им
+    /// ведущую тривию, которая по норме принадлежит предку снаружи.
+    deferred_nodes: Vec<DeferredNode>,
+    /// Сколько отложенных открытий ещё не закрыто.
+    deferred_depth: usize,
+    /// Сколько узлов открыто в билдере.
+    open_nodes: usize,
     errors: Vec<(TextRange, ParseError)>,
+}
+
+enum DeferredNode {
+    Start(SyntaxKind),
+    Finish,
 }
 
 impl<'t> Sink<'t, 'static> {
     pub fn new(tokens: &'t [lexer::Token]) -> Self {
-        Self { builder: SyntaxTreeBuilder::new(), tokens, token_pos: 0, errors: Vec::new() }
+        Self::with_builder(SyntaxTreeBuilder::new(), tokens)
     }
 }
 
 impl<'t, 'cache> Sink<'t, 'cache> {
     pub fn with_cache(tokens: &'t [lexer::Token], cache: &'cache mut syntax::NodeCache) -> Self {
+        Self::with_builder(SyntaxTreeBuilder::with_cache(cache), tokens)
+    }
+
+    fn with_builder(builder: SyntaxTreeBuilder<'cache>, tokens: &'t [lexer::Token]) -> Self {
         Self {
-            builder: SyntaxTreeBuilder::with_cache(cache),
+            builder,
             tokens,
             token_pos: 0,
+            last_significant_pos: None,
+            pending_trivia_start: None,
+            deferred_nodes: Vec::new(),
+            deferred_depth: 0,
+            open_nodes: 0,
             errors: Vec::new(),
         }
     }
 
+    /// Строит дерево, объявляя, кому принадлежит тривия.
+    ///
+    /// Норма: тривия принадлежит общему предку соседних значимых токенов.
+    /// Объявлена она здесь, а не в грамматике, потому что `Marker::complete`
+    /// закрывает узел по текущей позиции парсера — правило, съевшее пробел
+    /// ради заглядывания вперёд, втягивает его в узел независимо от того,
+    /// зачем съело. Держать норму перечнем правил значит держать её
+    /// дисциплиной авторов.
+    ///
+    /// Отсюда два отступления от прямой трансляции событий. Тривия копится в
+    /// буфере и уходит билдеру только перед значимым токеном — это даёт
+    /// хвостовой край, потому что закрытие узла успевает раньше сброса.
+    /// Открытие узла откладывается до его первого значимого токена — это даёт
+    /// ведущий край, потому что в грамматике `p.start()` сплошь и рядом стоит
+    /// раньше `p.skip_trivia()`, и сброса «перед открытием» не хватило бы.
+    ///
+    /// Узел, у которого своих значимых токенов не оказалось, остаётся пустым;
+    /// это узлы ошибок, и диапазоны самих сообщений считаются отдельно.
     pub fn finish(mut self, events: Vec<Event>) -> SyntaxTreeBuilder<'cache> {
         let mut forward_parents = Vec::new();
         let mut skip = vec![false; events.len()];
@@ -69,13 +133,42 @@ impl<'t, 'cache> Sink<'t, 'cache> {
                         }
                     }
 
+                    // Корень открывается сразу: сбрасывать тривию некуда,
+                    // пока не открыт ни один узел, и хвост файла иначе
+                    // выпал бы из дерева.
+                    let defer = self.open_nodes > 0 || !self.deferred_nodes.is_empty();
                     for kind in forward_parents.iter().rev() {
-                        self.builder.start_node(node_kind_to_syntax(*kind));
+                        let kind = node_kind_to_syntax(*kind);
+                        if defer {
+                            self.deferred_nodes.push(DeferredNode::Start(kind));
+                            self.deferred_depth += 1;
+                        } else {
+                            self.builder.start_node(kind);
+                            self.open_nodes += 1;
+                        }
                     }
                 }
 
+                // Закрытие идёт раньше любого сброса буфера — этим и держится
+                // хвостовой край нормы.
                 Event::Finish => {
+                    if self.deferred_depth > 0 {
+                        self.deferred_nodes.push(DeferredNode::Finish);
+                        self.deferred_depth -= 1;
+                        continue;
+                    }
+
+                    // Уравновешенные отложенные узлы значимых токенов так и
+                    // не получили. Место у них внутри закрываемого узла,
+                    // поэтому выйти нерождёнными они не могут — но и тривию
+                    // им отдавать не за что: они пусты и встают там, где
+                    // билдер стоит сейчас.
+                    self.perform_deferred_nodes();
+                    if self.open_nodes == 1 {
+                        self.flush_trivia();
+                    }
                     self.builder.finish_node();
+                    self.open_nodes -= 1;
                 }
 
                 Event::Token { kind } => {
@@ -104,11 +197,55 @@ impl<'t, 'cache> Sink<'t, 'cache> {
     }
 
     fn token(&mut self, kind: lexer::TokenKind) {
-        if let Some(token) = self.tokens.get(self.token_pos) {
-            let syntax_kind = token_kind_to_syntax(kind);
+        let Some(token) = self.tokens.get(self.token_pos) else {
+            return;
+        };
+
+        let syntax_kind = token_kind_to_syntax(kind);
+        if syntax_kind.is_trivia() {
+            self.pending_trivia_start.get_or_insert(self.token_pos);
+        } else {
+            // Порядок здесь и есть ведущий край нормы: тривия достаётся тому,
+            // что было открыто до неё, а узлы этого токена открываются уже
+            // после неё.
+            self.flush_trivia();
+            self.perform_deferred_nodes();
             self.builder.token(syntax_kind, &token.text);
-            self.token_pos += 1;
+            self.last_significant_pos = Some(self.token_pos);
         }
+        self.token_pos += 1;
+    }
+
+    /// Отдаёт накопленную тривию билдеру.
+    ///
+    /// Вид берётся у самой лексемы, а не у события: текст она отдаёт тот же,
+    /// и разойтись они не могут — событие рождается из лексемы под курсором.
+    fn flush_trivia(&mut self) {
+        let Some(start) = self.pending_trivia_start.take() else {
+            return;
+        };
+        let tokens = self.tokens;
+        for token in &tokens[start..self.token_pos] {
+            self.builder.token(token_kind_to_syntax(token.kind), &token.text);
+        }
+    }
+
+    fn perform_deferred_nodes(&mut self) {
+        self.deferred_depth = 0;
+        let mut deferred = std::mem::take(&mut self.deferred_nodes);
+        for node in deferred.drain(..) {
+            match node {
+                DeferredNode::Start(kind) => {
+                    self.builder.start_node(kind);
+                    self.open_nodes += 1;
+                }
+                DeferredNode::Finish => {
+                    self.builder.finish_node();
+                    self.open_nodes -= 1;
+                }
+            }
+        }
+        self.deferred_nodes = deferred;
     }
 
     fn compute_error_range(&self, err: &ParseError, span_start_token: Option<usize>) -> TextRange {
@@ -125,7 +262,7 @@ impl<'t, 'cache> Sink<'t, 'cache> {
                 self.safe_range(start, end)
             }
             RecoveryKind::Custom => {
-                if self.token_pos > 0 {
+                if self.last_significant_pos.is_some() {
                     self.previous_token_range_or_zero_at_start()
                 } else {
                     let offset = self.current_token_offset_or_source_len();
@@ -135,12 +272,17 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         }
     }
 
+    /// Диапазон токена, которым ошибка была потрачена.
+    ///
+    /// Берётся последний ЗНАЧИМЫЙ токен, а не предыдущая лексема потока:
+    /// ошибку, потраченную на пробел, следует показывать на слове перед ним,
+    /// а не на самом пробеле.
     fn previous_token_range_or_zero_at_start(&self) -> TextRange {
-        if self.token_pos == 0 {
+        let Some(pos) = self.last_significant_pos else {
             return TextRange::empty(TextSize::new(0));
-        }
+        };
 
-        self.tokens.get(self.token_pos - 1).map_or_else(
+        self.tokens.get(pos).map_or_else(
             || {
                 let offset = self.source_len();
                 TextRange::empty(TextSize::new(offset))
@@ -280,6 +422,71 @@ mod tests {
             "expected a MissingToken diagnostic at EOF, got {:?}",
             parse.errors()
         );
+    }
+
+    /// Тривия перед концом файла копится в буфере, поэтому «текущий токен»
+    /// в счёте отданных билдеру лексем и в счёте потока — разные вещи.
+    /// Здесь ошибка обязана встать в конец файла, а не перед пробелами.
+    #[test]
+    fn missing_token_after_buffered_trivia_still_lands_at_eof() {
+        let source = "Процедура Тест(   ";
+        let parse = crate::parse(source);
+        let expected = TextRange::empty(TextSize::new(source.len() as u32));
+
+        assert!(
+            parse.errors().iter().any(|error| {
+                error.range() == expected
+                    && error.structured().recovery() == RecoveryKind::MissingToken
+            }),
+            "ожидалась MissingToken в конце файла, получено {:?}",
+            parse.errors()
+        );
+    }
+
+    /// Конец спана берётся по потоку лексем, а не по отданным билдеру: иначе
+    /// он оборвался бы перед накопленной тривией.
+    #[test]
+    fn error_span_after_buffered_trivia_covers_it() {
+        let source = "А Б ;";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::ErrorWithSpan { start_token: 0, err: unexpected(RecoveryKind::RecoverySpan) },
+            Event::Token { kind: lexer::TokenKind::Semicolon },
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        // Конец — начало `;`, то есть за пробелом. Реализация, считающая
+        // отданные билдеру лексемы, оборвала бы спан на начале `Б`.
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(parse.errors()[0].range(), range(0, tokens[4].offset as u32));
+        assert_ne!(parse.errors()[0].range(), range(0, tokens[2].offset as u32));
+    }
+
+    /// Ветвь `Custom` при непустом буфере: своей проверки у неё нет ни одной,
+    /// а сообщить она обязана о слове, а не о пробеле за ним.
+    #[test]
+    fn custom_error_after_buffered_trivia_points_at_the_last_significant_token() {
+        let source = "А   ";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Error(unexpected(RecoveryKind::Custom)),
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(parse.errors()[0].range(), range(0, 2));
     }
 
     #[test]

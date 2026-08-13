@@ -3,7 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::catch_class::{classify_catch_body, CatchBodyClass};
 use hir::{IdConversion, Stmt, StmtId};
-use syntax::SyntaxKind;
+use syntax::{NodeOrToken, SyntaxKind};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -189,14 +189,22 @@ fn except_clause_has_comments(
     else {
         return false;
     };
-    let Some(except_clause) = try_node.children().find(|n| n.kind() == SyntaxKind::EXCEPT_CLAUSE)
-    else {
-        return false;
-    };
-    except_clause
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .any(|tok| tok.kind() == SyntaxKind::COMMENT)
+    // Область блока задаётся ключевыми словами, а не узлом клаузы: тривия
+    // принадлежит общему предку соседних значимых токенов, поэтому
+    // комментарий пустого блока лежит уже не внутри `EXCEPT_CLAUSE`, а рядом
+    // с ней. Вложенная `Попытка` границу не сдвигает — её `КонецПопытки`
+    // лежит внутри своего узла и прямым ребёнком этого не является.
+    try_node
+        .children_with_tokens()
+        .skip_while(|el| el.kind() != SyntaxKind::KW_EXCEPT)
+        .take_while(|el| el.kind() != SyntaxKind::KW_END_TRY)
+        .any(|el| match el {
+            NodeOrToken::Token(token) => token.kind() == SyntaxKind::COMMENT,
+            NodeOrToken::Node(node) => node
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .any(|token| token.kind() == SyntaxKind::COMMENT),
+        })
 }
 
 fn emit_at_except_keyword(

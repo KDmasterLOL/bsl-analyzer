@@ -53,20 +53,20 @@ fn test_alias_with_as_keyword() {
                   SDBL_QUERY@0..40
                     IDENT@0..6 "SELECT"
                     WHITESPACE@6..7 " "
-                    SDBL_FIELD_LIST@7..27
+                    SDBL_FIELD_LIST@7..26
                       SDBL_SELECTED_FIELD@7..26
-                        SDBL_LOGICAL_OR_EXPR@7..12
-                          SDBL_LOGICAL_AND_EXPR@7..12
-                            SDBL_ADDITIVE_EXPR@7..12
-                              SDBL_MULTIPLICATIVE_EXPR@7..12
-                                SDBL_COLUMN_REF@7..12
+                        SDBL_LOGICAL_OR_EXPR@7..11
+                          SDBL_LOGICAL_AND_EXPR@7..11
+                            SDBL_ADDITIVE_EXPR@7..11
+                              SDBL_MULTIPLICATIVE_EXPR@7..11
+                                SDBL_COLUMN_REF@7..11
                                   IDENT@7..11 "Name"
-                                  WHITESPACE@11..12 " "
+                        WHITESPACE@11..12 " "
                         SDBL_ALIAS@12..26
                           IDENT@12..14 "AS"
                           WHITESPACE@14..15 " "
                           IDENT@15..26 "ProductName"
-                      WHITESPACE@26..27 " "
+                    WHITESPACE@26..27 " "
                     SDBL_FROM_CLAUSE@27..40
                       IDENT@27..31 "FROM"
                       WHITESPACE@31..32 " "

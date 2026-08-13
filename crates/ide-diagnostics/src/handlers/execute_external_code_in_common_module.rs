@@ -90,7 +90,7 @@ fn is_global_eval_call(node: &syntax::SyntaxNode) -> bool {
         return false;
     }
 
-    if let Some(prev) = first_token.prev_token() {
+    if let Some(prev) = syntax::prev_token_past_empty(&first_token) {
         if prev.kind() == SyntaxKind::DOT {
             return false;
         }

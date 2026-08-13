@@ -406,12 +406,11 @@ mod tests {
 
             	КонецЦикла;
             	Возврат Результат;
-
             --- segments ---
             Copied eff=0..78 ext=177..255 "Результат = 1;\n\tДля Индекс = 1 По Степень Цикл\n"
             Copied eff=78..79 ext=364..365 "\n"
             Inserted eff=79..144 ext=380..445 "\n\t\tРезультат = Результат * Основание;\n"
-            Copied eff=144..204 ext=470..530 "\n\tКонецЦикла;\n\tВозврат Результат;\n"
+            Copied eff=144..203 ext=470..529 "\n\tКонецЦикла;\n\tВозврат Результат;"
         "#]]
         .assert_eq(&render_strip(CHANGE_CONTROL_EXAMPLE));
     }
