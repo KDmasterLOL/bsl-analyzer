@@ -36,6 +36,15 @@ fn is_known_type(name: &str) -> bool {
 /// with its own measure.
 const KNOWN_DEVIATIONS: &[&str] = &["СообщитьПользователю"];
 
+/// Both spellings of an entry are callable, so both are checked apart. A pair
+/// where only one half exists is the drift this gate is for: an English synonym
+/// that no longer resolves silently drops every English call from the registry
+/// while the Russian half keeps the entry looking healthy. An empty half means
+/// the surface has no such spelling and is skipped.
+fn spellings(ru: &'static str, en: &'static str) -> impl Iterator<Item = &'static str> {
+    [ru, en].into_iter().filter(|name| !name.is_empty())
+}
+
 /// A guarded name is worth guarding only where the platform actually has it.
 #[test]
 fn security_entries_match_platform_surface() {
@@ -47,13 +56,17 @@ fn security_entries_match_platform_surface() {
         }
         match entry.kind {
             security::EntryKind::GlobalMethod => {
-                if !is_global_function(entry.ru) && !is_global_function(entry.en) {
-                    wrong.push(format!("{}: global method absent from platform data", entry.ru));
+                for name in spellings(entry.ru, entry.en) {
+                    if !is_global_function(name) {
+                        wrong.push(format!("{name}: global method absent from platform data"));
+                    }
                 }
             }
             security::EntryKind::Constructor => {
-                if !is_known_type(entry.ru) && !is_known_type(entry.en) {
-                    wrong.push(format!("{}: constructor type absent from platform data", entry.ru));
+                for name in spellings(entry.ru, entry.en) {
+                    if !is_known_type(name) {
+                        wrong.push(format!("{name}: constructor type absent from platform data"));
+                    }
                 }
             }
             // The owners are library common modules — BSP ships them, the
@@ -89,7 +102,7 @@ fn known_deviations_are_still_deviating() {
             .lookup_global(name)
             .unwrap_or_else(|| panic!("{name}: no longer a registry global, drop the deviation"));
         assert!(
-            !is_global_function(entry.ru) && !is_global_function(entry.en),
+            spellings(entry.ru, entry.en).all(|spelling| !is_global_function(spelling)),
             "{name}: platform data now has it, drop the deviation"
         );
     }
@@ -102,8 +115,10 @@ fn capability_entries_match_platform_surface() {
     for entry in capability::registry().entries() {
         match entry.kind {
             capability::EntryKind::GlobalMethod => {
-                if !is_global_function(entry.ru) && !is_global_function(entry.en) {
-                    wrong.push(format!("{}: global method absent from platform data", entry.ru));
+                for name in spellings(entry.ru, entry.en) {
+                    if !is_global_function(name) {
+                        wrong.push(format!("{name}: global method absent from platform data"));
+                    }
                 }
             }
             // Spelling alone matches this kind, so at least one type must own
@@ -111,13 +126,17 @@ fn capability_entries_match_platform_surface() {
             // same-named global function does not save the entry: the global
             // surface is declared by a separate `GlobalMethod` entry.
             capability::EntryKind::AnyReceiverMethod => {
-                if !some_type_declares(entry.ru) && !some_type_declares(entry.en) {
-                    wrong.push(format!("{}: no platform type declares this method", entry.ru));
+                for name in spellings(entry.ru, entry.en) {
+                    if !some_type_declares(name) {
+                        wrong.push(format!("{name}: no platform type declares this method"));
+                    }
                 }
             }
             capability::EntryKind::Constructor | capability::EntryKind::Type => {
-                if !is_known_type(entry.ru) && !is_known_type(entry.en) {
-                    wrong.push(format!("{}: type absent from platform data", entry.ru));
+                for name in spellings(entry.ru, entry.en) {
+                    if !is_known_type(name) {
+                        wrong.push(format!("{name}: type absent from platform data"));
+                    }
                 }
             }
             capability::EntryKind::GlobalProperty => {}
