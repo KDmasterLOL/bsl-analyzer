@@ -3982,27 +3982,36 @@ fn is_proceed_with_call_name(name: &Name) -> bool {
 }
 
 /// Categories whose verdict is drawn here rather than in lowering, because it
-/// depends on who owns the name. Listed one by one on purpose: a category joins
-/// only together with the projection that reports it and with its own measure
-/// on a real configuration.
-const GUARDED_CATEGORIES: &[bsl_platform::security::Category] =
-    &[bsl_platform::security::Category::ExternalApp, bsl_platform::security::Category::FileSystem];
+/// depends on who owns the name. The two surfaces keep separate lists: a
+/// category is admitted to a surface only together with the projection that
+/// reports it and with its own measure on a real configuration, and the lists
+/// differ today — the file-system category has been measured on bare calls
+/// alone, so a future library method of that category cannot slip onto the
+/// qualified path by inheriting one shared list.
+const QUALIFIED_GUARDED_CATEGORIES: &[SecurityCategory] = &[SecurityCategory::ExternalApp];
+const BARE_GUARDED_CATEGORIES: &[SecurityCategory] =
+    &[SecurityCategory::ExternalApp, SecurityCategory::FileSystem];
 
-fn guarded_category(entry: &bsl_platform::security::SecurityEntry) -> Option<SecurityCategory> {
-    GUARDED_CATEGORIES.contains(&entry.category).then_some(entry.category)
+fn guarded_category(
+    entry: &bsl_platform::security::SecurityEntry,
+    admitted: &[SecurityCategory],
+) -> Option<SecurityCategory> {
+    admitted.contains(&entry.category).then_some(entry.category)
 }
 
 /// A method of a library common module, matched only under a declared owner.
 fn guarded_module_call(receiver: &str, method: &str) -> Option<SecurityCategory> {
     bsl_platform::security::registry()
         .lookup_module_method(receiver, method)
-        .and_then(guarded_category)
+        .and_then(|entry| guarded_category(entry, QUALIFIED_GUARDED_CATEGORIES))
 }
 
 /// A global-context method. Reachable only as a bare call: a qualified one names
 /// something else that shares the spelling.
 fn guarded_global_call(name: &str) -> Option<SecurityCategory> {
-    bsl_platform::security::registry().lookup_global(name).and_then(guarded_category)
+    bsl_platform::security::registry()
+        .lookup_global(name)
+        .and_then(|entry| guarded_category(entry, BARE_GUARDED_CATEGORIES))
 }
 
 /// Inference over an extension module's OWN bodies under *weaving* (`&Вместо` /

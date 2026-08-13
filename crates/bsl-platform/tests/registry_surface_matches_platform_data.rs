@@ -9,21 +9,41 @@ use bsl_platform::security;
 use bsl_platform::PlatformData;
 use stdx::case::CaseExt;
 
-/// Any platform type declaring a method spelled this way.
-fn some_type_declares(name: &str) -> bool {
-    let folded = name.fold_lower();
-    PlatformData::instance()
-        .all_methods()
-        .iter()
-        .any(|m| m.name.fold_lower() == folded || m.english_name.fold_lower() == folded)
+/// Some platform type declaring one method under BOTH spellings of the pair.
+/// Checking the halves apart would accept a pair glued from two different real
+/// methods, which is the same wrong lookup as a typo, only harder to see.
+fn some_type_declares_pair(ru: &str, en: &str) -> bool {
+    let (ru, en) = (ru.fold_lower(), en.fold_lower());
+    PlatformData::instance().all_methods().iter().any(|m| {
+        let (m_ru, m_en) = (m.name.fold_lower(), m.english_name.fold_lower());
+        (ru.is_empty() || m_ru == ru || m_en == ru) && (en.is_empty() || m_en == en || m_ru == en)
+    })
 }
 
 fn is_global_function(name: &str) -> bool {
     PlatformData::instance().get_global_function(name).is_some()
 }
 
+/// Both spellings must land on the SAME global function.
+fn global_function_pair_agrees(ru: &str, en: &str) -> bool {
+    let data = PlatformData::instance();
+    match (data.get_global_function(ru), data.get_global_function(en)) {
+        (Some(by_ru), Some(by_en)) => by_ru.id == by_en.id,
+        _ => false,
+    }
+}
+
 fn is_known_type(name: &str) -> bool {
     PlatformData::instance().get_type(name).is_some()
+}
+
+/// Both spellings must land on the SAME platform type.
+fn type_pair_agrees(ru: &str, en: &str) -> bool {
+    let data = PlatformData::instance();
+    match (data.get_type(ru), data.get_type(en)) {
+        (Some(by_ru), Some(by_en)) => by_ru.name == by_en.name,
+        _ => false,
+    }
 }
 
 /// Entries the platform data contradicts and that are knowingly left alone.
@@ -61,12 +81,24 @@ fn security_entries_match_platform_surface() {
                         wrong.push(format!("{name}: global method absent from platform data"));
                     }
                 }
+                if !entry.en.is_empty() && !global_function_pair_agrees(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: spellings name different global functions",
+                        entry.ru, entry.en
+                    ));
+                }
             }
             security::EntryKind::Constructor => {
                 for name in spellings(entry.ru, entry.en) {
                     if !is_known_type(name) {
                         wrong.push(format!("{name}: constructor type absent from platform data"));
                     }
+                }
+                if !entry.en.is_empty() && !type_pair_agrees(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: spellings name different types",
+                        entry.ru, entry.en
+                    ));
                 }
             }
             // The owners are library common modules — BSP ships them, the
@@ -120,16 +152,23 @@ fn capability_entries_match_platform_surface() {
                         wrong.push(format!("{name}: global method absent from platform data"));
                     }
                 }
+                if !entry.en.is_empty() && !global_function_pair_agrees(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: spellings name different global functions",
+                        entry.ru, entry.en
+                    ));
+                }
             }
             // Spelling alone matches this kind, so at least one type must own
             // the name — otherwise every match is provably something else. A
             // same-named global function does not save the entry: the global
             // surface is declared by a separate `GlobalMethod` entry.
             capability::EntryKind::AnyReceiverMethod => {
-                for name in spellings(entry.ru, entry.en) {
-                    if !some_type_declares(name) {
-                        wrong.push(format!("{name}: no platform type declares this method"));
-                    }
+                if !some_type_declares_pair(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: no platform type declares this method under both spellings",
+                        entry.ru, entry.en
+                    ));
                 }
             }
             capability::EntryKind::Constructor | capability::EntryKind::Type => {
@@ -137,6 +176,12 @@ fn capability_entries_match_platform_surface() {
                     if !is_known_type(name) {
                         wrong.push(format!("{name}: type absent from platform data"));
                     }
+                }
+                if !entry.en.is_empty() && !type_pair_agrees(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: spellings name different types",
+                        entry.ru, entry.en
+                    ));
                 }
             }
             capability::EntryKind::GlobalProperty => {}
