@@ -22,7 +22,7 @@ pub use crate::{
         clear_shared_node_cache, with_shared_node_cache, BslLanguage, SyntaxElement, SyntaxNode,
         SyntaxNodePtr, SyntaxToken, SyntaxTreeBuilder,
     },
-    token_walk::{next_token_past_empty, prev_token_past_empty},
+    token_walk::prev_token_past_empty,
 };
 pub use rowan::{Direction, NodeCache, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 

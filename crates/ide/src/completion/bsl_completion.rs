@@ -438,6 +438,12 @@ fn owner_for_method_range<DB: RootDatabase>(
 fn find_method_for_token(
     token: &syntax::SyntaxToken,
 ) -> Option<(Either<syntax::ast::ProcedureDef, syntax::ast::FunctionDef>, TextRange)> {
+    method_of_ancestors(token).or_else(|| method_of_unterminated_method_before(token))
+}
+
+fn method_of_ancestors(
+    token: &syntax::SyntaxToken,
+) -> Option<(Either<syntax::ast::ProcedureDef, syntax::ast::FunctionDef>, TextRange)> {
     use syntax::ast;
 
     for ancestor in token.parent()?.ancestors() {
@@ -451,6 +457,40 @@ fn find_method_for_token(
         }
     }
     None
+}
+
+/// Метод, внутри которого курсор стоит по смыслу, хотя по дереву — снаружи.
+///
+/// Так выглядит метод, который ещё печатают: закрывающего слова нет, поэтому
+/// узел метода кончается на последнем набранном токене, а пробел за ним
+/// принадлежит уже корню — тривия достаётся общему предку соседних значимых
+/// токенов, и другого предка у хвоста файла нет.
+///
+/// Закрытый метод сюда не попадает: за его `КонецПроцедуры` стоит уже
+/// модульный уровень, и предлагать там его локальные имена неверно.
+fn method_of_unterminated_method_before(
+    token: &syntax::SyntaxToken,
+) -> Option<(Either<syntax::ast::ProcedureDef, syntax::ast::FunctionDef>, TextRange)> {
+    if !token.kind().is_trivia() {
+        return None;
+    }
+
+    let previous = std::iter::successors(syntax::prev_token_past_empty(token), |t| {
+        syntax::prev_token_past_empty(t)
+    })
+    .find(|t| !t.kind().is_trivia())?;
+    let found = method_of_ancestors(&previous)?;
+    let method = match &found.0 {
+        Either::Left(proc) => proc.syntax(),
+        Either::Right(func) => func.syntax(),
+    };
+
+    let terminated = method
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| matches!(t.kind(), SyntaxKind::KW_END_PROCEDURE | SyntaxKind::KW_END_FUNCTION));
+
+    (!terminated).then_some(found)
 }
 
 fn is_expression_start_position(token: &syntax::SyntaxToken) -> bool {

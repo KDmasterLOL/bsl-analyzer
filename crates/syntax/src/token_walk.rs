@@ -1,40 +1,26 @@
-//! Обход токенов, не спотыкающийся о пустой узел.
+//! Обход токенов назад, не спотыкающийся о пустой узел.
 //!
-//! `SyntaxToken::prev_token` и `next_token` из rowan берут соседний элемент и
-//! спрашивают у него краевой токен, а `SyntaxNode::last_token` спускается
-//! ровно в последнего ребёнка. Пустой узел отдаёт `None`, и обход
-//! обрывается на границе, за которой текст есть.
+//! `SyntaxToken::prev_token` из rowan берёт соседний элемент и спрашивает у
+//! него краевой токен, а `SyntaxNode::last_token` спускается ровно в
+//! последнего ребёнка. Пустой узел отдаёт `None`, и обход обрывается на
+//! границе, за которой текст есть.
 //!
 //! Пустые узлы стоят на краях постоянно: ими помечен пропущенный элемент, и
 //! `ERROR` в конце незавершённой процедуры — обычное состояние кода, который
-//! ещё печатают. Отсюда пара функций, обходящих такой узел, а не
-//! останавливающихся на нём.
+//! ещё печатают.
+//!
+//! Вперёд не ходит никто, поэтому обратного направления здесь нет: ходят
+//! назад — за словом, к которому относится позиция.
 
 use crate::{NodeOrToken, SyntaxElement, SyntaxToken};
-
-#[derive(Clone, Copy)]
-enum Side {
-    Prev,
-    Next,
-}
 
 /// Предыдущий токен дерева, включая случай, когда путь к нему лежит через
 /// узел без единого токена.
 pub fn prev_token_past_empty(token: &SyntaxToken) -> Option<SyntaxToken> {
-    walk(token, Side::Prev)
-}
-
-/// Следующий токен дерева, включая случай, когда путь к нему лежит через
-/// узел без единого токена.
-pub fn next_token_past_empty(token: &SyntaxToken) -> Option<SyntaxToken> {
-    walk(token, Side::Next)
-}
-
-fn walk(token: &SyntaxToken, side: Side) -> Option<SyntaxToken> {
     let mut from: SyntaxElement = NodeOrToken::Token(token.clone());
     loop {
-        if let Some(neighbour) = sibling(&from, side) {
-            if let Some(found) = edge_token(neighbour, side) {
+        if let Some(neighbour) = from.prev_sibling_or_token() {
+            if let Some(found) = last_token_past_empty(neighbour) {
                 return Some(found);
             }
         }
@@ -46,33 +32,22 @@ fn walk(token: &SyntaxToken, side: Side) -> Option<SyntaxToken> {
     }
 }
 
-/// Первый токен, найденный от `start` в сторону `side`: сам элемент, если он
-/// токен, иначе спуск в него, иначе следующий сосед.
-fn edge_token(start: SyntaxElement, side: Side) -> Option<SyntaxToken> {
+/// Последний токен, найденный от `start` влево: сам элемент, если он токен,
+/// иначе спуск в него, иначе предыдущий сосед.
+fn last_token_past_empty(start: SyntaxElement) -> Option<SyntaxToken> {
     let mut current = Some(start);
     while let Some(element) = current {
         match &element {
             NodeOrToken::Token(token) => return Some(token.clone()),
             NodeOrToken::Node(node) => {
-                let inner = match side {
-                    Side::Prev => node.last_child_or_token(),
-                    Side::Next => node.first_child_or_token(),
-                };
-                if let Some(found) = inner.and_then(|inner| edge_token(inner, side)) {
+                if let Some(found) = node.last_child_or_token().and_then(last_token_past_empty) {
                     return Some(found);
                 }
             }
         }
-        current = sibling(&element, side);
+        current = element.prev_sibling_or_token();
     }
     None
-}
-
-fn sibling(element: &SyntaxElement, side: Side) -> Option<SyntaxElement> {
-    match side {
-        Side::Prev => element.prev_sibling_or_token(),
-        Side::Next => element.next_sibling_or_token(),
-    }
 }
 
 #[cfg(test)]
@@ -106,20 +81,13 @@ mod tests {
 
         let prev = prev_token_past_empty(&newline).expect("точка с запятой перед пустым узлом");
         assert_eq!(prev.kind(), SyntaxKind::SEMICOLON);
-
-        assert_eq!(
-            next_token_past_empty(&prev).map(|token| token.kind()),
-            Some(SyntaxKind::NEWLINE)
-        );
     }
 
     #[test]
-    fn ends_of_the_tree_have_no_neighbour() {
+    fn the_start_of_the_tree_has_no_neighbour() {
         let root = tree_with_empty_node_at_the_edge();
         let first = root.first_token().expect("точка с запятой");
-        let last = root.last_token().expect("перевод строки");
 
         assert!(prev_token_past_empty(&first).is_none());
-        assert!(next_token_past_empty(&last).is_none());
     }
 }
