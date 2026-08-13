@@ -37,6 +37,13 @@ fn is_known_type(name: &str) -> bool {
     PlatformData::instance().get_type(name).is_some()
 }
 
+/// A constructor entry claims `Новый <Тип>` works, and plenty of known types
+/// cannot be constructed at all — checking the type table alone would accept
+/// them.
+fn is_constructible(name: &str) -> bool {
+    !PlatformData::instance().get_constructors(name).is_empty()
+}
+
 /// Both spellings must land on the SAME platform type.
 fn type_pair_agrees(ru: &str, en: &str) -> bool {
     let data = PlatformData::instance();
@@ -90,8 +97,8 @@ fn security_entries_match_platform_surface() {
             }
             security::EntryKind::Constructor => {
                 for name in spellings(entry.ru, entry.en) {
-                    if !is_known_type(name) {
-                        wrong.push(format!("{name}: constructor type absent from platform data"));
+                    if !is_constructible(name) {
+                        wrong.push(format!("{name}: no constructor in platform data"));
                     }
                 }
                 if !entry.en.is_empty() && !type_pair_agrees(entry.ru, entry.en) {
@@ -171,7 +178,20 @@ fn capability_entries_match_platform_surface() {
                     ));
                 }
             }
-            capability::EntryKind::Constructor | capability::EntryKind::Type => {
+            capability::EntryKind::Constructor => {
+                for name in spellings(entry.ru, entry.en) {
+                    if !is_constructible(name) {
+                        wrong.push(format!("{name}: no constructor in platform data"));
+                    }
+                }
+                if !entry.en.is_empty() && !type_pair_agrees(entry.ru, entry.en) {
+                    wrong.push(format!(
+                        "{} / {}: spellings name different types",
+                        entry.ru, entry.en
+                    ));
+                }
+            }
+            capability::EntryKind::Type => {
                 for name in spellings(entry.ru, entry.en) {
                     if !is_known_type(name) {
                         wrong.push(format!("{name}: type absent from platform data"));

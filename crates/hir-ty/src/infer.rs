@@ -496,6 +496,8 @@ pub struct InferenceContext<'db> {
     implicit_locals: FxHashMap<String, ImplicitLocalInfo>,
 
     assigned_var_names: rustc_hash::FxHashSet<NormName>,
+    /// Lazily gathered names the body assigns anywhere; see `body_assigns_name`.
+    body_assigned_names: Option<rustc_hash::FxHashSet<NormName>>,
 
     /// Every bare assignment target anywhere in the body, collected once so a
     /// global read can skip CFG/reaching-definitions unless shadowing is possible.
@@ -779,6 +781,7 @@ impl<'db> InferenceContext<'db> {
             var_types: FxHashMap::default(),
             implicit_locals: FxHashMap::default(),
             assigned_var_names: rustc_hash::FxHashSet::default(),
+            body_assigned_names: None,
             assignment_target_names,
             shadowed_root_names: FxHashMap::default(),
             binding_types: FxHashMap::default(),
@@ -1200,9 +1203,32 @@ impl<'db> InferenceContext<'db> {
         Some(text.trim())
     }
 
+    /// Every name the body assigns anywhere, gathered once. BSL has no block
+    /// scope: an assignment makes the name a variable of the WHOLE method, so
+    /// ownership must not depend on where the traversal happens to be. The
+    /// running `assigned_var_names` holds only what has been walked so far and
+    /// would answer differently for two sides of the same `Если`.
+    fn body_assigns_name(&mut self, key: NormName) -> bool {
+        if self.body_assigned_names.is_none() {
+            let mut names = rustc_hash::FxHashSet::default();
+            for (_, stmt) in self.body.stmts_iter() {
+                if let Stmt::Assign { target, .. } = stmt {
+                    if let Expr::Path(name) = self.body.expr_idx(*target) {
+                        names.insert(NormName::intern(name.as_str()));
+                    }
+                }
+            }
+            self.body_assigned_names = Some(names);
+        }
+        self.body_assigned_names.as_ref().is_some_and(|names| names.contains(&key))
+    }
+
     fn is_call_name_shadowed(&mut self, name: &Name) -> bool {
         let key = NormName::intern(name.as_str());
-        if self.body_declares_binding(name) || self.assigned_var_names.contains(&key) {
+        if self.body_declares_binding(name)
+            || self.assigned_var_names.contains(&key)
+            || self.body_assigns_name(key)
+        {
             return true;
         }
         // A module-level `Перем` takes the name over just as a module method
