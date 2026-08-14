@@ -338,27 +338,35 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        // After a dot the word is a property name, whatever it spells. `T.ИЗ`
-        // is one fragment being skipped, not a fragment and then a query.
-        let could_begin_a_member =
-            !after_a_dot && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
+        // Only a significant token can end the leftover: what decides that is
+        // the token itself, and trivia is never a query start nor a clause
+        // keyword.
+        if !at_trivia(p) {
+            // The dot reaches across a space but not across a line break,
+            // which is how the expression layer reads a qualified name:
+            // `Т . ИЗ` is one property access, `Т.\nИЗ` is a name and then a
+            // clause. The reach is masked where it is read rather than
+            // cleared when the line ends, because it feeds two decisions —
+            // whether a member may begin here, and whether this word is a
+            // property — and clearing only one of them would change where the
+            // leftover ends.
+            let reaches_here = after_a_dot && !p.a_line_break_precedes();
 
-        if took_anything && could_begin_a_member && p.open_group_count() == 0 {
-            break;
-        }
+            // After a dot the word is a property name, whatever it spells.
+            // `T.ИЗ` is one fragment being skipped, not a fragment and then a
+            // query.
+            let could_begin_a_member = !reaches_here
+                && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
 
-        // The dot reaches across a space but not across a line break, which
-        // is how the expression layer reads a qualified name: `Т . ИЗ` is one
-        // property access, `Т.\nИЗ` is a name and then a clause.
-        if p.at(TokenKind::Newline) {
-            after_a_dot = false;
-        } else if !at_trivia(p) {
+            if took_anything && could_begin_a_member && p.open_group_count() == 0 {
+                break;
+            }
+
             // A dot qualifies the name in front of it. A dot with no name
             // there — a second dot, an operator, the start of the leftover —
             // is junk of its own and must not shield what follows.
-            let is_property = after_a_dot;
             after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
-            after_a_receiver = ends_a_name(p, is_property);
+            after_a_receiver = ends_a_name(p, reaches_here);
         }
 
         p.bump();

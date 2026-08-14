@@ -181,7 +181,8 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
             Some(TokenKind::Dot) => {
                 let m = lhs.precede(p);
                 p.bump();
-                let crossed_newline = p.skip_trivia_crossing_newline();
+                let crossed_newline = p.a_line_break_precedes();
+                p.skip_trivia();
                 let is_orphaned_declaration = crossed_newline && p.at_declaration_start();
                 // On the same line `expr.keyword` is unambiguously a member access —
                 // BSL keywords are not reserved as property/field/enum-value names

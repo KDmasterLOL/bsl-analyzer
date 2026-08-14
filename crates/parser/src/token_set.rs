@@ -4,11 +4,26 @@ use lexer::TokenKind;
 pub struct TokenSet(u128);
 
 impl TokenSet {
+    /// Trivia is refused here rather than where a set is consulted, and this
+    /// is the whole of what keeps it out: the bits are private, `empty` is
+    /// empty and `union` is clean by induction, so a set can hold trivia only
+    /// if it entered through here. Every set in the grammar is a `const`, so
+    /// the refusal is an error at compile time.
     pub const fn new(kinds: &[TokenKind]) -> Self {
         let mut bits: u128 = 0;
         let mut i = 0;
         while i < kinds.len() {
             let kind = kinds[i];
+            assert!(
+                !matches!(
+                    kind,
+                    TokenKind::Whitespace
+                        | TokenKind::Comment
+                        | TokenKind::Newline
+                        | TokenKind::Bom
+                ),
+                "тривия в наборе токенов: о переводе строки грамматике сообщает предикат"
+            );
             let bit_index = kind as u8;
 
             bits |= 1 << bit_index;
@@ -91,6 +106,14 @@ mod tests {
         assert!(RECOVERY_SET.contains(TokenKind::Comma));
         assert!(RECOVERY_SET.contains(TokenKind::RParen));
         assert!(RECOVERY_SET.contains(TokenKind::Semicolon));
+    }
+
+    /// Вызов в рантайме, а не `const`: у `const`-ветки того же запрета
+    /// срабатывание выражается отказом сборки, и тестом его не выразить.
+    #[test]
+    #[should_panic(expected = "тривия в наборе токенов")]
+    fn trivia_has_no_place_in_a_token_set() {
+        let _ = TokenSet::new(&[TokenKind::Newline]);
     }
 
     #[test]
