@@ -21,11 +21,6 @@ pub struct Parser<'a> {
     input: Input<'a>,
     /// Позиция среди ЗНАЧИМЫХ токенов, а не среди лексем.
     pos: usize,
-    /// Докуда сырой поток уже отдан событиями.
-    ///
-    /// Держится отдельно от `pos`, потому что промежутки в дерево всё ещё
-    /// уходят: грамматика их не видит, но текст дерева обязан равняться входу.
-    raw_pos: usize,
     events: Vec<Event>,
     iteration_count: usize,
     recent_positions: Vec<usize>,
@@ -41,7 +36,6 @@ impl<'a> Parser<'a> {
         Self {
             input: Input::new(tokens),
             pos: 0,
-            raw_pos: 0,
             events: Vec::new(),
             iteration_count: 0,
             recent_positions: Vec::with_capacity(POSITION_HISTORY_SIZE),
@@ -112,25 +106,8 @@ impl<'a> Parser<'a> {
         };
         self.track_group(kind);
 
-        let raw = self.input.raw_at(self.pos);
-        self.emit_gap_before(raw);
         self.events.push(Event::Token { kind });
-        self.raw_pos = raw + 1;
         self.pos += 1;
-    }
-
-    /// Отдаёт событиями промежуток перед сырой позицией `raw`.
-    ///
-    /// Промежутки уходят в дерево здесь, а не по просьбе грамматики: правило,
-    /// которому пришлось бы просить, тем самым знало бы о тривии. Событие на
-    /// каждую лексему — потому что сток идёт по сырому потоку в такт событиям,
-    /// и пропуск одного события сдвинул бы весь остаток.
-    fn emit_gap_before(&mut self, raw: usize) {
-        while self.raw_pos < raw {
-            let kind = self.input.raw_kind(self.raw_pos);
-            self.events.push(Event::Token { kind });
-            self.raw_pos += 1;
-        }
     }
 
     /// Maintains the open-group count as tokens go by.

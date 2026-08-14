@@ -237,6 +237,46 @@ mod tests {
         );
     }
 
+    /// Событий ровно столько, сколько значимых лексем в области разбора.
+    ///
+    /// Промежутки событий не имеют: их проматывает сток. Считается по обеим
+    /// фикстурам и по обоим языкам, потому что счётчик, сверенный с самим
+    /// собой на одном входе, ничего не сторожит.
+    #[test]
+    fn one_token_event_per_significant_lexeme() {
+        use crate::event::Event;
+
+        let bsl = include_str!("../tests/fixtures/Module.bsl");
+        let sdbl = include_str!("../tests/fixtures/user_query_with_highlighting_issue.sdbl");
+
+        let tokens = tokenize(bsl);
+        let mut p = Parser::new(&tokens);
+        grammar::source_file(&mut p);
+        let bsl_events = p.finish();
+
+        let sdbl_tokens =
+            sdbl_token_converter::convert_sdbl_tokens(&lexer::sdbl::tokenize_sdbl(sdbl));
+        let mut p = Parser::new(&sdbl_tokens);
+        p.set_grammar_boundary(grammar::sdbl::at_query_boundary);
+        grammar::sdbl::query_package(&mut p);
+        let sdbl_events = p.finish();
+
+        for (name, tokens, events) in
+            [("BSL", &tokens, &bsl_events), ("SDBL", &sdbl_tokens, &sdbl_events)]
+        {
+            let significant = tokens.iter().filter(|t| !crate::input::is_trivia(t.kind)).count();
+            let emitted = events.iter().filter(|e| matches!(e, Event::Token { .. })).count();
+            assert_eq!(
+                emitted, significant,
+                "{name}: событий {emitted}, значимых лексем {significant}"
+            );
+            assert!(
+                tokens.len() > significant,
+                "{name}: во входе нет тривии, и счёт совпал бы при любой реализации"
+            );
+        }
+    }
+
     #[test]
     fn test_parse_sdbl_entry_point() {
         let parse = parse_sdbl("SELECT Name FROM Catalog.Products");

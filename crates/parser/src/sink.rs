@@ -198,23 +198,31 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         self.builder
     }
 
+    /// Ставит очередной значимый токен, забрав по дороге промежуток перед ним.
+    ///
+    /// Промежутки событий не имеют: грамматика их не видит и выдать не может.
+    /// Промотку делает сток, потому что он один ходит по сырому потоку.
     fn token(&mut self, kind: lexer::TokenKind) {
+        while self
+            .tokens
+            .get(self.token_pos)
+            .is_some_and(|token| token_kind_to_syntax(token.kind).is_trivia())
+        {
+            self.pending_trivia_start.get_or_insert(self.token_pos);
+            self.token_pos += 1;
+        }
+
         let Some(token) = self.tokens.get(self.token_pos) else {
             return;
         };
 
-        let syntax_kind = token_kind_to_syntax(kind);
-        if syntax_kind.is_trivia() {
-            self.pending_trivia_start.get_or_insert(self.token_pos);
-        } else {
-            // Порядок здесь и есть ведущий край нормы: тривия достаётся тому,
-            // что было открыто до неё, а узлы этого токена открываются уже
-            // после неё.
-            self.flush_trivia();
-            self.perform_deferred_nodes();
-            self.builder.token(syntax_kind, &token.text);
-            self.last_significant_pos = Some(self.token_pos);
-        }
+        // Порядок здесь и есть ведущий край нормы: тривия достаётся тому,
+        // что было открыто до неё, а узлы этого токена открываются уже
+        // после неё.
+        self.flush_trivia();
+        self.perform_deferred_nodes();
+        self.builder.token(token_kind_to_syntax(kind), &token.text);
+        self.last_significant_pos = Some(self.token_pos);
         self.token_pos += 1;
     }
 
@@ -477,9 +485,7 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::ErrorWithSpan { start_token: 0, err: unexpected(RecoveryKind::RecoverySpan) },
             Event::Token { kind: lexer::TokenKind::Semicolon },
             Event::Finish,
@@ -503,7 +509,6 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Error(unexpected(RecoveryKind::Custom)),
             Event::Finish,
         ];
@@ -527,7 +532,6 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Error(unexpected(RecoveryKind::Custom)),
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::Finish,
         ];
@@ -557,7 +561,6 @@ mod tests {
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::Error(unexpected(RecoveryKind::MissingToken)),
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::Finish,
         ];
@@ -585,7 +588,6 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::ErrorWithSpan { start_token: 1, err: unexpected(RecoveryKind::RecoverySpan) },
             Event::Token { kind: lexer::TokenKind::Semicolon },
@@ -615,7 +617,6 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Error(unexpected(RecoveryKind::BumpToken)),
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::Finish,
@@ -646,7 +647,6 @@ mod tests {
         let events = vec![
             Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
             Event::Token { kind: lexer::TokenKind::Ident },
-            Event::Token { kind: lexer::TokenKind::Whitespace },
             Event::Token { kind: lexer::TokenKind::Ident },
             Event::ErrorWithSpan { start_token: 0, err: unexpected(RecoveryKind::RecoverySpan) },
             Event::Token { kind: lexer::TokenKind::Semicolon },
