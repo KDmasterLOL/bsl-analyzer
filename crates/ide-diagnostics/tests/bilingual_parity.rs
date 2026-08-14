@@ -56,6 +56,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         "keyword spelling policy, not platform identifier lookup",
     ),
     (DiagnosticCode::ConsecutiveEmptyLines, "formatting-only diagnostic"),
+    (
+        DiagnosticCode::MultilinePreprocessorInstruction,
+        "line-layout check on preprocessor instructions; no identifier lookup",
+    ),
     (DiagnosticCode::LineLength, "formatting-only diagnostic"),
     (DiagnosticCode::MissingSpace, "formatting-only diagnostic"),
     (DiagnosticCode::OneStatementPerLine, "statement layout diagnostic"),
@@ -605,7 +609,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 191, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 192, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]
