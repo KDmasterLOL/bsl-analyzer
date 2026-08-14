@@ -34,7 +34,7 @@ impl<'t> Input<'t> {
 
         let mut gap_has_line_break = false;
         for (index, token) in tokens.iter().enumerate() {
-            if is_trivia(token.kind) {
+            if token.kind.is_trivia() {
                 // Комментарий идёт до конца своей строки, поэтому за ним стоит
                 // либо перевод строки, либо конец файла — считать его иначе
                 // значило бы разрешить конструкции продолжаться через
@@ -124,11 +124,6 @@ fn set_bit(map: &mut Vec<u64>, index: usize, value: bool) {
     }
 }
 
-/// Единственное место в парсере, где вид токена сверяется с тривией.
-pub(crate) fn is_trivia(kind: TokenKind) -> bool {
-    matches!(kind, TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,12 +137,12 @@ mod tests {
     fn scan_line_break_before(tokens: &[Token], raw_pos: usize) -> bool {
         let anchor = tokens[raw_pos..]
             .iter()
-            .position(|t| !is_trivia(t.kind))
+            .position(|t| !t.kind.is_trivia())
             .map_or(tokens.len(), |offset| raw_pos + offset);
 
         let mut saw_line_break = false;
         for token in tokens[..anchor].iter().rev() {
-            if !is_trivia(token.kind) {
+            if !token.kind.is_trivia() {
                 return saw_line_break;
             }
             if matches!(token.kind, TokenKind::Newline | TokenKind::Comment) {
@@ -212,7 +207,7 @@ mod tests {
         assert!(input.len() > 0, "фикстура обязана дать значимые токены");
         for pos in 0..input.len() {
             let kind = input.kind(pos).expect("позиция внутри длины обязана иметь вид");
-            assert!(!is_trivia(kind), "позиция {pos} отдала тривию {kind:?}");
+            assert!(!kind.is_trivia(), "позиция {pos} отдала тривию {kind:?}");
         }
     }
 

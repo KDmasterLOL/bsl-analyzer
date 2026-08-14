@@ -264,7 +264,7 @@ mod tests {
         for (name, tokens, events) in
             [("BSL", &tokens, &bsl_events), ("SDBL", &sdbl_tokens, &sdbl_events)]
         {
-            let significant = tokens.iter().filter(|t| !crate::input::is_trivia(t.kind)).count();
+            let significant = tokens.iter().filter(|t| !t.kind.is_trivia()).count();
             let emitted = events.iter().filter(|e| matches!(e, Event::Token { .. })).count();
             assert_eq!(
                 emitted, significant,

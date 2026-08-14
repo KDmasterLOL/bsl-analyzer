@@ -60,7 +60,7 @@ impl Significant {
         let tokens: Vec<(usize, usize)> = match lang {
             Lang::Bsl => lexer::tokenize(text)
                 .into_iter()
-                .filter(|t| !is_trivia(t.kind))
+                .filter(|t| !t.kind.is_trivia())
                 .map(|t| (t.offset, t.text.len()))
                 .collect(),
             Lang::Sdbl => lexer::sdbl::tokenize_sdbl(text)
@@ -84,16 +84,6 @@ impl Significant {
     fn is_word_start(&self, offset: u32) -> bool {
         offset == self.len || self.starts.contains(&offset)
     }
-}
-
-fn is_trivia(kind: lexer::TokenKind) -> bool {
-    matches!(
-        kind,
-        lexer::TokenKind::Whitespace
-            | lexer::TokenKind::Comment
-            | lexer::TokenKind::Newline
-            | lexer::TokenKind::Bom
-    )
 }
 
 fn is_sdbl_trivia(kind: lexer::sdbl::SdblTokenKind) -> bool {

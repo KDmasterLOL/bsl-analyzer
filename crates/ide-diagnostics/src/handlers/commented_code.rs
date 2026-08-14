@@ -401,7 +401,16 @@ fn line_opens_query(body: &str) -> bool {
     })
 }
 
-/// Returns the non-whitespace BSL tokens of a comment line.
+/// Returns the BSL tokens of a comment line, minus whitespace.
+///
+/// The set is whitespace alone, deliberately, and not `TokenKind::is_trivia`:
+/// what is being tokenized is the body of a comment, so a second `//` in it
+/// is code commented twice — `// //Модуль.Метод(Данные);` — and it swallows
+/// the rest of the line into one `Comment` token. Dropping that token leaves
+/// the line with nothing to judge, and the check stops seeing exactly the
+/// thing it looks for. Measured on real modules: of 96 comment lines carrying
+/// a second `//`, widening the set loses that one verdict and changes no
+/// other.
 fn code_tokens(text: &str) -> Vec<Token> {
     tokenize(text).into_iter().filter(|t| t.kind != TokenKind::Whitespace).collect()
 }
@@ -715,6 +724,33 @@ mod tests {
 
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// Код, закомментированный дважды, остаётся находкой.
+    ///
+    /// Это и есть вход, на котором `code_tokens` обязан оставаться при своём
+    /// наборе: тело комментария здесь само начинается с `//`, и общий предикат
+    /// тривии унёс бы его целиком вместе с находкой. Вход взят из реального
+    /// модуля — он единственный из 96 строк с двумя `//`, на котором вердикт
+    /// расходится.
+    #[test]
+    fn code_commented_twice_is_still_a_finding() {
+        let code = "Функция Тест()\n    // //Модуль.Метод(Данные, Идентификатор);\n    Возврат А;\nКонецФункции";
+        let diagnostics = check_ast_diagnostic(code, check);
+        assert_eq!(diagnostics.len(), 1, "дважды закомментированный код перестал быть находкой");
+    }
+
+    /// BOM в начале файла не меняет вердикт.
+    #[test]
+    fn a_byte_order_mark_does_not_change_the_verdict() {
+        let with_bom = "\u{feff}Функция Тест()\n    // Б = 2;\n    Возврат А;\nКонецФункции";
+        let without = "Функция Тест()\n    // Б = 2;\n    Возврат А;\nКонецФункции";
+        assert_eq!(
+            check_ast_diagnostic(with_bom, check).len(),
+            check_ast_diagnostic(without, check).len(),
+            "BOM изменил число находок"
+        );
+        assert_eq!(check_ast_diagnostic(without, check).len(), 1, "вход обязан давать находку");
     }
 
     #[test]

@@ -15,13 +15,7 @@ impl TokenSet {
         while i < kinds.len() {
             let kind = kinds[i];
             assert!(
-                !matches!(
-                    kind,
-                    TokenKind::Whitespace
-                        | TokenKind::Comment
-                        | TokenKind::Newline
-                        | TokenKind::Bom
-                ),
+                !kind.is_trivia(),
                 "тривия в наборе токенов: о переводе строки грамматике сообщает предикат"
             );
             let bit_index = kind as u8;

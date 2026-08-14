@@ -61,7 +61,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn at(&self, kind: TokenKind) -> bool {
-        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
         self.current() == Some(kind)
     }
 
@@ -167,7 +167,7 @@ impl<'a> Parser<'a> {
     pub fn expect(&mut self, kind: TokenKind) -> bool {
         // Its own check, not the one in `at`: a declared boundary returns from
         // here without ever reaching it.
-        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
 
         // A grammar boundary belongs to a rule further out, and no rule may
         // require it here. It matters because kinds are coarser than words:
@@ -243,7 +243,7 @@ impl<'a> Parser<'a> {
     /// parse.
     pub fn expect_no_bump(&mut self, kind: TokenKind) -> bool {
         // Its own check, for the same reason as in [`Parser::expect`].
-        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
 
         if !self.at_declared_boundary() && self.eat(kind) {
             return true;
@@ -294,10 +294,6 @@ impl<'a> Parser<'a> {
     /// хоть пробелом, — уже другое слово.
     pub fn a_gap_precedes(&self) -> bool {
         self.input.a_gap_precedes(self.pos)
-    }
-
-    fn is_trivia_kind(kind: TokenKind) -> bool {
-        crate::input::is_trivia(kind)
     }
 
     pub fn eat_keyword(&mut self, text: &str) -> bool {

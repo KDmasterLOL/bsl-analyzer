@@ -3262,12 +3262,7 @@ fn assert_bare_keyword_clause(clause: &syntax::SyntaxNode, expected_keyword: &st
     let non_trivia_tokens: Vec<(SyntaxKind, String)> = clause
         .children_with_tokens()
         .filter_map(|c| match c {
-            NodeOrToken::Token(t)
-                if !matches!(
-                    t.kind(),
-                    SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-                ) =>
-            {
+            NodeOrToken::Token(t) if !t.kind().is_trivia() => {
                 Some((t.kind(), t.text().to_string()))
             }
             _ => None,
@@ -3829,9 +3824,7 @@ fn test_slice7adn_top_canonical_ru() {
     let token_text: Vec<(SyntaxKind, String)> = top_clauses[0]
         .children_with_tokens()
         .filter_map(|c| c.as_token().map(|t| (t.kind(), t.text().to_string())))
-        .filter(|(k, _)| {
-            !matches!(k, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT,)
-        })
+        .filter(|(k, _)| !k.is_trivia())
         .collect();
     let has_top_keyword = token_text
         .iter()

@@ -110,7 +110,7 @@ impl Config {
 }
 
 fn is_trivia(token: &SyntaxToken) -> bool {
-    matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT)
+    token.kind().is_trivia()
 }
 
 fn is_keyword_with_left_right_space(token: &SyntaxToken) -> bool {
