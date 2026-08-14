@@ -40,7 +40,6 @@ fn or_expr(p: &mut Parser) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
-        p.skip_trivia();
         let rhs = p.start();
         and_expr(p);
         rhs.complete(p, NodeKind::Expr);
@@ -58,7 +57,6 @@ fn and_expr(p: &mut Parser) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
-        p.skip_trivia();
         let rhs = p.start();
         not_expr(p);
         rhs.complete(p, NodeKind::Expr);
@@ -72,7 +70,6 @@ fn not_expr(p: &mut Parser) {
     if p.at(TokenKind::KwNot) {
         let m = p.start();
         p.bump();
-        p.skip_trivia();
         not_expr(p);
         m.complete(p, NodeKind::UnaryExpr);
     } else {
@@ -99,7 +96,6 @@ fn comparison_expr(p: &mut Parser) {
         saw_comparison = true;
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
-        p.skip_trivia();
         let rhs = p.start();
         additive_expr(p);
         rhs.complete(p, NodeKind::Expr);
@@ -121,7 +117,6 @@ fn additive_expr(p: &mut Parser) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
-        p.skip_trivia();
         let rhs = p.start();
         multiplicative_expr(p);
         rhs.complete(p, NodeKind::Expr);
@@ -142,7 +137,6 @@ fn multiplicative_expr(p: &mut Parser) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
-        p.skip_trivia();
         let rhs = p.start();
         unary_expr(p);
         rhs.complete(p, NodeKind::Expr);
@@ -156,7 +150,6 @@ fn unary_expr(p: &mut Parser) {
     match p.current() {
         Some(TokenKind::Plus) | Some(TokenKind::Minus) => {
             p.bump();
-            p.skip_trivia();
             unary_expr(p);
         }
         _ => postfix_expr(p),
@@ -176,13 +169,11 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
 
     loop {
         p.check_iteration_limit();
-        p.skip_trivia();
         match p.current() {
             Some(TokenKind::Dot) => {
                 let m = lhs.precede(p);
                 p.bump();
                 let crossed_newline = p.a_line_break_precedes();
-                p.skip_trivia();
                 let is_orphaned_declaration = crossed_newline && p.at_declaration_start();
                 // On the same line `expr.keyword` is unambiguously a member access —
                 // BSL keywords are not reserved as property/field/enum-value names
@@ -209,10 +200,8 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 let m = lhs.precede(p);
                 p.bump();
                 p.within_boundary(super::at_closing_bracket, |p| {
-                    p.skip_trivia();
                     expression(p);
                 });
-                p.skip_trivia();
                 p.expect(TokenKind::RBracket);
                 lhs = m.complete(p, NodeKind::IndexExpr);
                 is_valid_statement = true;
@@ -262,10 +251,8 @@ fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
             let m = p.start();
             p.bump();
             p.within_boundary(super::at_closing_paren, |p| {
-                p.skip_trivia();
                 expression(p);
             });
-            p.skip_trivia();
             p.expect(TokenKind::RParen);
             Some(m.complete(p, NodeKind::ParenExpr))
         }
@@ -296,21 +283,13 @@ fn string_literal(p: &mut Parser) -> CompletedMarker {
         if !at_adjacent_string_literal(p) {
             break;
         }
-
-        p.skip_trivia();
     }
 
     m.complete(p, NodeKind::Literal)
 }
 
 fn at_adjacent_string_literal(p: &Parser) -> bool {
-    match p.current() {
-        Some(TokenKind::String | TokenKind::StringStart) => true,
-        Some(TokenKind::Whitespace | TokenKind::Newline | TokenKind::Comment | TokenKind::Bom) => {
-            matches!(p.nth_non_trivia(0), Some(TokenKind::String | TokenKind::StringStart))
-        }
-        _ => false,
-    }
+    matches!(p.current(), Some(TokenKind::String | TokenKind::StringStart))
 }
 
 fn string_continuation_tail(p: &mut Parser) {
@@ -321,10 +300,7 @@ fn string_continuation_tail(p: &mut Parser) {
                 p.bump();
                 break;
             }
-            Some(TokenKind::Newline)
-            | Some(TokenKind::Whitespace)
-            | Some(TokenKind::Comment)
-            | Some(TokenKind::StringPart) => {
+            Some(TokenKind::StringPart) => {
                 p.bump();
             }
             None => {
@@ -342,7 +318,6 @@ fn string_continuation_tail(p: &mut Parser) {
 fn await_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
     expression(p);
     m.complete(p, NodeKind::AwaitExpr)
 }
@@ -350,13 +325,10 @@ fn await_expr(p: &mut Parser) -> CompletedMarker {
 fn new_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
 
     if p.at(TokenKind::Ident) {
         p.bump();
     }
-
-    p.skip_trivia();
 
     if p.at(TokenKind::LParen) {
         arg_list(p);
@@ -395,7 +367,6 @@ fn continues_the_surrounding_expression(p: &Parser) -> bool {
 fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
 
     // Every other bracketed rule is entered with its opener already in hand.
     // The ternary's opener is an `expect`, so it can be absent — and with no
@@ -419,18 +390,12 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     }
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
         expression(p);
-        p.skip_trivia();
         p.expect(TokenKind::Comma);
-        p.skip_trivia();
         expression(p);
-        p.skip_trivia();
         p.expect(TokenKind::Comma);
-        p.skip_trivia();
         expression(p);
     });
-    p.skip_trivia();
     p.expect(TokenKind::RParen);
     m.complete(p, NodeKind::TernaryExpr)
 }
@@ -440,8 +405,6 @@ fn arg_list(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
-
         if !p.at(TokenKind::RParen) {
             if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                 expression(p);
@@ -449,7 +412,6 @@ fn arg_list(p: &mut Parser) {
 
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                     expression(p);
                 }
@@ -457,7 +419,6 @@ fn arg_list(p: &mut Parser) {
         }
     });
 
-    p.skip_trivia();
     p.expect(TokenKind::RParen);
 
     m.complete(p, NodeKind::ArgList);

@@ -119,7 +119,6 @@ fn recover_to_delimiter(p: &mut Parser) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
-            p.skip_trivia();
             if super::select::is_query_starter_or_combiner_keyword(p) {
                 nested_query_starts.push(paren_depth);
             }
@@ -225,8 +224,6 @@ pub(super) fn parse_delimited_list<F>(
     }
 
     loop {
-        p.skip_trivia();
-
         if is_recovery_point(p, recovery_set) {
             break;
         }
@@ -236,7 +233,6 @@ pub(super) fn parse_delimited_list<F>(
         }
 
         p.check_iteration_limit();
-        p.skip_trivia();
 
         if p.at(delimiter) || is_recovery_point(p, recovery_set) || !is_item_start(p) {
             let err = p.start();
@@ -272,11 +268,9 @@ fn logical_or_expr(p: &mut Parser) {
     logical_and_expr(p);
 
     loop {
-        p.skip_trivia();
         if p.at(TokenKind::KwOr) {
             p.check_iteration_limit();
             p.bump();
-            p.skip_trivia();
             logical_and_expr(p);
         } else {
             break;
@@ -292,11 +286,9 @@ fn logical_and_expr(p: &mut Parser) {
     not_expr(p);
 
     loop {
-        p.skip_trivia();
         if p.at(TokenKind::KwAnd) {
             p.check_iteration_limit();
             p.bump();
-            p.skip_trivia();
             not_expr(p);
         } else {
             break;
@@ -310,7 +302,6 @@ fn not_expr(p: &mut Parser) {
     if p.at(TokenKind::KwNot) {
         let m = p.start();
         p.bump();
-        p.skip_trivia();
         not_expr(p);
         m.complete(p, NodeKind::SdblNotExpr);
     } else {
@@ -324,13 +315,11 @@ fn additive_expr(p: &mut Parser) {
     multiplicative_expr(p);
 
     loop {
-        p.skip_trivia();
         if !matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
             break;
         }
         p.check_iteration_limit();
         p.bump();
-        p.skip_trivia();
         multiplicative_expr(p);
     }
 
@@ -343,7 +332,6 @@ fn multiplicative_expr(p: &mut Parser) {
     unary_expr(p);
 
     loop {
-        p.skip_trivia();
         if !matches!(
             p.current(),
             Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
@@ -352,7 +340,6 @@ fn multiplicative_expr(p: &mut Parser) {
         }
         p.check_iteration_limit();
         p.bump();
-        p.skip_trivia();
         unary_expr(p);
     }
 
@@ -366,7 +353,6 @@ fn unary_expr(p: &mut Parser) {
     ) {
         let m = p.start();
         p.bump();
-        p.skip_trivia();
         unary_expr(p);
         m.complete(p, NodeKind::SdblUnaryExpr);
     } else {
@@ -461,7 +447,7 @@ fn at_a_keyword_that_cannot_be_a_field(p: &Parser) -> bool {
 }
 
 fn next_is_a_qualifying_dot(p: &Parser) -> bool {
-    matches!(p.nth_non_trivia(0), Some(TokenKind::Dot))
+    matches!(p.nth(1), Some(TokenKind::Dot))
 }
 
 fn literal_expr(p: &mut Parser) {
@@ -479,8 +465,12 @@ fn string_literal_or_multi(p: &mut Parser) {
 
     p.bump();
 
+    // Лексер режет одну строку языка на открывающую кавычку, содержимое и
+    // закрывающую — три токена вплотную. Склеиваются именно они, поэтому
+    // соседство здесь спрашивается прямо: строка, отделённая хоть пробелом, —
+    // уже другая строка, и своего узла лишаться не должна.
     let mut count = 1;
-    while p.at(TokenKind::String) {
+    while p.at(TokenKind::String) && !p.a_gap_precedes() {
         p.bump();
         count += 1;
     }
@@ -492,14 +482,13 @@ fn string_literal_or_multi(p: &mut Parser) {
     }
 }
 
+/// Имя параметра приходит внутри самого токена: лексер берёт `&Имя` целиком,
+/// а одинокий `&` остаётся только там, где за ним не буква. Отдельного `Ident`
+/// после амперсанда не бывает, и брать его нельзя — на `&\nПО` это забрало бы
+/// у соединения его же ключевое слово.
 fn parameter_expr(p: &mut Parser) {
     let m = p.start();
     p.bump();
-
-    if p.at(TokenKind::Ident) {
-        p.bump();
-    }
-
     m.complete(p, NodeKind::SdblParameter);
 }
 
@@ -507,28 +496,23 @@ fn paren_or_subquery_expr(p: &mut Parser) {
     let m = p.start();
 
     p.bump();
-    p.skip_trivia();
 
     if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
         super::select::subquery(p);
-        p.skip_trivia();
         p.expect(TokenKind::RParen);
         m.complete(p, NodeKind::SdblSubqueryExpr);
     } else {
         expression(p);
-        p.skip_trivia();
 
         if p.at(TokenKind::Comma) {
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
-                p.skip_trivia();
 
                 if p.at(TokenKind::RParen) || !is_expression_start(p) {
                     break;
                 }
 
                 expression(p);
-                p.skip_trivia();
             }
 
             p.expect(TokenKind::RParen);
@@ -549,26 +533,20 @@ fn predicate_expr(p: &mut Parser) {
 
     additive_expr(p);
 
-    p.skip_trivia();
-
     if p.at(TokenKind::KwNot) {
         p.bump();
-        p.skip_trivia();
     }
 
     if p.at(TokenKind::KwIn) {
         p.bump();
-        p.skip_trivia();
 
         if p.at_keyword("HIERARCHY") || p.at_keyword("ИЕРАРХИИ") {
             p.bump();
-            p.skip_trivia();
 
             if !p.expect(TokenKind::LParen) {
                 m.complete(p, NodeKind::SdblInHierarchyExpr);
                 return;
             }
-            p.skip_trivia();
 
             if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
                 super::select::subquery(p);
@@ -576,7 +554,6 @@ fn predicate_expr(p: &mut Parser) {
                 expression(p);
             }
 
-            p.skip_trivia();
             p.expect(TokenKind::RParen);
             m.complete(p, NodeKind::SdblInHierarchyExpr);
         } else {
@@ -584,7 +561,6 @@ fn predicate_expr(p: &mut Parser) {
                 m.complete(p, NodeKind::SdblInExpr);
                 return;
             }
-            p.skip_trivia();
 
             if p.at_keyword("SELECT") || p.at_keyword("ВЫБРАТЬ") {
                 super::select::subquery(p);
@@ -598,17 +574,14 @@ fn predicate_expr(p: &mut Parser) {
                 );
             }
 
-            p.skip_trivia();
             p.expect(TokenKind::RParen);
             m.complete(p, NodeKind::SdblInExpr);
         }
     } else if p.at_keyword("IS") || p.at_keyword("ЕСТЬ") {
         p.bump();
-        p.skip_trivia();
 
         if p.at(TokenKind::KwNot) {
             p.bump();
-            p.skip_trivia();
         }
 
         if !p.at_keyword("NULL") {
@@ -620,46 +593,37 @@ fn predicate_expr(p: &mut Parser) {
         m.complete(p, NodeKind::SdblIsNullExpr);
     } else if p.at_keyword("BETWEEN") || p.at_keyword("МЕЖДУ") {
         p.bump();
-        p.skip_trivia();
 
         additive_expr(p);
-        p.skip_trivia();
 
         if !p.at(TokenKind::KwAnd) {
             m.complete(p, NodeKind::SdblBetweenExpr);
             return;
         }
         p.bump();
-        p.skip_trivia();
 
         additive_expr(p);
 
         m.complete(p, NodeKind::SdblBetweenExpr);
     } else if p.at_keyword("LIKE") || p.at_keyword("ПОДОБНО") {
         p.bump();
-        p.skip_trivia();
 
         additive_expr(p);
-        p.skip_trivia();
 
         if p.at_keyword("ESCAPE") || p.at_keyword("СПЕЦСИМВОЛ") {
             p.bump();
-            p.skip_trivia();
             additive_expr(p);
         }
 
         m.complete(p, NodeKind::SdblLikeExpr);
     } else if p.at_keyword("REFS") || p.at_keyword("ССЫЛКА") {
         p.bump();
-        p.skip_trivia();
 
         if super::at_field_name(p) {
             p.bump();
-            p.skip_trivia();
 
             while super::eat_qualifying_dot(p) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 if !super::at_table_name_component(p) {
                     // A word stands here and cannot be part of the name: say
                     // so, or it is taken in silence. Nothing standing here at
@@ -673,7 +637,6 @@ fn predicate_expr(p: &mut Parser) {
                     break;
                 }
                 p.bump();
-                p.skip_trivia();
             }
         } else {
             // The source is explicit that what stands here is a table:
@@ -693,7 +656,6 @@ fn predicate_expr(p: &mut Parser) {
             | Some(TokenKind::Ge)
     ) {
         p.bump();
-        p.skip_trivia();
         additive_expr(p);
         m.complete(p, NodeKind::SdblComparisonExpr);
     } else {
@@ -712,11 +674,9 @@ fn parse_cast_type(p: &mut Parser) {
         let is_number_type = p.at_keyword("NUMBER") || p.at_keyword("ЧИСЛО");
 
         p.bump();
-        p.skip_trivia();
 
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.skip_trivia();
 
             if !super::at_table_name_component(p) {
                 // Saying «expected an identifier» of a word that IS one reads
@@ -739,23 +699,16 @@ fn parse_cast_type(p: &mut Parser) {
             }
 
             p.bump();
-            p.skip_trivia();
         }
 
         if p.at(TokenKind::LParen) {
             p.bump();
-            p.skip_trivia();
 
             if p.at(TokenKind::Decimal) {
                 p.bump();
-                p.skip_trivia();
 
-                if is_number_type && p.eat(TokenKind::Comma) {
-                    p.skip_trivia();
-                    if p.at(TokenKind::Decimal) {
-                        p.bump();
-                        p.skip_trivia();
-                    }
+                if is_number_type && p.eat(TokenKind::Comma) && p.at(TokenKind::Decimal) {
+                    p.bump();
                 }
             }
 
@@ -789,12 +742,10 @@ fn column_or_function(p: &mut Parser) {
     let is_cast = is_cast_function(p);
 
     p.bump();
-    p.skip_trivia();
 
     if p.at(TokenKind::Dot) || super::at_a_qualifying_dot(p) {
         while super::eat_qualifying_dot(p) {
             let crossed_newline = p.a_line_break_precedes();
-            p.skip_trivia();
 
             if p.at(TokenKind::LParen) {
                 inline_table_fields(p);
@@ -838,17 +789,14 @@ fn column_or_function(p: &mut Parser) {
             }
 
             p.bump();
-            p.skip_trivia();
         }
         m.complete(p, NodeKind::SdblColumnRef);
     } else if p.at(TokenKind::LParen) {
         p.bump();
-        p.skip_trivia();
 
         if !p.at(TokenKind::RParen) {
             if p.at_keyword("DISTINCT") || p.at_keyword("РАЗЛИЧНЫЕ") {
                 p.bump();
-                p.skip_trivia();
             }
 
             if is_expression_start(p)
@@ -858,13 +806,9 @@ fn column_or_function(p: &mut Parser) {
                 expression(p);
 
                 if is_cast && (p.at_keyword("AS") || p.at_keyword("КАК")) {
-                    p.skip_trivia();
                     p.bump();
-                    p.skip_trivia();
                     parse_cast_type(p);
-                    p.skip_trivia();
                 } else {
-                    p.skip_trivia();
                     if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                         recover_to_delimiter(p);
                     }
@@ -882,7 +826,6 @@ fn column_or_function(p: &mut Parser) {
 
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
-                p.skip_trivia();
 
                 if p.at(TokenKind::Comma)
                     || p.at(TokenKind::RParen)
@@ -906,14 +849,11 @@ fn column_or_function(p: &mut Parser) {
 
                 expression(p);
 
-                p.skip_trivia();
                 if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
                     recover_to_delimiter(p);
                 }
             }
         }
-
-        p.skip_trivia();
 
         if super::select::is_clause_keyword(p) {
             let err = p.start();
@@ -930,11 +870,9 @@ fn column_or_function(p: &mut Parser) {
             p.expect(TokenKind::RParen);
         }
 
-        p.skip_trivia();
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
             let crossed_newline = p.a_line_break_precedes();
-            p.skip_trivia();
 
             if at_property_name(p) {
                 // Same-line keyword after a dot is a member name; across a newline a
@@ -955,7 +893,6 @@ fn column_or_function(p: &mut Parser) {
                 }
 
                 p.bump();
-                p.skip_trivia();
             } else {
                 let err = p.start();
                 let found = p.current();
@@ -981,11 +918,9 @@ fn inline_table_fields(p: &mut Parser) {
     let m = p.start();
 
     p.bump();
-    p.skip_trivia();
 
     super::select::selected_fields(p);
 
-    p.skip_trivia();
     p.expect(TokenKind::RParen);
 
     m.complete(p, NodeKind::SdblInlineTableFields);
@@ -995,20 +930,17 @@ fn case_expr(p: &mut Parser) {
     let m = p.start();
 
     p.bump();
-    p.skip_trivia();
 
     let is_searched_case = p.at_keyword("WHEN") || p.at_keyword("КОГДА");
 
     if !is_searched_case {
         expression(p);
-        p.skip_trivia();
     }
 
     let mut has_when = false;
     while p.at_keyword("WHEN") || p.at_keyword("КОГДА") {
         has_when = true;
         when_clause(p);
-        p.skip_trivia();
     }
 
     if !has_when {
@@ -1017,9 +949,7 @@ fn case_expr(p: &mut Parser) {
 
     if p.at_keyword("ELSE") || p.at_keyword("ИНАЧЕ") {
         p.bump();
-        p.skip_trivia();
         expression(p);
-        p.skip_trivia();
     }
 
     if !p.at_keyword("END") && !p.at_keyword("КОНЕЦ") {
@@ -1035,17 +965,14 @@ fn when_clause(p: &mut Parser) {
     let m = p.start();
 
     p.bump();
-    p.skip_trivia();
 
     expression(p);
-    p.skip_trivia();
 
     if !p.at_keyword("THEN") && !p.at_keyword("ТОГДА") {
         m.complete(p, NodeKind::SdblWhenClause);
         return;
     }
     p.bump();
-    p.skip_trivia();
 
     expression(p);
 

@@ -1,5 +1,6 @@
 mod event;
 pub mod grammar;
+mod input;
 mod parser;
 mod sdbl_token_converter;
 mod sink;

@@ -41,7 +41,6 @@ fn annotated_item(p: &mut Parser) {
                     items::annotation(p);
                 }
             }
-            p.skip_trivia();
         }
 
         // Region directives are flat folding markers and may sit between an
@@ -54,12 +53,11 @@ fn annotated_item(p: &mut Parser) {
                 Some(TokenKind::PreRegion) => preprocessor_region(p),
                 _ => preprocessor_end_region(p),
             }
-            p.skip_trivia();
         }
     });
 
     match p.current() {
-        Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
+        Some(TokenKind::KwAsync) => match p.nth(1) {
             Some(TokenKind::KwProcedure) => {
                 items::procedure_def_content(p);
                 outer.complete(p, NodeKind::ProcedureDef);
@@ -97,14 +95,13 @@ pub fn source_file(p: &mut Parser) {
 
     while !p.at_end() {
         p.check_iteration_limit();
-        p.skip_trivia();
 
         if p.at_end() {
             break;
         }
 
         match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
+            Some(TokenKind::KwAsync) => match p.nth(1) {
                 Some(TokenKind::KwProcedure) => items::procedure_def(p),
                 Some(TokenKind::KwFunction) => items::function_def(p),
                 _ => p.error_unexpected(),
@@ -153,12 +150,8 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
     p.bump();
     // The name sits on the directive's own line; reaching past the newline would
     // steal the next statement's identifier and leave that statement headless.
-    if !p.a_line_break_precedes() {
-        p.skip_trivia();
-
-        if p.at(TokenKind::Ident) {
-            p.bump();
-        }
+    if !p.a_line_break_precedes() && p.at(TokenKind::Ident) {
+        p.bump();
     }
 
     m.complete(p, NodeKind::PreRegionDir);
@@ -174,11 +167,9 @@ pub(super) fn preprocessor_end_region(p: &mut Parser) {
 pub(super) fn preprocessor_if(p: &mut Parser) {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
 
     p.within_boundary(at_preproc_closer, |p| {
         p.within_boundary(at_then, preproc_expression);
-        p.skip_trivia();
 
         p.expect(TokenKind::KwThen);
 
@@ -188,10 +179,8 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
             p.check_iteration_limit();
             let elsif_m = p.start();
             p.bump();
-            p.skip_trivia();
 
             p.within_boundary(at_then, preproc_expression);
-            p.skip_trivia();
 
             p.expect(TokenKind::KwThen);
 
@@ -288,13 +277,12 @@ fn at_preproc_closer(p: &Parser) -> bool {
 fn preproc_content(p: &mut Parser) {
     while !p.at_end() && !at_preproc_closer(p) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
-        p.skip_trivia();
         if p.at_end() || at_preproc_closer(p) || p.at_enclosing_boundary() {
             break;
         }
 
         match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth_non_trivia(0) {
+            Some(TokenKind::KwAsync) => match p.nth(1) {
                 Some(TokenKind::KwProcedure) => items::procedure_def(p),
                 Some(TokenKind::KwFunction) => items::function_def(p),
                 _ => p.error_unexpected(),
@@ -338,16 +326,13 @@ fn preproc_logical_expression(p: &mut Parser) {
     let m = p.start();
 
     preproc_logical_operand(p);
-    p.skip_trivia();
 
     while matches!(p.current(), Some(TokenKind::KwAnd) | Some(TokenKind::KwOr)) {
         p.check_iteration_limit();
         let op_m = p.start();
         p.bump();
         op_m.complete(p, NodeKind::PreBoolOp);
-        p.skip_trivia();
         preproc_logical_operand(p);
-        p.skip_trivia();
     }
 
     m.complete(p, NodeKind::PreLogicalExpr);
@@ -358,23 +343,19 @@ fn preproc_logical_operand(p: &mut Parser) {
 
     if p.at(TokenKind::LParen) {
         p.bump();
-        p.skip_trivia();
 
         p.within_boundary(at_closing_paren, |p| {
             if p.at(TokenKind::KwNot) {
                 p.bump();
-                p.skip_trivia();
                 preproc_logical_operand(p);
             } else {
                 preproc_logical_expression(p);
             }
         });
 
-        p.skip_trivia();
         p.expect(TokenKind::RParen);
     } else if p.at(TokenKind::KwNot) {
         p.bump();
-        p.skip_trivia();
         preproc_logical_operand(p);
     } else {
         preproc_symbol(p);
@@ -386,7 +367,6 @@ fn preproc_logical_operand(p: &mut Parser) {
 pub(super) fn preprocessor_delete(p: &mut Parser) {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
 
     while !p.at_end() && !p.at(TokenKind::PreEndDelete) {
         p.check_iteration_limit();
@@ -400,7 +380,6 @@ pub(super) fn preprocessor_delete(p: &mut Parser) {
 pub(super) fn preprocessor_insert(p: &mut Parser) {
     let m = p.start();
     p.bump();
-    p.skip_trivia();
 
     while !p.at_end() && !p.at(TokenKind::PreEndInsert) {
         p.check_iteration_limit();

@@ -58,8 +58,6 @@ pub fn query_package(p: &mut Parser) {
     let mut a_query_is_due = true;
     let mut member_has_tokens = false;
 
-    p.skip_trivia();
-
     // A group cannot span a separator, so each member starts with none open
     // and "is this position inside a group" is simply "is anything open".
     // The parser keeps the count as tokens go by — the single place that
@@ -69,7 +67,6 @@ pub fn query_package(p: &mut Parser) {
 
     while !p.at_end() {
         p.check_iteration_limit();
-        p.skip_trivia();
 
         if p.at(TokenKind::Semicolon) {
             complain_about_a_missing_member(p, a_query_is_due, member_has_tokens);
@@ -168,13 +165,6 @@ fn ends_a_name(p: &Parser, is_property: bool) -> bool {
         // chain the same way or it will cut one in half.
         _ => is_property && expressions::at_property_name(p),
     }
-}
-
-fn at_trivia(p: &Parser) -> bool {
-    matches!(
-        p.current(),
-        Some(TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom)
-    )
 }
 
 /// The start of a query is a boundary for the whole grammar: no rule may
@@ -290,17 +280,11 @@ pub(super) fn at_table_name_component(p: &Parser) -> bool {
 }
 
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
-    p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
+    p.at(TokenKind::Dot)
 }
 
 pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
     if p.at(TokenKind::Dot) {
-        p.bump();
-        return true;
-    }
-
-    if at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot) {
-        p.skip_trivia();
         p.bump();
         return true;
     }
@@ -324,8 +308,6 @@ pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
 /// owed, a clause keyword is a boundary too: it is where an incomplete query
 /// begins, and swallowing it would cost that query the node it is promised.
 fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
-    p.skip_trivia();
-
     if p.at_end() || p.at(TokenKind::Semicolon) {
         return false;
     }
@@ -338,36 +320,30 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     while !p.at_end() && !p.at(TokenKind::Semicolon) {
         p.check_iteration_limit();
 
-        // Only a significant token can end the leftover: what decides that is
-        // the token itself, and trivia is never a query start nor a clause
-        // keyword.
-        if !at_trivia(p) {
-            // The dot reaches across a space but not across a line break,
-            // which is how the expression layer reads a qualified name:
-            // `Т . ИЗ` is one property access, `Т.\nИЗ` is a name and then a
-            // clause. The reach is masked where it is read rather than
-            // cleared when the line ends, because it feeds two decisions —
-            // whether a member may begin here, and whether this word is a
-            // property — and clearing only one of them would change where the
-            // leftover ends.
-            let reaches_here = after_a_dot && !p.a_line_break_precedes();
+        // The dot reaches across a space but not across a line break, which
+        // is how the expression layer reads a qualified name: `Т . ИЗ` is one
+        // property access, `Т.\nИЗ` is a name and then a clause. The reach is
+        // masked where it is read rather than cleared when the line ends,
+        // because it feeds two decisions — whether a member may begin here,
+        // and whether this word is a property — and clearing only one of them
+        // would change where the leftover ends.
+        let reaches_here = after_a_dot && !p.a_line_break_precedes();
 
-            // After a dot the word is a property name, whatever it spells.
-            // `T.ИЗ` is one fragment being skipped, not a fragment and then a
-            // query.
-            let could_begin_a_member = !reaches_here
-                && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
+        // After a dot the word is a property name, whatever it spells.
+        // `T.ИЗ` is one fragment being skipped, not a fragment and then a
+        // query.
+        let could_begin_a_member =
+            !reaches_here && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
 
-            if took_anything && could_begin_a_member && p.open_group_count() == 0 {
-                break;
-            }
-
-            // A dot qualifies the name in front of it. A dot with no name
-            // there — a second dot, an operator, the start of the leftover —
-            // is junk of its own and must not shield what follows.
-            after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
-            after_a_receiver = ends_a_name(p, reaches_here);
+        if took_anything && could_begin_a_member && p.open_group_count() == 0 {
+            break;
         }
+
+        // A dot qualifies the name in front of it. A dot with no name
+        // there — a second dot, an operator, the start of the leftover —
+        // is junk of its own and must not shield what follows.
+        after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
+        after_a_receiver = ends_a_name(p, reaches_here);
 
         p.bump();
         took_anything = true;
@@ -399,7 +375,6 @@ fn queries(p: &mut Parser) {
 fn drop_table_query(p: &mut Parser) {
     let m = p.start();
     select::eat_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ");
-    p.skip_trivia();
     // Every keyword reaches the parser as an `Ident`, so a bare kind check
     // would take the next query's `ВЫБРАТЬ` for the name of the table being
     // dropped — and the package would then lose that query entirely.

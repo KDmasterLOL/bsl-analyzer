@@ -3,6 +3,7 @@ use parser_error::{ParseError, RecoveryKind};
 use smallvec::smallvec;
 
 use crate::event::{Event, NodeKind};
+use crate::input::Input;
 
 const MAX_ITERATIONS: usize = 1_000_000;
 
@@ -17,8 +18,14 @@ const TRIVIA_IS_NOT_THE_CHANNEL: &str =
     "о переводе строки грамматике сообщает предикат, а не вид токена";
 
 pub struct Parser<'a> {
-    tokens: &'a [Token],
+    input: Input<'a>,
+    /// Позиция среди ЗНАЧИМЫХ токенов, а не среди лексем.
     pos: usize,
+    /// Докуда сырой поток уже отдан событиями.
+    ///
+    /// Держится отдельно от `pos`, потому что промежутки в дерево всё ещё
+    /// уходят: грамматика их не видит, но текст дерева обязан равняться входу.
+    raw_pos: usize,
     events: Vec<Event>,
     iteration_count: usize,
     recent_positions: Vec<usize>,
@@ -32,8 +39,9 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
         Self {
-            tokens,
+            input: Input::new(tokens),
             pos: 0,
+            raw_pos: 0,
             events: Vec::new(),
             iteration_count: 0,
             recent_positions: Vec::with_capacity(POSITION_HISTORY_SIZE),
@@ -53,31 +61,9 @@ impl<'a> Parser<'a> {
         self.nth(0)
     }
 
+    /// Вид `n`-го значимого токена, считая от текущего.
     pub fn nth(&self, n: usize) -> Option<TokenKind> {
-        self.tokens.get(self.pos + n).map(|t| t.kind)
-    }
-
-    pub fn nth_non_trivia(&self, n: usize) -> Option<TokenKind> {
-        let mut count = 0;
-        let mut offset = 1;
-        while let Some(t) = self.tokens.get(self.pos + offset) {
-            match t.kind {
-                TokenKind::Whitespace
-                | TokenKind::Comment
-                | TokenKind::Newline
-                | TokenKind::Bom => {
-                    offset += 1;
-                }
-                _ => {
-                    if count == n {
-                        return Some(t.kind);
-                    }
-                    count += 1;
-                    offset += 1;
-                }
-            }
-        }
-        None
+        self.input.kind(self.pos + n)
     }
 
     pub fn at(&self, kind: TokenKind) -> bool {
@@ -94,19 +80,21 @@ impl<'a> Parser<'a> {
     }
 
     pub fn current_text(&self) -> &str {
-        self.tokens.get(self.pos).map_or("", |t| t.text.as_str())
+        self.input.text(self.pos)
     }
 
     pub fn at_keyword(&self, text: &str) -> bool {
-        if let Some(token) = self.tokens.get(self.pos) {
-            token.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&token.text, text)
-        } else {
-            false
-        }
+        self.input.token(self.pos).is_some_and(|t| {
+            t.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&t.text, text)
+        })
     }
 
+    /// Значимых токенов больше не осталось.
+    ///
+    /// Хвост промежутков за последним словом сюда не входит: грамматике там
+    /// делать нечего, а до дерева его доводит сток.
     pub fn at_end(&self) -> bool {
-        self.pos >= self.tokens.len()
+        self.pos >= self.input.len()
     }
 
     pub fn eat(&mut self, kind: TokenKind) -> bool {
@@ -119,10 +107,29 @@ impl<'a> Parser<'a> {
     }
 
     pub fn bump(&mut self) {
-        if let Some(kind) = self.current() {
-            self.track_group(kind);
+        let Some(kind) = self.current() else {
+            return;
+        };
+        self.track_group(kind);
+
+        let raw = self.input.raw_at(self.pos);
+        self.emit_gap_before(raw);
+        self.events.push(Event::Token { kind });
+        self.raw_pos = raw + 1;
+        self.pos += 1;
+    }
+
+    /// Отдаёт событиями промежуток перед сырой позицией `raw`.
+    ///
+    /// Промежутки уходят в дерево здесь, а не по просьбе грамматики: правило,
+    /// которому пришлось бы просить, тем самым знало бы о тривии. Событие на
+    /// каждую лексему — потому что сток идёт по сырому потоку в такт событиям,
+    /// и пропуск одного события сдвинул бы весь остаток.
+    fn emit_gap_before(&mut self, raw: usize) {
+        while self.raw_pos < raw {
+            let kind = self.input.raw_kind(self.raw_pos);
             self.events.push(Event::Token { kind });
-            self.pos += 1;
+            self.raw_pos += 1;
         }
     }
 
@@ -281,7 +288,7 @@ impl<'a> Parser<'a> {
     /// token list itself, and every rule that walked it got a different
     /// part of it wrong.
     pub fn prev_significant(&self) -> Option<TokenKind> {
-        self.tokens[..self.pos].iter().rev().find(|t| !Self::is_trivia_kind(t.kind)).map(|t| t.kind)
+        self.pos.checked_sub(1).and_then(|prev| self.input.kind(prev))
     }
 
     /// Whether a line break stands between the previous significant token and
@@ -293,11 +300,6 @@ impl<'a> Parser<'a> {
     /// way. Which constructs may cross a line, and on what grounds, is
     /// declared in `docs/architecture/adr/ADR-02-line-sensitivity.md`.
     ///
-    /// The anchor is the next significant token rather than the current
-    /// position, so that a rule which has already skipped trivia and one which
-    /// has not get the same answer. Looking only forward would read false
-    /// after a skip; only backward, false before it.
-    ///
     /// A comment in the gap counts as a line break: it runs to the end of its
     /// line, so behind it stands either a newline or the end of the file.
     ///
@@ -305,28 +307,20 @@ impl<'a> Parser<'a> {
     /// the prologue of a file — there is no pair of tokens to stand between,
     /// and the answer is `false`.
     pub fn a_line_break_precedes(&self) -> bool {
-        let anchor = self.tokens[self.pos..]
-            .iter()
-            .position(|t| !Self::is_trivia_kind(t.kind))
-            .map_or(self.tokens.len(), |offset| self.pos + offset);
+        self.input.a_line_break_precedes(self.pos)
+    }
 
-        let mut saw_line_break = false;
-        for token in self.tokens[..anchor].iter().rev() {
-            if !Self::is_trivia_kind(token.kind) {
-                return saw_line_break;
-            }
-            if matches!(token.kind, TokenKind::Newline | TokenKind::Comment) {
-                saw_line_break = true;
-            }
-        }
-        false
+    /// Соприкасается ли токен под курсором с предыдущим.
+    ///
+    /// Нужен там, где лексер режет одно слово языка на несколько токенов
+    /// вплотную: склеить обратно надо ровно их, а соседнее слово, отделённое
+    /// хоть пробелом, — уже другое слово.
+    pub fn a_gap_precedes(&self) -> bool {
+        self.input.a_gap_precedes(self.pos)
     }
 
     fn is_trivia_kind(kind: TokenKind) -> bool {
-        matches!(
-            kind,
-            TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom
-        )
+        crate::input::is_trivia(kind)
     }
 
     pub fn eat_keyword(&mut self, text: &str) -> bool {
@@ -340,7 +334,10 @@ impl<'a> Parser<'a> {
 
     pub fn start(&mut self) -> Marker {
         let pos = self.events.len();
-        let start_token_pos = self.pos;
+        // Индекс СЫРОЙ: сток считает диапазоны по потоку лексем, а `self.pos`
+        // считает слова. Позиция за последним словом штатна — ошибка о
+        // пропущенном токене на конце входа ставит маркер именно там.
+        let start_token_pos = self.input.raw_at(self.pos);
         self.events.push(Event::Placeholder);
         Marker { pos, start_token_pos }
     }
@@ -472,21 +469,9 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    pub fn skip_trivia(&mut self) {
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Whitespace
-                | TokenKind::Comment
-                | TokenKind::Newline
-                | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-    }
-
     pub fn at_declaration_start(&self) -> bool {
         matches!(self.current(), Some(TokenKind::KwFunction | TokenKind::KwProcedure))
-            && self.nth_non_trivia(0) == Some(TokenKind::Ident)
+            && self.nth(1) == Some(TokenKind::Ident)
     }
 
     pub fn check_iteration_limit(&mut self) {

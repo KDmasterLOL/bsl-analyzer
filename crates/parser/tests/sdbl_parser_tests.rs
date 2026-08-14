@@ -4632,3 +4632,40 @@ fn test_well_formed_queries_are_covered_completely() {
         assert_accepted(input);
     }
 }
+
+/// Одинокий амперсанд никогда не соседствует с `Ident` вплотную.
+///
+/// На этом стоит правило параметра: имя приходит внутри самого токена, и
+/// отдельного `Ident` за амперсандом грамматика не берёт. Допущение лексерное,
+/// поэтому и проверяется на лексере: смена его правил обязана уронить этот
+/// тест, а не тихо вернуть грамматике съеденное ключевое слово.
+#[test]
+fn a_lone_ampersand_is_never_adjacent_to_an_identifier() {
+    use lexer::sdbl::{tokenize_sdbl, SdblTokenKind};
+
+    let mut seen_lone = false;
+    for source in [
+        "ВЫБРАТЬ &П ИЗ Т",
+        "ВЫБРАТЬ & П ИЗ Т",
+        "ВЫБРАТЬ &\nП ИЗ Т",
+        "ВЫБРАТЬ &&П ИЗ Т",
+        "ВЫБРАТЬ &1 ИЗ Т",
+        "ВЫБРАТЬ & ИЗ Т",
+        "ВЫБРАТЬ &_П ИЗ Т",
+    ] {
+        let tokens = tokenize_sdbl(source);
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind != SdblTokenKind::Ampersand {
+                continue;
+            }
+            seen_lone = true;
+            assert_ne!(
+                tokens.get(i + 1).map(|next| next.kind),
+                Some(SdblTokenKind::Ident),
+                "в {source:?} за одиноким амперсандом встал Ident вплотную"
+            );
+        }
+    }
+
+    assert!(seen_lone, "корпус не дал ни одного одинокого амперсанда: правило не проверено");
+}

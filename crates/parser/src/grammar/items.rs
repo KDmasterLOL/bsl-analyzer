@@ -15,8 +15,6 @@ pub fn annotation(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
-
     if p.at(TokenKind::LParen) {
         annotation_params(p);
     }
@@ -29,19 +27,15 @@ fn annotation_params(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
-
         if !p.at(TokenKind::RParen) {
             annotation_param(p);
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 annotation_param(p);
             }
         }
     });
 
-    p.skip_trivia();
     p.expect(TokenKind::RParen);
 
     m.complete(p, NodeKind::AnnotationParams);
@@ -50,13 +44,9 @@ fn annotation_params(p: &mut Parser) {
 fn annotation_param(p: &mut Parser) {
     let m = p.start();
 
-    p.skip_trivia();
-
     if p.at(TokenKind::Ident) {
         p.bump();
-        p.skip_trivia();
         if p.eat(TokenKind::Eq) {
-            p.skip_trivia();
             annotation_param_value(p);
         }
     } else {
@@ -80,7 +70,6 @@ fn annotation_param_value(p: &mut Parser) {
         }
         Some(TokenKind::Minus) | Some(TokenKind::Plus) => {
             p.bump();
-            p.skip_trivia();
             if p.at(TokenKind::Decimal) || p.at(TokenKind::Float) {
                 p.bump();
             }
@@ -124,36 +113,24 @@ fn at_end_function(p: &Parser) -> bool {
 }
 
 pub fn procedure_def_content(p: &mut Parser) {
-    p.skip_trivia();
-
     p.eat(TokenKind::KwAsync);
 
-    p.skip_trivia();
     p.expect(TokenKind::KwProcedure);
 
     p.within_boundary(at_end_procedure, |p| {
-        p.skip_trivia();
-
         if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
-
-        p.skip_trivia();
 
         if p.at(TokenKind::LParen) {
             param_list(p);
         }
 
-        p.skip_trivia();
-
         p.eat(TokenKind::KwExport);
-
-        p.skip_trivia();
 
         statements::stmt_list(p, TokenKind::KwEndProcedure);
     });
 
-    p.skip_trivia();
     p.expect(TokenKind::KwEndProcedure);
 }
 
@@ -164,36 +141,24 @@ pub fn function_def(p: &mut Parser) {
 }
 
 pub fn function_def_content(p: &mut Parser) {
-    p.skip_trivia();
-
     p.eat(TokenKind::KwAsync);
 
-    p.skip_trivia();
     p.expect(TokenKind::KwFunction);
 
     p.within_boundary(at_end_function, |p| {
-        p.skip_trivia();
-
         if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
-
-        p.skip_trivia();
 
         if p.at(TokenKind::LParen) {
             param_list(p);
         }
 
-        p.skip_trivia();
-
         p.eat(TokenKind::KwExport);
-
-        p.skip_trivia();
 
         statements::stmt_list(p, TokenKind::KwEndFunction);
     });
 
-    p.skip_trivia();
     p.expect(TokenKind::KwEndFunction);
 }
 
@@ -202,19 +167,15 @@ fn param_list(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
-
         if !p.at(TokenKind::RParen) {
             param(p);
             while p.eat(TokenKind::Comma) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 param(p);
             }
         }
     });
 
-    p.skip_trivia();
     p.expect(TokenKind::RParen);
 
     m.complete(p, NodeKind::ParamList);
@@ -223,20 +184,13 @@ fn param_list(p: &mut Parser) {
 fn param(p: &mut Parser) {
     let m = p.start();
 
-    p.skip_trivia();
-
     p.eat(TokenKind::KwVal);
-
-    p.skip_trivia();
 
     if p.at(TokenKind::Ident) {
         p.bump();
     }
 
-    p.skip_trivia();
-
     if p.eat(TokenKind::Eq) {
-        p.skip_trivia();
         super::expressions::expression(p);
     }
 
@@ -252,24 +206,18 @@ pub fn var_declaration(p: &mut Parser) {
 pub fn var_declaration_content(p: &mut Parser) {
     p.bump();
 
-    p.skip_trivia();
-
     if p.at(TokenKind::Ident) {
         p.bump();
     }
 
     while p.eat(TokenKind::Comma) {
         p.check_iteration_limit();
-        p.skip_trivia();
         if p.at(TokenKind::Ident) {
             p.bump();
         }
     }
 
-    p.skip_trivia();
-
     p.eat(TokenKind::KwExport);
 
-    p.skip_trivia();
     p.eat(TokenKind::Semicolon);
 }

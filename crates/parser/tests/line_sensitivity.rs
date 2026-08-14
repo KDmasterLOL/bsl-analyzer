@@ -29,10 +29,6 @@ enum Lang {
     Sdbl,
 }
 
-fn is_trivia(kind: TokenKind) -> bool {
-    matches!(kind, TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom)
-}
-
 // ===================================================================
 // Преобразование: перевод строки → пробел
 // ===================================================================
@@ -268,78 +264,42 @@ fn line_insensitive_inputs() -> Vec<Input> {
 // Предикат
 // ===================================================================
 
-/// Значение предиката не зависит от того, звало ли правило `skip_trivia`.
-///
-/// Предикат, смотрящий только вперёд, после пропуска тривии всегда ложен;
-/// смотрящий только назад — ложен до пропуска. Разойтись эти две формы могут
-/// тихо, и правило получит разный ответ на один и тот же текст в зависимости
-/// от того, в каком порядке оно написано.
-///
-/// Второе утверждение — покрытие: без него свойство зелено у реализации,
-/// которая всегда возвращает `false`.
-#[test]
-fn the_predicate_reads_the_same_before_and_after_skipping_trivia() {
-    let mut saw_true = false;
-    let mut saw_false = false;
-
-    let corpus = [MODULE_FIXTURE.to_string()]
-        .into_iter()
-        .chain(line_sensitive_inputs().into_iter().filter(|i| i.lang == Lang::Bsl).map(|i| i.text))
-        .chain(line_insensitive_inputs().into_iter().map(|i| i.text))
-        .collect::<Vec<_>>();
-
-    for text in &corpus {
-        let tokens = tokenize(text);
-        let mut p = Parser::new(&tokens);
-
-        while let Some(kind) = p.current() {
-            if !is_trivia(kind) {
-                let value = p.a_line_break_precedes();
-                saw_true |= value;
-                saw_false |= !value;
-                p.bump();
-                continue;
-            }
-
-            let at_run_start = p.a_line_break_precedes();
-            while p.current().is_some_and(is_trivia) {
-                assert_eq!(
-                    p.a_line_break_precedes(),
-                    at_run_start,
-                    "предикат разошёлся внутри прогона тривии"
-                );
-                p.bump();
-            }
-            assert_eq!(
-                p.a_line_break_precedes(),
-                at_run_start,
-                "предикат разошёлся до и после пропуска тривии"
-            );
-
-            saw_true |= at_run_start;
-            saw_false |= !at_run_start;
-        }
-    }
-
-    assert!(saw_true, "на корпусе не встретилось ни одного пересечения строки");
-    assert!(saw_false, "на корпусе не встретилось ни одной позиции без пересечения строки");
-}
+// Свойство «предикат читается одинаково до и после пропуска тривии» держал
+// тест `the_predicate_reads_the_same_before_and_after_skipping_trivia`. Он
+// снят, а не поправлен: у парсера, не видящего тривии, «до пропуска» и «после»
+// неразличимы по построению, поэтому его ветка обхода промежутка стала мёртвой
+// и тест проходил бы вхолостую на любой реализации. Содержание переехало в
+// сверку битовой карты с прежним обратным сканом (`crates/parser/src/input.rs`,
+// `the_map_agrees_with_the_backward_scan`), где два способа получить ответ
+// остались независимыми.
 
 /// Комментарий в промежутке — это пересечение строки, и основание тут
 /// лексическое, а не грамматическое: комментарий тянется до конца своей
-/// строки. Под позицией стоит `Comment`, а не `Newline`, поэтому правило,
-/// смотрящее на вид токена, здесь ответило бы «нет».
+/// строки.
+///
+/// Проба стоит на слове ЗА промежутком: позиции внутри промежутка у парсера
+/// нет. Отдельно проверяется, что `Newline` в этом промежутке нет вовсе, —
+/// без этого тест не отличает комментарий от перевода строки и повторяет
+/// соседний.
 #[test]
 fn a_comment_in_the_gap_counts_as_a_line_break() {
-    let tokens = tokenize("Т.// c\nИЗ");
-    let mut p = Parser::new(&tokens);
+    // Комментарий без перевода строки за ним бывает ровно в одном месте — на
+    // конце входа: слово на следующей строке этот перевод бы и принесло, и
+    // тогда вход перестаёт различать два правила.
+    let tokens = tokenize("Т.// c");
+    let gap: Vec<_> =
+        tokens.iter().skip_while(|t| t.kind != TokenKind::Dot).skip(1).map(|t| t.kind).collect();
+    assert_eq!(
+        gap,
+        vec![TokenKind::Comment],
+        "промежуток обязан состоять из одного комментария, иначе правило про него не проверяется"
+    );
 
-    while !p.at(TokenKind::Dot) {
+    let mut p = Parser::new(&tokens);
+    while !p.at_end() {
         p.bump();
     }
-    p.bump();
 
-    assert_eq!(p.current(), Some(TokenKind::Comment), "проба стоит не на комментарии");
     assert!(p.a_line_break_precedes(), "комментарий в промежутке не признан пересечением строки");
 }
 
