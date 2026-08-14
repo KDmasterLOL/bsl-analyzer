@@ -252,20 +252,20 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         match err.recovery() {
             RecoveryKind::BumpToken => self.previous_token_range_or_zero_at_start(),
             RecoveryKind::MissingToken => {
-                let offset = self.current_token_offset_or_source_len();
+                let offset = self.offset_of_next_significant(self.token_pos);
                 TextRange::empty(TextSize::new(offset))
             }
             RecoveryKind::RecoverySpan => {
                 let start = span_start_token
-                    .map_or_else(|| self.source_len(), |idx| self.token_offset(idx));
-                let end = self.current_token_offset_or_source_len();
+                    .map_or_else(|| self.source_len(), |idx| self.offset_of_next_significant(idx));
+                let end = self.offset_of_next_significant(self.token_pos);
                 self.safe_range(start, end)
             }
             RecoveryKind::Custom => {
                 if self.last_significant_pos.is_some() {
                     self.previous_token_range_or_zero_at_start()
                 } else {
-                    let offset = self.current_token_offset_or_source_len();
+                    let offset = self.offset_of_next_significant(self.token_pos);
                     TextRange::empty(TextSize::new(offset))
                 }
             }
@@ -295,15 +295,25 @@ impl<'t, 'cache> Sink<'t, 'cache> {
         )
     }
 
-    fn current_token_offset_or_source_len(&self) -> u32 {
-        self.tokens
-            .get(self.token_pos)
-            .map_or_else(|| self.source_len(), |token| self.clamp_offset(token.offset))
-    }
-
-    fn token_offset(&self, token_pos: usize) -> u32 {
-        self.tokens
-            .get(token_pos)
+    /// Начало первого значимого токена на позиции `from` или за ней; если
+    /// такого нет — конец входа.
+    ///
+    /// Этим держится норма привязки диапазонов ошибок
+    /// (`docs/architecture/adr/ADR-03-error-range-attribution.md`): о
+    /// пропущенном токене сообщают на начале следующего слова, а не в
+    /// промежутке перед ним. Пропущенный токен места не занимает, и указать на
+    /// него можно тремя способами — на конец предыдущего слова, в промежуток,
+    /// на начало следующего; выбран третий.
+    ///
+    /// Нормализация нужна здесь, а не у вызывающих: сегодня промежуток под
+    /// курсором почти не встречается, потому что грамматика снимает тривию
+    /// раньше, чем требует токен, — но это её привычка, а не устройство стока.
+    /// Правило, потребовавшее токен и не снявшее пробел, ставит диагностику на
+    /// пробел, и заметить это можно только по жалобе.
+    fn offset_of_next_significant(&self, from: usize) -> u32 {
+        self.tokens[from.min(self.tokens.len())..]
+            .iter()
+            .find(|token| !token_kind_to_syntax(token.kind).is_trivia())
             .map_or_else(|| self.source_len(), |token| self.clamp_offset(token.offset))
     }
 
@@ -487,6 +497,66 @@ mod tests {
 
         assert_eq!(parse.errors().len(), 1);
         assert_eq!(parse.errors()[0].range(), range(0, 2));
+    }
+
+    /// Ошибка о пропущенном токене указывает на начало следующего значимого
+    /// токена, а не в промежуток перед ним.
+    ///
+    /// Вход подобран так, чтобы нарушение было ВИДНО: ошибка подана до того,
+    /// как тривия сбампана, — то есть ровно в положении, в котором её
+    /// оставляет правило, потребовавшее токен и не снявшее пробел. Реализация,
+    /// берущая смещение у лексемы под курсором, показывает пробел.
+    #[test]
+    fn a_missing_token_error_after_buffered_trivia_points_at_the_next_word() {
+        let source = "А   Б";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Error(unexpected(RecoveryKind::MissingToken)),
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(
+            parse.errors()[0].range(),
+            TextRange::empty(TextSize::new(tokens[2].offset as u32)),
+            "ожидалось начало слова за промежутком, а не сам промежуток"
+        );
+    }
+
+    /// Начало спана нормализуется ВПЕРЁД, к следующему слову.
+    ///
+    /// Правило направленное, и проверить его можно только входом, у которого
+    /// маркер стоит на тривии: конец предыдущего слова — тоже граница
+    /// значимого токена, поэтому свойство «смещение не внутри тривии»
+    /// реализацию, нормализующую назад, пропустило бы.
+    #[test]
+    fn a_recovery_span_starting_on_trivia_begins_at_the_next_word() {
+        let source = "А Б;";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::ErrorWithSpan { start_token: 1, err: unexpected(RecoveryKind::RecoverySpan) },
+            Event::Token { kind: lexer::TokenKind::Semicolon },
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(
+            parse.errors()[0].range(),
+            range(tokens[2].offset as u32, tokens[3].offset as u32),
+            "начало спана уехало назад, на конец предыдущего слова"
+        );
     }
 
     #[test]
