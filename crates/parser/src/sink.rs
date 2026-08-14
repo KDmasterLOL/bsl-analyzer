@@ -499,6 +499,34 @@ mod tests {
         assert_eq!(parse.errors()[0].range(), range(0, 2));
     }
 
+    /// Ветвь `Custom` при пустом дереве: показывать не на чем, поэтому
+    /// диапазон пуст — но и он нормализуется вперёд, к первому слову.
+    ///
+    /// Вход начинается с тривии: пока перед ошибкой стоит слово, работает
+    /// соседняя ветвь, и подмена нормализации смещением текущей лексемы
+    /// остаётся невидимой.
+    #[test]
+    fn custom_error_on_an_empty_tree_points_at_the_first_word() {
+        let source = "  А";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Error(unexpected(RecoveryKind::Custom)),
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(
+            parse.errors()[0].range(),
+            TextRange::empty(TextSize::new(tokens[1].offset as u32)),
+            "пустой диапазон остался на промежутке вместо начала первого слова"
+        );
+    }
+
     /// Ошибка о пропущенном токене указывает на начало следующего значимого
     /// токена, а не в промежуток перед ним.
     ///
