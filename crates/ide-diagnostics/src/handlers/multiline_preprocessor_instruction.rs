@@ -36,6 +36,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let root = ctx.parse().syntax_node();
+    let line_index = ctx.line_index();
     let mut diagnostics = Vec::new();
 
     for node in root.descendants() {
@@ -47,7 +48,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         };
 
-        if !crosses_a_line(&node, header) {
+        if line_index.line_col(header.start()).line == line_index.line_col(header.end()).line {
             continue;
         }
 
@@ -76,6 +77,10 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 ///
 /// Инструкция без `Тогда` пропускается: она уже сломана, и об этом сообщает
 /// разбор. Второе сообщение о том же месте пользы не несёт.
+///
+/// Разрыв опознаётся по номерам строк концов этого диапазона, а не обходом
+/// токенов внутри него: тело инструкции лежит в том же узле, и обход поддерева
+/// у каждого заголовка стоил бы квадрата на вложенных директивах.
 fn instruction_header(node: &SyntaxNode) -> Option<TextRange> {
     let start = node.first_token()?.text_range().start();
     let then = node
@@ -84,12 +89,6 @@ fn instruction_header(node: &SyntaxNode) -> Option<TextRange> {
         .find(|token| token.kind() == SyntaxKind::KW_THEN)?;
 
     Some(TextRange::new(start, then.text_range().end()))
-}
-
-fn crosses_a_line(node: &SyntaxNode, header: TextRange) -> bool {
-    node.descendants_with_tokens().filter_map(|element| element.into_token()).any(|token| {
-        token.kind() == SyntaxKind::NEWLINE && header.contains_range(token.text_range())
-    })
 }
 
 #[cfg(test)]
