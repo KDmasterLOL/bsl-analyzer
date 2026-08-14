@@ -559,6 +559,35 @@ mod tests {
         );
     }
 
+    /// Ошибка, потраченная на токен, показывается на последнем СЛОВЕ, а не на
+    /// предыдущей лексеме потока.
+    ///
+    /// Вход с тривией между словом и ошибкой обязателен: пока лексема перед
+    /// ошибкой значима, обе реализации дают один и тот же диапазон, и подмена
+    /// «последнее слово» → «предыдущая лексема» остаётся невидимой.
+    #[test]
+    fn a_bump_token_error_after_trivia_points_at_the_last_word() {
+        let source = "А   Б";
+        let tokens = lexer::tokenize(source);
+        let events = vec![
+            Event::Start { kind: NodeKind::SourceFile, forward_parent: None },
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Token { kind: lexer::TokenKind::Whitespace },
+            Event::Error(unexpected(RecoveryKind::BumpToken)),
+            Event::Token { kind: lexer::TokenKind::Ident },
+            Event::Finish,
+        ];
+
+        let parse = Sink::new(&tokens).finish(events).finish();
+
+        assert_eq!(parse.errors().len(), 1);
+        assert_eq!(
+            parse.errors()[0].range(),
+            range(tokens[0].offset as u32, tokens[0].text.len() as u32),
+            "диапазон уехал на промежуток вместо слова перед ним"
+        );
+    }
+
     #[test]
     fn empty_token_stream_returns_clean_parse() {
         let parse = crate::parse("");
