@@ -133,12 +133,16 @@ fn region_header(node: &SyntaxNode) -> Option<TextRange> {
     // Точка с запятой стоит вне узла, поэтому одинокое слово и вызов без
     // скобок доходят сюда одинаковыми. Их различает она сама: у имени области
     // её не бывает, а поставивший её писал оператор.
+    //
+    // Смотреть надо ровно на следующий элемент, а не на следующий ТОКЕН: узлы
+    // пропускать нельзя. Присваивание и вызов тоже выносят свою точку с
+    // запятой наружу, и обход, перескакивающий их узлы, принимал бы её за
+    // свою — унесённое имя, за которым идёт обычный оператор, тогда глохнет.
     let terminated = orphan
         .siblings_with_tokens(syntax::Direction::Next)
         .skip(1)
-        .filter_map(|element| element.into_token())
-        .find(|token| !token.kind().is_trivia())
-        .is_some_and(|token| token.kind() == SyntaxKind::SEMICOLON);
+        .find(|element| !element.as_token().is_some_and(|token| token.kind().is_trivia()))
+        .is_some_and(|element| element.kind() == SyntaxKind::SEMICOLON);
     if terminated {
         return None;
     }
@@ -239,6 +243,47 @@ mod tests {
         let code = "#Область\nА = 1;\n#КонецОбласти\n";
         let diagnostics = check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// Точка с запятой оператора, идущего ЗА унесённым именем, к имени
+    /// отношения не имеет: у присваивания и вызова она лежит вне узла, и обход,
+    /// пропускающий узлы, принимал её за свою.
+    #[test]
+    fn a_semicolon_of_the_next_statement_does_not_belong_to_the_carried_name() {
+        let code = "#Область\nСлужебные\nА = 1;\n#КонецОбласти\n";
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            MultilinePreprocessorInstruction @ 1:1..2:10
+              message: Инструкция препроцессора разорвана переводом строки
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn the_same_holds_inside_a_procedure() {
+        let code = "Процедура П()\n#Область\nСлужебные\nМетод();\n#КонецОбласти\nКонецПроцедуры\n";
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            MultilinePreprocessorInstruction @ 2:1..3:10
+              message: Инструкция препроцессора разорвана переводом строки
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// Самый коварный представитель разряда: вызов без скобок за унесённым
+    /// именем даёт узел той же формы, что и само имя, и его точку с запятой
+    /// легко принять за принадлежащую имени. Отличается он тем, что стоит
+    /// ПОСЛЕ имени, а не на его месте — сравни с
+    /// `a_terminated_word_after_a_nameless_region_is_not_a_carried_name`.
+    #[test]
+    fn a_parenless_call_after_the_carried_name_does_not_silence_it() {
+        let code = "#Область\nСлужебные\nМетод;\n#КонецОбласти\n";
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            MultilinePreprocessorInstruction @ 1:1..2:10
+              message: Инструкция препроцессора разорвана переводом строки
+              severity: Major"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     /// Оператор без завершающей точки с запятой: её проверка тут не спасает,
