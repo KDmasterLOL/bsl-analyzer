@@ -470,10 +470,10 @@ fn table_ref(p: &mut Parser) {
 
     if p.at(TokenKind::Ampersand) {
         let pm = p.start();
+        // Имя параметра приходит внутри самого токена, отдельного `Ident` за
+        // амперсандом не бывает. Взять его значило бы отобрать у запроса
+        // следующее слово — `AS` у псевдонима, `ПО` у соединения.
         p.bump();
-        if p.at(TokenKind::Ident) {
-            p.bump();
-        }
         pm.complete(p, NodeKind::SdblParameter);
         m.complete(p, NodeKind::SdblTableRef);
         return;

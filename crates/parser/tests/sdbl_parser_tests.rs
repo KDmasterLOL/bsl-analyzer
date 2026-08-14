@@ -4669,3 +4669,49 @@ fn a_lone_ampersand_is_never_adjacent_to_an_identifier() {
 
     assert!(seen_lone, "корпус не дал ни одного одинокого амперсанда: правило не проверено");
 }
+
+/// Узел параметра состоит ровно из одного токена, где бы он ни разобрался.
+///
+/// Имя приходит внутри самого токена, поэтому любое правило, дозволившее себе
+/// взять `Ident` следом, отбирает у запроса следующее слово: у псевдонима —
+/// `КАК`, у соединения — `ПО`. Правил, разбирающих параметр, несколько, и
+/// проверять их поимённо значит пропустить следующее; свойство держит разряд
+/// целиком.
+#[test]
+fn a_parameter_node_never_holds_more_than_its_own_token() {
+    use syntax::SyntaxKind;
+
+    let mut seen = 0;
+    for source in [
+        "ВЫБРАТЬ * ИЗ &ТЗ КАК Т",
+        "SELECT * FROM &Tmp AS T",
+        "ВЫБРАТЬ * ИЗ & Т",
+        "ВЫБРАТЬ * ИЗ &\nГДЕ 1 = 1",
+        "ВЫБРАТЬ А ИЗ Т ЛЕВОЕ СОЕДИНЕНИЕ &\nПО Т.А = 1",
+        "ВЫБРАТЬ * ИЗ Т ГДЕ Т.А = &П И Т.Б = 1",
+        "ВЫБРАТЬ * ИЗ Т ГДЕ Т.А = &\nИ Т.Б = 1",
+        "ВЫБРАТЬ &П КАК Поле ИЗ Т",
+    ] {
+        for node in parse_sdbl(source)
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_PARAMETER)
+        {
+            seen += 1;
+            let tokens: Vec<_> = node
+                .children_with_tokens()
+                .filter_map(|c| c.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .map(|t| (t.kind(), t.text().to_string()))
+                .collect();
+            assert_eq!(tokens.len(), 1, "в {source:?} узел параметра забрал лишнее: {tokens:?}");
+            assert_eq!(
+                tokens[0].0,
+                SyntaxKind::AMPERSAND,
+                "в {source:?} параметр не из амперсанда"
+            );
+        }
+    }
+
+    assert!(seen >= 8, "корпус дал всего {seen} параметров: часть правил не пройдена");
+}
