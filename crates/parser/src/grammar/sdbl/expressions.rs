@@ -793,7 +793,8 @@ fn column_or_function(p: &mut Parser) {
 
     if p.at(TokenKind::Dot) || super::at_a_qualifying_dot(p) {
         while super::eat_qualifying_dot(p) {
-            let crossed_newline = p.skip_trivia_crossing_newline();
+            let crossed_newline = p.a_line_break_precedes();
+            p.skip_trivia();
 
             if p.at(TokenKind::LParen) {
                 inline_table_fields(p);
@@ -932,7 +933,8 @@ fn column_or_function(p: &mut Parser) {
         p.skip_trivia();
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            let crossed_newline = p.skip_trivia_crossing_newline();
+            let crossed_newline = p.a_line_break_precedes();
+            p.skip_trivia();
 
             if at_property_name(p) {
                 // Same-line keyword after a dot is a member name; across a newline a

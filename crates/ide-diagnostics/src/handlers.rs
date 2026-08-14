@@ -99,6 +99,7 @@ pub mod missing_temp_storage_deletion;
 pub mod missing_temporary_file_deletion;
 pub mod missing_variables_description;
 pub mod module_accessibility;
+pub mod multiline_preprocessor_instruction;
 pub mod multiline_string_in_query;
 pub mod multilingual_string_has_all_declared_languages;
 pub mod multilingual_string_using_with_template;
@@ -220,6 +221,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::ParseError => Some(&parse_error::METADATA),
         DiagnosticCode::CanonicalSpellingKeywords => Some(&canonical_spelling_keywords::METADATA),
         DiagnosticCode::ConsecutiveEmptyLines => Some(&consecutive_empty_lines::METADATA),
+        DiagnosticCode::MultilinePreprocessorInstruction => {
+            Some(&multiline_preprocessor_instruction::METADATA)
+        }
         DiagnosticCode::LineLength => Some(&line_length::METADATA),
         DiagnosticCode::MissingSpace => Some(&missing_space::METADATA),
         DiagnosticCode::OneStatementPerLine => Some(&one_statement_per_line::METADATA),

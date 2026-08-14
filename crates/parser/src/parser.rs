@@ -8,6 +8,14 @@ const MAX_ITERATIONS: usize = 1_000_000;
 
 const POSITION_HISTORY_SIZE: usize = 100;
 
+/// Asking for trivia by kind is asking the grammar to decide something about
+/// lines through a channel that does not carry that decision. The one channel
+/// that does is [`Parser::a_line_break_precedes`]; which constructs may cross a
+/// line, and on what grounds, is declared in
+/// `docs/architecture/adr/ADR-02-line-sensitivity.md`.
+const TRIVIA_IS_NOT_THE_CHANNEL: &str =
+    "о переводе строки грамматике сообщает предикат, а не вид токена";
+
 pub struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
@@ -73,9 +81,14 @@ impl<'a> Parser<'a> {
     }
 
     pub fn at(&self, kind: TokenKind) -> bool {
+        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
         self.current() == Some(kind)
     }
 
+    /// No check for trivia here, unlike [`Parser::at`]: a set cannot hold any.
+    /// The bits of a [`TokenSet`](crate::token_set::TokenSet) are private and
+    /// every way to make one refuses trivia or preserves that refusal, so a
+    /// check placed here could never be seen failing.
     pub fn at_ts(&self, set: crate::token_set::TokenSet) -> bool {
         self.current().is_some_and(|k| set.contains(k))
     }
@@ -168,6 +181,10 @@ impl<'a> Parser<'a> {
     }
 
     pub fn expect(&mut self, kind: TokenKind) -> bool {
+        // Its own check, not the one in `at`: a declared boundary returns from
+        // here without ever reaching it.
+        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+
         // A grammar boundary belongs to a rule further out, and no rule may
         // require it here. It matters because kinds are coarser than words:
         // every keyword of a language whose keywords are not reserved
@@ -241,6 +258,9 @@ impl<'a> Parser<'a> {
     /// recovery, which costs the caller exactly what the caller was about to
     /// parse.
     pub fn expect_no_bump(&mut self, kind: TokenKind) -> bool {
+        // Its own check, for the same reason as in [`Parser::expect`].
+        debug_assert!(!Self::is_trivia_kind(kind), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+
         if !self.at_declared_boundary() && self.eat(kind) {
             return true;
         }
@@ -262,6 +282,44 @@ impl<'a> Parser<'a> {
     /// part of it wrong.
     pub fn prev_significant(&self) -> Option<TokenKind> {
         self.tokens[..self.pos].iter().rev().find(|t| !Self::is_trivia_kind(t.kind)).map(|t| t.kind)
+    }
+
+    /// Whether a line break stands between the previous significant token and
+    /// the next one.
+    ///
+    /// This is the whole of what the grammar is told about lines. The kind of
+    /// a token is not that channel: a rule that reads one gets the norm from
+    /// nowhere, and the next rule to need the same decision writes it a fourth
+    /// way. Which constructs may cross a line, and on what grounds, is
+    /// declared in `docs/architecture/adr/ADR-02-line-sensitivity.md`.
+    ///
+    /// The anchor is the next significant token rather than the current
+    /// position, so that a rule which has already skipped trivia and one which
+    /// has not get the same answer. Looking only forward would read false
+    /// after a skip; only backward, false before it.
+    ///
+    /// A comment in the gap counts as a line break: it runs to the end of its
+    /// line, so behind it stands either a newline or the end of the file.
+    ///
+    /// Nothing is consumed. Where no significant token precedes the gap —
+    /// the prologue of a file — there is no pair of tokens to stand between,
+    /// and the answer is `false`.
+    pub fn a_line_break_precedes(&self) -> bool {
+        let anchor = self.tokens[self.pos..]
+            .iter()
+            .position(|t| !Self::is_trivia_kind(t.kind))
+            .map_or(self.tokens.len(), |offset| self.pos + offset);
+
+        let mut saw_line_break = false;
+        for token in self.tokens[..anchor].iter().rev() {
+            if !Self::is_trivia_kind(token.kind) {
+                return saw_line_break;
+            }
+            if matches!(token.kind, TokenKind::Newline | TokenKind::Comment) {
+                saw_line_break = true;
+            }
+        }
+        false
     }
 
     fn is_trivia_kind(kind: TokenKind) -> bool {
@@ -424,33 +482,6 @@ impl<'a> Parser<'a> {
                 _ => break,
             }
         }
-    }
-
-    /// Skips trivia that cannot end a line. Unlike [`Parser::skip_trivia`], this
-    /// stops at a newline and at a comment (which runs to the end of its line),
-    /// so a caller stays on the line it started on.
-    pub fn skip_blanks(&mut self) {
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Whitespace | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-    }
-
-    pub fn skip_trivia_crossing_newline(&mut self) -> bool {
-        let mut crossed_newline = false;
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Newline => {
-                    crossed_newline = true;
-                    self.bump();
-                }
-                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-        crossed_newline
     }
 
     pub fn at_declaration_start(&self) -> bool {

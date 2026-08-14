@@ -153,10 +153,12 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
     p.bump();
     // The name sits on the directive's own line; reaching past the newline would
     // steal the next statement's identifier and leave that statement headless.
-    p.skip_blanks();
+    if !p.a_line_break_precedes() {
+        p.skip_trivia();
 
-    if p.at(TokenKind::Ident) {
-        p.bump();
+        if p.at(TokenKind::Ident) {
+            p.bump();
+        }
     }
 
     m.complete(p, NodeKind::PreRegionDir);
