@@ -180,6 +180,7 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
         p.within_boundary(at_then, preproc_expression);
         p.skip_trivia();
 
+        a_preproc_part_stays_on_its_line(p);
         p.expect(TokenKind::KwThen);
 
         preproc_content(p);
@@ -193,6 +194,7 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
             p.within_boundary(at_then, preproc_expression);
             p.skip_trivia();
 
+            a_preproc_part_stays_on_its_line(p);
             p.expect(TokenKind::KwThen);
 
             preproc_content(p);
@@ -216,6 +218,19 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
 
 fn at_then(p: &Parser) -> bool {
     p.at(TokenKind::KwThen)
+}
+
+/// A preprocessor instruction stands on the line it starts on.
+///
+/// The platform refuses a part carried to the next line — the condition, an
+/// operand of it, the `Тогда` closing it — so text the grammar accepted
+/// silently was text the configuration would not take. Reported where the part
+/// begins, and without consuming it: the part itself is well formed, and the
+/// construct around it still parses.
+fn a_preproc_part_stays_on_its_line(p: &mut Parser) {
+    if p.a_line_break_precedes() {
+        p.error_custom_no_bump("часть инструкции препроцессора перенесена на другую строку");
+    }
 }
 
 /// The punctuation a parenthesised list owns: the comma it reaches its next
@@ -342,6 +357,7 @@ fn preproc_logical_expression(p: &mut Parser) {
 
     while matches!(p.current(), Some(TokenKind::KwAnd) | Some(TokenKind::KwOr)) {
         p.check_iteration_limit();
+        a_preproc_part_stays_on_its_line(p);
         let op_m = p.start();
         p.bump();
         op_m.complete(p, NodeKind::PreBoolOp);
@@ -354,6 +370,8 @@ fn preproc_logical_expression(p: &mut Parser) {
 }
 
 fn preproc_logical_operand(p: &mut Parser) {
+    a_preproc_part_stays_on_its_line(p);
+
     let m = p.start();
 
     if p.at(TokenKind::LParen) {
@@ -371,6 +389,7 @@ fn preproc_logical_operand(p: &mut Parser) {
         });
 
         p.skip_trivia();
+        a_preproc_part_stays_on_its_line(p);
         p.expect(TokenKind::RParen);
     } else if p.at(TokenKind::KwNot) {
         p.bump();
