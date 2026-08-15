@@ -78,64 +78,75 @@ pub struct Location {
     pub module: Option<ModuleRef>,
 }
 
-/// Why a place could not be named. Always emitted in place of a location, so a
-/// consumer never has to tell "absent because unknown" from "absent because none".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocationUnavailable {
+/// Declare the vocabulary of "why there is no place" ONCE: the variants, the wire codes,
+/// the published glosses and the list of them all come out of a single table.
+///
+/// A hand-written `ALL` beside the enum would be the one part a new variant does not have
+/// to join — `code` and `describe` are exhaustive matches and the compiler demands their
+/// branches, but an array of fixed length demands nothing. The gates that iterate that list
+/// would then keep passing while `graph schema` published a vocabulary short by exactly the
+/// code it had started serving, which is the failure the list exists to prevent.
+macro_rules! location_unavailable {
+    ($( $(#[$doc:meta])* $variant:ident => $code:literal, $gloss:literal; )+) => {
+        /// Why a place could not be named. Always emitted in place of a location, so a
+        /// consumer never has to tell "absent because unknown" from "absent because none".
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum LocationUnavailable {
+            $( $(#[$doc])* $variant, )+
+        }
+
+        impl LocationUnavailable {
+            /// The whole vocabulary. Every place that PUBLISHES the list — a tool's
+            /// `schema` action, the contract document — reads it from here.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
+
+            /// The wire code: what a consumer matches on.
+            pub fn code(self) -> &'static str {
+                match self { $( Self::$variant => $code, )+ }
+            }
+
+            /// A one-line gloss, so a tool's `schema` action publishes the vocabulary
+            /// instead of paraphrasing it in prose that drifts from the enum.
+            pub fn describe(self) -> &'static str {
+                match self { $( Self::$variant => $gloss, )+ }
+            }
+        }
+    };
+}
+
+location_unavailable! {
     /// The path lies outside every registered root, so no pair addresses it.
-    PathOutsideRegisteredRoots,
+    PathOutsideRegisteredRoots => "path_outside_registered_roots",
+        "the file lies outside every registered root";
+
     /// The producer holds an absolute path where the pair was expected — a search hit whose
     /// `file_path` is not root-relative. Its file is named, but not as `(root_id, path)`.
-    AbsolutePathWithoutPair,
+    AbsolutePathWithoutPair => "absolute_path_without_pair",
+        "the producer holds an absolute path rather than a (root_id, path) pair";
+
     /// Only a relative path is known, so the root table cannot place it. The mirror image of
-    /// [`Self::AbsolutePathWithoutPair`], and a separate code for exactly that reason: one
-    /// name for both facts would leave a consumer unable to tell which of the two happened.
-    RelativePathWithoutRoot,
+    /// [`LocationUnavailable::AbsolutePathWithoutPair`], and a separate code for exactly that
+    /// reason: one name for both facts would leave a consumer unable to tell which happened.
+    RelativePathWithoutRoot => "relative_path_without_root",
+        "only a relative path is known, so no root table can place it";
+
     /// The entity has no source file by construction (a metadata object, a form item).
-    NoSourceLocation,
-    /// The root table is not available in this answer — a stale graph cache published
-    /// as ready while the catch-up reload is still running.
-    RootsUnavailable,
-    /// The entity HAS a source file, but its path could not be named — a VFS entry that
-    /// is not valid UTF-8, or one missing from the source root's file set. Distinct from
+    NoSourceLocation => "no_source_location",
+        "metadata objects, forms and attributes have no file";
+
+    /// The root table is not available in this answer — a stale graph cache published as
+    /// ready while the catch-up reload is still running.
+    RootsUnavailable => "roots_unavailable",
+        "answered from a cache published before the project's root table was known";
+
+    /// The entity HAS a source file, but its path could not be named — a VFS entry that is
+    /// not valid UTF-8, or one missing from the source root's file set. Distinct from
     /// `RootsUnavailable`: the table was there, the path was not.
-    SourcePathUnavailable,
+    SourcePathUnavailable => "source_path_unavailable",
+        "the entity has a file, but its path could not be named";
 }
 
 impl LocationUnavailable {
-    /// The whole vocabulary. Every place that PUBLISHES the list — a tool's `schema` action,
-    /// the contract document — reads it from here, so a new reason cannot ship while a
-    /// consumer's closed list still says otherwise.
-    pub const ALL: [Self; 6] = [
-        Self::PathOutsideRegisteredRoots,
-        Self::AbsolutePathWithoutPair,
-        Self::RelativePathWithoutRoot,
-        Self::NoSourceLocation,
-        Self::RootsUnavailable,
-        Self::SourcePathUnavailable,
-    ];
-
-    /// A one-line gloss, so a tool's `schema` action publishes the vocabulary instead of
-    /// paraphrasing it: prose written beside the enum drifts from it, and a machine list
-    /// that is short by one code is worse than none — a consumer matching on a closed set
-    /// meets a value it was told could not occur.
-    pub fn describe(self) -> &'static str {
-        match self {
-            Self::PathOutsideRegisteredRoots => "the file lies outside every registered root",
-            Self::AbsolutePathWithoutPair => {
-                "the producer holds an absolute path rather than a (root_id, path) pair"
-            }
-            Self::RelativePathWithoutRoot => {
-                "only a relative path is known, so no root table can place it"
-            }
-            Self::NoSourceLocation => "metadata objects, forms and attributes have no file",
-            Self::RootsUnavailable => {
-                "answered from a cache published before the project's root table was known"
-            }
-            Self::SourcePathUnavailable => "the entity has a file, but its path could not be named",
-        }
-    }
-
     /// The whole vocabulary on one line, `code (gloss)` joined — what a tool's `schema`
     /// action serves.
     pub fn vocabulary() -> String {
@@ -144,17 +155,6 @@ impl LocationUnavailable {
             .map(|reason| format!("{} ({})", reason.code(), reason.describe()))
             .collect::<Vec<_>>()
             .join(", ")
-    }
-
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::PathOutsideRegisteredRoots => "path_outside_registered_roots",
-            Self::AbsolutePathWithoutPair => "absolute_path_without_pair",
-            Self::RelativePathWithoutRoot => "relative_path_without_root",
-            Self::NoSourceLocation => "no_source_location",
-            Self::RootsUnavailable => "roots_unavailable",
-            Self::SourcePathUnavailable => "source_path_unavailable",
-        }
     }
 }
 
