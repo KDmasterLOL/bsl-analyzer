@@ -26,7 +26,7 @@ itself.
 | `crates/parser/src/event.rs` | 147 | event stream and node kinds | strongly local |
 | `crates/parser/src/parser.rs` | 272 | parser state machine, markers, forward parents, loop guards | strongly local |
 | `crates/parser/src/sink.rs` | 259 | Rowan sink from events to syntax tree | strongly local |
-| `crates/parser/src/token_set.rs` | 212 | recovery/token-set utility | strongly local |
+| `crates/parser/src/parser/token_set.rs` | 151 | recovery/token-set utility | strongly local |
 | `crates/parser/src/syntax_kind.rs` | 264 | mapping to syntax kinds | local, but tied to parser output model |
 | `crates/parser/src/lib.rs` | 194 | public entry points and glue | local glue; depends on grammar layer |
 
