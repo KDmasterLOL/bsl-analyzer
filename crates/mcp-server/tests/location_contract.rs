@@ -200,7 +200,10 @@ async fn the_resident_and_the_graph_name_the_same_topology() {
     // the fingerprint mixes the configuration's own path, so any two scratch dirs differ
     // whatever their root sets, and the assertion would hold even with extensions removed
     // from the hash entirely.
-    let ext = ws.path().parent().expect("scratch parent").join("declared-ext");
+    // Inside this test's own TempDir, not beside it: `ws.path().parent()` is the shared
+    // system temp directory, so a fixed name there survives the run and collides with any
+    // other process running the same test.
+    let ext = ws.path().join("declared-ext");
     copy_fixture_into(&ext);
     std::fs::write(
         ws.path().join("bsl-analyzer.toml"),
@@ -220,7 +223,7 @@ async fn the_resident_and_the_graph_name_the_same_topology() {
         .unwrap_or_else(|| panic!("the resident stamps a topology: {after}"));
     assert_ne!(
         after_fingerprint, from_resident,
-        "one directory, one extension declared: the root set moved, so the fingerprint must",
+        "one directory, one extension declared: the declared topology moved, so the fingerprint must",
     );
 
     // Both envelopes name who answered, so a consumer never has to guess which subsystem's

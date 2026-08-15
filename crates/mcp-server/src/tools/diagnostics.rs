@@ -186,6 +186,10 @@ pub(crate) fn file_findings(
     // scope verdict, and each of them reads it against the workspace on its own. Shadowing is
     // what makes the root-relative spelling unreachable below rather than merely unwanted —
     // the compiler cannot tell the two apart, they are both `&Path`.
+    // Kept before the shadowing below: this is the only place the caller's own spelling is
+    // still visible, and it is what the published location must echo.
+    let rooted_spelling =
+        root_id.zip(path.to_str().filter(|spelling| !Path::new(spelling).is_absolute()));
     let path = match resident.resolve_rooted_path(root_id, path) {
         Ok(resolved) => resolved,
         Err(error) => {
@@ -265,13 +269,15 @@ pub(crate) fn file_findings(
     // Method spans for the graph bridge: each finding inside a method carries the
     // method's durable graph id so the agent can pivot to `graph callers`.
     let methods = method_ranges(&analysis.document_symbols(file_id));
-    // The file's pair is computed ONCE, from the absolute path the resident resolved the
-    // request to — not from the spelling the caller sent, which may carry no root at all.
-    // A relative path handed to the root table would be read against the CONFIGURATION
-    // root, while the resident reads it against the workspace: different files whenever
-    // the configuration sits in a subdirectory.
-    let file_location =
-        loc::Location::from_path(resident.workspace_roots(), &resident.abs_path_for(path));
+    // The pair the ANSWER carries must be the pair the request was served under. When the
+    // caller named a root, that root is the answer — deriving it again by canonicalizing
+    // the resolved path would rename a file reached through a link inside one root into
+    // the root its target physically lives in, and a consumer feeding the pair back would
+    // address a different copy. Only a caller that named no root gets one derived.
+    let file_location = match rooted_spelling {
+        Some((root_id, relative)) => Ok(loc::Location::from_key(root_id, relative)),
+        None => loc::Location::from_path(resident.workspace_roots(), &resident.abs_path_for(path)),
+    };
     let line_index = line_index::LineIndex::new(&file_text);
 
     let mut counts = Counts::default();
@@ -1157,6 +1163,36 @@ mod tests {
                 ext_location["path"], cfg_location["path"],
                 "the relative path is the same in both roots — the root_id is what separates them",
             );
+        }
+
+        /// A link inside one root may point at a file that physically lives under another.
+        /// The request named a root and was served under it, so the published pair must be
+        /// that one: canonicalizing the resolved path instead renames the answer into the
+        /// target's root, and a consumer feeding the pair back reaches a different copy.
+        #[cfg(unix)]
+        #[test]
+        fn a_location_echoes_the_root_the_request_named() {
+            use crate::diagnostics_state::test_support::{
+                extension_root_id, workspace_with_an_outside_extension,
+            };
+            let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+            write_common_module(&workspace, "Проба", MIXED_MODULE);
+            // A file OF the extension root whose bytes live under the configuration root.
+            std::os::unix::fs::symlink(
+                workspace.join("CommonModules/Проба/Ext/Module.bsl"),
+                extension.join("Alias.bsl"),
+            )
+            .expect("the stand needs a link inside the extension root");
+
+            let state = ready_state(&workspace);
+            let root_id = extension_root_id(&workspace, &extension);
+
+            let body =
+                run_rooted(&state, Some(&root_id), Path::new("Alias.bsl"), &default_filters());
+            let location = &finding_with_code(&body, "UnresolvedMethodCall")["location"];
+
+            assert_eq!(location["root_id"], root_id.as_str(), "{location}");
+            assert_eq!(location["path"], "Alias.bsl", "{location}");
         }
 
         /// A hole elsewhere in the workspace must not make an answer ABOUT ANOTHER FILE

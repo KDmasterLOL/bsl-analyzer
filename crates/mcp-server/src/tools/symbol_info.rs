@@ -146,7 +146,11 @@ pub(crate) fn render_card(
     stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
     let (mut body, budget_exhausted) = card_to_value(card, max_output_tokens);
+    // Three states, not one flag: the resident lost the symbol's semantics, the graph is
+    // still indexing, or the graph answered and does not know this symbol. They call for
+    // different reactions — retry, retry later, don't retry — so they get different codes.
     let mut degraded = card.semantics_unavailable;
+    let mut indexing = false;
 
     if !card.semantics_unavailable {
         match (card.graph_id.as_deref(), graph) {
@@ -163,7 +167,7 @@ pub(crate) fn render_card(
             // usages summary; only note the graph being unavailable for graph-addressable symbols.
             (Some(_), None) => {
                 body["usages_unavailable"] = json!("graph indexing");
-                degraded = true;
+                indexing = true;
             }
             (None, _) => {}
         }
@@ -172,10 +176,7 @@ pub(crate) fn render_card(
     // The definition under the location contract, beside the legacy `definition` key. A list
     // because an extension may override a method (`&Вместо`, `&До`, `&После`) and the shape
     // must not have to change when the second target starts being reported.
-    // The already-budgeted snippet, read from the body the card produced — one value, one
-    // budget, published twice by construction rather than by two separate truncations.
-    let budgeted_snippet = body["definition"]["snippet"].as_str().map(str::to_owned);
-    body["definitions"] = json!(definitions_value(card, stamp, budgeted_snippet.as_deref()));
+    body["definitions"] = json!(definitions_value(card, stamp));
 
     let completeness = Completeness::complete()
         .when(budget_exhausted, ReasonCode::OutputBudget, "card trimmed to fit max_output_tokens")
@@ -183,6 +184,14 @@ pub(crate) fn render_card(
             degraded,
             ReasonCode::ModalityDegraded,
             "the call graph could not answer for this symbol",
+        )
+        // The same condition the miss shape reports, under the same code: the graph is
+        // building, and a consumer driving retries off the code must not get two answers
+        // for one state depending on whether the symbol happened to resolve.
+        .when(
+            indexing,
+            ReasonCode::IndexBuilding,
+            "the call graph is still indexing, so usages are not counted yet",
         )
         // Deliberately NOT stamped here: the workspace-wide unread counter. This answer is
         // one resolved symbol, and a hole in an unrelated module does not make it less
@@ -217,11 +226,7 @@ impl ResidentStamp<'_> {
 /// The definition sites under the location contract. Empty when the card has no source
 /// (platform members, metadata objects): an empty list says "no definition site", where an
 /// invented location would say something false.
-fn definitions_value(
-    card: &SymbolInfoCard,
-    stamp: &ResidentStamp<'_>,
-    budgeted_snippet: Option<&str>,
-) -> Vec<Value> {
+fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Value> {
     let Some(def) = &card.definition else {
         return Vec::new();
     };
@@ -256,12 +261,9 @@ fn definitions_value(
         }
     }
 
-    // The snippet is the one the card already budgeted: publishing the raw one beside it
-    // would put two different values of one field in a single answer, and blow the budget
-    // the envelope says was applied.
-    if let Some(snippet) = budgeted_snippet {
-        entry.insert("snippet".into(), json!(snippet));
-    }
+    // No snippet here on purpose: the card already carries it in `definition`, and a second
+    // copy would double the very payload the budget just trimmed. The location says WHERE;
+    // the text stays where it was.
     vec![Value::Object(entry)]
 }
 
@@ -269,6 +271,13 @@ fn definitions_value(
 /// display string.
 fn module_ref(card: &SymbolInfoCard) -> Option<crate::tools::location::ModuleRef> {
     let container = card.container.as_ref()?;
+    // Only a common module's container IS the module. For a method of an object or manager
+    // module the container describes the OWNING OBJECT (`Документ`, `Справочник`, …), and
+    // publishing that under a key named `module` would make one key mean two things —
+    // exactly the ambiguity this contract removes.
+    if container.kind != "ОбщийМодуль" {
+        return None;
+    }
     Some(crate::tools::location::ModuleRef {
         kind: container.kind.clone(),
         name: container.name.clone(),
@@ -569,10 +578,11 @@ mod tests {
         assert_eq!(body["container"]["context"], "Сервер");
         assert_eq!(body["usages_unavailable"], "graph indexing");
         assert!(body.get("usages").is_none());
-        // A graph that could not answer is a degraded modality, and the envelope says so
-        // rather than leaving the old flag as the only trace.
+        // A graph that has not finished indexing is `index_building` — the SAME code the
+        // miss shape reports for the same condition, so a consumer driving retries off the
+        // code is not told two different things about one state.
         assert_eq!(body["freshness"]["completeness"]["status"], "partial");
-        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "modality_degraded");
+        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "index_building");
     }
 
     /// The card keeps its legacy 1-based `definition.line` AND gains the contract location:

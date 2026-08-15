@@ -589,9 +589,16 @@ fn resolve_position(
                 true,
             );
         } else {
-            // Locals/parameters have no method-level source range; anchor at the token.
-            card.definition =
-                def_from_file_line(db, pos.file_id, offset, DefinitionRanges::default(), true);
+            // Locals and parameters have no method-level source range, but their POSITION is
+            // known — it is how the caller reached them. Publishing a location without ranges
+            // here would mean "somewhere in this file" while the legacy `line` names the line.
+            card.definition = def_from_file_line(
+                db,
+                pos.file_id,
+                offset,
+                DefinitionRanges { name: Some(token.text_range()), enclosing: None },
+                true,
+            );
         }
     }
 
