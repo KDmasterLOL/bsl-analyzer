@@ -68,7 +68,10 @@ const SNIPPET_LINES: usize = 5;
 ///
 /// `freshness` alone is ~144 bytes empty and ~216 with a reason, so a response that carries
 /// it must be charged for it, or it would pass the ceiling while still reporting
-/// `budget_exhausted: false` — exactly what this constant exists to prevent.
+/// `budget_exhausted: false` — exactly what this constant exists to prevent. Only the FIXED
+/// part is charged here: a reason's `detail` is as long as the note it repeats, and a flat
+/// constant cannot cover a value that grows, so the caller holding the note charges for it
+/// (see `hybrid::hits_budget`).
 ///
 /// The reference profile's documentation actions emit no envelope at all
 /// ([`Envelope::No`]), so charging them for it would shrink their listings for a block they
@@ -301,7 +304,7 @@ pub(super) fn no_hits_response(degraded: Option<&str>, envelope: Envelope) -> Ca
 /// publishing it as an end-exclusive line would be a number this contract does not mean.
 fn hit_location(hit: &SearchHit) -> Result<loc::Location, loc::LocationUnavailable> {
     if Path::new(&hit.file_path).is_absolute() {
-        return Err(loc::LocationUnavailable::PathNotRelativeToRoot);
+        return Err(loc::LocationUnavailable::AbsolutePathWithoutPair);
     }
     let location = loc::Location::from_key(&hit.root_id, &hit.file_path);
     if hit.symbol_name.is_empty() {

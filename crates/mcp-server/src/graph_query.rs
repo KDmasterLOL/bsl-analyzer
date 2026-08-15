@@ -62,6 +62,34 @@ fn slice_in(text: &str, start: u32, end: u32) -> Option<String> {
     text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
 }
 
+/// One node's file text, read AT THE POINT OF USE and at most once.
+///
+/// Which consumer needs the bytes is decided by that consumer: the place needs them only
+/// after the pair is built and the row turns out to carry offsets, the signature and the
+/// body only for a method at `signatures`/`bodies`. A predicate deciding this up front
+/// restates those conditions and then drifts away from them — `usages` walks up to 200
+/// callers at `names` with no root table and cannot use a single byte, yet a
+/// detail-and-offsets predicate had it read every caller's file in full.
+///
+/// Memoized per node and NEVER across nodes: a handle is pooled and outlives edits to the
+/// files, so a text remembered across nodes would make the staleness check in
+/// [`GraphDb::node_location`] compare the artefact against itself.
+struct NodeText<'a> {
+    file: Option<&'a str>,
+    read: Option<Option<String>>,
+}
+
+impl<'a> NodeText<'a> {
+    fn new(file: Option<&'a str>) -> Self {
+        Self { file, read: None }
+    }
+
+    fn get(&mut self) -> Option<&str> {
+        let file = self.file?;
+        self.read.get_or_insert_with(|| std::fs::read_to_string(file).ok()).as_deref()
+    }
+}
+
 const NODE_COLUMNS: &str =
     "id, kind, name, qualified, module, file, name_offset, sig_end, src_start, src_end, dispatch, is_export, addressable";
 
@@ -608,30 +636,22 @@ impl GraphDb {
             location: None,
             location_unavailable: None,
         };
-        // Read once per node, here, and hand the text to everything that needs it: the
-        // place, the signature and the body all describe the same bytes, and reading them
-        // twice invites two answers. NOT cached across nodes: a handle is pooled and
-        // outlives edits to the file, so a remembered text would make the staleness check
-        // below compare the artefact against itself.
-        let wants_text = matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies)
-            || n.name_offset.is_some();
-        let text = match (&n.file, wants_text) {
-            (Some(file), true) => std::fs::read_to_string(file).ok(),
-            _ => None,
-        };
+        // The file is read at most once per node and only where a consumer actually reaches
+        // for it: the place, the signature and the body all describe the same bytes, and
+        // reading them twice invites two answers.
+        let mut text = NodeText::new(n.file.as_deref());
 
-        match self.node_location(n, roots, text.as_deref()) {
+        match self.node_location(n, roots, &mut text) {
             Ok(location) => node.location = Some(location),
             Err(reason) => node.location_unavailable = Some(reason),
         }
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            if let (Some(text), Some(off), Some(end)) = (text.as_deref(), n.name_offset, n.sig_end)
-            {
-                node.signature = signature_in(text, off, end);
+            if let (Some(off), Some(end)) = (n.name_offset, n.sig_end) {
+                node.signature = text.get().and_then(|text| signature_in(text, off, end));
             }
             if detail == GraphDetail::Bodies {
-                if let (Some(text), Some(s), Some(e)) = (text.as_deref(), n.src_start, n.src_end) {
-                    node.source = slice_in(text, s, e);
+                if let (Some(s), Some(e)) = (n.src_start, n.src_end) {
+                    node.source = text.get().and_then(|text| slice_in(text, s, e));
                 }
             }
         }
@@ -651,7 +671,7 @@ impl GraphDb {
         &self,
         n: &StoredNode,
         roots: Option<&bsl_search::WorkspaceRoots>,
-        text: Option<&str>,
+        text: &mut NodeText<'_>,
     ) -> Result<serde_json::Value, &'static str> {
         if !matches!(n.kind.as_str(), "method" | "module") {
             return Err(loc::LocationUnavailable::NoSourceLocation.code());
@@ -673,15 +693,16 @@ impl GraphDb {
         let location = loc::Location::from_path(roots, std::path::Path::new(file))
             .map_err(|reason| reason.code())?;
 
-        // The pair costs no I/O; only the ranges do. A node with no offsets — a synthesized
-        // `module` row — must not open the file at all, or `detail=names` would turn a
-        // disk-free traversal into one full read per node.
+        // The pair costs no I/O; only the ranges do, and everything above this line is
+        // decided without touching the disk. A node with no offsets — a synthesized `module`
+        // row — leaves here, so `overview` does not read a module's file for a signature it
+        // will never build out of it.
         let (Some(name_offset), Some(src_start), Some(src_end)) =
             (n.name_offset, n.src_start, n.src_end)
         else {
             return Ok(location.to_value());
         };
-        let Some(text) = text else {
+        let Some(text) = text.get() else {
             // The row's offsets describe a file we cannot read now; the pair is still true.
             return Ok(location.to_value());
         };

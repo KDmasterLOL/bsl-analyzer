@@ -84,8 +84,13 @@ pub struct Location {
 pub enum LocationUnavailable {
     /// The path lies outside every registered root, so no pair addresses it.
     PathOutsideRegisteredRoots,
-    /// Only an absolute path is known and it is not relative to any root.
-    PathNotRelativeToRoot,
+    /// The producer holds an absolute path where the pair was expected — a search hit whose
+    /// `file_path` is not root-relative. Its file is named, but not as `(root_id, path)`.
+    AbsolutePathWithoutPair,
+    /// Only a relative path is known, so the root table cannot place it. The mirror image of
+    /// [`Self::AbsolutePathWithoutPair`], and a separate code for exactly that reason: one
+    /// name for both facts would leave a consumer unable to tell which of the two happened.
+    RelativePathWithoutRoot,
     /// The entity has no source file by construction (a metadata object, a form item).
     NoSourceLocation,
     /// The root table is not available in this answer — a stale graph cache published
@@ -98,10 +103,54 @@ pub enum LocationUnavailable {
 }
 
 impl LocationUnavailable {
+    /// The whole vocabulary. Every place that PUBLISHES the list — a tool's `schema` action,
+    /// the contract document — reads it from here, so a new reason cannot ship while a
+    /// consumer's closed list still says otherwise.
+    pub const ALL: [Self; 6] = [
+        Self::PathOutsideRegisteredRoots,
+        Self::AbsolutePathWithoutPair,
+        Self::RelativePathWithoutRoot,
+        Self::NoSourceLocation,
+        Self::RootsUnavailable,
+        Self::SourcePathUnavailable,
+    ];
+
+    /// A one-line gloss, so a tool's `schema` action publishes the vocabulary instead of
+    /// paraphrasing it: prose written beside the enum drifts from it, and a machine list
+    /// that is short by one code is worse than none — a consumer matching on a closed set
+    /// meets a value it was told could not occur.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::PathOutsideRegisteredRoots => "the file lies outside every registered root",
+            Self::AbsolutePathWithoutPair => {
+                "the producer holds an absolute path rather than a (root_id, path) pair"
+            }
+            Self::RelativePathWithoutRoot => {
+                "only a relative path is known, so no root table can place it"
+            }
+            Self::NoSourceLocation => "metadata objects, forms and attributes have no file",
+            Self::RootsUnavailable => {
+                "answered from a cache published before the project's root table was known"
+            }
+            Self::SourcePathUnavailable => "the entity has a file, but its path could not be named",
+        }
+    }
+
+    /// The whole vocabulary on one line, `code (gloss)` joined — what a tool's `schema`
+    /// action serves.
+    pub fn vocabulary() -> String {
+        Self::ALL
+            .iter()
+            .map(|reason| format!("{} ({})", reason.code(), reason.describe()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             Self::PathOutsideRegisteredRoots => "path_outside_registered_roots",
-            Self::PathNotRelativeToRoot => "path_not_relative_to_root",
+            Self::AbsolutePathWithoutPair => "absolute_path_without_pair",
+            Self::RelativePathWithoutRoot => "relative_path_without_root",
             Self::NoSourceLocation => "no_source_location",
             Self::RootsUnavailable => "roots_unavailable",
             Self::SourcePathUnavailable => "source_path_unavailable",
@@ -134,7 +183,7 @@ impl Location {
     /// relative path would both come back as the configuration's.
     pub fn from_path(roots: &WorkspaceRoots, abs: &Path) -> Result<Self, LocationUnavailable> {
         if !abs.is_absolute() {
-            return Err(LocationUnavailable::PathNotRelativeToRoot);
+            return Err(LocationUnavailable::RelativePathWithoutRoot);
         }
         let key = roots.key_of_path(abs).ok_or(LocationUnavailable::PathOutsideRegisteredRoots)?;
         Ok(Self::from_key(&key.root_id, &key.path))
@@ -448,7 +497,26 @@ mod tests {
         let err = Location::from_path(&roots, Path::new("CommonModules/М/Ext/Module.bsl"))
             .expect_err("a relative path addresses no root on its own");
 
-        assert_eq!(err.code(), "path_not_relative_to_root");
+        assert_eq!(err.code(), "relative_path_without_root");
+    }
+
+    /// The vocabulary is closed, and its only worth over a free-form string is that a
+    /// consumer may match on it. That holds while every code names ONE fact and while every
+    /// published list carries every code — the contract document among them, since it is
+    /// what a consumer's own closed list gets written from.
+    #[test]
+    fn every_reason_is_a_distinct_code_and_the_contract_publishes_all_of_them() {
+        let contract = include_str!("../../../../docs/mcp/LOCATION_CONTRACT.md");
+
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in LocationUnavailable::ALL {
+            assert!(seen.insert(reason.code()), "two facts share the code {}", reason.code());
+            assert!(
+                contract.contains(&format!("`{}`", reason.code())),
+                "{} is served but the contract document does not list it",
+                reason.code(),
+            );
+        }
     }
 
     #[test]

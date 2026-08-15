@@ -1996,6 +1996,82 @@ mod tests {
         );
     }
 
+    /// A projection reads a node's file only where the bytes are actually used, and the
+    /// answers that cannot use them must not pay for a read.
+    ///
+    /// The two shapes that cannot: `usages` walks its callers with NO root table (so no place
+    /// can be built) at `names` (so no signature and no body are asked for), and a `module`
+    /// row carries no offsets (so it gets the pair alone) while being projected at `bodies`,
+    /// which is what `overview` does for every module it lists.
+    ///
+    /// A wasted read is invisible in the answer — same JSON either way — so this measures the
+    /// read itself: every module file is replaced by a FIFO, whose open blocks until someone
+    /// writes. A projection that reads returns nothing within the timeout; one that does not
+    /// answers at once. That also makes the check sensitive in the only direction that
+    /// matters: it fails when a read comes back, and passes only when none does.
+    #[cfg(unix)]
+    #[test]
+    fn a_projection_that_cannot_use_a_file_does_not_open_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+
+        // Everything the graph knows about is read from the database from here on; the
+        // sources exist only as a trap.
+        for module in ["Клиент", "Сервер"] {
+            let path = root.join(format!("CommonModules/{module}/Ext/Module.bsl"));
+            fs::remove_file(&path).unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("mkfifo runs on this platform");
+            assert!(made.success(), "a FIFO stands in for {module}'s module");
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out_in_thread = out.clone();
+        std::thread::spawn(move || {
+            let gdb = GraphDb::open(&out_in_thread).expect("graph database opens");
+            // The callers of a method, summarized for `symbol_info`: no root table, `names`.
+            let usages = gdb
+                .usages("method/common/Сервер/Считать", 5)
+                .expect("usages reads the database")
+                .expect("the method is in the graph");
+            // A module projected at `bodies` — the shape `overview` takes for every module.
+            let module = gdb
+                .node("module/common/Сервер", ide::GraphDetail::Bodies, Some(&roots))
+                .expect("node reads the database")
+                .expect("the module resolves")
+                .node;
+            let _ = tx.send((usages.count, module.location.is_some(), module.source.is_none()));
+        });
+
+        let (callers, module_placed, module_without_source) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("no projection here can use the bytes, so none may block on reading them");
+        assert_eq!(callers, 1, "the fixture has exactly one caller of Считать");
+        assert!(module_placed, "the pair costs no I/O and is served without it");
+        assert!(module_without_source, "a module row has no offsets to cut a body with");
+    }
+
     #[test]
     fn node_bodies_respect_output_budget() {
         let dir = tempfile::tempdir().unwrap();

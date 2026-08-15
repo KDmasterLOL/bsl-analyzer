@@ -353,7 +353,16 @@ fn schema_json() -> Value {
             "stale": "bool — this snapshot is not current: the workspace drifted on disk since it was built, and/or some module could not be read when it was built (see the status action's unread_files); DEPRECATED in favour of freshness.stale",
             "reload": "none | running | failed — background re-index state",
             "freshness": "the location contract's envelope: { source, revision, topology_fingerprint, stale, completeness }. topology_fingerprint is 16 hex digits naming the extension topology this snapshot was built for; completeness is { status, reasons: [{ code, detail }] }",
-            "node_location": "every method/module node carries either `location` (the location contract v1: root_id, path, range = the declared name, enclosing_range = the whole declaration, position_encoding, schema_version) or `location_unavailable` — a machine reason: no_source_location (metadata objects, forms, attributes have no file), roots_unavailable (a cached graph published before the project's root table was known), path_outside_registered_roots",
+            // The reason list is GENERATED from the vocabulary rather than restated here:
+            // a schema that publishes a closed set has to publish all of it, and a hand-kept
+            // copy of it drifts silently the moment a reason is added.
+            "node_location": format!(
+                "every method/module node carries either `location` (the location contract v1: \
+                 root_id, path, range = the declared name, enclosing_range = the whole \
+                 declaration, position_encoding, schema_version) or `location_unavailable` — \
+                 a machine reason from the closed vocabulary: {}",
+                loc::LocationUnavailable::vocabulary(),
+            ),
             "result": "the action's payload (or an {error} object)",
             "delivery": "the payload lives in MCP structuredContent; the JSON text block is a compatibility mirror for clients without structured-output support — a host injects exactly one copy into model context"
         },
@@ -389,6 +398,25 @@ fn redact_opt(source: &mut Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `graph schema` is the only machine-readable place this tool names the reasons a node
+    /// may carry instead of a location, and a consumer writes its own closed match from it.
+    /// A list short by one code makes that consumer meet a value it was told cannot occur.
+    #[test]
+    fn the_schema_publishes_every_reason_a_node_can_carry() {
+        let published = schema_json()["envelope"]["node_location"]
+            .as_str()
+            .expect("the schema describes node_location")
+            .to_owned();
+
+        for reason in loc::LocationUnavailable::ALL {
+            assert!(
+                published.contains(reason.code()),
+                "{} is served but `graph schema` does not publish it: {published}",
+                reason.code(),
+            );
+        }
+    }
 
     #[test]
     fn clamp_to_budget_signals_truncation_and_drop() {
