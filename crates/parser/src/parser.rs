@@ -354,6 +354,37 @@ impl<'a> Parser<'a> {
         self.emit_missing(err);
     }
 
+    /// Сообщает, что на месте курсора ожидался `kind`, и подчёркивает место.
+    ///
+    /// Правило, собирающее `ParseError` руками, обходит выбор `RecoveryKind` и
+    /// разметку диапазона — решения уровня парсера, а не грамматики, — и
+    /// каждое такое место обходит их по-своему. Здесь они приняты один раз:
+    /// диапазон открывается маркером и закрывается узлом ошибки, то есть это
+    /// [`RecoveryKind::RecoverySpan`], и норма привязки из
+    /// `docs/architecture/adr/ADR-03-error-range-attribution.md` выполняется
+    /// по построению.
+    pub fn error_expected(&mut self, kind: TokenKind) {
+        let m = self.start();
+        let found = self.current();
+        self.emit_error_at_marker(
+            m,
+            ParseError::Expected {
+                expected: smallvec![kind],
+                found,
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    }
+
+    /// Стоит ли под курсором то, что лексер прочесть не смог.
+    ///
+    /// Правилу это нужно, чтобы промолчать: текст, который лексер уже отверг,
+    /// о своём содержимом ничего не обещает, и вторая жалоба на него говорит о
+    /// нём не больше первой.
+    pub fn at_error(&self) -> bool {
+        self.current() == Some(TokenKind::Error)
+    }
+
     pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
         debug_assert!(err.recovery() == RecoveryKind::RecoverySpan);
         self.events.push(Event::ErrorWithSpan { start_token: m.start_token_pos, err });

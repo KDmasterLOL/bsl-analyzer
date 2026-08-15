@@ -2,7 +2,6 @@ use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
 use parser_error::{ParseError, RecoveryKind};
-use smallvec::smallvec;
 
 pub(super) fn is_expression_start(p: &Parser) -> bool {
     match p.current() {
@@ -684,16 +683,7 @@ fn parse_cast_type(p: &mut Parser) {
                 if at_property_name(p) {
                     report_missing_name(p, "ожидалось имя объекта после '.'");
                 } else {
-                    let err = p.start();
-                    let found = p.current();
-                    p.emit_error_at_marker(
-                        err,
-                        ParseError::Expected {
-                            expected: smallvec![TokenKind::Ident],
-                            found,
-                            recovery: RecoveryKind::RecoverySpan,
-                        },
-                    );
+                    p.error_expected(TokenKind::Ident);
                 }
                 break;
             }
@@ -753,16 +743,7 @@ fn column_or_function(p: &mut Parser) {
             }
 
             if !at_property_name(p) {
-                let err = p.start();
-                let found = p.current();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Expected {
-                        expected: smallvec![TokenKind::Ident],
-                        found,
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+                p.error_expected(TokenKind::Ident);
                 break;
             }
 
@@ -856,16 +837,7 @@ fn column_or_function(p: &mut Parser) {
         }
 
         if super::select::is_clause_keyword(p) {
-            let err = p.start();
-            let found = p.current();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Expected {
-                    expected: smallvec![TokenKind::RParen],
-                    found,
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
+            p.error_expected(TokenKind::RParen);
         } else {
             p.expect(TokenKind::RParen);
         }
@@ -894,16 +866,7 @@ fn column_or_function(p: &mut Parser) {
 
                 p.bump();
             } else {
-                let err = p.start();
-                let found = p.current();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Expected {
-                        expected: smallvec![TokenKind::Ident],
-                        found,
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+                p.error_expected(TokenKind::Ident);
                 break;
             }
         }

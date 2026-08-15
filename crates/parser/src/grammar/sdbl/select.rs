@@ -2,7 +2,6 @@ use crate::event::NodeKind;
 use crate::parser::Parser;
 use lexer::TokenKind;
 use parser_error::{ParseError, RecoveryKind};
-use smallvec::smallvec;
 
 use super::expressions;
 
@@ -916,7 +915,7 @@ fn for_update_clause(p: &mut Parser) {
                 // rejected belongs to a text already reported as unreadable:
                 // the inputs that reach here that way are Russian prose whose
                 // `для` reads as `ДЛЯ` and whose full stop reads as a dot.
-                if p.current().is_some_and(|kind| kind != TokenKind::Error) {
+                if !p.at_end() && !p.at_error() {
                     report_the_component_the_dot_promised(p);
                 }
                 break;
@@ -940,9 +939,8 @@ fn for_update_clause(p: &mut Parser) {
 /// opens a clause of its own, so `ДЛЯ ИЗМЕНЕНИЯ Catalog.УПОРЯДОЧИТЬ ПО А`
 /// parsed as a whole clean query with a broken name inside it.
 fn report_the_component_the_dot_promised(p: &mut Parser) {
-    let err = p.start();
-
     if super::expressions::at_property_name(p) {
+        let err = p.start();
         p.emit_error_at_marker(
             err,
             ParseError::Custom {
@@ -953,15 +951,7 @@ fn report_the_component_the_dot_promised(p: &mut Parser) {
         return;
     }
 
-    let found = p.current();
-    p.emit_error_at_marker(
-        err,
-        ParseError::Expected {
-            expected: smallvec![TokenKind::Ident],
-            found,
-            recovery: RecoveryKind::RecoverySpan,
-        },
-    );
+    p.error_expected(TokenKind::Ident);
 }
 
 fn index_by_clause(p: &mut Parser) {
@@ -1413,16 +1403,7 @@ fn virtual_table_args(p: &mut Parser) {
     if p.at(TokenKind::RParen) {
         p.bump();
     } else if is_clause_keyword(p) {
-        let err = p.start();
-        let found = p.current();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Expected {
-                expected: smallvec![TokenKind::RParen],
-                found,
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_expected(TokenKind::RParen);
     } else {
         p.expect(TokenKind::RParen);
     }
