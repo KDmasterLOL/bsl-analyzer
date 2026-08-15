@@ -24,6 +24,9 @@ use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
 use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, WorkspaceSweep};
+// Aliased: the resident has a `Freshness` of its own, and the contract's is a different
+// type serving a different purpose — the two must not be confusable at a glance.
+use crate::tools::location as loc;
 use crate::tools::response::{structured, trim_items_to_budget};
 
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
@@ -122,11 +125,24 @@ pub fn loading(report: &StatusReport) -> CallToolResult {
 }
 
 /// Wrap a `file` result in the freshness envelope, matching the `graph` tool.
-pub fn envelope(freshness: Freshness, result: Value) -> CallToolResult {
+///
+/// `completeness` is passed in rather than derived here: the facts that make an answer
+/// partial (a budget trim, a count cap, an unread file) are known where the body is built,
+/// and recovering them from the rendered JSON would be a guess about our own behaviour.
+pub fn envelope(
+    freshness: Freshness,
+    completeness: loc::Completeness,
+    result: Value,
+) -> CallToolResult {
     structured(json!({
         "revision": freshness.revision,
         "stale": freshness.stale,
         "reload": freshness.reload,
+        "freshness": loc::Freshness::new(loc::FreshnessSource::Resident, completeness)
+            .with_revision(freshness.revision)
+            .with_topology(freshness.topology)
+            .with_stale(freshness.stale)
+            .to_value(),
         "result": result,
     }))
 }
@@ -164,7 +180,7 @@ pub(crate) fn file_findings(
     path: &Path,
     filters: &FileFilters,
     generation: u64,
-) -> Value {
+) -> (Value, loc::Completeness) {
     // Resolved ONCE, here, and bound to the same name: the request path is read again by the
     // unreadable branch, the blame filter, every finding's graph id, the result id and the
     // scope verdict, and each of them reads it against the workspace on its own. Shadowing is
@@ -173,11 +189,14 @@ pub(crate) fn file_findings(
     let path = match resident.resolve_rooted_path(root_id, path) {
         Ok(resolved) => resolved,
         Err(error) => {
-            return json!({
-                "error": error.code(),
-                "detail": error.to_string(),
-                "path": path.to_string_lossy(),
-            });
+            return (
+                json!({
+                    "error": error.code(),
+                    "detail": error.to_string(),
+                    "path": path.to_string_lossy(),
+                }),
+                loc::Completeness::complete(),
+            );
         }
     };
     let path = path.as_path();
@@ -187,18 +206,24 @@ pub(crate) fn file_findings(
         // first one ("no findings"). The two are kept apart so an agent can tell
         // "wrong path" from "this module is unanalysed".
         if resident.is_unread(path) {
-            return json!({
-                "error": "unreadable",
-                "detail": "workspace .bsl file exists but its bytes could not be read; \
-                           it is held out of service and re-read every drift window",
-                "path": path.to_string_lossy(),
-            });
+            return (
+                json!({
+                    "error": "unreadable",
+                    "detail": "workspace .bsl file exists but its bytes could not be read; \
+                               it is held out of service and re-read every drift window",
+                    "path": path.to_string_lossy(),
+                }),
+                loc::Completeness::complete(),
+            );
         }
-        return json!({
-            "error": "not_in_workspace",
-            "detail": "path is not a resident workspace .bsl file",
-            "path": path.to_string_lossy(),
-        });
+        return (
+            json!({
+                "error": "not_in_workspace",
+                "detail": "path is not a resident workspace .bsl file",
+                "path": path.to_string_lossy(),
+            }),
+            loc::Completeness::complete(),
+        );
     };
     let analysis = resident.analysis();
     let file_text = analysis.file_text(file_id);
@@ -237,6 +262,14 @@ pub(crate) fn file_findings(
     // Method spans for the graph bridge: each finding inside a method carries the
     // method's durable graph id so the agent can pivot to `graph callers`.
     let methods = method_ranges(&analysis.document_symbols(file_id));
+    // The file's pair is computed ONCE, from the absolute path the resident resolved the
+    // request to — not from the spelling the caller sent, which may carry no root at all.
+    // A relative path handed to the root table would be read against the CONFIGURATION
+    // root, while the resident reads it against the workspace: different files whenever
+    // the configuration sits in a subdirectory.
+    let file_location =
+        loc::Location::from_path(resident.workspace_roots(), &resident.abs_path_for(path));
+    let line_index = line_index::LineIndex::new(&file_text);
 
     let mut counts = Counts::default();
     let mut findings: Vec<Value> = Vec::new();
@@ -266,7 +299,13 @@ pub(crate) fn file_findings(
             continue;
         }
         let graph_id = graph_id_for(diag.range, &methods, path, resident.workspace_root());
-        findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed));
+        let place = FindingPlace {
+            file: &file_location,
+            range: line_index.utf16_line_col_range(&file_text, diag.range),
+            enclosing: enclosing_method_range(diag.range, &methods)
+                .and_then(|range| line_index.utf16_line_col_range(&file_text, range)),
+        };
+        findings.push(finding_value(diag, &out, bucket, graph_id, filters.detailed, &place));
     }
 
     // Byte budget on top of the `max_findings` count cap: a file of small findings stays
@@ -313,7 +352,25 @@ pub(crate) fn file_findings(
             "findings truncated to fit max_output_tokens; narrow with `codes`/`min_severity`/range or raise the budget"
         });
     }
-    body
+
+    let completeness = loc::Completeness::complete()
+        .when(
+            budget_exhausted,
+            loc::ReasonCode::OutputBudget,
+            "findings trimmed to fit max_output_tokens",
+        )
+        .when(count_capped, loc::ReasonCode::ResultCap, "findings capped by max_findings")
+        .when(
+            !resident.path_in_scope(path),
+            loc::ReasonCode::OutOfAnalysisScope,
+            "file has no changed lines vs [analysis].diff_base and was not analyzed",
+        )
+        .when(
+            resident.unread_count() > 0,
+            loc::ReasonCode::UnreadableFiles,
+            "some workspace files could not be read and are held out of service",
+        );
+    (body, completeness)
 }
 
 /// The `workspace` action's result body: whole-config diagnostics aggregated per code
@@ -325,7 +382,7 @@ pub(crate) fn workspace_findings(
     sweep: &WorkspaceSweep,
     generation: u64,
     max_output_tokens: Option<usize>,
-) -> Value {
+) -> (Value, loc::Completeness) {
     let mut aggregates: Vec<Value> = sweep
         .aggregates
         .iter()
@@ -375,7 +432,37 @@ pub(crate) fn workspace_findings(
         body["budget_hint"] =
             json!("aggregates truncated to fit max_output_tokens; narrow with `codes`/`min_severity` or raise the budget");
     }
-    body
+
+    let completeness = loc::Completeness::complete()
+        .when(
+            budget_exhausted,
+            loc::ReasonCode::OutputBudget,
+            "aggregates trimmed to fit max_output_tokens",
+        )
+        .when(
+            sweep.truncated,
+            loc::ReasonCode::ResultCap,
+            "the sweep stopped at max_files; files_total names the whole config",
+        )
+        .when(
+            sweep.files_unread > 0,
+            loc::ReasonCode::UnreadableFiles,
+            "some workspace files could not be read and were not analyzed",
+        )
+        .when(
+            sweep.files_out_of_scope > 0,
+            loc::ReasonCode::OutOfAnalysisScope,
+            "files with no changed lines vs [analysis].diff_base were not analyzed",
+        );
+    (body, completeness)
+}
+
+/// Where one finding sits: the file's pair (or why there is none) plus the finding's own
+/// span and its enclosing method, already in contract units.
+struct FindingPlace<'a> {
+    file: &'a Result<loc::Location, loc::LocationUnavailable>,
+    range: Option<line_index::LineColRange>,
+    enclosing: Option<line_index::LineColRange>,
 }
 
 fn finding_value(
@@ -384,6 +471,7 @@ fn finding_value(
     bucket: SeverityBucket,
     graph_id: Option<String>,
     detailed: bool,
+    place: &FindingPlace<'_>,
 ) -> Value {
     let mut v = json!({
         "code": out.code,
@@ -397,6 +485,22 @@ fn finding_value(
         },
         "has_fix": !diag.fixes.is_empty(),
     });
+    // `range` above stays as it was — 0-based lines, columns in CODE POINTS — and the
+    // contract location travels beside it. In a location, `range` is the finding's own
+    // span (a diagnostic has no name of its own to point at) and `enclosing_range` is the
+    // method that holds it.
+    match place.file {
+        Ok(location) => {
+            v["location"] = location
+                .clone()
+                .with_range(place.range.map(loc::PositionRange::from))
+                .with_enclosing_range(place.enclosing.map(loc::PositionRange::from))
+                .to_value();
+        }
+        Err(reason) => {
+            v["location_unavailable"] = json!(reason.code());
+        }
+    }
     if !out.tags.is_empty() {
         v["tags"] = json!(out.tags);
     }
@@ -447,6 +551,13 @@ fn graph_id_for(
     ide::method_graph_id(&path.to_string_lossy(), name, Some(workspace_root))
 }
 
+/// The span of the method containing `range` — the same lookup [`graph_id_for`] does, by
+/// the same rule, so a finding's `graph_id` and its `enclosing_range` can never name
+/// different methods.
+fn enclosing_method_range(range: TextRange, methods: &[(String, TextRange)]) -> Option<TextRange> {
+    methods.iter().find(|(_, r)| r.contains_range(range)).map(|(_, r)| *r)
+}
+
 /// The pull-model freshness handle: `<path>@<generation>@<content-hash>`. The content
 /// hash MUST be present so a body edit inside the drift-scan throttle window cannot be
 /// masked by an unchanged generation (a stale `unchanged` would otherwise be possible
@@ -484,7 +595,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "11",
+        "schema_version": "12",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -525,7 +636,9 @@ fn schema_json() -> Value {
             "code": "string",
             "severity": "error | warning | info | hint (4-bucket)",
             "message": "string",
-            "range": "{ start_line, start_column, end_line, end_column } — 0-based",
+            "range": "{ start_line, start_column, end_line, end_column } — 0-based; DEPRECATED, columns are counted in code POINTS. Use `location.range`, whose units are declared",
+            "location": "the location contract v1: { root_id, path, range, enclosing_range, position_encoding, schema_version }. `range` is the finding's own span (a diagnostic has no name of its own), `enclosing_range` the method holding it; 0-based, end-exclusive, columns in UTF-16 code units",
+            "location_unavailable": "string — machine reason, present instead of `location` when the file's (root_id, path) pair could not be formed",
             "tags": "string[] — omitted when empty",
             "has_fix": "bool — whether an automatic fix is attached",
             "graph_id": "durable id of the containing method — pass to `graph callers`/`node` (omitted when not in a method or not an indexable module)",
@@ -561,9 +674,10 @@ fn schema_json() -> Value {
             "aggregates": "{ code, severity, count, files_affected }[] — per-code, most-severe-then-most-frequent first; NO per-finding detail"
         },
         "envelope": {
-            "revision": "u64 — resident-db generation the answer was computed at",
-            "stale": "bool — this answer is not current: the workspace drifted on disk since this generation, and/or some workspace file could not be read (see unread_files)",
+            "revision": "u64 — resident-db generation the answer was computed at; DEPRECATED in favour of freshness.revision, which carries the same value",
+            "stale": "bool — this answer is not current: the workspace drifted on disk since this generation, and/or some workspace file could not be read (see unread_files); DEPRECATED in favour of freshness.stale",
             "reload": "none | running | failed — background reload state",
+            "freshness": "the location contract's envelope: { source, revision, topology_fingerprint, stale, completeness }. `completeness` is { status: complete | partial, reasons: [{ code, detail }] } with code one of output_budget | result_cap | index_building | unreadable_files | out_of_analysis_scope | modality_degraded",
             "result": "the action payload (or an {error} object)"
         }
     })
@@ -598,7 +712,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "11");
+        assert_eq!(body["schema_version"], "12");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -633,6 +747,13 @@ mod tests {
         assert!(body["file_params"]["path"].is_string());
         assert!(body["file_result"]["result_id"].is_string());
         assert!(body["envelope"]["revision"].is_string());
+        // The version bump above is only honest if the new keys are described too.
+        assert!(body["finding"]["location"].is_string(), "the location contract advertised");
+        assert!(body["envelope"]["freshness"].is_string(), "the freshness envelope advertised");
+        assert!(
+            body["finding"]["range"].as_str().unwrap().contains("DEPRECATED"),
+            "the legacy range is marked, not silently kept",
+        );
     }
 
     #[test]
@@ -771,7 +892,7 @@ mod tests {
             match state.read(|resident, generation| {
                 file_findings(resident, root_id, path, filters, generation)
             }) {
-                ResidentOutcome::Ready(v, _) => v,
+                ResidentOutcome::Ready((body, _completeness), _) => body,
                 _ => panic!("expected Ready outcome"),
             }
         }
@@ -939,6 +1060,131 @@ mod tests {
             assert_eq!(body["error"], "unreadable", "{body}");
         }
 
+        /// A module whose third line puts a NON-BMP character before an unresolved call, so
+        /// the finding's column differs in every candidate unit: bytes, code points, UTF-16.
+        const MIXED_MODULE: &str =
+            "&НаСервере\nПроцедура Тест() Экспорт\n\tСообщить(\"\u{1D54F}\"); НетТакогоМодуля.Метод();\nКонецПроцедуры\n";
+
+        fn finding_with_code<'a>(body: &'a Value, code: &str) -> &'a Value {
+            body["findings"]
+                .as_array()
+                .expect("findings")
+                .iter()
+                .find(|f| f["code"] == code)
+                .unwrap_or_else(|| panic!("no {code} in {body}"))
+        }
+
+        /// The unit the contract publishes is UTF-16 code units, and the legacy `range`
+        /// keeps counting code points. Asserted together on ONE finding: an implementation
+        /// that copies the old encoding into the new field makes the two equal and fails
+        /// here — which is the whole reason this step exists.
+        #[test]
+        fn a_location_range_counts_utf16_where_the_legacy_range_counts_code_points() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Проба", MIXED_MODULE);
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Проба/Ext/Module.bsl");
+
+            let body = run(&state, &path, &default_filters());
+            let finding = finding_with_code(&body, "UnresolvedMethodCall");
+
+            assert_eq!(finding["range"]["start_column"], 16, "legacy column counts code points");
+            assert_eq!(
+                finding["location"]["range"]["start_character"], 17,
+                "the contract column counts UTF-16 code units: {finding}",
+            );
+            assert_ne!(
+                finding["range"]["start_column"], finding["location"]["range"]["start_character"],
+                "the two units must not coincide on this input, or the test proves nothing",
+            );
+            assert_eq!(finding["location"]["position_encoding"], "utf-16");
+            // The enclosing method, not just the finding's own span. It starts at line 0
+            // because the compilation directive is part of the method node, and ends past
+            // the finding's line — so it is the method's span and not the finding's again.
+            let enclosing = &finding["location"]["enclosing_range"];
+            assert_eq!(enclosing["start_line"], 0, "{finding}");
+            assert_eq!(enclosing["end_line"], 3, "{finding}");
+            assert!(
+                enclosing["end_line"].as_u64()
+                    > finding["location"]["range"]["start_line"].as_u64(),
+                "the enclosing span must cover the finding: {finding}",
+            );
+        }
+
+        /// One relative path, two roots: the location must name the root the file actually
+        /// came from. The stand gives both modules the same relative path on purpose.
+        #[test]
+        fn a_location_names_the_root_the_file_came_from() {
+            use crate::diagnostics_state::test_support::{
+                extension_root_id, workspace_with_an_outside_extension,
+            };
+            let (_dir, workspace, extension) = workspace_with_an_outside_extension();
+            write_common_module(&workspace, "Проба", MIXED_MODULE);
+            write_common_module(&extension, "Проба", MIXED_MODULE);
+            let state = ready_state(&workspace);
+            let root_id = extension_root_id(&workspace, &extension);
+            let rel = Path::new("CommonModules/Проба/Ext/Module.bsl");
+
+            let from_extension = run_rooted(&state, Some(&root_id), rel, &default_filters());
+            let from_configuration = run_rooted(&state, Some(""), rel, &default_filters());
+
+            let ext_location =
+                &finding_with_code(&from_extension, "UnresolvedMethodCall")["location"];
+            let cfg_location =
+                &finding_with_code(&from_configuration, "UnresolvedMethodCall")["location"];
+
+            assert_eq!(ext_location["root_id"], root_id.as_str(), "{ext_location}");
+            assert_eq!(cfg_location["root_id"], "", "{cfg_location}");
+            assert_eq!(
+                ext_location["path"], cfg_location["path"],
+                "the relative path is the same in both roots — the root_id is what separates them",
+            );
+        }
+
+        /// The envelope must be able to SAY the answer was cut, and to stop saying it when
+        /// it was not: a pair of calls, one budget each.
+        #[test]
+        fn completeness_reports_a_budget_cut_and_only_then() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Проба", MIXED_MODULE);
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Проба/Ext/Module.bsl");
+
+            let tight = completeness_of(&state, &path, Some(1));
+            let ample = completeness_of(&state, &path, Some(100_000));
+
+            assert!(
+                has_reason(&tight, "output_budget"),
+                "a one-token budget cannot fit these findings: {tight}",
+            );
+            assert!(
+                !has_reason(&ample, "output_budget"),
+                "and an ample budget must not claim it did: {ample}",
+            );
+        }
+
+        fn completeness_of(
+            state: &DiagnosticsState,
+            path: &Path,
+            max_output_tokens: Option<usize>,
+        ) -> Value {
+            let filters = FileFilters { max_output_tokens, ..default_filters() };
+            match state.read(|resident, generation| {
+                file_findings(resident, None, path, &filters, generation)
+            }) {
+                ResidentOutcome::Ready((_body, completeness), _) => completeness.to_value(),
+                _ => panic!("expected Ready outcome"),
+            }
+        }
+
+        fn has_reason(completeness: &Value, code: &str) -> bool {
+            completeness["reasons"].as_array().expect("reasons").iter().any(|r| r["code"] == code)
+        }
+
         #[test]
         fn codes_filter_narrows_findings() {
             let dir = tempfile::tempdir().unwrap();
@@ -1082,7 +1328,7 @@ mod tests {
                 workspace_findings(&sweep, gen, None)
             });
             match outcome {
-                ResidentOutcome::Ready(v, _) => v,
+                ResidentOutcome::Ready((body, _completeness), _) => body,
                 _ => panic!("expected Ready outcome"),
             }
         }

@@ -256,6 +256,8 @@ EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
 
 - `docs/mcp/SETUP.md` — установка с нуля (бинарник, PATH, LSP-плагин, верификация)
 - `docs/mcp/TOOLS_AND_EXTENSION.md` — доступные инструменты, prerequisites и расширение 1С
+- `docs/mcp/LOCATION_CONTRACT.md` — единый объект места и конверт свежести в ответах
+  `search`, `symbol_info`, `diagnostics` и `graph`.
 - `docs/mcp/CONTRACT.md` — машиночитаемая декларация контракта (`bsl-analyzer contract`,
   ресурс `bsl-analyzer://contract`) для проверки совместимости в чужом CI
 - `docs/central-postgres-search/README.md` — shared baseline и overlay для поиска

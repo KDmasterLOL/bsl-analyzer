@@ -17,9 +17,11 @@ use ide::{
     GraphOverview, NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
     MAX_DROPPED_SAMPLE,
 };
+use line_index::TextRange;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::graph_db::SCHEMA_VERSION;
+use crate::tools::location as loc;
 
 /// A node as stored, before projection to a [`NodeRef`].
 struct StoredNode {
@@ -520,7 +522,9 @@ impl GraphDb {
         let mut by_module: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         let mut sampled = false;
-        if let Ok(result) = self.neighbors(&params)? {
+        // The usages summary counts calling MODULES; the nodes themselves never leave this
+        // function, so no root table is needed to place them.
+        if let Ok(result) = self.neighbors(&params, None)? {
             sampled = result.dropped_count > 0;
             for node in &result.nodes {
                 if let Some(module) = &node.module {
@@ -568,7 +572,17 @@ impl GraphDb {
     }
 
     /// Project a stored node to its agent-facing [`NodeRef`] at `detail`.
-    fn node_ref(&self, n: &StoredNode, detail: GraphDetail) -> NodeRef {
+    ///
+    /// `roots` is the answering snapshot's root table, passed down rather than owned: the
+    /// table belongs to the publication, and a `GraphDb` outlives any one of them. `None`
+    /// is a real serving state (a cached graph published before the project loaded), and
+    /// the node then names `roots_unavailable` instead of quietly dropping its place.
+    fn node_ref(
+        &self,
+        n: &StoredNode,
+        detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> NodeRef {
         let kind = node_kind(&n.kind);
         let mut node = NodeRef {
             id: n.id.clone(),
@@ -587,7 +601,13 @@ impl GraphDb {
             // query, so it is not done in this projection helper.
             methods: None,
             addressable: n.addressable,
+            location: None,
+            location_unavailable: None,
         };
+        match self.node_location(n, roots) {
+            Ok(location) => node.location = Some(location),
+            Err(reason) => node.location_unavailable = Some(reason),
+        }
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
             if let (Some(file), Some(off), Some(end)) = (&n.file, n.name_offset, n.sig_end) {
                 node.signature = self.signature_at(file, off, end);
@@ -601,9 +621,72 @@ impl GraphDb {
         node
     }
 
+    /// A stored node's place under the location contract, or the machine reason there is
+    /// none.
+    ///
+    /// The name range is VERIFIED by slicing rather than trusted: the database stores where
+    /// a name starts and where the HEADER ends (`sig_end` — the closing `)` or the export
+    /// keyword), not where the name ends. Publishing the header end as the name's would put
+    /// the parameter list inside a field the contract says is the name, so the range is
+    /// built from the name's own length and dropped unless the text there really is that
+    /// name.
+    fn node_location(
+        &self,
+        n: &StoredNode,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> Result<serde_json::Value, &'static str> {
+        if !matches!(n.kind.as_str(), "method" | "module") {
+            return Err(loc::LocationUnavailable::NoSourceLocation.code());
+        }
+        let (Some(file), Some(roots)) = (n.file.as_deref(), roots) else {
+            // A method whose row has no file is a path-fallback node seen only as an edge
+            // endpoint; a missing table is the boot window. Neither may answer "no place".
+            return Err(if n.file.is_none() {
+                loc::LocationUnavailable::NoSourceLocation.code()
+            } else {
+                loc::LocationUnavailable::RootsUnavailable.code()
+            });
+        };
+        let location = loc::Location::from_path(roots, std::path::Path::new(file))
+            .map_err(|reason| reason.code())?;
+
+        let Some(text) = std::fs::read_to_string(file).ok() else {
+            // The row's offsets describe a file we cannot read now; the pair is still true.
+            return Ok(location.to_value());
+        };
+        let index = line_index::LineIndex::new(&text);
+        let enclosing = match (n.src_start, n.src_end) {
+            (Some(start), Some(end)) => index
+                .utf16_line_col_range(&text, TextRange::new(start.into(), end.into()))
+                .map(loc::PositionRange::from),
+            _ => None,
+        };
+        let name = n.name_offset.and_then(|start| {
+            let start = start as usize;
+            let end = start + n.name.len();
+            let slice = text.get(start..end)?;
+            if !slice.eq_ignore_ascii_case(&n.name) && slice.to_lowercase() != n.name.to_lowercase()
+            {
+                return None;
+            }
+            index
+                .utf16_line_col_range(
+                    &text,
+                    TextRange::new((start as u32).into(), (end as u32).into()),
+                )
+                .map(loc::PositionRange::from)
+        });
+
+        Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
+    }
+
     /// Cold-start overview: node/edge tallies, the most-called nodes, and the
     /// provenance/dispatch profile.
-    pub fn overview(&self, top_n: usize) -> anyhow::Result<GraphOverview> {
+    pub fn overview(
+        &self,
+        top_n: usize,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> anyhow::Result<GraphOverview> {
         let nodes = self.count("SELECT COUNT(*) FROM nodes")?;
         let methods = self.count("SELECT COUNT(*) FROM nodes WHERE kind='method'")?;
         let modules = self.count_modules()?;
@@ -640,7 +723,7 @@ impl GraphDb {
         let mut top_by_centrality = Vec::with_capacity(top_ids.len());
         for id in top_ids {
             if let Some(n) = self.fetch_node(&id)? {
-                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures));
+                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures, roots));
             }
         }
 
@@ -667,12 +750,13 @@ impl GraphDb {
         &self,
         id: &str,
         detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NodeResult, GraphError>> {
         let stored = match self.resolve_stored(id)? {
             Ok(n) => n,
             Err(e) => return Ok(Err(e)),
         };
-        let mut node = self.node_ref(&stored, detail);
+        let mut node = self.node_ref(&stored, detail, roots);
         // A `module` node lists its members so an agent discovers them from `node(module/…)`
         // directly, without a traversal.
         if stored.kind == "module" {
@@ -736,6 +820,7 @@ impl GraphDb {
     pub fn neighbors(
         &self,
         params: &NeighborsParams<'_>,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NeighborsResult, GraphError>> {
         let root = match self.resolve_stored(params.id)? {
             Ok(n) => n,
@@ -806,7 +891,7 @@ impl GraphDb {
         let mut nodes = Vec::with_capacity(ranked.len());
         for (_, id) in &ranked {
             if let Some(n) = self.fetch_node(id)? {
-                nodes.push(self.node_ref(&n, params.detail));
+                nodes.push(self.node_ref(&n, params.detail, roots));
             }
         }
 
@@ -857,7 +942,7 @@ impl GraphDb {
         let returned = nodes.len();
         let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
         Ok(Ok(NeighborsResult {
-            root: self.node_ref(&root, params.detail),
+            root: self.node_ref(&root, params.detail, roots),
             nodes,
             edges,
             total,
@@ -884,7 +969,9 @@ impl GraphDb {
             Some(n) if n.kind == "method" => n,
             _ => return Ok(None),
         };
-        let nref = self.node_ref(&node, GraphDetail::Signatures);
+        // Not serialized as a node: this projection feeds a text renderer for embedding
+        // enrichment, so it needs no place and takes no table.
+        let nref = self.node_ref(&node, GraphDetail::Signatures, None);
 
         // Mirror the in-memory renderer's facts exactly by EDGE kind, not just target
         // kind: calls come only from `call` edges, reads only from a method's

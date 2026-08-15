@@ -7,6 +7,9 @@
 
 Набор доступных tools зависит от профиля сервера.
 
+Ответы инструментов `search` (`search_code`), `symbol_info`, `diagnostics` и `graph`
+несут единый объект места и единый конверт свежести — см. `docs/mcp/LOCATION_CONTRACT.md`.
+
 | Профиль | Tool | Что делает | Что нужно дополнительно |
 |--------|------|------------|-------------------------|
 | `reference` | `search(action=find_docs\|search_docs\|status)` | поиск по справке платформы | `EMBEDDING_URL` только для `search_docs` |

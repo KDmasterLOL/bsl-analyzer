@@ -423,6 +423,12 @@ impl DiagnosticsResident {
         &self.workspace_root
     }
 
+    /// This resident's own root table — the one its files were enumerated under, so a
+    /// location built from it addresses a file this resident can actually serve.
+    pub(crate) fn workspace_roots(&self) -> &bsl_search::WorkspaceRoots {
+        &self.workspace_roots
+    }
+
     /// An `Analysis` view over a cloned db handle. The clone shares the Salsa storage
     /// (memo/LRU cache), and is dropped before the read guard is released.
     pub(crate) fn analysis(&self) -> Analysis {

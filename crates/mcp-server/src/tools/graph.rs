@@ -14,6 +14,8 @@ use serde_json::{json, Value};
 
 use crate::graph::Freshness;
 use crate::graph_query::GraphDb;
+// Aliased: the graph has a `Freshness` of its own, and the contract's is a different type.
+use crate::tools::location as loc;
 use crate::tools::redact::redact_secrets;
 use crate::tools::response::structured;
 
@@ -78,20 +80,32 @@ fn internal(e: anyhow::Error) -> Value {
     json!({ "error": "internal", "detail": e.to_string() })
 }
 
-pub fn overview(graph: &GraphDb, top: usize) -> Value {
-    match graph.overview(top) {
-        Ok(overview) => to_value(&overview),
-        Err(e) => internal(e),
+pub fn overview(
+    graph: &GraphDb,
+    top: usize,
+    roots: Option<&bsl_search::WorkspaceRoots>,
+) -> (Value, loc::Completeness) {
+    match graph.overview(top, roots) {
+        Ok(overview) => (to_value(&overview), loc::Completeness::complete()),
+        Err(e) => (internal(e), loc::Completeness::complete()),
     }
 }
 
 /// Default cap on the candidate ids returned by `resolve`.
 pub const DEFAULT_RESOLVE_LIMIT: usize = 20;
 
-pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> Value {
+pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> (Value, loc::Completeness) {
     match graph.resolve(query, limit) {
-        Ok(result) => to_value(&result),
-        Err(e) => internal(e),
+        Ok(result) => {
+            // `resolve` caps its candidate list; it has no `dropped_count`, only this flag.
+            let completeness = loc::Completeness::complete().when(
+                result.truncated,
+                loc::ReasonCode::ResultCap,
+                "candidate list capped; raise `top` or refine the query",
+            );
+            (to_value(&result), completeness)
+        }
+        Err(e) => (internal(e), loc::Completeness::complete()),
     }
 }
 
@@ -125,8 +139,14 @@ fn clamp_to_budget(source: &mut Option<String>, remaining: &mut usize) -> bool {
     true
 }
 
-pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail, max_output_tokens: usize) -> Value {
-    match graph.node(id, detail) {
+pub fn node(
+    graph: &GraphDb,
+    id: &str,
+    detail: GraphDetail,
+    max_output_tokens: usize,
+    roots: Option<&bsl_search::WorkspaceRoots>,
+) -> (Value, loc::Completeness) {
+    match graph.node(id, detail, roots) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.node.source);
             let mut remaining = max_output_tokens.saturating_mul(4);
@@ -136,15 +156,29 @@ pub fn node(graph: &GraphDb, id: &str, detail: GraphDetail, max_output_tokens: u
             if truncated {
                 value["budget_exhausted"] = json!(true);
             }
-            value
+            (value, budget_completeness(truncated))
         }
-        Ok(Err(err)) => to_value(&err),
-        Err(e) => internal(e),
+        Ok(Err(err)) => (to_value(&err), loc::Completeness::complete()),
+        Err(e) => (internal(e), loc::Completeness::complete()),
     }
 }
 
-pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>, max_output_tokens: usize) -> Value {
-    match graph.neighbors(params) {
+/// The one reason a body-carrying action can be partial on its own.
+fn budget_completeness(truncated: bool) -> loc::Completeness {
+    loc::Completeness::complete().when(
+        truncated,
+        loc::ReasonCode::OutputBudget,
+        "bodies trimmed to fit max_output_tokens",
+    )
+}
+
+pub fn neighbors(
+    graph: &GraphDb,
+    params: &NeighborsParams<'_>,
+    max_output_tokens: usize,
+    roots: Option<&bsl_search::WorkspaceRoots>,
+) -> (Value, loc::Completeness) {
+    match graph.neighbors(params, roots) {
         Ok(Ok(mut result)) => {
             redact_opt(&mut result.root.source);
             for node in &mut result.nodes {
@@ -165,33 +199,56 @@ pub fn neighbors(graph: &GraphDb, params: &NeighborsParams<'_>, max_output_token
             if truncated {
                 value["budget_exhausted"] = json!(true);
             }
-            value
+            // A centrality-ranked tail drop is a CAP, not a budget cut: raising
+            // `max_output_tokens` alone does not bring the dropped neighbours back.
+            let completeness = budget_completeness(truncated).when(
+                result.dropped_count > 0,
+                loc::ReasonCode::ResultCap,
+                "neighbours dropped by max_nodes; raise it or narrow the direction",
+            );
+            (value, completeness)
         }
-        Ok(Err(err)) => to_value(&err),
-        Err(e) => internal(e),
+        Ok(Err(err)) => (to_value(&err), loc::Completeness::complete()),
+        Err(e) => (internal(e), loc::Completeness::complete()),
     }
 }
 
-pub fn source(graph: &GraphDb, ids: &[String], max_output_tokens: usize) -> Value {
+pub fn source(
+    graph: &GraphDb,
+    ids: &[String],
+    max_output_tokens: usize,
+) -> (Value, loc::Completeness) {
     match graph.source(ids, max_output_tokens) {
         Ok(mut result) => {
             for item in &mut result.items {
                 redact_opt(&mut item.source);
             }
-            to_value(&result)
+            // `source` budgets INSIDE the query, so the fact is on the result rather than
+            // on a local: skipping it here would report "complete" over a clipped body.
+            let completeness = budget_completeness(result.budget_exhausted);
+            (to_value(&result), completeness)
         }
-        Err(e) => internal(e),
+        Err(e) => (internal(e), loc::Completeness::complete()),
     }
 }
 
 /// Wrap an action result in the freshness envelope. `revision` is the snapshot
 /// generation the answer was computed at; `stale` flags on-disk drift since then;
 /// `reload` is the background-reindex state (`none` / `running` / `failed`).
-pub fn envelope(freshness: Freshness, result: Value) -> CallToolResult {
+pub fn envelope(
+    freshness: Freshness,
+    completeness: loc::Completeness,
+    result: Value,
+) -> CallToolResult {
     structured(json!({
         "revision": freshness.revision,
         "stale": freshness.stale,
         "reload": freshness.reload,
+        "freshness": loc::Freshness::new(loc::FreshnessSource::Graph, completeness)
+            .with_revision(freshness.revision)
+            .with_topology(freshness.topology)
+            .with_stale(freshness.stale)
+            .to_value(),
         "result": result,
     }))
 }
@@ -249,7 +306,7 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "29",
+        "schema_version": "30",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, unread_files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `unread_files` counts modules whose bytes could not be read when the artefact was built or last patched: they contributed no nodes and no edges, so the graph is missing them, `stale` is true, and no fingerprint comparison reveals it (stat needs no read permission). A patch never clears an inherited one — only a full rebuild restores the missing rows. `files` here is the module count the artefact COVERS, unread ones included, so `unread_files` is a subset of it — unlike `diagnostics status`, whose `files` counts only what it serves and excludes them; do not apply one arithmetic to both. `superseded: true` (emitted only when it holds) means another daemon generation now owns this workspace's derived caches: answers keep coming from the snapshot this server already has, but it no longer rebuilds, so a `stale` snapshot stays stale — reconnect to pick up the daemon that does.",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
@@ -282,9 +339,11 @@ fn schema_json() -> Value {
         "redaction": "method source/snippets emitted by `node`/`neighbors`/`source` (and search) are secret-redacted: a string literal is replaced with `***` when a sensitive marker (a credential-named identifier like `Токен`, or a key like `Вставить(\"Пароль\", …)`) precedes it in the same statement. Structural literals (field lists, type names) and localized messages are preserved. Method source served by the graph actions additionally has line endings normalized to LF (search snippets are byte-exact apart from redaction). Treat source as sanitized, not byte-exact.",
         "revision_note": "the graph `revision` is independent of the `diagnostics` tool's `generation` — they are separate subsystems with separate freshness counters and do not correlate.",
         "envelope": {
-            "revision": "u64 — snapshot generation the answer was computed at",
-            "stale": "bool — this snapshot is not current: the workspace drifted on disk since it was built, and/or some module could not be read when it was built (see the status action's unread_files)",
+            "revision": "u64 — snapshot generation the answer was computed at; DEPRECATED in favour of freshness.revision, which carries the same value",
+            "stale": "bool — this snapshot is not current: the workspace drifted on disk since it was built, and/or some module could not be read when it was built (see the status action's unread_files); DEPRECATED in favour of freshness.stale",
             "reload": "none | running | failed — background re-index state",
+            "freshness": "the location contract's envelope: { source, revision, topology_fingerprint, stale, completeness }. topology_fingerprint is 16 hex digits naming the extension topology this snapshot was built for; completeness is { status, reasons: [{ code, detail }] }",
+            "node_location": "every method/module node carries either `location` (the location contract v1: root_id, path, range = the declared name, enclosing_range = the whole declaration, position_encoding, schema_version) or `location_unavailable` — a machine reason: no_source_location (metadata objects, forms, attributes have no file), roots_unavailable (a cached graph published before the project's root table was known), path_outside_registered_roots",
             "result": "the action's payload (or an {error} object)",
             "delivery": "the payload lives in MCP structuredContent; the JSON text block is a compatibility mirror for clients without structured-output support — a host injects exactly one copy into model context"
         },
@@ -431,7 +490,14 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "29");
+        assert_eq!(schema["schema_version"], "30");
+        // A bumped number over unchanged text would certify a contract the server no longer
+        // honours, so the new keys are asserted by description, not by version alone.
+        assert!(schema["envelope"]["freshness"].is_string(), "the freshness envelope advertised");
+        assert!(
+            schema["envelope"]["node_location"].is_string(),
+            "the node location contract advertised",
+        );
         // The validating `edge_kinds` allowlist and the schema-advertised list must not drift:
         // every advertised kind except the implicit `call` umbrella must be an accepted filter,
         // and the allowlist must advertise no kind the schema omits.
@@ -489,21 +555,33 @@ mod tests {
 
     #[test]
     fn envelope_populates_structured_content() {
-        let freshness = Freshness { revision: 7, stale: true, reload: "running" };
-        let result = envelope(freshness, json!({ "kind": "method", "name": "Считать" }));
+        let freshness =
+            Freshness { revision: 7, stale: true, reload: "running", topology: 0x0a1b_2c3d };
+        let result = envelope(
+            freshness,
+            loc::Completeness::partial(loc::ReasonCode::ResultCap, "capped by max_nodes"),
+            json!({ "kind": "method", "name": "Считать" }),
+        );
         assert_structured_mirrors_text(&result);
         let body = result.structured_content.as_ref().unwrap();
         assert_eq!(body["revision"], 7);
         assert_eq!(body["stale"], true);
         assert_eq!(body["reload"], "running");
         assert_eq!(body["result"]["name"], "Считать");
+        // The contract envelope carries the same verdict as the legacy keys beside it, plus
+        // the topology and the machine reason they never had.
+        assert_eq!(body["freshness"]["source"], "graph");
+        assert_eq!(body["freshness"]["revision"], body["revision"]);
+        assert_eq!(body["freshness"]["stale"], body["stale"]);
+        assert_eq!(body["freshness"]["topology_fingerprint"], "000000000a1b2c3d");
+        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "result_cap");
         assert_eq!(result.is_error, Some(false));
     }
 
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "29");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "30");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

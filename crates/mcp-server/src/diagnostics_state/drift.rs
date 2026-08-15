@@ -1120,6 +1120,7 @@ pub(super) fn compute_freshness(inner: &Inner, scan: Option<&OwnedScan>) -> Fres
             || inner.reload == ReloadState::Running
             || inner.resident.as_ref().is_some_and(|r| r.unread_count() > 0),
         reload: inner.reload.label(),
+        topology: inner.topology,
     }
 }
 
@@ -1392,7 +1393,7 @@ mod tests {
         assert!(is_unread, "it is known, though");
         assert_eq!(unread, 1);
         // The distinction the node exists for: not "clean", not "not in workspace".
-        assert_eq!(findings["error"], "unreadable");
+        assert_eq!(findings.0["error"], "unreadable");
         assert!(fresh.stale, "an unanalysed workspace file makes the answer stale");
 
         // Positive control: the same tree with a readable body answers the opposite.

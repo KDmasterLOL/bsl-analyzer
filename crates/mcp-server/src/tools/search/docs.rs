@@ -3,7 +3,7 @@ use super::gating::{
     map_reference_baseline_resolution,
 };
 use super::render::{
-    format_doc_hits, format_lexical_doc_hits, format_semantic_doc_hits, no_hits_response,
+    format_doc_hits, format_lexical_doc_hits, format_semantic_doc_hits, no_hits_response, Envelope,
 };
 use super::status::docs_not_ready;
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
@@ -36,7 +36,7 @@ pub fn find_docs(
                     return Ok(format_lexical_doc_hits(&hits, max_output_tokens).into_response());
                 }
                 Ok(_) => {
-                    return Ok(no_hits_response(None));
+                    return Ok(no_hits_response(None, Envelope::No));
                 }
                 Err(error) => {
                     if error.is_terminal() {
@@ -59,7 +59,7 @@ pub fn find_docs(
                 if !hits.is_empty() {
                     return Ok(format_doc_hits(&hits, max_output_tokens).into_response());
                 }
-                return Ok(no_hits_response(None));
+                return Ok(no_hits_response(None, Envelope::No));
             }
         }
     }
@@ -72,7 +72,7 @@ pub fn find_docs(
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
-        return Ok(no_hits_response(None));
+        return Ok(no_hits_response(None, Envelope::No));
     }
 
     Ok(format_doc_hits(&hits, max_output_tokens).into_response())
@@ -136,7 +136,7 @@ pub fn search_docs(
                     return Ok(format_semantic_doc_hits(&hits, max_output_tokens).into_response());
                 }
                 Ok(_) => {
-                    return Ok(no_hits_response(None));
+                    return Ok(no_hits_response(None, Envelope::No));
                 }
                 Err(error) => {
                     if error.is_terminal() {
@@ -157,7 +157,7 @@ pub fn search_docs(
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
-        return Ok(no_hits_response(None));
+        return Ok(no_hits_response(None, Envelope::No));
     }
 
     Ok(format_doc_hits(&hits, max_output_tokens).into_response())
@@ -202,7 +202,7 @@ mod tests {
         assert!(text.starts_with("#1 ["), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
-        assert_eq!(body["schema_version"], "2");
+        assert_eq!(body["schema_version"], "3");
         let hits = body["hits"].as_array().expect("hits array");
         assert_eq!(hits[0]["rank"], 1);
         assert_eq!(hits[0]["symbol"], "Массив");

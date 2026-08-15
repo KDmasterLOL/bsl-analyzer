@@ -7,6 +7,15 @@ and this project adheres to [Date-based Versioning](docs/contributing/VERSIONING
 
 ## [Unreleased]
 
+### Added
+
+- MCP: единый location contract v1 в ответах `search`, `symbol_info`, `diagnostics`
+  и `graph` — объект места с парой `(root_id, path)`, двумя диапазонами (0-based,
+  конец исключающий, колонки в кодовых единицах UTF-16 с явным `position_encoding`)
+  и конверт `freshness` с отпечатком топологии и машиночитаемой полнотой. Старые
+  поля сохранены без изменения значений и помечены устаревшими; подробности в
+  `docs/mcp/LOCATION_CONTRACT.md`.
+
 ### Removed
 
 - Removed the deprecated `--streaming` CLI flag and the legacy streaming

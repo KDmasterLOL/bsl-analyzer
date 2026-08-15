@@ -4,6 +4,7 @@ pub mod event_log;
 pub mod execution;
 pub mod graph;
 pub mod its_help;
+pub mod location;
 pub mod metadata;
 pub mod platform;
 pub mod query;

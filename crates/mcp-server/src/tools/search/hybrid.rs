@@ -1,5 +1,5 @@
 use super::lexical::lexical_code_hits;
-use super::render::{format_code_hits, hits_response, no_hits_response};
+use super::render::{format_code_hits, hits_response, no_hits_response, Envelope};
 use super::semantic::semantic_code_hits;
 use super::status::search_not_ready;
 use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
@@ -104,7 +104,7 @@ pub fn hybrid_code(
         // The text stays the bare sentence it has always been; the degradation reaches a
         // machine consumer through the envelope, where an empty list plus `degraded` reads as
         // "half the search was down" rather than "there is nothing".
-        return Ok(no_hits_response(note.as_deref()));
+        return Ok(no_hits_response(note.as_deref(), Envelope::Yes));
     }
 
     // Explain the per-hit modality tag once, up front — a leading line does not shift the
@@ -122,7 +122,7 @@ pub fn hybrid_code(
         // positionally is not shifted.
         let _ = writeln!(out, "-- {note} --");
     }
-    Ok(hits_response(out, rendered, note.as_deref()))
+    Ok(hits_response(out, rendered, note.as_deref(), Envelope::Yes))
 }
 
 #[cfg(test)]
@@ -341,7 +341,7 @@ mod tests {
         assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
-        assert_eq!(body["schema_version"], "2");
+        assert_eq!(body["schema_version"], "3");
         let hits = body["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), body["shown"].as_u64().unwrap() as usize);
         assert_eq!(body["total"], serde_json::json!(hits.len()));

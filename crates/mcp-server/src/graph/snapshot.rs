@@ -67,12 +67,21 @@ pub(crate) struct GraphSnapshot {
     /// true — the graph is missing their nodes and edges — WITHOUT making
     /// `wants_reload` true, since rebuilding cannot read them either.
     unread_files: usize,
+    /// The root table this workspace publishes, for turning a node's stored file path into
+    /// a `(root_id, path)` pair. `None` on a boot that published a cached graph before the
+    /// project was loaded — a real serving state, not a test-only one.
+    workspace_roots: Option<bsl_search::WorkspaceRoots>,
 }
 
 impl GraphSnapshot {
     /// Modules this artefact could not read when it was built or last patched.
     pub(crate) fn unread_files(&self) -> usize {
         self.unread_files
+    }
+
+    /// The root table, when this snapshot has one.
+    pub(crate) fn workspace_roots(&self) -> Option<&bsl_search::WorkspaceRoots> {
+        self.workspace_roots.as_ref()
     }
 }
 
@@ -109,10 +118,12 @@ impl GraphState {
     /// and can be moved onto a blocking task without holding the lock during the
     /// query.
     pub(crate) fn snapshot(&self) -> Option<GraphSnapshot> {
-        let (published_generation, published_topology) = {
+        let (published_generation, published_topology, workspace_roots) = {
             let inner = lock_recover(&self.inner);
             let published = inner.published.as_ref()?;
-            (published.generation, published.fingerprint.topology)
+            // Cloned under the same lock as the generation: an answer must describe the
+            // publication it was served from, roots included.
+            (published.generation, published.fingerprint.topology, published.search_roots.clone())
         };
         {
             let mut pool = lock_recover(&self.snapshot_pool);
@@ -130,6 +141,7 @@ impl GraphState {
                         fingerprint,
                         force_stale,
                         unread_files,
+                        workspace_roots,
                     });
                 }
             }
@@ -171,6 +183,7 @@ impl GraphState {
             fingerprint,
             force_stale,
             unread_files,
+            workspace_roots,
         })
     }
 
@@ -191,7 +204,12 @@ impl GraphState {
 
         let mut inner = lock_recover(&self.inner);
         let Some(published) = inner.published.as_mut() else {
-            return Freshness { revision: snapshot.generation, stale, reload: "none" };
+            return Freshness {
+                revision: snapshot.generation,
+                stale,
+                reload: "none",
+                topology: snapshot.fingerprint.topology,
+            };
         };
         let mut reload = published.reload.label();
         let claim_reload =
@@ -216,7 +234,12 @@ impl GraphState {
             }
         }
 
-        Freshness { revision: snapshot.generation, stale, reload }
+        Freshness {
+            revision: snapshot.generation,
+            stale,
+            reload,
+            topology: snapshot.fingerprint.topology,
+        }
     }
 
     pub(super) fn current_disk_fp(&self) -> Option<(crate::graph_db::GraphFp, bool)> {

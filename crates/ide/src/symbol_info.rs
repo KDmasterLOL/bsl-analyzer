@@ -16,8 +16,9 @@ use hir::{
 };
 use ide_db::base_db::{Locale, RootQueryDb, SourceDatabase, SourceRootId};
 use ide_db::RootDatabaseImpl;
-use line_index::LineIndex;
+use line_index::{LineColRange, LineIndex};
 use symbol_info::{build_signature, render_declaration, CalleeKind, MethodKind, SymbolSignature};
+use syntax::TextRange;
 use vfs::FileId;
 
 /// The whole workspace is loaded into a single local source root; the resident host mirrors
@@ -96,6 +97,21 @@ pub struct SymbolDefinition {
     pub line: u32,
     /// The declaration line (or the local's line) as a source snippet.
     pub snippet: Option<String>,
+    /// The declared name alone, 0-based with UTF-16 columns. Absent where the name has
+    /// no range of its own — a local, a module card anchored at the file start.
+    pub name_range: Option<LineColRange>,
+    /// The whole declaration, same units. Absent for the same reason.
+    pub enclosing_range: Option<LineColRange>,
+}
+
+/// The two byte ranges a definition may know about, kept as one value so the two
+/// `Option<TextRange>` cannot be passed in the wrong order.
+#[derive(Debug, Clone, Copy, Default)]
+struct DefinitionRanges {
+    /// The declared name.
+    name: Option<TextRange>,
+    /// The whole declaration node.
+    enclosing: Option<TextRange>,
 }
 
 /// The consolidated semantic card for one symbol.
@@ -190,8 +206,15 @@ fn resolve_single(
             name: display,
             context: module_context(db, ModuleId::new(file_id)),
         });
-        card.definition =
-            def_from_file_line(db, file_id, syntax::TextSize::from(0u32), req.sections.definition);
+        // A module card is anchored at the file start: the module has no declaration
+        // node of its own, so there is no range to publish.
+        card.definition = def_from_file_line(
+            db,
+            file_id,
+            syntax::TextSize::from(0u32),
+            DefinitionRanges::default(),
+            req.sections.definition,
+        );
         return Some(card);
     }
 
@@ -558,10 +581,17 @@ fn resolve_position(
 
     if req.sections.definition {
         if let (Some(module), Some(range)) = (def.module(db), def.source_range(db)) {
-            card.definition = def_from_file_line(db, module.file_id, range.start(), true);
+            card.definition = def_from_file_line(
+                db,
+                module.file_id,
+                range.start(),
+                DefinitionRanges { name: def.name_range(db), enclosing: Some(range) },
+                true,
+            );
         } else {
             // Locals/parameters have no method-level source range; anchor at the token.
-            card.definition = def_from_file_line(db, pos.file_id, offset, true);
+            card.definition =
+                def_from_file_line(db, pos.file_id, offset, DefinitionRanges::default(), true);
         }
     }
 
@@ -724,14 +754,22 @@ fn execution_context_label(ctx: ExecutionContext) -> &'static str {
 }
 
 fn def_for_method(db: &RootDatabaseImpl, method_id: MethodId) -> Option<SymbolDefinition> {
-    let range = Definition::Method(method_id).source_range(db)?;
-    def_from_file_line(db, method_id.module.file_id, range.start(), true)
+    let def = Definition::Method(method_id);
+    let enclosing = def.source_range(db)?;
+    def_from_file_line(
+        db,
+        method_id.module.file_id,
+        enclosing.start(),
+        DefinitionRanges { name: def.name_range(db), enclosing: Some(enclosing) },
+        true,
+    )
 }
 
 fn def_from_file_line(
     db: &RootDatabaseImpl,
     file_id: FileId,
     offset: syntax::TextSize,
+    ranges: DefinitionRanges,
     include: bool,
 ) -> Option<SymbolDefinition> {
     if !include {
@@ -741,7 +779,16 @@ fn def_from_file_line(
     let line_index = LineIndex::new(&text);
     let line_col = line_index.line_col(offset);
     let snippet = line_text(&text, line_col.line).map(str::to_string);
-    Some(SymbolDefinition { path: file_path(db, file_id), line: line_col.line + 1, snippet })
+    let to_line_col = |range: Option<TextRange>| {
+        range.and_then(|range| line_index.utf16_line_col_range(&text, range))
+    };
+    Some(SymbolDefinition {
+        path: file_path(db, file_id),
+        line: line_col.line + 1,
+        snippet,
+        name_range: to_line_col(ranges.name),
+        enclosing_range: to_line_col(ranges.enclosing),
+    })
 }
 
 fn line_text(text: &str, line: u32) -> Option<&str> {

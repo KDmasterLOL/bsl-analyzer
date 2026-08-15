@@ -15,6 +15,10 @@ use serde_json::{json, Map, Value};
 
 use crate::diagnostics_state::DiagnosticsResident;
 use crate::graph_query::GraphDb;
+use crate::tools::location::{
+    Completeness, Freshness, FreshnessSource, Location, PositionRange, ReasonCode,
+    LOCATION_SCHEMA_VERSION,
+};
 use crate::tools::response::{structured, trim_items_to_budget, truncate_text_to_budget};
 
 /// Default number of top calling modules included in the `usages` summary.
@@ -139,8 +143,10 @@ pub(crate) fn render_card(
     graph: Option<&GraphDb>,
     top_modules: usize,
     max_output_tokens: usize,
+    stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
-    let mut body = card_to_value(card, max_output_tokens);
+    let (mut body, budget_exhausted) = card_to_value(card, max_output_tokens);
+    let mut degraded = card.semantics_unavailable;
 
     if !card.semantics_unavailable {
         match (card.graph_id.as_deref(), graph) {
@@ -150,18 +156,106 @@ pub(crate) fn render_card(
                 }
                 None => {
                     body["usages_unavailable"] = json!("symbol not in call graph");
+                    degraded = true;
                 }
             },
             // Cards without a graph id (metadata objects/attributes, platform members) carry no
             // usages summary; only note the graph being unavailable for graph-addressable symbols.
             (Some(_), None) => {
                 body["usages_unavailable"] = json!("graph indexing");
+                degraded = true;
             }
             (None, _) => {}
         }
     }
 
+    // The definition under the location contract, beside the legacy `definition` key. A list
+    // because an extension may override a method (`&Вместо`, `&До`, `&После`) and the shape
+    // must not have to change when the second target starts being reported.
+    body["definitions"] = json!(definitions_value(card, stamp));
+    body["schema_version"] = json!(LOCATION_SCHEMA_VERSION);
+
+    let completeness = Completeness::complete()
+        .when(budget_exhausted, ReasonCode::OutputBudget, "card trimmed to fit max_output_tokens")
+        .when(
+            degraded,
+            ReasonCode::ModalityDegraded,
+            "the call graph could not answer for this symbol",
+        )
+        .when(
+            stamp.unread_files > 0,
+            ReasonCode::UnreadableFiles,
+            "some workspace files could not be read and are held out of service",
+        );
+    body["freshness"] = stamp.freshness(completeness).to_value();
+
     structured(body)
+}
+
+/// What the caller knows about the resident that answered: its root table (for locations)
+/// and its freshness. Carried as one value so a new envelope field cannot be forgotten at
+/// one of the two response shapes.
+pub(crate) struct ResidentStamp<'a> {
+    pub roots: Option<&'a bsl_search::WorkspaceRoots>,
+    pub revision: u64,
+    pub topology: u64,
+    pub stale: bool,
+    pub unread_files: usize,
+}
+
+impl ResidentStamp<'_> {
+    fn freshness(&self, completeness: Completeness) -> Freshness {
+        Freshness::new(FreshnessSource::Resident, completeness)
+            .with_revision(self.revision)
+            .with_topology(self.topology)
+            .with_stale(self.stale)
+    }
+}
+
+/// The definition sites under the location contract. Empty when the card has no source
+/// (platform members, metadata objects): an empty list says "no definition site", where an
+/// invented location would say something false.
+fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Value> {
+    let Some(def) = &card.definition else {
+        return Vec::new();
+    };
+    let mut entry = Map::new();
+
+    match (&def.path, stamp.roots) {
+        (Some(path), Some(roots)) => match Location::from_path(roots, Path::new(path)) {
+            Ok(location) => {
+                let location = location
+                    .with_range(def.name_range.map(PositionRange::from))
+                    .with_enclosing_range(def.enclosing_range.map(PositionRange::from))
+                    .with_module(module_ref(card));
+                entry.insert("location".into(), location.to_value());
+            }
+            Err(reason) => {
+                entry.insert("location_unavailable".into(), json!(reason.code()));
+            }
+        },
+        _ => {
+            entry.insert(
+                "location_unavailable".into(),
+                json!(crate::tools::location::LocationUnavailable::RootsUnavailable.code()),
+            );
+        }
+    }
+
+    if let Some(snippet) = &def.snippet {
+        entry.insert("snippet".into(), json!(snippet));
+    }
+    vec![Value::Object(entry)]
+}
+
+/// The owning module, when the card already holds both halves — never parsed back out of a
+/// display string.
+fn module_ref(card: &SymbolInfoCard) -> Option<crate::tools::location::ModuleRef> {
+    let container = card.container.as_ref()?;
+    Some(crate::tools::location::ModuleRef {
+        kind: container.kind.clone(),
+        name: container.name.clone(),
+    })
 }
 
 /// The resident-miss response: graph-derived candidates (imprecise-name path). When the graph
@@ -170,13 +264,21 @@ pub(crate) fn render_not_found(
     symbol: &str,
     graph: Option<&GraphDb>,
     limit: usize,
+    stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
     let Some(graph) = graph else {
+        // Answering with an empty candidate list while an index is still building is
+        // exactly `index_building`: the answer is real, but a source of it was not asked.
+        let completeness = Completeness::partial(
+            ReasonCode::IndexBuilding,
+            "the call graph is still indexing, so no candidates were searched",
+        );
         return structured(json!({
             "resolved": false,
             "symbol": symbol,
             "candidates": [],
             "hint": "call graph is still indexing; retry shortly for candidate matches",
+            "freshness": stamp.freshness(completeness).to_value(),
         }));
     };
     match graph.resolve(symbol, limit) {
@@ -189,6 +291,11 @@ pub(crate) fn render_not_found(
                 .iter()
                 .map(|c| json!({ "id": c.id, "kind": c.kind, "match": c.match_kind }))
                 .collect();
+            let completeness = Completeness::complete().when(
+                result.truncated,
+                ReasonCode::ResultCap,
+                "candidate list capped; raise the limit or refine the name",
+            );
             structured(json!({
                 "resolved": false,
                 "symbol": symbol,
@@ -197,6 +304,7 @@ pub(crate) fn render_not_found(
                 "truncated": result.truncated,
                 "hint": "no exact resident match; open a candidate id in `graph`, or refine to a \
                          qualified BSL name for `symbol_info`",
+                "freshness": stamp.freshness(completeness).to_value(),
             }))
         }
         Err(e) => structured(json!({
@@ -205,6 +313,12 @@ pub(crate) fn render_not_found(
             "candidates": [],
             "error": "internal",
             "detail": e.to_string(),
+            "freshness": stamp
+                .freshness(Completeness::partial(
+                    ReasonCode::ModalityDegraded,
+                    "the call graph failed to answer",
+                ))
+                .to_value(),
         })),
     }
 }
@@ -230,7 +344,9 @@ fn usages(graph: &GraphDb, graph_id: &str, top_modules: usize) -> Option<Value> 
     Some(value)
 }
 
-fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> Value {
+/// The card body plus whether the output budget cut anything: the fact is known here and
+/// travels up with the body rather than being recovered from the rendered JSON.
+fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> (Value, bool) {
     let mut body = Map::new();
     let mut truncated = false;
     body.insert("symbol".into(), json!(card.symbol));
@@ -295,13 +411,31 @@ fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> Value {
         );
     }
 
-    Value::Object(body)
+    (Value::Object(body), truncated)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use ide::{SymbolContainer, SymbolDefinition, SymbolMember};
+    use line_index::LineColRange;
+
+    /// A workspace whose configuration root owns the module the card below points at.
+    fn stand_roots() -> bsl_search::WorkspaceRoots {
+        let (roots, _rejected) =
+            bsl_search::WorkspaceRoots::build(Path::new("/ws"), Path::new("/ws/src/cf"), &[]);
+        roots
+    }
+
+    fn stamp(roots: &bsl_search::WorkspaceRoots) -> ResidentStamp<'_> {
+        ResidentStamp {
+            roots: Some(roots),
+            revision: 7,
+            topology: 0x0a1b_2c3d_4e5f_6071,
+            stale: false,
+            unread_files: 0,
+        }
+    }
 
     fn method_card() -> SymbolInfoCard {
         SymbolInfoCard {
@@ -316,9 +450,21 @@ mod tests {
             doc: Some("Складывает".to_string()),
             return_type: Some("Число".to_string()),
             definition: Some(SymbolDefinition {
-                path: Some("/CommonModules/МойМодуль/Ext/Module.bsl".to_string()),
+                path: Some("/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl".to_string()),
                 line: 3,
                 snippet: Some("Функция Сложить(А, Б) Экспорт".to_string()),
+                name_range: Some(LineColRange {
+                    start_line: 2,
+                    start_character: 8,
+                    end_line: 2,
+                    end_character: 15,
+                }),
+                enclosing_range: Some(LineColRange {
+                    start_line: 2,
+                    start_character: 0,
+                    end_line: 6,
+                    end_character: 15,
+                }),
             }),
             members: Vec::new(),
             graph_id: Some("method/common/МойМодуль/Сложить".to_string()),
@@ -391,12 +537,58 @@ mod tests {
     #[test]
     fn render_card_without_graph_stamps_usages_unavailable() {
         let card = method_card();
-        let result = render_card(&card, None, DEFAULT_TOP_MODULES, 6000);
+        let roots = stand_roots();
+        let result = render_card(&card, None, DEFAULT_TOP_MODULES, 6000, &stamp(&roots));
         let body = result.structured_content.unwrap();
         assert_eq!(body["kind"], "function");
         assert_eq!(body["container"]["context"], "Сервер");
         assert_eq!(body["usages_unavailable"], "graph indexing");
         assert!(body.get("usages").is_none());
+        // A graph that could not answer is a degraded modality, and the envelope says so
+        // rather than leaving the old flag as the only trace.
+        assert_eq!(body["freshness"]["completeness"]["status"], "partial");
+        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "modality_degraded");
+    }
+
+    /// The card keeps its legacy 1-based `definition.line` AND gains the contract location:
+    /// both are asserted together, because dropping either is the failure this step exists
+    /// to prevent.
+    #[test]
+    fn a_card_carries_both_the_old_line_and_the_new_location() {
+        let card = method_card();
+        let roots = stand_roots();
+        let body = render_card(&card, None, DEFAULT_TOP_MODULES, 6000, &stamp(&roots))
+            .structured_content
+            .unwrap();
+
+        assert_eq!(body["definition"]["line"], 3);
+        assert_eq!(body["definition"]["path"], "/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl");
+
+        let location = &body["definitions"][0]["location"];
+        assert_eq!(location["root_id"], "");
+        assert_eq!(location["path"], "CommonModules/МойМодуль/Ext/Module.bsl");
+        assert_eq!(location["position_encoding"], "utf-16");
+        // 0-based against the 1-based `definition.line` above: the same declaration.
+        assert_eq!(location["range"]["start_line"], 2);
+        assert_eq!(location["enclosing_range"]["end_line"], 6);
+        assert_eq!(location["module"]["name"], "МойМодуль");
+        assert_eq!(body["freshness"]["source"], "resident");
+        assert_eq!(body["freshness"]["revision"], 7);
+        assert_eq!(body["freshness"]["topology_fingerprint"], "0a1b2c3d4e5f6071");
+    }
+
+    /// Without the root table there is no pair to publish — and the answer says which,
+    /// instead of omitting the location and letting it read as "no definition".
+    #[test]
+    fn a_card_without_roots_names_the_reason() {
+        let card = method_card();
+        let stamp =
+            ResidentStamp { roots: None, revision: 7, topology: 1, stale: false, unread_files: 0 };
+        let body =
+            render_card(&card, None, DEFAULT_TOP_MODULES, 6000, &stamp).structured_content.unwrap();
+
+        assert_eq!(body["definitions"][0]["location_unavailable"], "roots_unavailable");
+        assert!(body["definitions"][0].get("location").is_none());
     }
 
     #[test]
@@ -411,7 +603,8 @@ mod tests {
             })
             .collect();
         // A tiny budget forces the member list to be trimmed.
-        let body = card_to_value(&card, 5);
+        let (body, budget_exhausted) = card_to_value(&card, 5);
+        assert!(budget_exhausted, "the fact travels up with the body, not via the rendered JSON");
         assert_eq!(body["truncated"], true);
         let members = body["members"].as_array().unwrap();
         assert!(members.len() < 200 && !members.is_empty());
@@ -419,11 +612,17 @@ mod tests {
 
     #[test]
     fn not_found_without_graph_returns_retry_hint() {
-        let result = render_not_found("НетТакого.Метод", None, DEFAULT_CANDIDATE_LIMIT);
+        let roots = stand_roots();
+        let result =
+            render_not_found("НетТакого.Метод", None, DEFAULT_CANDIDATE_LIMIT, &stamp(&roots));
         let body = result.structured_content.unwrap();
         assert_eq!(body["resolved"], false);
         assert_eq!(body["symbol"], "НетТакого.Метод");
         assert_eq!(body["candidates"].as_array().unwrap().len(), 0);
         assert!(body["hint"].as_str().unwrap().contains("indexing"));
+        // The miss shape is assembled by its own function, so it is the one that would
+        // silently ship without an envelope.
+        assert_eq!(body["freshness"]["source"], "resident");
+        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "index_building");
     }
 }

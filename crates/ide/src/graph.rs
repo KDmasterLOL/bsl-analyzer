@@ -64,7 +64,10 @@ pub enum Direction {
 
 /// A node, projected for the agent. `dispatch` is surfaced top-level (not nested
 /// under a type) because client/server is a first-order BSL concern.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// `Eq` is deliberately absent: `location` holds a `serde_json::Value`, which does not
+/// implement it. Nothing keys a set or a map by a node — the id string does that — so
+/// `PartialEq` is all this type has ever needed.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NodeRef {
     pub id: String,
     pub kind: &'static str,
@@ -100,7 +103,30 @@ pub struct NodeRef {
     /// `false` (the informative case); absent means addressable.
     #[serde(skip_serializing_if = "is_true")]
     pub addressable: bool,
+    /// Where this node lives, under the MCP location contract. Carried as an opaque
+    /// value because the contract's types live in the serving layer: giving this crate a
+    /// typed twin would mean a second serializer for one published shape.
+    ///
+    /// Exactly one of this and `location_unavailable` is set on every node a tool serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<serde_json::Value>,
+    /// Why there is no location: the node has no source file by construction, or the
+    /// answering snapshot had no root table. Never both absent and `location` absent on a
+    /// served node — silence would read as "no place exists" for a method that has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_unavailable: Option<&'static str>,
 }
+
+/// The location contract's reason for a node that has no source file at all — a metadata
+/// object, a form, an attribute. Spelled here as a literal rather than imported from the
+/// serving layer, which sits above this crate; the serving layer asserts the two agree.
+pub const NO_SOURCE_LOCATION: &str = "no_source_location";
+
+/// The reason a node that DOES have a file still carries no location: the answering
+/// snapshot had no root table, so no `(root_id, path)` pair could be formed. The in-memory
+/// projection never has one, which is also what keeps it byte-identical to the SQLite
+/// projection serving without roots.
+pub const ROOTS_UNAVAILABLE: &str = "roots_unavailable";
 
 /// `skip_serializing_if` helper: the field is emitted only when `false`.
 fn is_true(v: &bool) -> bool {
@@ -1576,6 +1602,8 @@ impl<'a> GraphCtx<'a> {
                     is_export: None,
                     methods: None,
                     addressable,
+                    location: None,
+                    location_unavailable: Some(NO_SOURCE_LOCATION),
                 }
             }
             GraphNode::Form { owner, form_name } => NodeRef {
@@ -1595,6 +1623,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
                 qualified: Some(format!(
@@ -1614,6 +1644,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
                 qualified: Some(format!(
@@ -1633,6 +1665,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
                 qualified: Some(format!(
@@ -1652,6 +1686,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::TabularSectionAttribute {
                 mdo_type,
@@ -1677,6 +1713,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
         }
     }
@@ -1703,6 +1741,8 @@ impl<'a> GraphCtx<'a> {
             is_export: None,
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(NO_SOURCE_LOCATION),
         }
     }
 
@@ -1735,6 +1775,8 @@ impl<'a> GraphCtx<'a> {
             is_export: Some(m.is_export()),
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(ROOTS_UNAVAILABLE),
         };
 
         if matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
@@ -1776,6 +1818,8 @@ impl<'a> GraphCtx<'a> {
             // not enumerate members here.
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(ROOTS_UNAVAILABLE),
         }
     }
 

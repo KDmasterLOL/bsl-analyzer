@@ -41,7 +41,7 @@ pub use graph::{
     FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext, GraphDetail, GraphError,
     GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult,
     NodeRef, NodeResult, ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem,
-    SourceResult, MAX_DROPPED_SAMPLE,
+    SourceResult, MAX_DROPPED_SAMPLE, NO_SOURCE_LOCATION, ROOTS_UNAVAILABLE,
 };
 pub use hir::graph_index;
 pub use hir::ModuleId;
