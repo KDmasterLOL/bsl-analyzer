@@ -214,13 +214,23 @@
 `structuredContent`. Машинный потребитель читает поля, а не разбирает колонки:
 
 ```json
-{"schema_version":"2",
+{"schema_version":"3",
  "hits":[{"rank":1,"modality":"L","root_id":"","path":"CommonModules/Утилиты/Ext/Module.bsl",
           "line_start":181,"line_end":201,"symbol":"ПроверитьИНН","kind":"procedure",
           "graph_id":"method/common/Утилиты/ПроверитьИНН",
+          "location":{"root_id":"","path":"CommonModules/Утилиты/Ext/Module.bsl",
+                      "enclosing_range":{"start_line":180,"start_character":0,
+                                         "end_line":201,"end_character":0},
+                      "position_encoding":"utf-16","schema_version":"1"},
           "snippet":"Процедура ПроверитьИНН(…)\n…","snippet_truncated_lines":16}],
- "shown":10,"total":10}
+ "shown":10,"total":10,
+ "freshness":{"source":"search-index","revision":null,"topology_fingerprint":null,
+              "stale":null,"completeness":{"status":"complete","reasons":[]}}}
 ```
+
+`line_start`/`line_end` (1-based, конец включающий) остаются как были; `location` — общий
+объект места (0-based, конец исключающий), см. `docs/mcp/LOCATION_CONTRACT.md`. У поиска нет
+своей ревизии, поэтому поля свежести равны `null`, а источник назван явно.
 
 Правила чтения:
 

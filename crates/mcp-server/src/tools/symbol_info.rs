@@ -17,7 +17,6 @@ use crate::diagnostics_state::DiagnosticsResident;
 use crate::graph_query::GraphDb;
 use crate::tools::location::{
     Completeness, Freshness, FreshnessSource, Location, PositionRange, ReasonCode,
-    LOCATION_SCHEMA_VERSION,
 };
 use crate::tools::response::{structured, trim_items_to_budget, truncate_text_to_budget};
 
@@ -173,7 +172,6 @@ pub(crate) fn render_card(
     // because an extension may override a method (`&Вместо`, `&До`, `&После`) and the shape
     // must not have to change when the second target starts being reported.
     body["definitions"] = json!(definitions_value(card, stamp));
-    body["schema_version"] = json!(LOCATION_SCHEMA_VERSION);
 
     let completeness = Completeness::complete()
         .when(budget_exhausted, ReasonCode::OutputBudget, "card trimmed to fit max_output_tokens")
@@ -564,6 +562,10 @@ mod tests {
         assert_eq!(body["definition"]["line"], 3);
         assert_eq!(body["definition"]["path"], "/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl");
 
+        // The slab's own version lives INSIDE the location and nowhere else: hoisting it to
+        // the top level would tie this tool's response version to the slab's, which is the
+        // one thing the three-axis versioning exists to prevent.
+        assert!(body.get("schema_version").is_none(), "{body}");
         let location = &body["definitions"][0]["location"];
         assert_eq!(location["root_id"], "");
         assert_eq!(location["path"], "CommonModules/МойМодуль/Ext/Module.bsl");

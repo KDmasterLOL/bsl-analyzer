@@ -1883,6 +1883,63 @@ mod tests {
         }
     }
 
+    /// Offsets live in the artefact, text lives on disk, and between a build and its
+    /// catch-up reload they disagree. An offset that stayed inside the file still points at
+    /// the wrong bytes, so a range built from it is plausible and wrong — the worst kind for
+    /// a consumer that cuts text with it. The name is verifiable by slicing, and it gates
+    /// BOTH ranges; the pair itself stays, because the file is still that file.
+    #[test]
+    fn a_drifted_file_loses_its_ranges_but_keeps_its_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let id = "method/common/Сервер/Считать";
+
+        // Control: before the drift the node has both ranges.
+        let before =
+            gdb.node(id, ide::GraphDetail::Names, Some(&roots)).unwrap().expect("resolves").node;
+        let before = before.location.expect("a method has a place");
+        assert!(before.get("range").is_some(), "{before}");
+        assert!(before.get("enclosing_range").is_some(), "{before}");
+
+        // Insert a line ABOVE the method: every stored offset now points that much earlier.
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        let text = fs::read_to_string(&module).unwrap();
+        fs::write(&module, format!("// шапка\n{text}")).unwrap();
+
+        let after = GraphDb::open(&out)
+            .expect("graph database opens")
+            .node(id, ide::GraphDetail::Names, Some(&roots))
+            .unwrap()
+            .expect("resolves")
+            .node;
+        let after = after.location.expect("the pair survives: it is still that file");
+        assert_eq!(after["path"], before["path"]);
+        assert!(
+            after.get("range").is_none() && after.get("enclosing_range").is_none(),
+            "an unverifiable place is published as the file alone: {after}",
+        );
+    }
+
     #[test]
     fn node_bodies_respect_output_budget() {
         let dir = tempfile::tempdir().unwrap();

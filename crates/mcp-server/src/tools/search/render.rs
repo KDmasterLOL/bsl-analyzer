@@ -62,9 +62,14 @@ pub(super) fn graph_id_for_hit(
 const SNIPPET_LINES: usize = 5;
 
 /// What the envelope around the hits costs: `schema_version`, `shown`, `total`, the optional
-/// `budget_exhausted` / `degraded` keys, and the hit array's own brackets. An upper bound, not
-/// a measurement — the point is that the wrapper is charged, not that it is charged exactly.
-pub(super) const ENVELOPE_OVERHEAD_BYTES: usize = 128;
+/// `budget_exhausted` / `degraded` keys, the `freshness` block, and the hit array's own
+/// brackets. An upper bound, not a measurement — the point is that the wrapper is charged,
+/// not that it is charged exactly.
+///
+/// `freshness` alone is ~144 bytes empty and ~216 with a reason, so charging the old 128 for
+/// the whole wrapper would let a response pass the ceiling while still reporting
+/// `budget_exhausted: false` — exactly what this constant exists to prevent.
+pub(super) const ENVELOPE_OVERHEAD_BYTES: usize = 352;
 
 /// One hit rendered in both views: the text block a person reads and the JSON object a machine
 /// reads. Rendering the pair up front lets [`budgeted_hits`] charge the budget for what the

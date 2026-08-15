@@ -9,7 +9,9 @@
 //! Source text is read on demand from the file + byte ranges stored per node, so
 //! method bodies stay out of the database.
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Context;
 use ide::{
@@ -153,6 +155,10 @@ fn provenance(p: &str) -> &'static str {
 /// A read-only handle to a built graph database.
 pub struct GraphDb {
     conn: Connection,
+    /// The last file read while projecting nodes, so a traversal over one module does not
+    /// re-read it per member. `RefCell` rather than a lock: the handle owns a `Connection`,
+    /// which is `!Sync`, so a `GraphDb` is only ever used from one thread at a time.
+    text_cache: RefCell<Option<(String, Arc<String>)>>,
 }
 
 /// The graph-derived usage summary for a symbol: total inbound edges and the top calling
@@ -173,7 +179,7 @@ impl GraphDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening graph database at {}", path.display()))?;
-        let db = Self { conn };
+        let db = Self::from_connection(conn);
         db.validate_meta()?;
         Ok(db)
     }
@@ -650,34 +656,67 @@ impl GraphDb {
         let location = loc::Location::from_path(roots, std::path::Path::new(file))
             .map_err(|reason| reason.code())?;
 
-        let Some(text) = std::fs::read_to_string(file).ok() else {
+        // The pair costs no I/O; only the ranges do. A node with no offsets — a synthesized
+        // `module` row — must not open the file at all, or `detail=names` would turn a
+        // disk-free traversal into one full read per node.
+        let (Some(name_offset), Some(src_start), Some(src_end)) =
+            (n.name_offset, n.src_start, n.src_end)
+        else {
+            return Ok(location.to_value());
+        };
+        let Some(text) = self.file_text(file) else {
             // The row's offsets describe a file we cannot read now; the pair is still true.
             return Ok(location.to_value());
         };
+
+        // Offsets come from the artefact, the text from disk NOW. Between a build and its
+        // catch-up reload those disagree, and an offset that stayed inside the file yields a
+        // plausible but wrong span. The name is the one span we can verify by slicing, so it
+        // gates BOTH ranges: an unverifiable place is published as the file alone rather than
+        // as a range a consumer would happily cut text with.
+        let name_end = name_offset as usize + n.name.len();
+        let named = text
+            .get(name_offset as usize..name_end)
+            .is_some_and(|slice| slice.to_lowercase() == n.name.to_lowercase());
+        if !named {
+            return Ok(location.to_value());
+        }
+
         let index = line_index::LineIndex::new(&text);
-        let enclosing = match (n.src_start, n.src_end) {
-            (Some(start), Some(end)) => index
-                .utf16_line_col_range(&text, TextRange::new(start.into(), end.into()))
-                .map(loc::PositionRange::from),
-            _ => None,
-        };
-        let name = n.name_offset.and_then(|start| {
-            let start = start as usize;
-            let end = start + n.name.len();
-            let slice = text.get(start..end)?;
-            if !slice.eq_ignore_ascii_case(&n.name) && slice.to_lowercase() != n.name.to_lowercase()
-            {
-                return None;
-            }
-            index
-                .utf16_line_col_range(
-                    &text,
-                    TextRange::new((start as u32).into(), (end as u32).into()),
-                )
-                .map(loc::PositionRange::from)
-        });
+        let name = index
+            .utf16_line_col_range(
+                &text,
+                TextRange::new(name_offset.into(), (name_end as u32).into()),
+            )
+            .map(loc::PositionRange::from);
+        let enclosing = index
+            .utf16_line_col_range(&text, TextRange::new(src_start.into(), src_end.into()))
+            .map(loc::PositionRange::from);
 
         Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
+    }
+
+    /// Wrap an open connection. The one place the text cache is created, so a new
+    /// construction site cannot forget it.
+    fn from_connection(conn: Connection) -> Self {
+        Self { conn, text_cache: RefCell::new(None) }
+    }
+
+    /// The text of `file`, reusing the last one read.
+    ///
+    /// A traversal projects many nodes of one module in a row — the members of a common
+    /// module, the callers inside one file — and each of them would otherwise re-read and
+    /// re-index the same file. One slot is enough for that shape and costs one string.
+    fn file_text(&self, file: &str) -> Option<Arc<String>> {
+        let mut cache = self.text_cache.borrow_mut();
+        if let Some((cached_path, text)) = cache.as_ref() {
+            if cached_path == file {
+                return Some(Arc::clone(text));
+            }
+        }
+        let text = Arc::new(std::fs::read_to_string(file).ok()?);
+        *cache = Some((file.to_owned(), Arc::clone(&text)));
+        Some(text)
     }
 
     /// Cold-start overview: node/edge tallies, the most-called nodes, and the
@@ -1242,7 +1281,7 @@ mod tests {
             conn.execute("INSERT INTO nodes (id, kind) VALUES (?1, ?2)", params![id, kind])
                 .unwrap();
         }
-        GraphDb { conn }
+        GraphDb::from_connection(conn)
     }
 
     /// The reverse lookup must ride the `edges_to` index (equality + half-open range on
@@ -1259,7 +1298,7 @@ mod tests {
              CREATE INDEX edges_from ON edges(from_id);",
         )
         .unwrap();
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let plan: Vec<String> = db
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", super::REFERENCING_FILES_SQL))
@@ -1322,7 +1361,7 @@ mod tests {
         edge("method/common/Г/Ч", "attribute/Catalog/Товары/Код", "query_ref");
         edge("method/common/В/Н", "mdo/Catalog/Другой", "manager_access");
 
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let mut files = db.referencing_files("mdo/Catalog/Товары").unwrap();
         files.sort();
         assert_eq!(

@@ -87,7 +87,7 @@ pub fn overview(
 ) -> (Value, loc::Completeness) {
     match graph.overview(top, roots) {
         Ok(overview) => (to_value(&overview), loc::Completeness::complete()),
-        Err(e) => (internal(e), loc::Completeness::complete()),
+        Err(e) => (internal(e), read_failure()),
     }
 }
 
@@ -105,7 +105,7 @@ pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> (Value, loc::Compl
             );
             (to_value(&result), completeness)
         }
-        Err(e) => (internal(e), loc::Completeness::complete()),
+        Err(e) => (internal(e), read_failure()),
     }
 }
 
@@ -159,8 +159,18 @@ pub fn node(
             (value, budget_completeness(truncated))
         }
         Ok(Err(err)) => (to_value(&err), loc::Completeness::complete()),
-        Err(e) => (internal(e), loc::Completeness::complete()),
+        Err(e) => (internal(e), read_failure()),
     }
+}
+
+/// The graph could not be read at all. The body says so, and the envelope must not
+/// contradict it: `complete` is the field a consumer trusts to decide whether the answer can
+/// be relied on, and on a failure it would say yes.
+fn read_failure() -> loc::Completeness {
+    loc::Completeness::partial(
+        loc::ReasonCode::ModalityDegraded,
+        "the graph database could not be read",
+    )
 }
 
 /// The one reason a body-carrying action can be partial on its own.
@@ -209,7 +219,7 @@ pub fn neighbors(
             (value, completeness)
         }
         Ok(Err(err)) => (to_value(&err), loc::Completeness::complete()),
-        Err(e) => (internal(e), loc::Completeness::complete()),
+        Err(e) => (internal(e), read_failure()),
     }
 }
 
@@ -228,7 +238,7 @@ pub fn source(
             let completeness = budget_completeness(result.budget_exhausted);
             (to_value(&result), completeness)
         }
-        Err(e) => (internal(e), loc::Completeness::complete()),
+        Err(e) => (internal(e), read_failure()),
     }
 }
 
