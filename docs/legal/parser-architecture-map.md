@@ -24,7 +24,8 @@ itself.
 | File | Lines | Role | Current assessment |
 |---|---:|---|---|
 | `crates/parser/src/event.rs` | 147 | event stream and node kinds | strongly local |
-| `crates/parser/src/parser.rs` | 272 | parser state machine, markers, forward parents, loop guards | strongly local |
+| `crates/parser/src/parser.rs` | 559 | parser state machine, markers, forward parents, loop guards | strongly local |
+| `crates/parser/src/parser/input.rs` | 624 | значимые токены входа, карта переводов строк, алфавит грамматики `Sig` | strongly local |
 | `crates/parser/src/sink.rs` | 259 | Rowan sink from events to syntax tree | strongly local |
 | `crates/parser/src/parser/token_set.rs` | 151 | recovery/token-set utility | strongly local |
 | `crates/parser/src/syntax_kind.rs` | 264 | mapping to syntax kinds | local, but tied to parser output model |

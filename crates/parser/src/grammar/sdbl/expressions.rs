@@ -1,6 +1,5 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
-use parser_error::{ParseError, RecoveryKind};
 
 pub(super) fn is_expression_start(p: &Parser) -> bool {
     match p.current() {
@@ -178,13 +177,7 @@ fn recover_to_delimiter(p: &mut Parser) {
     }
 
     if consumed_any {
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "пропуск некорректного фрагмента",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "пропуск некорректного фрагмента");
     } else {
         err.abandon(p);
     }
@@ -207,13 +200,7 @@ pub(super) fn parse_delimited_list<F>(
     // reads as that one's alias.
     if p.at(delimiter) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "пропущен элемент списка",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "пропущен элемент списка");
     } else {
         parse_item(p);
     }
@@ -231,13 +218,7 @@ pub(super) fn parse_delimited_list<F>(
 
         if p.at(delimiter) || is_recovery_point(p, recovery_set) || !is_item_start(p) {
             let err = p.start();
-            p.emit_error_at_marker(
-                err,
-                ParseError::Custom {
-                    message: "пропущен элемент списка",
-                    recovery: RecoveryKind::RecoverySpan,
-                },
-            );
+            p.error_custom_at_marker(err, "пропущен элемент списка");
 
             if !p.at(delimiter) {
                 break;
@@ -708,7 +689,7 @@ fn parse_cast_type(p: &mut Parser) {
 /// rule's to take.
 fn report_missing_name(p: &mut Parser, message: &'static str) {
     let m = p.start();
-    p.emit_error_at_marker(m, ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan });
+    p.error_custom_at_marker(m, message);
 }
 
 fn column_or_function(p: &mut Parser) {
@@ -744,13 +725,7 @@ fn column_or_function(p: &mut Parser) {
             };
             if dangling_dot_recovery {
                 let err = p.start();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Custom {
-                        message: "ожидалось имя поля, встречено ключевое слово",
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+                p.error_custom_at_marker(err, "ожидалось имя поля, встречено ключевое слово");
                 break;
             }
 
@@ -778,13 +753,7 @@ fn column_or_function(p: &mut Parser) {
                 }
             } else if p.at(T![Comma]) {
                 let err = p.start();
-                p.emit_error_at_marker(
-                    err,
-                    ParseError::Custom {
-                        message: "пропущен первый аргумент",
-                        recovery: RecoveryKind::RecoverySpan,
-                    },
-                );
+                p.error_custom_at_marker(err, "пропущен первый аргумент");
             }
 
             while p.eat(T![Comma]) {
@@ -796,13 +765,7 @@ fn column_or_function(p: &mut Parser) {
                     || super::select::is_clause_keyword(p)
                 {
                     let err = p.start();
-                    p.emit_error_at_marker(
-                        err,
-                        ParseError::Custom {
-                            message: "пропущен аргумент функции",
-                            recovery: RecoveryKind::RecoverySpan,
-                        },
-                    );
+                    p.error_custom_at_marker(err, "пропущен аргумент функции");
 
                     if !p.at(T![Comma]) {
                         break;
@@ -836,13 +799,7 @@ fn column_or_function(p: &mut Parser) {
                     && (super::select::is_clause_keyword(p) || super::at_query_boundary(p))
                 {
                     let err = p.start();
-                    p.emit_error_at_marker(
-                        err,
-                        ParseError::Custom {
-                            message: "ожидалось имя поля, встречено ключевое слово",
-                            recovery: RecoveryKind::RecoverySpan,
-                        },
-                    );
+                    p.error_custom_at_marker(err, "ожидалось имя поля, встречено ключевое слово");
                     break;
                 }
 

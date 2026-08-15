@@ -30,7 +30,6 @@ pub mod select;
 use crate::event::NodeKind;
 use crate::parser::token_set::TokenSet;
 use crate::parser::Parser;
-use parser_error::{ParseError, RecoveryKind};
 
 pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[T![RParen], T![Semicolon]]);
 
@@ -346,13 +345,7 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     }
 
     if took_anything {
-        p.emit_error_at_marker(
-            leftover,
-            ParseError::Custom {
-                message: "не разобран остаток текста запроса",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(leftover, "не разобран остаток текста запроса");
     } else {
         leftover.abandon(p);
     }

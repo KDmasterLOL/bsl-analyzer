@@ -222,7 +222,7 @@ impl Sig {
         self.0
     }
 
-    pub fn is_keyword(self) -> bool {
+    pub(crate) fn is_keyword(self) -> bool {
         self.0.is_keyword()
     }
 }
@@ -244,7 +244,12 @@ macro_rules! define_the_alphabet {
             $(pub const $konst: Sig = Sig::new(TokenKind::$variant);)*
 
             /// Все записи алфавита, в порядке объявления вида.
-            pub const ALL: &'static [Sig] = &[$(Sig::$konst),*];
+            ///
+            /// Существует ради гейта чистоты и только для него: отражения
+            /// ассоциированных констант в языке нет, и лишнюю запись для
+            /// тривии «со стороны видов» не увидеть ничем.
+            #[cfg(test)]
+            pub(crate) const ALL: &'static [Sig] = &[$(Sig::$konst),*];
         }
 
         /// Запись алфавита грамматики по имени вида: `T![Comma]`, `T![KwIf]`.

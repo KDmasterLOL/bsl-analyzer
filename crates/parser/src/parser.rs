@@ -373,7 +373,21 @@ impl<'a> Parser<'a> {
         self.current() == Some(T![Error])
     }
 
-    pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
+    /// Подчёркивает уже открытый маркером участок и называет причину.
+    ///
+    /// Единственный путь грамматики к ошибке с диапазоном. Собирать `ParseError`
+    /// руками правило не может: тип ошибки хранит СЫРОЙ вид токена, и открытая
+    /// грамматике дверь с таким параметром обошла бы алфавит `Sig` мимо всех
+    /// десяти переведённых дверей — то есть вернула бы ровно ту дыру, ради
+    /// которой алфавит и заведён.
+    pub fn error_custom_at_marker(&mut self, m: Marker, message: &'static str) {
+        self.emit_error_at_marker(
+            m,
+            ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan },
+        );
+    }
+
+    fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
         debug_assert!(err.recovery() == RecoveryKind::RecoverySpan);
         self.events.push(Event::ErrorWithSpan { start_token: m.start_token_pos, err });
         m.complete(self, NodeKind::Error);

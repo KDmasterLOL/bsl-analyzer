@@ -1,5 +1,4 @@
 use crate::Sig;
-use parser_error::{ParseError, RecoveryKind};
 
 use crate::event::NodeKind;
 use crate::parser::Parser;
@@ -404,13 +403,7 @@ fn assignment_or_call(p: &mut Parser) {
         m.complete(p, NodeKind::CallStmt);
         p.eat(T![Semicolon]);
     } else {
-        p.emit_error_at_marker(
-            m,
-            ParseError::Custom {
-                message: "ожидался вызов или присваивание",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(m, "ожидался вызов или присваивание");
         p.eat(T![Semicolon]);
     }
 }

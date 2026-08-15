@@ -1,6 +1,5 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
-use parser_error::{ParseError, RecoveryKind};
 
 use super::expressions;
 
@@ -148,13 +147,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     }
 
     if consumed_any {
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "пропуск некорректного фрагмента",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "пропуск некорректного фрагмента");
     } else {
         err.abandon(p);
     }
@@ -382,13 +375,7 @@ fn selected_field_alias(p: &mut Parser) {
     // valid field aliases. See `source_alias` for the rationale.
     if is_body_clause_keyword(p) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидался алиас, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "ожидался алиас, встречено ключевое слово");
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -526,13 +513,7 @@ fn source_alias(p: &mut Parser) {
     // alias and is left for its clause parser.
     if is_body_clause_keyword(p) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидался алиас источника, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "ожидался алиас источника, встречено ключевое слово");
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -940,13 +921,7 @@ fn for_update_clause(p: &mut Parser) {
 fn report_the_component_the_dot_promised(p: &mut Parser) {
     if super::expressions::at_property_name(p) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидалось имя объекта, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "ожидалось имя объекта, встречено ключевое слово");
         return;
     }
 
@@ -1341,13 +1316,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
     }
 
     if consumed_any {
-        p.emit_error_at_marker(
-            recovery,
-            ParseError::Custom {
-                message: "пропуск некорректного фрагмента",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(recovery, "пропуск некорректного фрагмента");
     } else {
         recovery.abandon(p);
     }
