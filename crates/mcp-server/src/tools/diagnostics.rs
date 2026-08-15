@@ -213,7 +213,10 @@ pub(crate) fn file_findings(
                                it is held out of service and re-read every drift window",
                     "path": path.to_string_lossy(),
                 }),
-                loc::Completeness::complete(),
+                loc::Completeness::partial(
+                    loc::ReasonCode::UnreadableFiles,
+                    "this file's bytes could not be read, so it is not analysed at all",
+                ),
             );
         }
         return (
@@ -365,11 +368,19 @@ pub(crate) fn file_findings(
             loc::ReasonCode::OutOfAnalysisScope,
             "file has no changed lines vs [analysis].diff_base and was not analyzed",
         )
+        // Author suppression narrows the analysed set exactly as `[analysis].diff_base`
+        // does; leaving it out of the envelope would let a consumer that reads only the
+        // envelope call a pruned answer whole.
         .when(
-            resident.unread_count() > 0,
-            loc::ReasonCode::UnreadableFiles,
-            "some workspace files could not be read and are held out of service",
+            findings_ignored_by_author > 0,
+            loc::ReasonCode::OutOfAnalysisScope,
+            "findings on lines authored by [analysis].ignored_authors were suppressed",
         );
+    // Note what is NOT here: the workspace-wide unread counter. This answer is about ONE
+    // file, and a hole in an unrelated module does not make it any less whole — the file
+    // that IS a hole gets its own `unreadable` branch above. Marking every answer partial
+    // while any file anywhere is unreadable would teach a consumer to ignore the field.
+
     (body, completeness)
 }
 
@@ -453,6 +464,11 @@ pub(crate) fn workspace_findings(
             sweep.files_out_of_scope > 0,
             loc::ReasonCode::OutOfAnalysisScope,
             "files with no changed lines vs [analysis].diff_base were not analyzed",
+        )
+        .when(
+            sweep.findings_ignored_by_author > 0,
+            loc::ReasonCode::OutOfAnalysisScope,
+            "findings on lines authored by [analysis].ignored_authors were suppressed",
         );
     (body, completeness)
 }
@@ -1140,6 +1156,49 @@ mod tests {
             assert_eq!(
                 ext_location["path"], cfg_location["path"],
                 "the relative path is the same in both roots — the root_id is what separates them",
+            );
+        }
+
+        /// A hole elsewhere in the workspace must not make an answer ABOUT ANOTHER FILE
+        /// partial. The envelope describes this answer; a consumer taught that "partial"
+        /// means "some unrelated module is unreadable" learns to ignore the field.
+        #[test]
+        fn an_unrelated_hole_does_not_make_a_clean_file_partial() {
+            use std::io::Write;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write_common_module(root, "Проба", MIXED_MODULE);
+            // A module whose bytes are not valid UTF-8 is held out of service.
+            let broken = root.join("CommonModules/Битый/Ext/Module.bsl");
+            write_common_module(
+                root,
+                "Битый",
+                "&НаСервере\nПроцедура П() Экспорт КонецПроцедуры\n",
+            );
+            let mut f = std::fs::File::create(&broken).unwrap();
+            f.write_all(&[0xFF, 0xFE, 0xFF]).unwrap();
+            drop(f);
+
+            let state = ready_state(root);
+            let clean = root.join("CommonModules/Проба/Ext/Module.bsl");
+
+            let (unread, completeness) = match state.read(|resident, generation| {
+                (
+                    resident.unread_count(),
+                    file_findings(resident, None, &clean, &default_filters(), generation).1,
+                )
+            }) {
+                ResidentOutcome::Ready(pair, _) => pair,
+                _ => panic!("expected Ready outcome"),
+            };
+
+            assert_eq!(unread, 1, "the stand must actually hold a hole, or it proves nothing");
+            assert!(
+                !has_reason(&completeness.to_value(), "unreadable_files"),
+                "the answer is about a readable file: {}",
+                completeness.to_value(),
             );
         }
 

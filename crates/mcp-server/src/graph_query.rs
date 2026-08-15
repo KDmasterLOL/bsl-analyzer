@@ -9,9 +9,7 @@
 //! Source text is read on demand from the file + byte ranges stored per node, so
 //! method bodies stay out of the database.
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::sync::Arc;
 
 use anyhow::Context;
 use ide::{
@@ -40,6 +38,28 @@ struct StoredNode {
     dispatch: Option<String>,
     is_export: Option<bool>,
     addressable: bool,
+}
+
+/// The full declaration signature, from the keyword line containing `name_offset` through
+/// the header end `sig_end` (the closing `)` or export keyword). Internal runs of
+/// whitespace — including the newlines of a wrapped parameter list — are collapsed to
+/// single spaces so a multi-line declaration reads as one line.
+fn signature_in(text: &str, name_offset: u32, sig_end: u32) -> Option<String> {
+    let name = (name_offset as usize).min(text.len());
+    let end = (sig_end as usize).min(text.len());
+    if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
+        return None;
+    }
+    let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+    let slice = text.get(start..end)?;
+    Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Line endings are normalized to LF before redaction and budget clamping: consumers read
+/// the source, they do not need byte-exact CRLF, and the CR would only inflate the JSON
+/// escaping.
+fn slice_in(text: &str, start: u32, end: u32) -> Option<String> {
+    text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
 }
 
 const NODE_COLUMNS: &str =
@@ -155,10 +175,6 @@ fn provenance(p: &str) -> &'static str {
 /// A read-only handle to a built graph database.
 pub struct GraphDb {
     conn: Connection,
-    /// The last file read while projecting nodes, so a traversal over one module does not
-    /// re-read it per member. `RefCell` rather than a lock: the handle owns a `Connection`,
-    /// which is `!Sync`, so a `GraphDb` is only ever used from one thread at a time.
-    text_cache: RefCell<Option<(String, Arc<String>)>>,
 }
 
 /// The graph-derived usage summary for a symbol: total inbound edges and the top calling
@@ -553,28 +569,10 @@ impl GraphDb {
         Ok(d.unwrap_or(0) as usize)
     }
 
-    /// The full declaration signature, from the keyword line containing `name_offset`
-    /// through the header end `sig_end` (the closing `)` or export keyword). Internal
-    /// runs of whitespace — including the newlines of a wrapped parameter list — are
-    /// collapsed to single spaces so a multi-line declaration reads as one line.
-    fn signature_at(&self, file: &str, name_offset: u32, sig_end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        let name = (name_offset as usize).min(text.len());
-        let end = (sig_end as usize).min(text.len());
-        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
-            return None;
-        }
-        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
-        let slice = text.get(start..end)?;
-        Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
-    }
-
+    /// A source slice read from `file`, for the callers that hold a path rather than text.
+    /// The node projection reads its file once and calls [`slice_in`] directly.
     fn slice(&self, file: &str, start: u32, end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        // Line endings are normalized to LF before redaction and budget clamping:
-        // consumers read the source, they do not need byte-exact CRLF, and the CR
-        // would only inflate the JSON escaping.
-        text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
+        slice_in(&std::fs::read_to_string(file).ok()?, start, end)
     }
 
     /// Project a stored node to its agent-facing [`NodeRef`] at `detail`.
@@ -610,17 +608,30 @@ impl GraphDb {
             location: None,
             location_unavailable: None,
         };
-        match self.node_location(n, roots) {
+        // Read once per node, here, and hand the text to everything that needs it: the
+        // place, the signature and the body all describe the same bytes, and reading them
+        // twice invites two answers. NOT cached across nodes: a handle is pooled and
+        // outlives edits to the file, so a remembered text would make the staleness check
+        // below compare the artefact against itself.
+        let wants_text = matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies)
+            || n.name_offset.is_some();
+        let text = match (&n.file, wants_text) {
+            (Some(file), true) => std::fs::read_to_string(file).ok(),
+            _ => None,
+        };
+
+        match self.node_location(n, roots, text.as_deref()) {
             Ok(location) => node.location = Some(location),
             Err(reason) => node.location_unavailable = Some(reason),
         }
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            if let (Some(file), Some(off), Some(end)) = (&n.file, n.name_offset, n.sig_end) {
-                node.signature = self.signature_at(file, off, end);
+            if let (Some(text), Some(off), Some(end)) = (text.as_deref(), n.name_offset, n.sig_end)
+            {
+                node.signature = signature_in(text, off, end);
             }
             if detail == GraphDetail::Bodies {
-                if let (Some(file), Some(s), Some(e)) = (&n.file, n.src_start, n.src_end) {
-                    node.source = self.slice(file, s, e);
+                if let (Some(text), Some(s), Some(e)) = (text.as_deref(), n.src_start, n.src_end) {
+                    node.source = slice_in(text, s, e);
                 }
             }
         }
@@ -640,6 +651,7 @@ impl GraphDb {
         &self,
         n: &StoredNode,
         roots: Option<&bsl_search::WorkspaceRoots>,
+        text: Option<&str>,
     ) -> Result<serde_json::Value, &'static str> {
         if !matches!(n.kind.as_str(), "method" | "module") {
             return Err(loc::LocationUnavailable::NoSourceLocation.code());
@@ -647,8 +659,13 @@ impl GraphDb {
         let (Some(file), Some(roots)) = (n.file.as_deref(), roots) else {
             // A method whose row has no file is a path-fallback node seen only as an edge
             // endpoint; a missing table is the boot window. Neither may answer "no place".
+            // Two different facts, two different codes: a method whose row carries no path
+            // HAS a file (it is a path-fallback node seen only as an edge endpoint) — its
+            // address was lost, not absent. `no_source_location` is reserved for entities
+            // that have no file at all, and saying it here would send a consumer looking in
+            // the wrong direction.
             return Err(if n.file.is_none() {
-                loc::LocationUnavailable::NoSourceLocation.code()
+                loc::LocationUnavailable::SourcePathUnavailable.code()
             } else {
                 loc::LocationUnavailable::RootsUnavailable.code()
             });
@@ -664,7 +681,7 @@ impl GraphDb {
         else {
             return Ok(location.to_value());
         };
-        let Some(text) = self.file_text(file) else {
+        let Some(text) = text else {
             // The row's offsets describe a file we cannot read now; the pair is still true.
             return Ok(location.to_value());
         };
@@ -682,41 +699,39 @@ impl GraphDb {
             return Ok(location.to_value());
         }
 
-        let index = line_index::LineIndex::new(&text);
+        // The name alone is not enough. An edit INSIDE the body leaves the name where it
+        // was and still moves `src_end`, so a range built from it would end at the wrong
+        // bytes — plausible, and wrong exactly where a consumer cuts text. A declaration
+        // ends with its closing keyword, so that is what the stored end must land on.
+        let declared_end = text
+            .get(src_start as usize..src_end as usize)
+            .map(|slice| slice.trim_end().to_lowercase())
+            .is_some_and(|slice| {
+                ["конецпроцедуры", "конецфункции", "endprocedure", "endfunction"]
+                    .iter()
+                    .any(|keyword| slice.ends_with(keyword))
+            });
+
+        let index = line_index::LineIndex::new(text);
         let name = index
             .utf16_line_col_range(
-                &text,
+                text,
                 TextRange::new(name_offset.into(), (name_end as u32).into()),
             )
             .map(loc::PositionRange::from);
-        let enclosing = index
-            .utf16_line_col_range(&text, TextRange::new(src_start.into(), src_end.into()))
+        let enclosing = declared_end
+            .then(|| {
+                index.utf16_line_col_range(text, TextRange::new(src_start.into(), src_end.into()))
+            })
+            .flatten()
             .map(loc::PositionRange::from);
 
         Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
     }
 
-    /// Wrap an open connection. The one place the text cache is created, so a new
-    /// construction site cannot forget it.
+    /// Wrap an open connection.
     fn from_connection(conn: Connection) -> Self {
-        Self { conn, text_cache: RefCell::new(None) }
-    }
-
-    /// The text of `file`, reusing the last one read.
-    ///
-    /// A traversal projects many nodes of one module in a row — the members of a common
-    /// module, the callers inside one file — and each of them would otherwise re-read and
-    /// re-index the same file. One slot is enough for that shape and costs one string.
-    fn file_text(&self, file: &str) -> Option<Arc<String>> {
-        let mut cache = self.text_cache.borrow_mut();
-        if let Some((cached_path, text)) = cache.as_ref() {
-            if cached_path == file {
-                return Some(Arc::clone(text));
-            }
-        }
-        let text = Arc::new(std::fs::read_to_string(file).ok()?);
-        *cache = Some((file.to_owned(), Arc::clone(&text)));
-        Some(text)
+        Self { conn }
     }
 
     /// Cold-start overview: node/edge tallies, the most-called nodes, and the

@@ -1395,6 +1395,14 @@ mod tests {
         // The distinction the node exists for: not "clean", not "not in workspace".
         assert_eq!(findings.0["error"], "unreadable");
         assert!(fresh.stale, "an unanalysed workspace file makes the answer stale");
+        // The envelope must agree with the body: this file is not analysed at all, so the
+        // answer about it cannot be whole.
+        assert_eq!(
+            findings.1.to_value()["reasons"][0]["code"],
+            "unreadable_files",
+            "the branch that KNOWS the file is a hole must say so: {}",
+            findings.1.to_value(),
+        );
 
         // Positive control: the same tree with a readable body answers the opposite.
         // The generation is sampled BEFORE the write — `generation()` polls a window

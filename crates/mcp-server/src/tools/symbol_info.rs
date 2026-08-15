@@ -16,7 +16,8 @@ use serde_json::{json, Map, Value};
 use crate::diagnostics_state::DiagnosticsResident;
 use crate::graph_query::GraphDb;
 use crate::tools::location::{
-    Completeness, Freshness, FreshnessSource, Location, PositionRange, ReasonCode,
+    Completeness, Freshness, FreshnessSource, Location, LocationUnavailable, PositionRange,
+    ReasonCode,
 };
 use crate::tools::response::{structured, trim_items_to_budget, truncate_text_to_budget};
 
@@ -171,7 +172,10 @@ pub(crate) fn render_card(
     // The definition under the location contract, beside the legacy `definition` key. A list
     // because an extension may override a method (`&Вместо`, `&До`, `&После`) and the shape
     // must not have to change when the second target starts being reported.
-    body["definitions"] = json!(definitions_value(card, stamp));
+    // The already-budgeted snippet, read from the body the card produced — one value, one
+    // budget, published twice by construction rather than by two separate truncations.
+    let budgeted_snippet = body["definition"]["snippet"].as_str().map(str::to_owned);
+    body["definitions"] = json!(definitions_value(card, stamp, budgeted_snippet.as_deref()));
 
     let completeness = Completeness::complete()
         .when(budget_exhausted, ReasonCode::OutputBudget, "card trimmed to fit max_output_tokens")
@@ -180,11 +184,11 @@ pub(crate) fn render_card(
             ReasonCode::ModalityDegraded,
             "the call graph could not answer for this symbol",
         )
-        .when(
-            stamp.unread_files > 0,
-            ReasonCode::UnreadableFiles,
-            "some workspace files could not be read and are held out of service",
-        );
+        // Deliberately NOT stamped here: the workspace-wide unread counter. This answer is
+        // one resolved symbol, and a hole in an unrelated module does not make it less
+        // whole. The miss below is the shape where a hole CAN hide the answer, and that is
+        // where the counter is read.
+        ;
     body["freshness"] = stamp.freshness(completeness).to_value();
 
     structured(body)
@@ -213,7 +217,11 @@ impl ResidentStamp<'_> {
 /// The definition sites under the location contract. Empty when the card has no source
 /// (platform members, metadata objects): an empty list says "no definition site", where an
 /// invented location would say something false.
-fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Value> {
+fn definitions_value(
+    card: &SymbolInfoCard,
+    stamp: &ResidentStamp<'_>,
+    budgeted_snippet: Option<&str>,
+) -> Vec<Value> {
     let Some(def) = &card.definition else {
         return Vec::new();
     };
@@ -232,15 +240,26 @@ fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Va
                 entry.insert("location_unavailable".into(), json!(reason.code()));
             }
         },
-        _ => {
+        // The two remaining cases are different facts and must not share a code: no table
+        // at all, versus a table that was there and a path that could not be named.
+        (Some(_), None) => {
             entry.insert(
                 "location_unavailable".into(),
-                json!(crate::tools::location::LocationUnavailable::RootsUnavailable.code()),
+                json!(LocationUnavailable::RootsUnavailable.code()),
+            );
+        }
+        (None, _) => {
+            entry.insert(
+                "location_unavailable".into(),
+                json!(LocationUnavailable::SourcePathUnavailable.code()),
             );
         }
     }
 
-    if let Some(snippet) = &def.snippet {
+    // The snippet is the one the card already budgeted: publishing the raw one beside it
+    // would put two different values of one field in a single answer, and blow the budget
+    // the envelope says was applied.
+    if let Some(snippet) = budgeted_snippet {
         entry.insert("snippet".into(), json!(snippet));
     }
     vec![Value::Object(entry)]
@@ -289,11 +308,19 @@ pub(crate) fn render_not_found(
                 .iter()
                 .map(|c| json!({ "id": c.id, "kind": c.kind, "match": c.match_kind }))
                 .collect();
-            let completeness = Completeness::complete().when(
-                result.truncated,
-                ReasonCode::ResultCap,
-                "candidate list capped; raise the limit or refine the name",
-            );
+            let completeness = Completeness::complete()
+                .when(
+                    result.truncated,
+                    ReasonCode::ResultCap,
+                    "candidate list capped; raise the limit or refine the name",
+                )
+                // Here the counter matters: the symbol was not found, and an unread module
+                // is a place it could have been.
+                .when(
+                    stamp.unread_files > 0,
+                    ReasonCode::UnreadableFiles,
+                    "some workspace files could not be read, so the search was not exhaustive",
+                );
             structured(json!({
                 "resolved": false,
                 "symbol": symbol,

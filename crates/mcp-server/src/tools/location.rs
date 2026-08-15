@@ -91,6 +91,10 @@ pub enum LocationUnavailable {
     /// The root table is not available in this answer — a stale graph cache published
     /// as ready while the catch-up reload is still running.
     RootsUnavailable,
+    /// The entity HAS a source file, but its path could not be named — a VFS entry that
+    /// is not valid UTF-8, or one missing from the source root's file set. Distinct from
+    /// `RootsUnavailable`: the table was there, the path was not.
+    SourcePathUnavailable,
 }
 
 impl LocationUnavailable {
@@ -100,6 +104,7 @@ impl LocationUnavailable {
             Self::PathNotRelativeToRoot => "path_not_relative_to_root",
             Self::NoSourceLocation => "no_source_location",
             Self::RootsUnavailable => "roots_unavailable",
+            Self::SourcePathUnavailable => "source_path_unavailable",
         }
     }
 }
@@ -171,8 +176,16 @@ impl Location {
     }
 }
 
+/// Windows spells a stored relative path with `\`, and the contract publishes `/`. On
+/// UNIX a backslash is an ordinary character in a file name, so rewriting it there would
+/// mint an address that looks right and points elsewhere — the exact failure this contract
+/// exists to prevent.
 fn normalize_separators(path: &str) -> String {
-    path.replace('\\', "/")
+    if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path.to_owned()
+    }
 }
 
 /// Why an answer is not the whole answer. A closed vocabulary: a new reason means a
@@ -374,6 +387,15 @@ mod tests {
         assert_eq!(value["range"]["end_character"], 22);
         // A location that knows only the file omits the ranges instead of zeroing them.
         assert!(value.get("enclosing_range").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_in_a_unix_name_is_a_name_and_not_a_separator() {
+        // A path component may legally contain a backslash on UNIX; rewriting it would
+        // address a different file, and `resolve` would hand back the wrong one.
+        let location = Location::from_key("", "CommonModules/A\\B/Ext/Module.bsl");
+        assert_eq!(location.path, "CommonModules/A\\B/Ext/Module.bsl");
     }
 
     #[test]

@@ -43,23 +43,6 @@ fn stage_workspace() -> TempDir {
     dst
 }
 
-/// The same fixture twice: once as the configuration, once as a declared extension beside
-/// it. The point is a DIFFERENT root set, not different code.
-fn stage_workspace_with_an_extension() -> TempDir {
-    let dir = TempDir::new().expect("scratch dir");
-    let ws = dir.path().join("ws");
-    let ext = dir.path().join("ext");
-    for target in [&ws, &ext] {
-        copy_fixture_into(target);
-    }
-    std::fs::write(
-        ws.join("bsl-analyzer.toml"),
-        format!("[source]\nroot = \".\"\nextensions = [{{ name = \"a\", path = {ext:?} }}]\n"),
-    )
-    .expect("write project config");
-    dir
-}
-
 fn copy_fixture_into(dst: &Path) {
     let src = designer_fixture();
     for entry in walkdir::WalkDir::new(&src) {
@@ -212,23 +195,32 @@ async fn the_resident_and_the_graph_name_the_same_topology() {
         "an all-zero fingerprint would make the equality above hold for any two subsystems",
     );
 
-    // Sensitivity control: a workspace that declares an extension has a DIFFERENT topology.
-    // Without this, the equality above would also hold for a constant, and the whole field
-    // would be decoration.
-    let with_extension = stage_workspace_with_an_extension();
-    let other = workspace_client(with_extension.path().join("ws").as_path()).await;
-    let other_card = poll(
-        &other,
+    // Sensitivity control: the SAME workspace directory, before and after it declares an
+    // extension. Comparing two different temporary directories would not test this at all —
+    // the fingerprint mixes the configuration's own path, so any two scratch dirs differ
+    // whatever their root sets, and the assertion would hold even with extensions removed
+    // from the hash entirely.
+    let ext = ws.path().parent().expect("scratch parent").join("declared-ext");
+    copy_fixture_into(&ext);
+    std::fs::write(
+        ws.path().join("bsl-analyzer.toml"),
+        format!("[source]\nroot = \".\"\nextensions = [{{ name = \"a\", path = {ext:?} }}]\n"),
+    )
+    .expect("declare an extension in the same workspace");
+
+    let redeclared = workspace_client(ws.path()).await;
+    let after = poll(
+        &redeclared,
         "symbol_info",
         args(&[("symbol", Value::from("ПервыйОбщийМодуль.НеУстаревшаяПроцедура"))]),
     )
     .await;
-    let with_ext_fingerprint = other_card["freshness"]["topology_fingerprint"]
+    let after_fingerprint = after["freshness"]["topology_fingerprint"]
         .as_str()
-        .unwrap_or_else(|| panic!("the resident stamps a topology: {other_card}"));
+        .unwrap_or_else(|| panic!("the resident stamps a topology: {after}"));
     assert_ne!(
-        with_ext_fingerprint, from_resident,
-        "declaring an extension changes the root set, so it must change the fingerprint",
+        after_fingerprint, from_resident,
+        "one directory, one extension declared: the root set moved, so the fingerprint must",
     );
 
     // Both envelopes name who answered, so a consumer never has to guess which subsystem's

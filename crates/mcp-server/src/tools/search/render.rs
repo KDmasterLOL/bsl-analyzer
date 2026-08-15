@@ -66,10 +66,17 @@ const SNIPPET_LINES: usize = 5;
 /// brackets. An upper bound, not a measurement — the point is that the wrapper is charged,
 /// not that it is charged exactly.
 ///
-/// `freshness` alone is ~144 bytes empty and ~216 with a reason, so charging the old 128 for
-/// the whole wrapper would let a response pass the ceiling while still reporting
+/// `freshness` alone is ~144 bytes empty and ~216 with a reason, so a response that carries
+/// it must be charged for it, or it would pass the ceiling while still reporting
 /// `budget_exhausted: false` — exactly what this constant exists to prevent.
-pub(super) const ENVELOPE_OVERHEAD_BYTES: usize = 352;
+///
+/// The reference profile's documentation actions emit no envelope at all
+/// ([`Envelope::No`]), so charging them for it would shrink their listings for a block they
+/// never produce. Hence two values, picked by the caller that knows which shape it renders.
+pub(super) const ENVELOPE_OVERHEAD_BYTES: usize = 128;
+
+/// [`ENVELOPE_OVERHEAD_BYTES`] plus the `freshness` block, for the responses that carry one.
+pub(super) const ENVELOPE_OVERHEAD_WITH_FRESHNESS_BYTES: usize = 352;
 
 /// One hit rendered in both views: the text block a person reads and the JSON object a machine
 /// reads. Rendering the pair up front lets [`budgeted_hits`] charge the budget for what the
@@ -158,13 +165,20 @@ fn display_name(symbol_name: &str) -> &str {
 /// charging only the text would overshoot the caller's ceiling by roughly the JSON's size.
 /// At least one hit is always kept — a single oversized hit is delivered and flagged by
 /// `budget_exhausted` rather than dropped into an empty-looking answer.
-fn budgeted_hits(blocks: Vec<HitBlock>, max_output_tokens: usize) -> RenderedHits {
+fn budgeted_hits(
+    blocks: Vec<HitBlock>,
+    max_output_tokens: usize,
+    envelope: Envelope,
+) -> RenderedHits {
     let budget = max_output_tokens.saturating_mul(4);
     let total = blocks.len();
     // The hits are not the whole response: they get wrapped in [`hits_response`]'s envelope
     // keys and the `[` + `]` of their own array. Charging for that up front is what keeps
     // `budget_exhausted: false` from appearing on a response that is already over its ceiling.
-    let mut used = ENVELOPE_OVERHEAD_BYTES;
+    let mut used = match envelope {
+        Envelope::Yes => ENVELOPE_OVERHEAD_WITH_FRESHNESS_BYTES,
+        Envelope::No => ENVELOPE_OVERHEAD_BYTES,
+    };
     let mut shown = 0usize;
     for (i, block) in blocks.iter().enumerate() {
         let json_len = serde_json::to_string(&block.json).map(|s| s.len()).unwrap_or(0);
@@ -362,7 +376,7 @@ pub(super) fn format_code_hits(
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::Yes)
 }
 
 pub(super) fn format_doc_hits(hits: &[SearchHit], max_output_tokens: usize) -> RenderedHits {
@@ -390,7 +404,7 @@ pub(super) fn format_doc_hits(hits: &[SearchHit], max_output_tokens: usize) -> R
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_lexical_doc_hits(
@@ -430,7 +444,7 @@ pub(super) fn format_lexical_doc_hits(
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_semantic_doc_hits(
@@ -469,7 +483,7 @@ pub(super) fn format_semantic_doc_hits(
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {

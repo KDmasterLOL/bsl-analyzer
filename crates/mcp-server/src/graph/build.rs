@@ -1940,6 +1940,62 @@ mod tests {
         );
     }
 
+    /// An edit INSIDE the body leaves the declared name exactly where it was, so the name
+    /// check passes and cannot notice anything — yet the stored end offset now lands in the
+    /// middle of the new text. The end of a declaration is a keyword, so that is what the
+    /// stored end is required to land on; without it the answer carries a range that cuts
+    /// the wrong bytes.
+    #[test]
+    fn a_body_edit_drops_the_enclosing_range_while_the_name_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let id = "method/common/Сервер/Считать";
+
+        // Grow the BODY: the name keeps its offset, the closing keyword does not.
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Считать() Экспорт\n\tА = 1;\n\tВозврат А;\nКонецФункции\n",
+        )
+        .unwrap();
+
+        let node = GraphDb::open(&out)
+            .expect("graph database opens")
+            .node(id, ide::GraphDetail::Names, Some(&roots))
+            .unwrap()
+            .expect("resolves")
+            .node;
+        let location = node.location.expect("the pair survives");
+
+        assert!(
+            location.get("range").is_some(),
+            "the name is where it was, so its range is still true: {location}",
+        );
+        assert!(
+            location.get("enclosing_range").is_none(),
+            "the stored end no longer lands on the closing keyword: {location}",
+        );
+    }
+
     #[test]
     fn node_bodies_respect_output_budget() {
         let dir = tempfile::tempdir().unwrap();
