@@ -1,6 +1,5 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
-use lexer::TokenKind;
 use parser_error::{ParseError, RecoveryKind};
 
 use super::expressions;
@@ -39,14 +38,14 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         // An extension region is opaque: the words inside it are not this
         // query's, and a boundary read from one is a boundary that is not
         // there.
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             brace_depth += 1;
             p.bump();
             consumed_any = true;
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             brace_depth = brace_depth.saturating_sub(1);
             p.bump();
             consumed_any = true;
@@ -54,7 +53,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         }
 
         if brace_depth > 0 {
-            if p.at_end() || p.at(TokenKind::Semicolon) {
+            if p.at_end() || p.at(T![Semicolon]) {
                 break;
             }
             p.bump();
@@ -76,7 +75,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             continue;
         }
 
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
@@ -86,7 +85,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             continue;
         }
 
-        if p.at(TokenKind::RParen) && paren_depth > 0 {
+        if p.at(T![RParen]) && paren_depth > 0 {
             if let Some(&d) = nested_query_starts.last() {
                 if d == paren_depth {
                     nested_query_starts.pop();
@@ -113,7 +112,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         // rest of the query, and half-written `ВЫБОР` is what an editor
         // buffer holds. Stopping early costs a closed `ВЫБОР` its skip;
         // stopping late costs every unclosed one its whole query.
-        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(T![Dot]) {
             let stop = if at_top_level {
                 true
             } else if inside_nested_query {
@@ -125,7 +124,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
                 break;
             }
         }
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
         if p.at_end() {
@@ -136,10 +135,10 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             if at_sdbl_keyword(p, "AS", "КАК") {
                 break;
             }
-            if p.at(TokenKind::Comma) {
+            if p.at(T![Comma]) {
                 break;
             }
-            if p.at(TokenKind::RParen) {
+            if p.at(T![RParen]) {
                 break;
             }
         }
@@ -179,7 +178,7 @@ pub(super) fn subquery(p: &mut Parser) {
     query(p);
 
     loop {
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
@@ -277,9 +276,9 @@ pub(super) fn selected_fields(p: &mut Parser) {
     // a list with something wrong inside it, and the list parser's own
     // recovery handles that better than giving up here would.
     let list_is_absent = is_clause_keyword(p)
-        || p.at(TokenKind::Semicolon)
-        || p.at(TokenKind::RParen)
-        || p.at(TokenKind::LBrace)
+        || p.at(T![Semicolon])
+        || p.at(T![RParen])
+        || p.at(T![LBrace])
         || p.at_end();
 
     if !list_is_absent {
@@ -288,7 +287,7 @@ pub(super) fn selected_fields(p: &mut Parser) {
         p.within_field_names(|p| {
             super::expressions::parse_delimited_list(
                 p,
-                TokenKind::Comma,
+                T![Comma],
                 &super::LIST_RECOVERY,
                 is_field_start,
                 selected_field,
@@ -316,9 +315,9 @@ fn selected_field(p: &mut Parser) {
 
         let at_expected_position = at_sdbl_keyword(p, "AS", "КАК")
             || (is_identifier_token(p) && !is_clause_keyword(p))
-            || p.at(TokenKind::Comma)
-            || p.at(TokenKind::Semicolon)
-            || p.at(TokenKind::LBrace)
+            || p.at(T![Comma])
+            || p.at(T![Semicolon])
+            || p.at(T![LBrace])
             || is_clause_keyword(p)
             || p.at_end();
 
@@ -342,13 +341,13 @@ fn is_field_start(p: &Parser) -> bool {
 }
 
 fn is_asterisk_start(p: &Parser) -> bool {
-    if p.at(TokenKind::Star) {
+    if p.at(T![Star]) {
         return true;
     }
 
-    if p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
-            if let Some(TokenKind::Star) = p.nth(2) {
+    if p.at(T![Ident]) {
+        if let Some(T![Dot]) = p.nth(1) {
+            if let Some(T![Star]) = p.nth(2) {
                 return true;
             }
         }
@@ -360,8 +359,8 @@ fn is_asterisk_start(p: &Parser) -> bool {
 fn asterisk_field(p: &mut Parser) {
     let m = p.start();
 
-    while p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth(1) {
+    while p.at(T![Ident]) {
+        if let Some(T![Dot]) = p.nth(1) {
             p.bump();
             p.bump();
         } else {
@@ -369,7 +368,7 @@ fn asterisk_field(p: &mut Parser) {
         }
     }
 
-    p.expect(TokenKind::Star);
+    p.expect(T![Star]);
 
     m.complete(p, NodeKind::SdblAsteriskField);
 }
@@ -417,9 +416,9 @@ fn into_clause(p: &mut Parser) {
 
 fn is_data_source_start(p: &Parser) -> bool {
     match p.current() {
-        Some(TokenKind::LParen) => true,
-        Some(TokenKind::Ampersand) => true,
-        Some(TokenKind::Ident) => !is_clause_keyword(p),
+        Some(T![LParen]) => true,
+        Some(T![Ampersand]) => true,
+        Some(T![Ident]) => !is_clause_keyword(p),
         _ => false,
     }
 }
@@ -431,7 +430,7 @@ fn from_clause(p: &mut Parser) {
 
     super::expressions::parse_delimited_list(
         p,
-        TokenKind::Comma,
+        T![Comma],
         &super::LIST_RECOVERY,
         is_data_source_start,
         data_source,
@@ -443,10 +442,10 @@ fn from_clause(p: &mut Parser) {
 fn data_source(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         p.bump();
         subquery(p);
-        p.expect(TokenKind::RParen);
+        p.expect(T![RParen]);
     } else {
         table_ref(p);
     }
@@ -467,7 +466,7 @@ fn data_source(p: &mut Parser) {
 fn table_ref(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::Ampersand) {
+    if p.at(T![Ampersand]) {
         let pm = p.start();
         // Имя параметра приходит внутри самого токена, отдельного `Ident` за
         // амперсандом не бывает. Взять его значило бы отобрать у запроса
@@ -483,13 +482,13 @@ fn table_ref(p: &mut Parser) {
     // and the filter behind it existed nowhere. The first source of a list is
     // reached without the list's own start check, which is why this belongs at
     // the reference itself.
-    if p.at(TokenKind::Ident) && !super::at_field_name(p) {
+    if p.at(T![Ident]) && !super::at_field_name(p) {
         p.error_custom_no_bump("ожидалось имя таблицы");
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
 
-    if !p.expect(TokenKind::Ident) {
+    if !p.expect(T![Ident]) {
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
@@ -497,8 +496,8 @@ fn table_ref(p: &mut Parser) {
     // The dot reaches across the space before it as well as the space after
     // it: `Справочник . Товары` is one name, and the expression layer already
     // reads it as one.
-    while p.nth(1) == Some(TokenKind::Dot) || p.at(TokenKind::Dot) {
-        if !p.eat(TokenKind::Dot) {
+    while p.nth(1) == Some(T![Dot]) || p.at(T![Dot]) {
+        if !p.eat(T![Dot]) {
             break;
         }
         p.check_iteration_limit();
@@ -599,7 +598,7 @@ fn select_tail_clauses(p: &mut Parser) {
     let mut parsed_totals_by = false;
 
     loop {
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             query_extension(p);
             continue;
         }
@@ -674,7 +673,7 @@ fn query_body_clauses(p: &mut Parser) {
 /// surrounding query parses and keeps its diagnostics whichever element
 /// appears.
 pub(super) fn eat_query_extensions(p: &mut Parser) {
-    while p.at(TokenKind::LBrace) {
+    while p.at(T![LBrace]) {
         query_extension(p);
     }
 }
@@ -694,17 +693,17 @@ fn query_extension(p: &mut Parser) {
         // An unclosed `{` is tolerated, but tolerating it must not cost the
         // rest of the package: a separator ends the region whether or not
         // its brace was ever closed.
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             depth += 1;
             p.bump();
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             depth -= 1;
             p.bump();
             if depth == 0 {
@@ -804,7 +803,7 @@ fn group_by_clause(p: &mut Parser) {
 
     super::expressions::expression(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         super::expressions::expression(p);
     }
@@ -825,7 +824,7 @@ fn order_by_clause(p: &mut Parser) {
 
     order_by_item(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         order_by_item(p);
     }
@@ -951,7 +950,7 @@ fn report_the_component_the_dot_promised(p: &mut Parser) {
         return;
     }
 
-    p.error_expected(TokenKind::Ident);
+    p.error_expected(T![Ident]);
 }
 
 fn index_by_clause(p: &mut Parser) {
@@ -967,7 +966,7 @@ fn index_by_clause(p: &mut Parser) {
 
     super::expressions::expression(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         super::expressions::expression(p);
     }
@@ -1002,7 +1001,7 @@ fn totals_by_clause(p: &mut Parser) {
         if super::expressions::is_expression_start(p) {
             super::expressions::expression(p);
 
-            if !p.at(TokenKind::Comma) {
+            if !p.at(T![Comma]) {
                 continue;
             }
             p.bump();
@@ -1019,7 +1018,7 @@ fn totals_by_clause(p: &mut Parser) {
 
     totals_group_item(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         totals_group_item(p);
     }
@@ -1063,9 +1062,9 @@ fn at_period_name(p: &Parser) -> bool {
 fn at_period_boundary(p: &Parser) -> bool {
     // A parameter arrives as one token, name included, so `Ampersand` here
     // means a whole `&Имя` rather than the sigil alone.
-    p.at(TokenKind::Ampersand)
-        || p.at(TokenKind::Date)
-        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ") && p.nth(1) == Some(TokenKind::LParen))
+    p.at(T![Ampersand])
+        || p.at(T![Date])
+        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ") && p.nth(1) == Some(T![LParen]))
 }
 
 fn at_periods_keyword(p: &Parser) -> bool {
@@ -1126,7 +1125,7 @@ fn totals_group_modifier(p: &mut Parser) {
 fn totals_periods_modifier(p: &mut Parser) {
     p.bump();
 
-    if !p.at(TokenKind::LParen) {
+    if !p.at(T![LParen]) {
         if !p.at_end() {
             p.error_custom_no_bump("ожидалась '(' после 'ПЕРИОДАМИ' / 'PERIODS'");
         }
@@ -1147,7 +1146,7 @@ fn totals_periods_modifier(p: &mut Parser) {
 
     // The rule allows two boundaries. A third is a mistake the user can
     // see; counting them here would only cost the rest of the clause.
-    while p.at(TokenKind::Comma) {
+    while p.at(T![Comma]) {
         p.check_iteration_limit();
         p.bump();
 
@@ -1161,7 +1160,7 @@ fn totals_periods_modifier(p: &mut Parser) {
         }
     }
 
-    if p.at(TokenKind::RParen) {
+    if p.at(T![RParen]) {
         p.bump();
     } else if !p.at_end() {
         // At end of input this is a query being typed and says nothing;
@@ -1231,10 +1230,10 @@ fn top_clause(p: &mut Parser) {
     // `expect` reports by bumping the offending token, which would eat the
     // next clause's keyword and cost that clause its parse. Say the same
     // thing without moving when the count is simply not there.
-    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end() {
+    if is_clause_keyword(p) || p.at(T![Semicolon]) || p.at(T![RParen]) || p.at_end() {
         p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
     } else {
-        p.expect(TokenKind::Decimal);
+        p.expect(T![Decimal]);
     }
 
     m.complete(p, NodeKind::SdblTopClause);
@@ -1263,14 +1262,14 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         // An extension region is opaque text: the words in it are not this
         // query's, and neither are its parens.
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             brace_depth += 1;
             p.bump();
             consumed_any = true;
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             brace_depth = brace_depth.saturating_sub(1);
             p.bump();
             consumed_any = true;
@@ -1278,7 +1277,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         }
 
         if brace_depth > 0 {
-            if p.at_end() || p.at(TokenKind::Semicolon) {
+            if p.at_end() || p.at(T![Semicolon]) {
                 break;
             }
             p.bump();
@@ -1286,7 +1285,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             continue;
         }
 
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
@@ -1295,7 +1294,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
             continue;
         }
-        if p.at(TokenKind::RParen) {
+        if p.at(T![RParen]) {
             if paren_depth == 0 {
                 break;
             }
@@ -1312,7 +1311,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(T![Dot]) {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {
@@ -1325,11 +1324,11 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
         }
 
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
-        if paren_depth == 0 && p.at(TokenKind::Comma) {
+        if paren_depth == 0 && p.at(T![Comma]) {
             break;
         }
 
@@ -1355,21 +1354,21 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 }
 
 fn virtual_table_args(p: &mut Parser) {
-    if !p.at(TokenKind::LParen) {
+    if !p.at(T![LParen]) {
         return;
     }
     p.bump();
     eat_query_extensions(p);
 
-    if p.at(TokenKind::RParen) {
-        p.expect(TokenKind::RParen);
+    if p.at(T![RParen]) {
+        p.expect(T![RParen]);
         return;
     }
 
-    if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
+    if super::expressions::is_expression_start(p) && !p.at(T![Comma]) {
         super::expressions::expression(p);
         eat_query_extensions(p);
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+        if !p.at(T![Comma]) && !p.at(T![RParen]) {
             recover_to_delimiter_vt(p);
         }
     } else {
@@ -1377,17 +1376,16 @@ fn virtual_table_args(p: &mut Parser) {
         m.complete(p, NodeKind::SdblMissingArg);
     }
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         eat_query_extensions(p);
 
-        let empty_slot = p.at(TokenKind::Comma)
-            || p.at(TokenKind::RParen)
-            || !super::expressions::is_expression_start(p);
+        let empty_slot =
+            p.at(T![Comma]) || p.at(T![RParen]) || !super::expressions::is_expression_start(p);
         if empty_slot {
             let m = p.start();
             m.complete(p, NodeKind::SdblMissingArg);
-            if !p.at(TokenKind::Comma) {
+            if !p.at(T![Comma]) {
                 break;
             }
             continue;
@@ -1395,17 +1393,17 @@ fn virtual_table_args(p: &mut Parser) {
 
         super::expressions::expression(p);
         eat_query_extensions(p);
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+        if !p.at(T![Comma]) && !p.at(T![RParen]) {
             recover_to_delimiter_vt(p);
         }
     }
 
-    if p.at(TokenKind::RParen) {
+    if p.at(T![RParen]) {
         p.bump();
     } else if is_clause_keyword(p) {
-        p.error_expected(TokenKind::RParen);
+        p.error_expected(T![RParen]);
     } else {
-        p.expect(TokenKind::RParen);
+        p.expect(T![RParen]);
     }
 }
 

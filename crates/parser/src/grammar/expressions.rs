@@ -1,27 +1,27 @@
-use lexer::TokenKind;
+use crate::Sig;
 
 use crate::event::NodeKind;
+use crate::parser::token_set::TokenSet;
 use crate::parser::{CompletedMarker, Parser};
-use crate::token_set::TokenSet;
 
 // Keywords accepted as a member name when the name is on a *new* line after the
 // dot. There the construct is ambiguous with a dangling dot before a fresh
 // statement, so we stay conservative and never swallow block-structuring
 // keywords (КонецФункции, Функция, …) — that would destroy error recovery.
 const CROSS_LINE_PROPERTY_NAME_TOKENS: TokenSet = TokenSet::new(&[
-    TokenKind::Ident,
-    TokenKind::KwProcedure,
-    TokenKind::KwFunction,
-    TokenKind::KwExecute,
-    TokenKind::KwGoto,
-    TokenKind::KwBreak,
-    TokenKind::KwContinue,
-    TokenKind::KwTo,
-    TokenKind::KwTrue,
-    TokenKind::KwFalse,
-    TokenKind::KwUndefined,
-    TokenKind::KwNull,
-    TokenKind::KwNew,
+    T![Ident],
+    T![KwProcedure],
+    T![KwFunction],
+    T![KwExecute],
+    T![KwGoto],
+    T![KwBreak],
+    T![KwContinue],
+    T![KwTo],
+    T![KwTrue],
+    T![KwFalse],
+    T![KwUndefined],
+    T![KwNull],
+    T![KwNew],
 ]);
 
 pub fn expression(p: &mut Parser) {
@@ -36,7 +36,7 @@ fn or_expr(p: &mut Parser) {
     let mut lhs = p.start();
     and_expr(p);
 
-    while p.at(TokenKind::KwOr) {
+    while p.at(T![KwOr]) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
@@ -53,7 +53,7 @@ fn and_expr(p: &mut Parser) {
     let mut lhs = p.start();
     not_expr(p);
 
-    while p.at(TokenKind::KwAnd) {
+    while p.at(T![KwAnd]) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
@@ -67,7 +67,7 @@ fn and_expr(p: &mut Parser) {
 }
 
 fn not_expr(p: &mut Parser) {
-    if p.at(TokenKind::KwNot) {
+    if p.at(T![KwNot]) {
         let m = p.start();
         p.bump();
         not_expr(p);
@@ -82,17 +82,7 @@ fn comparison_expr(p: &mut Parser) {
     additive_expr(p);
     let mut saw_comparison = false;
 
-    while matches!(
-        p.current(),
-        Some(
-            TokenKind::Eq
-                | TokenKind::Neq
-                | TokenKind::Lt
-                | TokenKind::Le
-                | TokenKind::Gt
-                | TokenKind::Ge
-        )
-    ) {
+    while matches!(p.current(), Some(T![Eq] | T![Neq] | T![Lt] | T![Le] | T![Gt] | T![Ge])) {
         saw_comparison = true;
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
@@ -113,7 +103,7 @@ fn additive_expr(p: &mut Parser) {
     let mut lhs = p.start();
     multiplicative_expr(p);
 
-    while matches!(p.current(), Some(TokenKind::Plus) | Some(TokenKind::Minus)) {
+    while matches!(p.current(), Some(T![Plus]) | Some(T![Minus])) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
@@ -130,10 +120,7 @@ fn multiplicative_expr(p: &mut Parser) {
     let mut lhs = p.start();
     unary_expr(p);
 
-    while matches!(
-        p.current(),
-        Some(TokenKind::Star) | Some(TokenKind::Slash) | Some(TokenKind::Percent)
-    ) {
+    while matches!(p.current(), Some(T![Star]) | Some(T![Slash]) | Some(T![Percent])) {
         p.check_iteration_limit();
         let m = lhs.complete(p, NodeKind::Expr).precede(p);
         p.bump();
@@ -148,7 +135,7 @@ fn multiplicative_expr(p: &mut Parser) {
 
 fn unary_expr(p: &mut Parser) {
     match p.current() {
-        Some(TokenKind::Plus) | Some(TokenKind::Minus) => {
+        Some(T![Plus]) | Some(T![Minus]) => {
             p.bump();
             unary_expr(p);
         }
@@ -170,7 +157,7 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
     loop {
         p.check_iteration_limit();
         match p.current() {
-            Some(TokenKind::Dot) => {
+            Some(T![Dot]) => {
                 let m = lhs.precede(p);
                 p.bump();
                 let crossed_newline = p.a_line_break_precedes();
@@ -184,7 +171,7 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                 let at_property_name = if crossed_newline {
                     p.at_ts(CROSS_LINE_PROPERTY_NAME_TOKENS)
                 } else {
-                    p.at(TokenKind::Ident) || p.current().is_some_and(TokenKind::is_keyword)
+                    p.at(T![Ident]) || p.current().is_some_and(Sig::is_keyword)
                 };
                 if at_property_name && !is_orphaned_declaration {
                     p.bump();
@@ -196,17 +183,17 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
                     break;
                 }
             }
-            Some(TokenKind::LBracket) => {
+            Some(T![LBracket]) => {
                 let m = lhs.precede(p);
                 p.bump();
                 p.within_boundary(super::at_closing_bracket, |p| {
                     expression(p);
                 });
-                p.expect(TokenKind::RBracket);
+                p.expect(T![RBracket]);
                 lhs = m.complete(p, NodeKind::IndexExpr);
                 is_valid_statement = true;
             }
-            Some(TokenKind::LParen) => {
+            Some(T![LParen]) => {
                 let m = lhs.precede(p);
                 arg_list(p);
                 lhs = m.complete(p, NodeKind::CallExpr);
@@ -221,43 +208,43 @@ fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
 
 fn primary_expr(p: &mut Parser) -> Option<CompletedMarker> {
     match p.current() {
-        Some(TokenKind::Decimal) | Some(TokenKind::Float) | Some(TokenKind::Date) => {
+        Some(T![Decimal]) | Some(T![Float]) | Some(T![Date]) => {
             let m = p.start();
             p.bump();
             Some(m.complete(p, NodeKind::Literal))
         }
-        Some(TokenKind::String) | Some(TokenKind::StringStart) => Some(string_literal(p)),
-        Some(TokenKind::StringPart) | Some(TokenKind::StringTail) => {
+        Some(T![String]) | Some(T![StringStart]) => Some(string_literal(p)),
+        Some(T![StringPart]) | Some(T![StringTail]) => {
             p.error_custom("неожиданный фрагмент строки");
             None
         }
-        Some(TokenKind::KwTrue) | Some(TokenKind::KwFalse) => {
+        Some(T![KwTrue]) | Some(T![KwFalse]) => {
             let m = p.start();
             p.bump();
             Some(m.complete(p, NodeKind::Literal))
         }
-        Some(TokenKind::KwUndefined) | Some(TokenKind::KwNull) => {
+        Some(T![KwUndefined]) | Some(T![KwNull]) => {
             let m = p.start();
             p.bump();
             Some(m.complete(p, NodeKind::Literal))
         }
-        Some(TokenKind::KwAwait) => Some(await_expr(p)),
-        Some(TokenKind::Ident) => {
+        Some(T![KwAwait]) => Some(await_expr(p)),
+        Some(T![Ident]) => {
             let m = p.start();
             p.bump();
             Some(m.complete(p, NodeKind::Ident))
         }
-        Some(TokenKind::LParen) => {
+        Some(T![LParen]) => {
             let m = p.start();
             p.bump();
             p.within_boundary(super::at_closing_paren, |p| {
                 expression(p);
             });
-            p.expect(TokenKind::RParen);
+            p.expect(T![RParen]);
             Some(m.complete(p, NodeKind::ParenExpr))
         }
-        Some(TokenKind::KwNew) => Some(new_expr(p)),
-        Some(TokenKind::Question) => Some(ternary_expr(p)),
+        Some(T![KwNew]) => Some(new_expr(p)),
+        Some(T![Question]) => Some(ternary_expr(p)),
         _ => {
             p.error_unexpected();
             None
@@ -270,10 +257,10 @@ fn string_literal(p: &mut Parser) -> CompletedMarker {
 
     loop {
         match p.current() {
-            Some(TokenKind::String) => {
+            Some(T![String]) => {
                 p.bump();
             }
-            Some(TokenKind::StringStart) => {
+            Some(T![StringStart]) => {
                 p.bump();
                 string_continuation_tail(p);
             }
@@ -289,18 +276,18 @@ fn string_literal(p: &mut Parser) -> CompletedMarker {
 }
 
 fn at_adjacent_string_literal(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::String | TokenKind::StringStart))
+    matches!(p.current(), Some(T![String] | T![StringStart]))
 }
 
 fn string_continuation_tail(p: &mut Parser) {
     loop {
         p.check_iteration_limit();
         match p.current() {
-            Some(TokenKind::StringTail) | Some(TokenKind::String) => {
+            Some(T![StringTail]) | Some(T![String]) => {
                 p.bump();
                 break;
             }
-            Some(TokenKind::StringPart) => {
+            Some(T![StringPart]) => {
                 p.bump();
             }
             None => {
@@ -326,11 +313,11 @@ fn new_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();
 
-    if p.at(TokenKind::Ident) {
+    if p.at(T![Ident]) {
         p.bump();
     }
 
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         arg_list(p);
     }
     m.complete(p, NodeKind::NewExpr)
@@ -345,21 +332,21 @@ fn continues_the_surrounding_expression(p: &Parser) -> bool {
     matches!(
         p.current(),
         Some(
-            TokenKind::KwOr
-                | TokenKind::KwAnd
-                | TokenKind::Eq
-                | TokenKind::Neq
-                | TokenKind::Lt
-                | TokenKind::Le
-                | TokenKind::Gt
-                | TokenKind::Ge
-                | TokenKind::Plus
-                | TokenKind::Minus
-                | TokenKind::Star
-                | TokenKind::Slash
-                | TokenKind::Percent
-                | TokenKind::Dot
-                | TokenKind::LBracket
+            T![KwOr]
+                | T![KwAnd]
+                | T![Eq]
+                | T![Neq]
+                | T![Lt]
+                | T![Le]
+                | T![Gt]
+                | T![Ge]
+                | T![Plus]
+                | T![Minus]
+                | T![Star]
+                | T![Slash]
+                | T![Percent]
+                | T![Dot]
+                | T![LBracket]
         )
     )
 }
@@ -375,28 +362,28 @@ fn ternary_expr(p: &mut Parser) -> CompletedMarker {
     // `expect` does not ask whose separator it is. Not the closer either.
     // Reading on would spend another rule's punctuation on operands that were
     // never written.
-    if !p.eat(TokenKind::LParen) {
+    if !p.eat(T![LParen]) {
         // Giving up must not spend a token either — but only where something
         // else will use it. `expect` already leaves an enclosing boundary
         // alone; what nobody declares is the operator that carries on the
         // expression around the `?`. Anything past those two is stray, and
         // leaving that behind means no rule ever takes it.
         if continues_the_surrounding_expression(p) {
-            p.expect_no_bump(TokenKind::LParen);
+            p.expect_no_bump(T![LParen]);
         } else {
-            p.expect(TokenKind::LParen);
+            p.expect(T![LParen]);
         }
         return m.complete(p, NodeKind::TernaryExpr);
     }
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
         expression(p);
-        p.expect(TokenKind::Comma);
+        p.expect(T![Comma]);
         expression(p);
-        p.expect(TokenKind::Comma);
+        p.expect(T![Comma]);
         expression(p);
     });
-    p.expect(TokenKind::RParen);
+    p.expect(T![RParen]);
     m.complete(p, NodeKind::TernaryExpr)
 }
 
@@ -405,21 +392,21 @@ fn arg_list(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        if !p.at(TokenKind::RParen) {
-            if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+        if !p.at(T![RParen]) {
+            if !p.at(T![Comma]) && !p.at(T![RParen]) {
                 expression(p);
             }
 
-            while p.eat(TokenKind::Comma) {
+            while p.eat(T![Comma]) {
                 p.check_iteration_limit();
-                if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+                if !p.at(T![Comma]) && !p.at(T![RParen]) {
                     expression(p);
                 }
             }
         }
     });
 
-    p.expect(TokenKind::RParen);
+    p.expect(T![RParen]);
 
     m.complete(p, NodeKind::ArgList);
 }

@@ -401,46 +401,11 @@ fn the_transformation_rules_are_observable() {
 // Тривия вне алфавита грамматики
 // ===================================================================
 //
-// Проверок три, по одной на функцию, а не одна на всех: в грамматике нет ни
-// одного вызова с тривиальным видом, поэтому забытая или перепутанная проверка
-// не всплыла бы ни в одном прогоне.
-//
-// У `expect` и `expect_no_bump` перед вызовом объявляется граница: при истинной
-// границе обе возвращаются, не дойдя до `eat`, а значит и до `at`, — и
-// сработать может только их собственная проверка. Без этой подготовки тест был
-// бы зелен из-за паники в `at` и своей проверки не наблюдал бы вовсе.
-
-#[test]
-#[should_panic(expected = "о переводе строки")]
-#[cfg(debug_assertions)]
-fn at_refuses_a_trivia_kind() {
-    let tokens = tokenize("А = 1;\n");
-    let p = Parser::new(&tokens);
-
-    let _ = p.at(TokenKind::Newline);
-}
-
-#[test]
-#[should_panic(expected = "о переводе строки")]
-#[cfg(debug_assertions)]
-fn expect_refuses_a_trivia_kind() {
-    let tokens = tokenize("А = 1;\n");
-    let mut p = Parser::new(&tokens);
-    p.set_grammar_boundary(|_| true);
-
-    p.expect(TokenKind::Newline);
-}
-
-#[test]
-#[should_panic(expected = "о переводе строки")]
-#[cfg(debug_assertions)]
-fn expect_no_bump_refuses_a_trivia_kind() {
-    let tokens = tokenize("А = 1;\n");
-    let mut p = Parser::new(&tokens);
-    p.set_grammar_boundary(|_| true);
-
-    p.expect_no_bump(TokenKind::Newline);
-}
+// Прежде здесь стояли три `#[should_panic]` на `at`, `expect` и
+// `expect_no_bump` с тривиальным видом. Такого вызова больше не существует:
+// двери принимают `Sig`, а записи тривиального вида в алфавите нет. Запрет
+// сторожат `compile_fail`-доктесты на `Sig` — по одному на каждую дверь и по
+// одному на каждый тривиальный вид, каждый со своим положительным контролем.
 
 /// Перевод строки внутри многострочного литерала принадлежит литералу.
 ///

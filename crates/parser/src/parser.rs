@@ -2,20 +2,16 @@ use lexer::{Token, TokenKind};
 use parser_error::{ParseError, RecoveryKind};
 use smallvec::smallvec;
 
+#[macro_use]
+pub(crate) mod input;
+pub mod token_set;
+
 use crate::event::{Event, NodeKind};
-use crate::input::Input;
+use crate::parser::input::{Input, Sig};
 
 const MAX_ITERATIONS: usize = 1_000_000;
 
 const POSITION_HISTORY_SIZE: usize = 100;
-
-/// Asking for trivia by kind is asking the grammar to decide something about
-/// lines through a channel that does not carry that decision. The one channel
-/// that does is [`Parser::a_line_break_precedes`]; which constructs may cross a
-/// line, and on what grounds, is declared in
-/// `docs/architecture/adr/ADR-02-line-sensitivity.md`.
-const TRIVIA_IS_NOT_THE_CHANNEL: &str =
-    "о переводе строки грамматике сообщает предикат, а не вид токена";
 
 pub struct Parser<'a> {
     input: Input<'a>,
@@ -51,25 +47,20 @@ impl<'a> Parser<'a> {
         self.events
     }
 
-    pub fn current(&self) -> Option<TokenKind> {
+    pub fn current(&self) -> Option<Sig> {
         self.nth(0)
     }
 
     /// Вид `n`-го значимого токена, считая от текущего.
-    pub fn nth(&self, n: usize) -> Option<TokenKind> {
+    pub fn nth(&self, n: usize) -> Option<Sig> {
         self.input.kind(self.pos + n)
     }
 
-    pub fn at(&self, kind: TokenKind) -> bool {
-        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
+    pub fn at(&self, kind: Sig) -> bool {
         self.current() == Some(kind)
     }
 
-    /// No check for trivia here, unlike [`Parser::at`]: a set cannot hold any.
-    /// The bits of a [`TokenSet`](crate::token_set::TokenSet) are private and
-    /// every way to make one refuses trivia or preserves that refusal, so a
-    /// check placed here could never be seen failing.
-    pub fn at_ts(&self, set: crate::token_set::TokenSet) -> bool {
+    pub fn at_ts(&self, set: crate::parser::token_set::TokenSet) -> bool {
         self.current().is_some_and(|k| set.contains(k))
     }
 
@@ -91,7 +82,7 @@ impl<'a> Parser<'a> {
         self.pos >= self.input.len()
     }
 
-    pub fn eat(&mut self, kind: TokenKind) -> bool {
+    pub fn eat(&mut self, kind: Sig) -> bool {
         if self.at(kind) {
             self.bump();
             true
@@ -104,9 +95,9 @@ impl<'a> Parser<'a> {
         let Some(kind) = self.current() else {
             return;
         };
-        self.track_group(kind);
+        self.track_group(kind.kind());
 
-        self.events.push(Event::Token { kind });
+        self.events.push(Event::Token { kind: kind.kind() });
         self.pos += 1;
     }
 
@@ -164,11 +155,7 @@ impl<'a> Parser<'a> {
         self.brace_depth = 0;
     }
 
-    pub fn expect(&mut self, kind: TokenKind) -> bool {
-        // Its own check, not the one in `at`: a declared boundary returns from
-        // here without ever reaching it.
-        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
-
+    pub fn expect(&mut self, kind: Sig) -> bool {
         // A grammar boundary belongs to a rule further out, and no rule may
         // require it here. It matters because kinds are coarser than words:
         // every keyword of a language whose keywords are not reserved
@@ -185,7 +172,11 @@ impl<'a> Parser<'a> {
         } else {
             RecoveryKind::BumpToken
         };
-        let err = ParseError::Expected { expected: smallvec![kind], found, recovery };
+        let err = ParseError::Expected {
+            expected: smallvec![kind.kind()],
+            found: found.map(Sig::kind),
+            recovery,
+        };
 
         if recovery == RecoveryKind::MissingToken {
             self.emit_missing(err);
@@ -241,17 +232,14 @@ impl<'a> Parser<'a> {
     /// of the construct holding it — and plain `expect` would take it as its
     /// recovery, which costs the caller exactly what the caller was about to
     /// parse.
-    pub fn expect_no_bump(&mut self, kind: TokenKind) -> bool {
-        // Its own check, for the same reason as in [`Parser::expect`].
-        debug_assert!(!kind.is_trivia(), "{}", TRIVIA_IS_NOT_THE_CHANNEL);
-
+    pub fn expect_no_bump(&mut self, kind: Sig) -> bool {
         if !self.at_declared_boundary() && self.eat(kind) {
             return true;
         }
 
         let err = ParseError::Expected {
-            expected: smallvec![kind],
-            found: self.current(),
+            expected: smallvec![kind.kind()],
+            found: self.current().map(Sig::kind),
             recovery: RecoveryKind::MissingToken,
         };
         self.emit_missing(err);
@@ -264,7 +252,7 @@ impl<'a> Parser<'a> {
     /// made the word here a field name, say — would otherwise walk the
     /// token list itself, and every rule that walked it got a different
     /// part of it wrong.
-    pub fn prev_significant(&self) -> Option<TokenKind> {
+    pub fn prev_significant(&self) -> Option<Sig> {
         self.pos.checked_sub(1).and_then(|prev| self.input.kind(prev))
     }
 
@@ -316,7 +304,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn error(&mut self) {
-        let found = self.current();
+        let found = self.current().map(Sig::kind);
         let recovery = if found.is_none() || self.at_statement_separator() {
             RecoveryKind::MissingToken
         } else {
@@ -363,13 +351,13 @@ impl<'a> Parser<'a> {
     /// [`RecoveryKind::RecoverySpan`], и норма привязки из
     /// `docs/architecture/adr/ADR-03-error-range-attribution.md` выполняется
     /// по построению.
-    pub fn error_expected(&mut self, kind: TokenKind) {
+    pub fn error_expected(&mut self, kind: Sig) {
         let m = self.start();
-        let found = self.current();
+        let found = self.current().map(Sig::kind);
         self.emit_error_at_marker(
             m,
             ParseError::Expected {
-                expected: smallvec![kind],
+                expected: smallvec![kind.kind()],
                 found,
                 recovery: RecoveryKind::RecoverySpan,
             },
@@ -382,7 +370,7 @@ impl<'a> Parser<'a> {
     /// о своём содержимом ничего не обещает, и вторая жалоба на него говорит о
     /// нём не больше первой.
     pub fn at_error(&self) -> bool {
-        self.current() == Some(TokenKind::Error)
+        self.current() == Some(T![Error])
     }
 
     pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
@@ -443,7 +431,7 @@ impl<'a> Parser<'a> {
     /// where the missing element should have been, and the token stays for
     /// the caller.
     fn at_statement_separator(&self) -> bool {
-        self.at(TokenKind::Semicolon) || self.at_declared_boundary() || self.at_enclosing_boundary()
+        self.at(T![Semicolon]) || self.at_declared_boundary() || self.at_enclosing_boundary()
     }
 
     /// The part of the boundary that holds for the whole parse, without the
@@ -474,8 +462,8 @@ impl<'a> Parser<'a> {
     }
 
     pub fn at_declaration_start(&self) -> bool {
-        matches!(self.current(), Some(TokenKind::KwFunction | TokenKind::KwProcedure))
-            && self.nth(1) == Some(TokenKind::Ident)
+        matches!(self.current(), Some(T![KwFunction] | T![KwProcedure]))
+            && self.nth(1) == Some(T![Ident])
     }
 
     pub fn check_iteration_limit(&mut self) {

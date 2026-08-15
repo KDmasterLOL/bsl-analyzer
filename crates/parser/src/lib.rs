@@ -1,14 +1,25 @@
 mod event;
-pub mod grammar;
-mod input;
+// Объявлен ДО грамматики и с `macro_use`: макрос `T![…]` порождается другим
+// макросом, а такой `macro_export` внутри своего крейта по пути `crate::T`
+// недоступен — язык это прямо запрещает. Остаётся текстовая область
+// видимости, а она идёт по порядку объявления модулей.
+#[macro_use]
 mod parser;
+pub mod grammar;
 mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
-pub mod token_set;
 
 use lexer::tokenize;
 
+/// Алфавит грамматики выходит наружу вынужденно, а не по широте API: макрос
+/// `T![…]` разворачивается в коде вызывающего, и путь к типу обязан
+/// разрешаться снаружи крейта — в том числе в `compile_fail`-доктестах,
+/// которые собираются как отдельный крейт.
+pub use crate::parser::input::Sig;
+/// Путь `parser::token_set::TokenSet` сохраняется после переезда модуля внутрь
+/// `parser`: переезд нужен видимости `Sig::kind`, а не поверхности крейта.
+pub use crate::parser::token_set;
 pub use crate::parser::Parser;
 
 pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {

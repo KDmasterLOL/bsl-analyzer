@@ -3,8 +3,6 @@ pub mod items;
 pub mod sdbl;
 pub mod statements;
 
-use lexer::TokenKind;
-
 use crate::event::NodeKind;
 use crate::parser::Parser;
 
@@ -17,24 +15,24 @@ fn annotated_item(p: &mut Parser) {
     p.within_boundary(at_declaration_start, |p| {
         while matches!(
             p.current(),
-            Some(TokenKind::AnnAtClient)
-                | Some(TokenKind::AnnAtServer)
-                | Some(TokenKind::AnnAtServerNoContext)
-                | Some(TokenKind::AnnAtClientAtServer)
-                | Some(TokenKind::AnnAtClientAtServerNoContext)
-                | Some(TokenKind::AnnBefore)
-                | Some(TokenKind::AnnAfter)
-                | Some(TokenKind::AnnAround)
-                | Some(TokenKind::AnnChangeAndValidate)
-                | Some(TokenKind::AnnCustom)
+            Some(T![AnnAtClient])
+                | Some(T![AnnAtServer])
+                | Some(T![AnnAtServerNoContext])
+                | Some(T![AnnAtClientAtServer])
+                | Some(T![AnnAtClientAtServerNoContext])
+                | Some(T![AnnBefore])
+                | Some(T![AnnAfter])
+                | Some(T![AnnAround])
+                | Some(T![AnnChangeAndValidate])
+                | Some(T![AnnCustom])
         ) {
             p.check_iteration_limit();
             match p.current() {
-                Some(TokenKind::AnnAtClient)
-                | Some(TokenKind::AnnAtServer)
-                | Some(TokenKind::AnnAtServerNoContext)
-                | Some(TokenKind::AnnAtClientAtServer)
-                | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+                Some(T![AnnAtClient])
+                | Some(T![AnnAtServer])
+                | Some(T![AnnAtServerNoContext])
+                | Some(T![AnnAtClientAtServer])
+                | Some(T![AnnAtClientAtServerNoContext]) => {
                     items::compiler_directive(p);
                 }
                 _ => {
@@ -47,22 +45,22 @@ fn annotated_item(p: &mut Parser) {
         // annotation and the declaration it applies to (e.g. `&НаКлиенте #Область X
         // <newline> Перем Y;`). Consume them here so the annotation still binds to
         // the following Procedure/Function/Var instead of derailing the parse.
-        while matches!(p.current(), Some(TokenKind::PreRegion) | Some(TokenKind::PreEndRegion)) {
+        while matches!(p.current(), Some(T![PreRegion]) | Some(T![PreEndRegion])) {
             p.check_iteration_limit();
             match p.current() {
-                Some(TokenKind::PreRegion) => preprocessor_region(p),
+                Some(T![PreRegion]) => preprocessor_region(p),
                 _ => preprocessor_end_region(p),
             }
         }
     });
 
     match p.current() {
-        Some(TokenKind::KwAsync) => match p.nth(1) {
-            Some(TokenKind::KwProcedure) => {
+        Some(T![KwAsync]) => match p.nth(1) {
+            Some(T![KwProcedure]) => {
                 items::procedure_def_content(p);
                 outer.complete(p, NodeKind::ProcedureDef);
             }
-            Some(TokenKind::KwFunction) => {
+            Some(T![KwFunction]) => {
                 items::function_def_content(p);
                 outer.complete(p, NodeKind::FunctionDef);
             }
@@ -71,15 +69,15 @@ fn annotated_item(p: &mut Parser) {
                 p.error_unexpected();
             }
         },
-        Some(TokenKind::KwProcedure) => {
+        Some(T![KwProcedure]) => {
             items::procedure_def_content(p);
             outer.complete(p, NodeKind::ProcedureDef);
         }
-        Some(TokenKind::KwFunction) => {
+        Some(T![KwFunction]) => {
             items::function_def_content(p);
             outer.complete(p, NodeKind::FunctionDef);
         }
-        Some(TokenKind::KwVar) => {
+        Some(T![KwVar]) => {
             items::var_declaration_content(p);
             outer.complete(p, NodeKind::VarDef);
         }
@@ -101,31 +99,31 @@ pub fn source_file(p: &mut Parser) {
         }
 
         match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth(1) {
-                Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                Some(TokenKind::KwFunction) => items::function_def(p),
+            Some(T![KwAsync]) => match p.nth(1) {
+                Some(T![KwProcedure]) => items::procedure_def(p),
+                Some(T![KwFunction]) => items::function_def(p),
                 _ => p.error_unexpected(),
             },
-            Some(TokenKind::KwProcedure) => items::procedure_def(p),
-            Some(TokenKind::KwFunction) => items::function_def(p),
-            Some(TokenKind::KwVar) => items::var_declaration(p),
-            Some(TokenKind::PreRegion) => preprocessor_region(p),
-            Some(TokenKind::PreEndRegion) => preprocessor_end_region(p),
-            Some(TokenKind::PreIf) => preprocessor_if(p),
-            Some(TokenKind::PreDelete) => preprocessor_delete(p),
-            Some(TokenKind::PreInsert) => preprocessor_insert(p),
-            Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+            Some(T![KwProcedure]) => items::procedure_def(p),
+            Some(T![KwFunction]) => items::function_def(p),
+            Some(T![KwVar]) => items::var_declaration(p),
+            Some(T![PreRegion]) => preprocessor_region(p),
+            Some(T![PreEndRegion]) => preprocessor_end_region(p),
+            Some(T![PreIf]) => preprocessor_if(p),
+            Some(T![PreDelete]) => preprocessor_delete(p),
+            Some(T![PreInsert]) => preprocessor_insert(p),
+            Some(T![AnnAtClient])
+            | Some(T![AnnAtServer])
+            | Some(T![AnnAtServerNoContext])
+            | Some(T![AnnAtClientAtServer])
+            | Some(T![AnnAtClientAtServerNoContext]) => {
                 annotated_item(p);
             }
-            Some(TokenKind::AnnBefore)
-            | Some(TokenKind::AnnAfter)
-            | Some(TokenKind::AnnAround)
-            | Some(TokenKind::AnnChangeAndValidate)
-            | Some(TokenKind::AnnCustom) => {
+            Some(T![AnnBefore])
+            | Some(T![AnnAfter])
+            | Some(T![AnnAround])
+            | Some(T![AnnChangeAndValidate])
+            | Some(T![AnnCustom]) => {
                 annotated_item(p);
             }
             _ => {
@@ -150,7 +148,7 @@ pub(super) fn preprocessor_region(p: &mut Parser) {
     p.bump();
     // The name sits on the directive's own line; reaching past the newline would
     // steal the next statement's identifier and leave that statement headless.
-    if !p.a_line_break_precedes() && p.at(TokenKind::Ident) {
+    if !p.a_line_break_precedes() && p.at(T![Ident]) {
         p.bump();
     }
 
@@ -171,25 +169,25 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
     p.within_boundary(at_preproc_closer, |p| {
         p.within_boundary(at_then, preproc_expression);
 
-        p.expect(TokenKind::KwThen);
+        p.expect(T![KwThen]);
 
         preproc_content(p);
 
-        while p.at(TokenKind::PreElsIf) {
+        while p.at(T![PreElsIf]) {
             p.check_iteration_limit();
             let elsif_m = p.start();
             p.bump();
 
             p.within_boundary(at_then, preproc_expression);
 
-            p.expect(TokenKind::KwThen);
+            p.expect(T![KwThen]);
 
             preproc_content(p);
 
             elsif_m.complete(p, NodeKind::PreElsIfClause);
         }
 
-        if p.at(TokenKind::PreElse) {
+        if p.at(T![PreElse]) {
             let else_m = p.start();
             p.bump();
 
@@ -199,12 +197,12 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
         }
     });
 
-    p.expect(TokenKind::PreEndIf);
+    p.expect(T![PreEndIf]);
     m.complete(p, NodeKind::PreIfDir);
 }
 
 fn at_then(p: &Parser) -> bool {
-    p.at(TokenKind::KwThen)
+    p.at(T![KwThen])
 }
 
 /// The punctuation a parenthesised list owns: the comma it reaches its next
@@ -220,18 +218,18 @@ fn at_then(p: &Parser) -> bool {
 /// behind a token nobody will take, and its own `expect` then spends the
 /// closer on it.
 pub(super) fn at_paren_list_punctuation(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::RParen | TokenKind::Comma))
+    matches!(p.current(), Some(T![RParen] | T![Comma]))
 }
 
 /// The paren a group ends with. A group holds a single expression, so a comma
 /// inside it belongs to no rule waiting here.
 pub(super) fn at_closing_paren(p: &Parser) -> bool {
-    p.at(TokenKind::RParen)
+    p.at(T![RParen])
 }
 
 /// The bracket an index ends with.
 pub(super) fn at_closing_bracket(p: &Parser) -> bool {
-    p.at(TokenKind::RBracket)
+    p.at(T![RBracket])
 }
 
 /// The words a declaration begins with. An annotation is followed by one, and
@@ -241,31 +239,31 @@ fn at_declaration_start(p: &Parser) -> bool {
     matches!(
         p.current(),
         Some(
-            TokenKind::KwProcedure
-                | TokenKind::KwFunction
-                | TokenKind::KwVar
-                | TokenKind::KwAsync
+            T![KwProcedure]
+                | T![KwFunction]
+                | T![KwVar]
+                | T![KwAsync]
                 // The chain may hold more than one annotation, with a folding
                 // marker allowed between them, so the next link of the chain
                 // is awaited here exactly as the declaration is.
-                | TokenKind::AnnAtClient
-                | TokenKind::AnnAtServer
-                | TokenKind::AnnAtServerNoContext
-                | TokenKind::AnnAtClientAtServer
-                | TokenKind::AnnAtClientAtServerNoContext
-                | TokenKind::AnnBefore
-                | TokenKind::AnnAfter
-                | TokenKind::AnnAround
-                | TokenKind::AnnChangeAndValidate
-                | TokenKind::AnnCustom
-                | TokenKind::PreRegion
-                | TokenKind::PreEndRegion
+                | T![AnnAtClient]
+                | T![AnnAtServer]
+                | T![AnnAtServerNoContext]
+                | T![AnnAtClientAtServer]
+                | T![AnnAtClientAtServerNoContext]
+                | T![AnnBefore]
+                | T![AnnAfter]
+                | T![AnnAround]
+                | T![AnnChangeAndValidate]
+                | T![AnnCustom]
+                | T![PreRegion]
+                | T![PreEndRegion]
         )
     )
 }
 
 fn at_preproc_closer(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::PreElsIf | TokenKind::PreElse | TokenKind::PreEndIf))
+    matches!(p.current(), Some(T![PreElsIf] | T![PreElse] | T![PreEndIf]))
 }
 
 /// A conditional region and a statement block can cross each other: a
@@ -282,31 +280,31 @@ fn preproc_content(p: &mut Parser) {
         }
 
         match p.current() {
-            Some(TokenKind::KwAsync) => match p.nth(1) {
-                Some(TokenKind::KwProcedure) => items::procedure_def(p),
-                Some(TokenKind::KwFunction) => items::function_def(p),
+            Some(T![KwAsync]) => match p.nth(1) {
+                Some(T![KwProcedure]) => items::procedure_def(p),
+                Some(T![KwFunction]) => items::function_def(p),
                 _ => p.error_unexpected(),
             },
-            Some(TokenKind::KwProcedure) => items::procedure_def(p),
-            Some(TokenKind::KwFunction) => items::function_def(p),
-            Some(TokenKind::KwVar) => items::var_declaration(p),
-            Some(TokenKind::PreRegion) => preprocessor_region(p),
-            Some(TokenKind::PreEndRegion) => preprocessor_end_region(p),
-            Some(TokenKind::PreIf) => preprocessor_if(p),
-            Some(TokenKind::PreDelete) => preprocessor_delete(p),
-            Some(TokenKind::PreInsert) => preprocessor_insert(p),
-            Some(TokenKind::AnnAtClient)
-            | Some(TokenKind::AnnAtServer)
-            | Some(TokenKind::AnnAtServerNoContext)
-            | Some(TokenKind::AnnAtClientAtServer)
-            | Some(TokenKind::AnnAtClientAtServerNoContext) => {
+            Some(T![KwProcedure]) => items::procedure_def(p),
+            Some(T![KwFunction]) => items::function_def(p),
+            Some(T![KwVar]) => items::var_declaration(p),
+            Some(T![PreRegion]) => preprocessor_region(p),
+            Some(T![PreEndRegion]) => preprocessor_end_region(p),
+            Some(T![PreIf]) => preprocessor_if(p),
+            Some(T![PreDelete]) => preprocessor_delete(p),
+            Some(T![PreInsert]) => preprocessor_insert(p),
+            Some(T![AnnAtClient])
+            | Some(T![AnnAtServer])
+            | Some(T![AnnAtServerNoContext])
+            | Some(T![AnnAtClientAtServer])
+            | Some(T![AnnAtClientAtServerNoContext]) => {
                 annotated_item(p);
             }
-            Some(TokenKind::AnnBefore)
-            | Some(TokenKind::AnnAfter)
-            | Some(TokenKind::AnnAround)
-            | Some(TokenKind::AnnChangeAndValidate)
-            | Some(TokenKind::AnnCustom) => {
+            Some(T![AnnBefore])
+            | Some(T![AnnAfter])
+            | Some(T![AnnAround])
+            | Some(T![AnnChangeAndValidate])
+            | Some(T![AnnCustom]) => {
                 annotated_item(p);
             }
             _ => {
@@ -327,7 +325,7 @@ fn preproc_logical_expression(p: &mut Parser) {
 
     preproc_logical_operand(p);
 
-    while matches!(p.current(), Some(TokenKind::KwAnd) | Some(TokenKind::KwOr)) {
+    while matches!(p.current(), Some(T![KwAnd]) | Some(T![KwOr])) {
         p.check_iteration_limit();
         let op_m = p.start();
         p.bump();
@@ -341,11 +339,11 @@ fn preproc_logical_expression(p: &mut Parser) {
 fn preproc_logical_operand(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         p.bump();
 
         p.within_boundary(at_closing_paren, |p| {
-            if p.at(TokenKind::KwNot) {
+            if p.at(T![KwNot]) {
                 p.bump();
                 preproc_logical_operand(p);
             } else {
@@ -353,8 +351,8 @@ fn preproc_logical_operand(p: &mut Parser) {
             }
         });
 
-        p.expect(TokenKind::RParen);
-    } else if p.at(TokenKind::KwNot) {
+        p.expect(T![RParen]);
+    } else if p.at(T![KwNot]) {
         p.bump();
         preproc_logical_operand(p);
     } else {
@@ -368,12 +366,12 @@ pub(super) fn preprocessor_delete(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    while !p.at_end() && !p.at(TokenKind::PreEndDelete) {
+    while !p.at_end() && !p.at(T![PreEndDelete]) {
         p.check_iteration_limit();
         p.bump();
     }
 
-    p.eat(TokenKind::PreEndDelete);
+    p.eat(T![PreEndDelete]);
     m.complete(p, NodeKind::PreDeleteDir);
 }
 
@@ -381,12 +379,12 @@ pub(super) fn preprocessor_insert(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    while !p.at_end() && !p.at(TokenKind::PreEndInsert) {
+    while !p.at_end() && !p.at(T![PreEndInsert]) {
         p.check_iteration_limit();
         p.bump();
     }
 
-    p.eat(TokenKind::PreEndInsert);
+    p.eat(T![PreEndInsert]);
     m.complete(p, NodeKind::PreInsertDir);
 }
 
@@ -394,7 +392,7 @@ fn preproc_symbol(p: &mut Parser) {
     let m = p.start();
 
     match p.current() {
-        Some(TokenKind::Ident) => {
+        Some(T![Ident]) => {
             p.bump();
         }
         _ => {

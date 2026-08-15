@@ -1,4 +1,4 @@
-use lexer::TokenKind;
+use crate::Sig;
 use parser_error::{ParseError, RecoveryKind};
 
 use crate::event::NodeKind;
@@ -6,7 +6,7 @@ use crate::parser::Parser;
 
 use super::expressions;
 
-pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
+pub fn stmt_list(p: &mut Parser, terminator: Sig) {
     let m = p.start();
 
     // The list ends at its own terminator and at every closer further out.
@@ -27,41 +27,41 @@ pub fn stmt_list(p: &mut Parser, terminator: TokenKind) {
 
 pub fn statement(p: &mut Parser) {
     match p.current() {
-        Some(TokenKind::Semicolon) => {
+        Some(T![Semicolon]) => {
             let m = p.start();
             p.bump();
             m.complete(p, NodeKind::EmptyStmt);
         }
-        Some(TokenKind::KwReturn) => return_stmt(p),
-        Some(TokenKind::KwIf) => if_stmt(p),
-        Some(TokenKind::KwWhile) => while_stmt(p),
-        Some(TokenKind::KwFor) => for_stmt(p),
-        Some(TokenKind::KwTry) => try_stmt(p),
-        Some(TokenKind::KwRaise) => raise_stmt(p),
-        Some(TokenKind::KwBreak) => {
+        Some(T![KwReturn]) => return_stmt(p),
+        Some(T![KwIf]) => if_stmt(p),
+        Some(T![KwWhile]) => while_stmt(p),
+        Some(T![KwFor]) => for_stmt(p),
+        Some(T![KwTry]) => try_stmt(p),
+        Some(T![KwRaise]) => raise_stmt(p),
+        Some(T![KwBreak]) => {
             let m = p.start();
             p.bump();
-            p.eat(TokenKind::Semicolon);
+            p.eat(T![Semicolon]);
             m.complete(p, NodeKind::BreakStmt);
         }
-        Some(TokenKind::KwContinue) => {
+        Some(T![KwContinue]) => {
             let m = p.start();
             p.bump();
-            p.eat(TokenKind::Semicolon);
+            p.eat(T![Semicolon]);
             m.complete(p, NodeKind::ContinueStmt);
         }
-        Some(TokenKind::KwGoto) => goto_stmt(p),
-        Some(TokenKind::Tilde) => label_stmt(p),
-        Some(TokenKind::KwExecute) => execute_stmt(p),
-        Some(TokenKind::KwAddHandler) => add_handler_stmt(p),
-        Some(TokenKind::KwRemoveHandler) => remove_handler_stmt(p),
-        Some(TokenKind::KwVar) => super::items::var_declaration(p),
-        Some(TokenKind::PreRegion) => super::preprocessor_region(p),
-        Some(TokenKind::PreEndRegion) => super::preprocessor_end_region(p),
-        Some(TokenKind::PreIf) => super::preprocessor_if(p),
-        Some(TokenKind::PreDelete) => super::preprocessor_delete(p),
-        Some(TokenKind::PreInsert) => super::preprocessor_insert(p),
-        Some(TokenKind::Ident) => {
+        Some(T![KwGoto]) => goto_stmt(p),
+        Some(T![Tilde]) => label_stmt(p),
+        Some(T![KwExecute]) => execute_stmt(p),
+        Some(T![KwAddHandler]) => add_handler_stmt(p),
+        Some(T![KwRemoveHandler]) => remove_handler_stmt(p),
+        Some(T![KwVar]) => super::items::var_declaration(p),
+        Some(T![PreRegion]) => super::preprocessor_region(p),
+        Some(T![PreEndRegion]) => super::preprocessor_end_region(p),
+        Some(T![PreIf]) => super::preprocessor_if(p),
+        Some(T![PreDelete]) => super::preprocessor_delete(p),
+        Some(T![PreInsert]) => super::preprocessor_insert(p),
+        Some(T![Ident]) => {
             assignment_or_call(p);
         }
         _ => {
@@ -69,7 +69,7 @@ pub fn statement(p: &mut Parser) {
                 let m = p.start();
                 expressions::expression(p);
                 m.complete(p, NodeKind::CallStmt);
-                p.eat(TokenKind::Semicolon);
+                p.eat(T![Semicolon]);
             }
         }
     }
@@ -88,7 +88,7 @@ fn return_stmt(p: &mut Parser) {
         expressions::expression(p);
     }
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::ReturnStmt);
 }
@@ -100,7 +100,7 @@ fn return_stmt(p: &mut Parser) {
 // costs `Исключение`, `КонецПопытки` and `КонецПроцедуры` all three.
 
 fn at_end_do(p: &Parser) -> bool {
-    p.at(TokenKind::KwEndDo)
+    p.at(T![KwEndDo])
 }
 
 // A header waits for the word that ends it as surely as the block waits for
@@ -109,29 +109,29 @@ fn at_end_do(p: &Parser) -> bool {
 // it and then report it missing.
 
 fn at_then(p: &Parser) -> bool {
-    p.at(TokenKind::KwThen)
+    p.at(T![KwThen])
 }
 
 /// The comma between the two operands of a handler statement. It stands at
 /// the statement's own level, where no group is open to speak for it.
 fn at_handler_comma(p: &Parser) -> bool {
-    p.at(TokenKind::Comma)
+    p.at(T![Comma])
 }
 
 fn at_do(p: &Parser) -> bool {
-    p.at(TokenKind::KwDo)
+    p.at(T![KwDo])
 }
 
 fn at_to_or_do(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::KwTo | TokenKind::KwDo))
+    matches!(p.current(), Some(T![KwTo] | T![KwDo]))
 }
 
 fn at_if_closer(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::KwElsIf | TokenKind::KwElse | TokenKind::KwEndIf))
+    matches!(p.current(), Some(T![KwElsIf] | T![KwElse] | T![KwEndIf]))
 }
 
 fn at_try_closer(p: &Parser) -> bool {
-    matches!(p.current(), Some(TokenKind::KwExcept | TokenKind::KwEndTry))
+    matches!(p.current(), Some(T![KwExcept] | T![KwEndTry]))
 }
 
 fn if_stmt(p: &mut Parser) {
@@ -141,31 +141,31 @@ fn if_stmt(p: &mut Parser) {
     p.within_boundary(at_if_closer, |p| {
         p.within_boundary(at_then, expressions::expression);
 
-        p.expect(TokenKind::KwThen);
+        p.expect(T![KwThen]);
 
-        stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
+        stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
 
-        while p.at(TokenKind::KwElsIf) {
+        while p.at(T![KwElsIf]) {
             p.check_iteration_limit();
             let em = p.start();
             p.bump();
             p.within_boundary(at_then, expressions::expression);
-            p.expect(TokenKind::KwThen);
-            stmt_list_inner(p, &[TokenKind::KwElsIf, TokenKind::KwElse, TokenKind::KwEndIf]);
+            p.expect(T![KwThen]);
+            stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
             em.complete(p, NodeKind::ElseIfClause);
         }
 
-        if p.at(TokenKind::KwElse) {
+        if p.at(T![KwElse]) {
             let em = p.start();
             p.bump();
-            stmt_list_inner(p, &[TokenKind::KwEndIf]);
+            stmt_list_inner(p, &[T![KwEndIf]]);
             em.complete(p, NodeKind::ElseClause);
         }
     });
 
-    p.expect(TokenKind::KwEndIf);
+    p.expect(T![KwEndIf]);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::IfStmt);
 }
@@ -177,14 +177,14 @@ fn while_stmt(p: &mut Parser) {
     p.within_boundary(at_end_do, |p| {
         p.within_boundary(at_do, expressions::expression);
 
-        p.expect(TokenKind::KwDo);
+        p.expect(T![KwDo]);
 
-        stmt_list(p, TokenKind::KwEndDo);
+        stmt_list(p, T![KwEndDo]);
     });
 
-    p.expect(TokenKind::KwEndDo);
+    p.expect(T![KwEndDo]);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::WhileStmt);
 }
@@ -193,37 +193,37 @@ fn for_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    if p.at(TokenKind::KwEach) {
+    if p.at(T![KwEach]) {
         p.within_boundary(at_end_do, |p| {
             p.bump();
 
-            if p.at(TokenKind::Ident) {
+            if p.at(T![Ident]) {
                 p.bump();
             }
 
             p.within_boundary(at_do, |p| {
-                p.expect(TokenKind::KwIn);
+                p.expect(T![KwIn]);
 
                 expressions::expression(p);
             });
 
-            p.expect(TokenKind::KwDo);
+            p.expect(T![KwDo]);
 
-            stmt_list(p, TokenKind::KwEndDo);
+            stmt_list(p, T![KwEndDo]);
         });
 
-        p.expect(TokenKind::KwEndDo);
+        p.expect(T![KwEndDo]);
 
-        p.eat(TokenKind::Semicolon);
+        p.eat(T![Semicolon]);
 
         m.complete(p, NodeKind::ForEachStmt);
     } else {
         p.within_boundary(at_end_do, |p| {
-            if p.at(TokenKind::Ident) {
+            if p.at(T![Ident]) {
                 p.bump();
             }
 
-            p.expect(TokenKind::Eq);
+            p.expect(T![Eq]);
 
             // The scope has to outlive the `По` it protects: an expect run
             // outside it would take the `Цикл` the header is still waiting
@@ -235,21 +235,21 @@ fn for_stmt(p: &mut Parser) {
             p.within_boundary(at_to_or_do, |p| {
                 expressions::expression(p);
 
-                p.expect(TokenKind::KwTo);
+                p.expect(T![KwTo]);
             });
 
             p.within_boundary(at_do, |p| {
                 expressions::expression(p);
             });
 
-            p.expect(TokenKind::KwDo);
+            p.expect(T![KwDo]);
 
-            stmt_list(p, TokenKind::KwEndDo);
+            stmt_list(p, T![KwEndDo]);
         });
 
-        p.expect(TokenKind::KwEndDo);
+        p.expect(T![KwEndDo]);
 
-        p.eat(TokenKind::Semicolon);
+        p.eat(T![Semicolon]);
 
         m.complete(p, NodeKind::ForStmt);
     }
@@ -260,18 +260,18 @@ fn try_stmt(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(at_try_closer, |p| {
-        stmt_list(p, TokenKind::KwExcept);
+        stmt_list(p, T![KwExcept]);
 
-        p.expect(TokenKind::KwExcept);
+        p.expect(T![KwExcept]);
 
         let em = p.start();
-        stmt_list(p, TokenKind::KwEndTry);
+        stmt_list(p, T![KwEndTry]);
         em.complete(p, NodeKind::ExceptClause);
     });
 
-    p.expect(TokenKind::KwEndTry);
+    p.expect(T![KwEndTry]);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::TryStmt);
 }
@@ -280,13 +280,13 @@ fn raise_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         parse_raise_call_args(p);
     } else if !at_end_of_statement(p) {
         expressions::expression(p);
     }
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::RaiseStmt);
 }
@@ -294,46 +294,46 @@ fn raise_stmt(p: &mut Parser) {
 /// Whether nothing more of this statement can follow: its own separator, the
 /// end of the input, or a word an enclosing construct is waiting for.
 fn at_end_of_statement(p: &Parser) -> bool {
-    p.at(TokenKind::Semicolon) || p.at_end() || p.at_enclosing_boundary()
+    p.at(T![Semicolon]) || p.at_end() || p.at_enclosing_boundary()
 }
 
 fn parse_raise_call_args(p: &mut Parser) {
-    assert!(p.at(TokenKind::LParen));
+    assert!(p.at(T![LParen]));
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        while !p.at(TokenKind::RParen) && !p.at_end() {
+        while !p.at(T![RParen]) && !p.at_end() {
             p.check_iteration_limit();
 
-            if p.at(TokenKind::Comma) {
-            } else if !p.at(TokenKind::RParen) {
+            if p.at(T![Comma]) {
+            } else if !p.at(T![RParen]) {
                 expressions::expression(p);
             }
 
-            if p.at(TokenKind::Comma) {
+            if p.at(T![Comma]) {
                 p.bump();
-            } else if !p.at(TokenKind::RParen) {
+            } else if !p.at(T![RParen]) {
                 break;
             }
         }
     });
 
-    p.expect(TokenKind::RParen);
+    p.expect(T![RParen]);
 }
 
 fn goto_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    if p.at(TokenKind::Tilde) {
+    if p.at(T![Tilde]) {
         p.bump();
     }
 
-    if p.at(TokenKind::Ident) {
+    if p.at(T![Ident]) {
         p.bump();
     }
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::GotoStmt);
 }
@@ -341,8 +341,8 @@ fn goto_stmt(p: &mut Parser) {
 fn label_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
-    p.expect(TokenKind::Ident);
-    p.expect(TokenKind::Colon);
+    p.expect(T![Ident]);
+    p.expect(T![Colon]);
     m.complete(p, NodeKind::LabelStmt);
 }
 
@@ -352,7 +352,7 @@ fn execute_stmt(p: &mut Parser) {
 
     expressions::expression(p);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::ExecuteStmt);
 }
@@ -364,12 +364,12 @@ fn add_handler_stmt(p: &mut Parser) {
     p.within_boundary(at_handler_comma, |p| {
         expressions::expression(p);
 
-        p.expect(TokenKind::Comma);
+        p.expect(T![Comma]);
     });
 
     expressions::expression(p);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::AddHandlerStmt);
 }
@@ -381,12 +381,12 @@ fn remove_handler_stmt(p: &mut Parser) {
     p.within_boundary(at_handler_comma, |p| {
         expressions::expression(p);
 
-        p.expect(TokenKind::Comma);
+        p.expect(T![Comma]);
     });
 
     expressions::expression(p);
 
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 
     m.complete(p, NodeKind::RemoveHandlerStmt);
 }
@@ -396,13 +396,13 @@ fn assignment_or_call(p: &mut Parser) {
 
     let is_valid_stmt = expressions::postfix_expression_for_assignment(p);
 
-    if p.eat(TokenKind::Eq) {
+    if p.eat(T![Eq]) {
         expressions::expression(p);
         m.complete(p, NodeKind::AssignStmt);
-        p.eat(TokenKind::Semicolon);
+        p.eat(T![Semicolon]);
     } else if is_valid_stmt {
         m.complete(p, NodeKind::CallStmt);
-        p.eat(TokenKind::Semicolon);
+        p.eat(T![Semicolon]);
     } else {
         p.emit_error_at_marker(
             m,
@@ -411,11 +411,11 @@ fn assignment_or_call(p: &mut Parser) {
                 recovery: RecoveryKind::RecoverySpan,
             },
         );
-        p.eat(TokenKind::Semicolon);
+        p.eat(T![Semicolon]);
     }
 }
 
-fn stmt_list_inner(p: &mut Parser, terminators: &[TokenKind]) {
+fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) {
     let m = p.start();
 
     while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) && !p.at_enclosing_boundary() {
