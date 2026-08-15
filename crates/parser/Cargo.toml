@@ -14,4 +14,9 @@ syntax.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 expect-test.workspace = true
+
+[[bench]]
+name = "parse"
+harness = false

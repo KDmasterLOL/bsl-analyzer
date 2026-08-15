@@ -3262,12 +3262,7 @@ fn assert_bare_keyword_clause(clause: &syntax::SyntaxNode, expected_keyword: &st
     let non_trivia_tokens: Vec<(SyntaxKind, String)> = clause
         .children_with_tokens()
         .filter_map(|c| match c {
-            NodeOrToken::Token(t)
-                if !matches!(
-                    t.kind(),
-                    SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-                ) =>
-            {
+            NodeOrToken::Token(t) if !t.kind().is_trivia() => {
                 Some((t.kind(), t.text().to_string()))
             }
             _ => None,
@@ -3829,9 +3824,7 @@ fn test_slice7adn_top_canonical_ru() {
     let token_text: Vec<(SyntaxKind, String)> = top_clauses[0]
         .children_with_tokens()
         .filter_map(|c| c.as_token().map(|t| (t.kind(), t.text().to_string())))
-        .filter(|(k, _)| {
-            !matches!(k, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT,)
-        })
+        .filter(|(k, _)| !k.is_trivia())
         .collect();
     let has_top_keyword = token_text
         .iter()
@@ -4631,4 +4624,87 @@ fn test_well_formed_queries_are_covered_completely() {
     ] {
         assert_accepted(input);
     }
+}
+
+/// Одинокий амперсанд никогда не соседствует с `Ident` вплотную.
+///
+/// На этом стоит правило параметра: имя приходит внутри самого токена, и
+/// отдельного `Ident` за амперсандом грамматика не берёт. Допущение лексерное,
+/// поэтому и проверяется на лексере: смена его правил обязана уронить этот
+/// тест, а не тихо вернуть грамматике съеденное ключевое слово.
+#[test]
+fn a_lone_ampersand_is_never_adjacent_to_an_identifier() {
+    use lexer::sdbl::{tokenize_sdbl, SdblTokenKind};
+
+    let mut seen_lone = false;
+    for source in [
+        "ВЫБРАТЬ &П ИЗ Т",
+        "ВЫБРАТЬ & П ИЗ Т",
+        "ВЫБРАТЬ &\nП ИЗ Т",
+        "ВЫБРАТЬ &&П ИЗ Т",
+        "ВЫБРАТЬ &1 ИЗ Т",
+        "ВЫБРАТЬ & ИЗ Т",
+        "ВЫБРАТЬ &_П ИЗ Т",
+    ] {
+        let tokens = tokenize_sdbl(source);
+        for (i, token) in tokens.iter().enumerate() {
+            if token.kind != SdblTokenKind::Ampersand {
+                continue;
+            }
+            seen_lone = true;
+            assert_ne!(
+                tokens.get(i + 1).map(|next| next.kind),
+                Some(SdblTokenKind::Ident),
+                "в {source:?} за одиноким амперсандом встал Ident вплотную"
+            );
+        }
+    }
+
+    assert!(seen_lone, "корпус не дал ни одного одинокого амперсанда: правило не проверено");
+}
+
+/// Узел параметра состоит ровно из одного токена, где бы он ни разобрался.
+///
+/// Имя приходит внутри самого токена, поэтому любое правило, дозволившее себе
+/// взять `Ident` следом, отбирает у запроса следующее слово: у псевдонима —
+/// `КАК`, у соединения — `ПО`. Правил, разбирающих параметр, несколько, и
+/// проверять их поимённо значит пропустить следующее; свойство держит разряд
+/// целиком.
+#[test]
+fn a_parameter_node_never_holds_more_than_its_own_token() {
+    use syntax::SyntaxKind;
+
+    let mut seen = 0;
+    for source in [
+        "ВЫБРАТЬ * ИЗ &ТЗ КАК Т",
+        "SELECT * FROM &Tmp AS T",
+        "ВЫБРАТЬ * ИЗ & Т",
+        "ВЫБРАТЬ * ИЗ &\nГДЕ 1 = 1",
+        "ВЫБРАТЬ А ИЗ Т ЛЕВОЕ СОЕДИНЕНИЕ &\nПО Т.А = 1",
+        "ВЫБРАТЬ * ИЗ Т ГДЕ Т.А = &П И Т.Б = 1",
+        "ВЫБРАТЬ * ИЗ Т ГДЕ Т.А = &\nИ Т.Б = 1",
+        "ВЫБРАТЬ &П КАК Поле ИЗ Т",
+    ] {
+        for node in parse_sdbl(source)
+            .syntax_node()
+            .descendants()
+            .filter(|n| n.kind() == SyntaxKind::SDBL_PARAMETER)
+        {
+            seen += 1;
+            let tokens: Vec<_> = node
+                .children_with_tokens()
+                .filter_map(|c| c.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .map(|t| (t.kind(), t.text().to_string()))
+                .collect();
+            assert_eq!(tokens.len(), 1, "в {source:?} узел параметра забрал лишнее: {tokens:?}");
+            assert_eq!(
+                tokens[0].0,
+                SyntaxKind::AMPERSAND,
+                "в {source:?} параметр не из амперсанда"
+            );
+        }
+    }
+
+    assert!(seen >= 8, "корпус дал всего {seen} параметров: часть правил не пройдена");
 }

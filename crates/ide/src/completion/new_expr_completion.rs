@@ -81,7 +81,7 @@ fn is_after_new_keyword(anchor: &SyntaxToken) -> bool {
     };
     while let Some(t) = cur.clone() {
         match t.kind() {
-            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT => {
+            kind if kind.is_trivia() => {
                 cur = syntax::prev_token_past_empty(&t);
             }
             SyntaxKind::KW_NEW => return true,

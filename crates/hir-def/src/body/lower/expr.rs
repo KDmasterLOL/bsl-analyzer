@@ -944,7 +944,7 @@ fn is_trivia_element(element: &syntax::NodeOrToken<SyntaxNode, syntax::SyntaxTok
         element,
         syntax::NodeOrToken::Token(t) if matches!(
             t.kind(),
-            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            kind if kind.is_trivia()
         )
     )
 }

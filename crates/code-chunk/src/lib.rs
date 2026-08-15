@@ -192,12 +192,7 @@ fn annotation_text(ann: &Annotation) -> Option<String> {
 
 fn has_meaningful_content(text: &str) -> bool {
     let tokens = lexer::tokenize(text);
-    tokens.iter().any(|t| {
-        !matches!(
-            t.kind,
-            lexer::TokenKind::Whitespace | lexer::TokenKind::Newline | lexer::TokenKind::Comment
-        )
-    })
+    tokens.iter().any(|t| !t.kind.is_trivia())
 }
 
 struct LineIndex {

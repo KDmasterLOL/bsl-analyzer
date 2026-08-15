@@ -145,11 +145,7 @@ fn process_code_tokens(
         if let Some(token) = element.into_token() {
             let kind = token.kind();
 
-            if kind == SyntaxKind::WHITESPACE || kind == SyntaxKind::NEWLINE {
-                continue;
-            }
-
-            if kind == SyntaxKind::COMMENT {
+            if kind.is_trivia() {
                 continue;
             }
 
@@ -585,6 +581,33 @@ mod tests {
               message: Длина строки 177 превышает максимальную 120
               severity: Information"#]]
         .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// BOM не делает первую строку несущей код.
+    ///
+    /// Замер длины пропускает тривию, и BOM обязан идти с нею: место,
+    /// считающее его значимым токеном, метит первую строку как строку с
+    /// кодом, а при включённом исключении хвостовых комментариев комментарий
+    /// на такой строке из замера выпадает — и находка пропадает целиком.
+    ///
+    /// Вход подобран так, чтобы разница была ВИДНА: длинный комментарий стоит
+    /// первой строкой, потому что только там BOM ему соседствует.
+    #[test]
+    fn a_byte_order_mark_does_not_make_the_first_line_code() {
+        let long_comment = format!("// {}", "о".repeat(150));
+        let code = format!("{long_comment}\nПроцедура Тест()\nКонецПроцедуры\n");
+
+        let mut config = DiagnosticsConfig::default();
+        config.parameters.insert(
+            DiagnosticCode::LineLength,
+            serde_json::json!({"excludeTrailingComments": true}),
+        );
+
+        let without = check_ast_diagnostic_with_config(&code, config.clone(), check);
+        assert_eq!(without.len(), 1, "вход обязан давать находку, иначе сверка пуста");
+
+        let with_bom = check_ast_diagnostic_with_config(&format!("\u{feff}{code}"), config, check);
+        assert_eq!(with_bom.len(), without.len(), "BOM отменил находку о длине строки");
     }
 
     #[test]

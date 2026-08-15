@@ -243,3 +243,30 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Error => SK::ERROR,
     }
 }
+
+#[cfg(test)]
+mod trivia_agreement_tests {
+    use super::token_kind_to_syntax;
+    use lexer::TokenKind;
+
+    /// Два канонических предиката тривии согласны на КАЖДОМ виде.
+    ///
+    /// Слоёв два, и предикат каждого живёт у себя: вид лексемы принадлежит
+    /// лексеру, вид узла — дереву. Наводить один на другой нельзя, а
+    /// разойтись они могут молча — отображение видов правится отдельно от
+    /// обоих.
+    ///
+    /// Перебор, а не выборка: проверка на трёх видах зелена и у таблицы,
+    /// разошедшейся на четвёртом. Полноту перебора держит
+    /// `TokenKind::ALL` со своим тестом.
+    #[test]
+    fn both_layers_agree_on_what_trivia_is() {
+        for kind in TokenKind::ALL {
+            assert_eq!(
+                kind.is_trivia(),
+                token_kind_to_syntax(*kind).is_trivia(),
+                "{kind:?}: лексер и дерево разошлись в том, тривия ли это"
+            );
+        }
+    }
+}

@@ -2965,6 +2965,7 @@ dependencies = [
 name = "parser"
 version = "0.2.67"
 dependencies = [
+ "criterion",
  "expect-test",
  "lexer",
  "parser-error",

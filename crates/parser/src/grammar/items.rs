@@ -1,5 +1,3 @@
-use lexer::TokenKind;
-
 use crate::event::NodeKind;
 use crate::parser::Parser;
 
@@ -15,9 +13,7 @@ pub fn annotation(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.skip_trivia();
-
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         annotation_params(p);
     }
 
@@ -29,20 +25,16 @@ fn annotation_params(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
-
-        if !p.at(TokenKind::RParen) {
+        if !p.at(T![RParen]) {
             annotation_param(p);
-            while p.eat(TokenKind::Comma) {
+            while p.eat(T![Comma]) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 annotation_param(p);
             }
         }
     });
 
-    p.skip_trivia();
-    p.expect(TokenKind::RParen);
+    p.expect(T![RParen]);
 
     m.complete(p, NodeKind::AnnotationParams);
 }
@@ -50,13 +42,9 @@ fn annotation_params(p: &mut Parser) {
 fn annotation_param(p: &mut Parser) {
     let m = p.start();
 
-    p.skip_trivia();
-
-    if p.at(TokenKind::Ident) {
+    if p.at(T![Ident]) {
         p.bump();
-        p.skip_trivia();
-        if p.eat(TokenKind::Eq) {
-            p.skip_trivia();
+        if p.eat(T![Eq]) {
             annotation_param_value(p);
         }
     } else {
@@ -68,34 +56,33 @@ fn annotation_param(p: &mut Parser) {
 
 fn annotation_param_value(p: &mut Parser) {
     match p.current() {
-        Some(TokenKind::Decimal)
-        | Some(TokenKind::Float)
-        | Some(TokenKind::String)
-        | Some(TokenKind::Date)
-        | Some(TokenKind::KwTrue)
-        | Some(TokenKind::KwFalse)
-        | Some(TokenKind::KwUndefined)
-        | Some(TokenKind::KwNull) => {
+        Some(T![Decimal])
+        | Some(T![Float])
+        | Some(T![String])
+        | Some(T![Date])
+        | Some(T![KwTrue])
+        | Some(T![KwFalse])
+        | Some(T![KwUndefined])
+        | Some(T![KwNull]) => {
             p.bump();
         }
-        Some(TokenKind::Minus) | Some(TokenKind::Plus) => {
+        Some(T![Minus]) | Some(T![Plus]) => {
             p.bump();
-            p.skip_trivia();
-            if p.at(TokenKind::Decimal) || p.at(TokenKind::Float) {
+            if p.at(T![Decimal]) || p.at(T![Float]) {
                 p.bump();
             }
         }
         Some(
-            TokenKind::AnnAtClient
-            | TokenKind::AnnAtServer
-            | TokenKind::AnnAtServerNoContext
-            | TokenKind::AnnAtClientAtServer
-            | TokenKind::AnnAtClientAtServerNoContext
-            | TokenKind::AnnBefore
-            | TokenKind::AnnAfter
-            | TokenKind::AnnAround
-            | TokenKind::AnnChangeAndValidate
-            | TokenKind::AnnCustom,
+            T![AnnAtClient]
+            | T![AnnAtServer]
+            | T![AnnAtServerNoContext]
+            | T![AnnAtClientAtServer]
+            | T![AnnAtClientAtServerNoContext]
+            | T![AnnBefore]
+            | T![AnnAfter]
+            | T![AnnAround]
+            | T![AnnChangeAndValidate]
+            | T![AnnCustom],
         ) => {
             annotation(p);
         }
@@ -116,45 +103,33 @@ pub fn procedure_def(p: &mut Parser) {
 // definition instead of consuming it and reporting it missing at end of file.
 
 fn at_end_procedure(p: &Parser) -> bool {
-    p.at(TokenKind::KwEndProcedure)
+    p.at(T![KwEndProcedure])
 }
 
 fn at_end_function(p: &Parser) -> bool {
-    p.at(TokenKind::KwEndFunction)
+    p.at(T![KwEndFunction])
 }
 
 pub fn procedure_def_content(p: &mut Parser) {
-    p.skip_trivia();
+    p.eat(T![KwAsync]);
 
-    p.eat(TokenKind::KwAsync);
-
-    p.skip_trivia();
-    p.expect(TokenKind::KwProcedure);
+    p.expect(T![KwProcedure]);
 
     p.within_boundary(at_end_procedure, |p| {
-        p.skip_trivia();
-
-        if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
+        if p.at(T![Ident]) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
 
-        p.skip_trivia();
-
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             param_list(p);
         }
 
-        p.skip_trivia();
+        p.eat(T![KwExport]);
 
-        p.eat(TokenKind::KwExport);
-
-        p.skip_trivia();
-
-        statements::stmt_list(p, TokenKind::KwEndProcedure);
+        statements::stmt_list(p, T![KwEndProcedure]);
     });
 
-    p.skip_trivia();
-    p.expect(TokenKind::KwEndProcedure);
+    p.expect(T![KwEndProcedure]);
 }
 
 pub fn function_def(p: &mut Parser) {
@@ -164,37 +139,25 @@ pub fn function_def(p: &mut Parser) {
 }
 
 pub fn function_def_content(p: &mut Parser) {
-    p.skip_trivia();
+    p.eat(T![KwAsync]);
 
-    p.eat(TokenKind::KwAsync);
-
-    p.skip_trivia();
-    p.expect(TokenKind::KwFunction);
+    p.expect(T![KwFunction]);
 
     p.within_boundary(at_end_function, |p| {
-        p.skip_trivia();
-
-        if p.at(TokenKind::Ident) || p.current().is_some_and(|k| k.is_keyword()) {
+        if p.at(T![Ident]) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
 
-        p.skip_trivia();
-
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             param_list(p);
         }
 
-        p.skip_trivia();
+        p.eat(T![KwExport]);
 
-        p.eat(TokenKind::KwExport);
-
-        p.skip_trivia();
-
-        statements::stmt_list(p, TokenKind::KwEndFunction);
+        statements::stmt_list(p, T![KwEndFunction]);
     });
 
-    p.skip_trivia();
-    p.expect(TokenKind::KwEndFunction);
+    p.expect(T![KwEndFunction]);
 }
 
 fn param_list(p: &mut Parser) {
@@ -202,20 +165,16 @@ fn param_list(p: &mut Parser) {
     p.bump();
 
     p.within_boundary(super::at_paren_list_punctuation, |p| {
-        p.skip_trivia();
-
-        if !p.at(TokenKind::RParen) {
+        if !p.at(T![RParen]) {
             param(p);
-            while p.eat(TokenKind::Comma) {
+            while p.eat(T![Comma]) {
                 p.check_iteration_limit();
-                p.skip_trivia();
                 param(p);
             }
         }
     });
 
-    p.skip_trivia();
-    p.expect(TokenKind::RParen);
+    p.expect(T![RParen]);
 
     m.complete(p, NodeKind::ParamList);
 }
@@ -223,20 +182,13 @@ fn param_list(p: &mut Parser) {
 fn param(p: &mut Parser) {
     let m = p.start();
 
-    p.skip_trivia();
+    p.eat(T![KwVal]);
 
-    p.eat(TokenKind::KwVal);
-
-    p.skip_trivia();
-
-    if p.at(TokenKind::Ident) {
+    if p.at(T![Ident]) {
         p.bump();
     }
 
-    p.skip_trivia();
-
-    if p.eat(TokenKind::Eq) {
-        p.skip_trivia();
+    if p.eat(T![Eq]) {
         super::expressions::expression(p);
     }
 
@@ -252,24 +204,18 @@ pub fn var_declaration(p: &mut Parser) {
 pub fn var_declaration_content(p: &mut Parser) {
     p.bump();
 
-    p.skip_trivia();
-
-    if p.at(TokenKind::Ident) {
+    if p.at(T![Ident]) {
         p.bump();
     }
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
-        p.skip_trivia();
-        if p.at(TokenKind::Ident) {
+        if p.at(T![Ident]) {
             p.bump();
         }
     }
 
-    p.skip_trivia();
+    p.eat(T![KwExport]);
 
-    p.eat(TokenKind::KwExport);
-
-    p.skip_trivia();
-    p.eat(TokenKind::Semicolon);
+    p.eat(T![Semicolon]);
 }
