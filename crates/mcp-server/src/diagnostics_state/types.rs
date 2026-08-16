@@ -51,6 +51,9 @@ pub(crate) struct Freshness {
     pub revision: u64,
     pub stale: bool,
     pub reload: &'static str,
+    /// Topology hash of the snapshot the answer was computed over, so a consumer can
+    /// tell an answer from before an extension appeared from one after.
+    pub topology: u64,
 }
 
 /// A snapshot of the resident lifecycle for the `status` action and the enriched

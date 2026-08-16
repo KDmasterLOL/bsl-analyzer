@@ -1005,12 +1005,12 @@ mod tests {
         let snap = graph.snapshot().expect("ready graph snapshots an opened handle");
         let gdb = &snap.graph;
 
-        let overview = gdb.overview(10).expect("overview");
+        let overview = gdb.overview(10, None).expect("overview");
         assert_eq!(overview.edges, 1, "Клиент.Главная → Сервер.Считать is one resolved edge");
         assert_eq!(overview.client_to_server_edges, 1);
 
         let node = gdb
-            .node("method/common/Сервер/Считать", ide::GraphDetail::Names)
+            .node("method/common/Сервер/Считать", ide::GraphDetail::Names, None)
             .expect("query")
             .expect("durable id resolves from the on-disk graph");
         assert_eq!(node.node.name, "Считать");
@@ -1019,15 +1019,18 @@ mod tests {
 
         // Callers traversal reaches the client method via the resolved edge.
         let callers = gdb
-            .neighbors(&ide::NeighborsParams {
-                id: "method/common/Сервер/Считать",
-                dir: ide::Direction::In,
-                depth: 1,
-                max_nodes: 50,
-                detail: ide::GraphDetail::Names,
-                provenance_filter: Vec::new(),
-                edge_kind_filter: Vec::new(),
-            })
+            .neighbors(
+                &ide::NeighborsParams {
+                    id: "method/common/Сервер/Считать",
+                    dir: ide::Direction::In,
+                    depth: 1,
+                    max_nodes: 50,
+                    detail: ide::GraphDetail::Names,
+                    provenance_filter: Vec::new(),
+                    edge_kind_filter: Vec::new(),
+                },
+                None,
+            )
             .expect("query")
             .expect("neighbors resolve");
         assert!(callers.nodes.iter().any(|n| n.id == "method/common/Клиент/Главная"));
@@ -1769,7 +1772,7 @@ mod tests {
         };
 
         // Unfiltered: both the call to Бета.ШагБ and the query_ref to Номенклатура.
-        let all = gdb.neighbors(&mk(Vec::new())).unwrap().unwrap();
+        let all = gdb.neighbors(&mk(Vec::new()), None).unwrap().unwrap();
         let all_kinds: Vec<&str> = all.edges.iter().map(|e| e.kind).collect();
         assert!(all_kinds.contains(&"call"), "kinds: {all_kinds:?}");
         assert!(all_kinds.contains(&"query_ref"), "kinds: {all_kinds:?}");
@@ -1785,28 +1788,290 @@ mod tests {
 
         // dir=both surfaces directional fan-out: 2 callees, 0 callers of ШагА.
         let both = gdb
-            .neighbors(&ide::NeighborsParams {
-                id: "method/common/Альфа/ШагА",
-                dir: ide::Direction::Both,
-                depth: 1,
-                max_nodes: 50,
-                detail: ide::GraphDetail::Names,
-                provenance_filter: Vec::new(),
-                edge_kind_filter: Vec::new(),
-            })
+            .neighbors(
+                &ide::NeighborsParams {
+                    id: "method/common/Альфа/ШагА",
+                    dir: ide::Direction::Both,
+                    depth: 1,
+                    max_nodes: 50,
+                    detail: ide::GraphDetail::Names,
+                    provenance_filter: Vec::new(),
+                    edge_kind_filter: Vec::new(),
+                },
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(both.out_total, Some(2), "both: callees counted");
         assert_eq!(both.in_total, Some(0), "both: no callers of ШагА");
 
         // edge_kinds=["query_ref"] keeps only the query_ref edge.
-        let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()])).unwrap().unwrap();
+        let qr = gdb.neighbors(&mk(vec!["query_ref".to_owned()]), None).unwrap().unwrap();
         assert!(!qr.edges.is_empty(), "query_ref edge present");
         assert!(qr.edges.iter().all(|e| e.kind == "query_ref"), "edges: {:?}", qr.edges);
     }
 
     /// `node(detail=bodies)` caps its source output at `max_output_tokens`: a tiny budget
     /// truncates the body and flags `budget_exhausted`, a generous budget leaves it whole.
+    /// Every node a tool serves says WHERE it is, or why it cannot — silence would read as
+    /// "this thing has no place", which is false for a method and true for a metadata object.
+    /// The three actions are checked separately because each has its own path to `node_ref`,
+    /// and covering only `node` is how `overview` would ship without a location at all.
+    #[test]
+    fn served_nodes_carry_a_location_or_a_machine_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+
+        let id = "method/common/Сервер/Считать";
+        let node = gdb
+            .node(id, ide::GraphDetail::Names, Some(&roots))
+            .unwrap()
+            .expect("the method resolves")
+            .node;
+        let location = node.location.as_ref().expect("a method has a place");
+        assert_eq!(location["root_id"], "");
+        assert!(
+            location["path"].as_str().unwrap().ends_with("CommonModules/Сервер/Ext/Module.bsl"),
+            "{location}",
+        );
+        // The name range must be the NAME: the row stores where the header ends, and
+        // publishing that would put the parameter list inside the field.
+        assert_eq!(location["range"]["start_line"], location["range"]["end_line"]);
+        assert!(location["enclosing_range"]["end_line"].as_u64().unwrap() >= 1);
+
+        // Without the root table there is no pair — the node says so instead of going quiet.
+        let rootless =
+            gdb.node(id, ide::GraphDetail::Names, None).unwrap().expect("the method resolves").node;
+        assert!(rootless.location.is_none());
+        assert_eq!(rootless.location_unavailable, Some("roots_unavailable"));
+
+        // `overview` reaches `node_ref` by its own path; a fix applied only to `node` and
+        // `neighbors` leaves its methods with neither key, and this is what catches it.
+        let overview = gdb.overview(10, Some(&roots)).expect("overview");
+        let served: Vec<_> = overview
+            .top_by_centrality
+            .iter()
+            .filter(|n| matches!(n.kind, "method" | "module"))
+            .collect();
+        assert!(!served.is_empty(), "the fixture has methods in the centrality list");
+        for node in served {
+            assert!(
+                node.location.is_some() ^ node.location_unavailable.is_some(),
+                "exactly one of the two keys, got {node:?}",
+            );
+            assert!(node.location.is_some(), "with a root table it must be the location");
+        }
+    }
+
+    /// Offsets live in the artefact, text lives on disk, and between a build and its
+    /// catch-up reload they disagree. An offset that stayed inside the file still points at
+    /// the wrong bytes, so a range built from it is plausible and wrong — the worst kind for
+    /// a consumer that cuts text with it. The name is verifiable by slicing, and it gates
+    /// BOTH ranges; the pair itself stays, because the file is still that file.
+    #[test]
+    fn a_drifted_file_loses_its_ranges_but_keeps_its_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let id = "method/common/Сервер/Считать";
+
+        // Control: before the drift the node has both ranges.
+        let before =
+            gdb.node(id, ide::GraphDetail::Names, Some(&roots)).unwrap().expect("resolves").node;
+        let before = before.location.expect("a method has a place");
+        assert!(before.get("range").is_some(), "{before}");
+        assert!(before.get("enclosing_range").is_some(), "{before}");
+
+        // Insert a line ABOVE the method: every stored offset now points that much earlier.
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        let text = fs::read_to_string(&module).unwrap();
+        fs::write(&module, format!("// шапка\n{text}")).unwrap();
+
+        let after = GraphDb::open(&out)
+            .expect("graph database opens")
+            .node(id, ide::GraphDetail::Names, Some(&roots))
+            .unwrap()
+            .expect("resolves")
+            .node;
+        let after = after.location.expect("the pair survives: it is still that file");
+        assert_eq!(after["path"], before["path"]);
+        assert!(
+            after.get("range").is_none() && after.get("enclosing_range").is_none(),
+            "an unverifiable place is published as the file alone: {after}",
+        );
+    }
+
+    /// An edit INSIDE the body leaves the declared name exactly where it was, so the name
+    /// check passes and cannot notice anything — yet the stored end offset now lands in the
+    /// middle of the new text. The end of a declaration is a keyword, so that is what the
+    /// stored end is required to land on; without it the answer carries a range that cuts
+    /// the wrong bytes.
+    #[test]
+    fn a_body_edit_drops_the_enclosing_range_while_the_name_survives() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let id = "method/common/Сервер/Считать";
+
+        // Grow the BODY: the name keeps its offset, the closing keyword does not.
+        let module = root.join("CommonModules/Сервер/Ext/Module.bsl");
+        fs::write(
+            &module,
+            "&НаСервере\nФункция Считать() Экспорт\n\tА = 1;\n\tВозврат А;\nКонецФункции\n",
+        )
+        .unwrap();
+
+        let node = GraphDb::open(&out)
+            .expect("graph database opens")
+            .node(id, ide::GraphDetail::Names, Some(&roots))
+            .unwrap()
+            .expect("resolves")
+            .node;
+        let location = node.location.expect("the pair survives");
+
+        assert!(
+            location.get("range").is_some(),
+            "the name is where it was, so its range is still true: {location}",
+        );
+        assert!(
+            location.get("enclosing_range").is_none(),
+            "the stored end no longer lands on the closing keyword: {location}",
+        );
+    }
+
+    /// A projection reads a node's file only where the bytes are actually used, and the
+    /// answers that cannot use them must not pay for a read.
+    ///
+    /// The two shapes that cannot: `usages` walks its callers with NO root table (so no place
+    /// can be built) at `names` (so no signature and no body are asked for), and a `module`
+    /// row carries no offsets (so it gets the pair alone) while being projected at `bodies`,
+    /// which is what `overview` does for every module it lists.
+    ///
+    /// A wasted read is invisible in the answer — same JSON either way — so this measures the
+    /// read itself: every module file is replaced by a FIFO, whose open blocks until someone
+    /// writes. A projection that reads returns nothing within the timeout; one that does not
+    /// answers at once. That also makes the check sensitive in the only direction that
+    /// matters: it fails when a read comes back, and passes only when none does.
+    #[cfg(unix)]
+    #[test]
+    fn a_projection_that_cannot_use_a_file_does_not_open_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (_db, files) = load_workspace_db(root).expect("workspace loads");
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let project = crate::project::at(root).expect("the fixture is a project");
+        let (roots, _rejected) = crate::project::workspace_roots(&project);
+
+        // Everything the graph knows about is read from the database from here on; the
+        // sources exist only as a trap.
+        for module in ["Клиент", "Сервер"] {
+            let path = root.join(format!("CommonModules/{module}/Ext/Module.bsl"));
+            fs::remove_file(&path).unwrap();
+            let made = std::process::Command::new("mkfifo")
+                .arg(&path)
+                .status()
+                .expect("mkfifo runs on this platform");
+            assert!(made.success(), "a FIFO stands in for {module}'s module");
+        }
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out_in_thread = out.clone();
+        std::thread::spawn(move || {
+            let gdb = GraphDb::open(&out_in_thread).expect("graph database opens");
+            // The callers of a method, summarized for `symbol_info`: no root table, `names`.
+            let usages = gdb
+                .usages("method/common/Сервер/Считать", 5)
+                .expect("usages reads the database")
+                .expect("the method is in the graph");
+            // A module projected at `bodies` — the shape `overview` takes for every module.
+            let module = gdb
+                .node("module/common/Сервер", ide::GraphDetail::Bodies, Some(&roots))
+                .expect("node reads the database")
+                .expect("the module resolves")
+                .node;
+            let _ = tx.send((usages.count, module.location.is_some(), module.source.is_none()));
+        });
+
+        let (callers, module_placed, module_without_source) = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("no projection here can use the bytes, so none may block on reading them");
+        assert_eq!(callers, 1, "the fixture has exactly one caller of Считать");
+        assert!(module_placed, "the pair costs no I/O and is served without it");
+        assert!(module_without_source, "a module row has no offsets to cut a body with");
+    }
+
     #[test]
     fn node_bodies_respect_output_budget() {
         let dir = tempfile::tempdir().unwrap();
@@ -1832,13 +2097,18 @@ mod tests {
 
         let id = "method/common/Сервер/Считать";
         // Tiny budget (1 token ≈ 4 chars) truncates the body and flags exhaustion.
-        let tight = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 1);
+        let (tight, tight_completeness) =
+            crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 1, None);
         assert_eq!(tight["budget_exhausted"], serde_json::json!(true));
         assert!(tight["node"]["source"].as_str().unwrap().len() <= 4, "{tight:?}");
+        // The same fact reaches the envelope as a machine reason, not only as the flag.
+        assert_eq!(tight_completeness.to_value()["reasons"][0]["code"], "output_budget");
         // A generous budget keeps the whole body and sets no exhaustion flag.
-        let loose = crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 10_000);
+        let (loose, loose_completeness) =
+            crate::tools::graph::node(&gdb, id, ide::GraphDetail::Bodies, 10_000, None);
         assert!(loose.get("budget_exhausted").is_none(), "{loose:?}");
         assert!(loose["node"]["source"].as_str().unwrap().contains("Считать"), "{loose:?}");
+        assert_eq!(loose_completeness.to_value()["status"], "complete");
     }
 
     /// A common module with no module-level edge has no stored `module` row, yet
@@ -1879,8 +2149,10 @@ mod tests {
         assert_eq!(stored_module_rows, 0, "module has no stored row");
 
         // ...yet node(module/common/Сервер) resolves on demand and lists its members.
-        let resolved =
-            gdb.node("module/common/Сервер", ide::GraphDetail::Names).unwrap().expect("resolves");
+        let resolved = gdb
+            .node("module/common/Сервер", ide::GraphDetail::Names, None)
+            .unwrap()
+            .expect("resolves");
         assert_eq!(resolved.node.kind, "module");
         let methods = resolved.node.methods.expect("module node carries its methods");
         assert!(
@@ -1889,7 +2161,7 @@ mod tests {
         );
 
         // A module with no methods cannot be synthesized → not_found.
-        let missing = gdb.node("module/common/НетТакого", ide::GraphDetail::Names).unwrap();
+        let missing = gdb.node("module/common/НетТакого", ide::GraphDetail::Names, None).unwrap();
         assert!(missing.is_err(), "module with no members is not_found");
     }
 
@@ -2004,7 +2276,7 @@ mod tests {
         let mem_overview =
             serde_json::to_value(analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10))
                 .unwrap();
-        let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
+        let sql_overview = serde_json::to_value(gdb.overview(10, None).unwrap()).unwrap();
         assert_eq!(mem_overview, sql_overview, "overview JSON");
 
         let mem_node = serde_json::to_value(
@@ -2014,7 +2286,8 @@ mod tests {
         )
         .unwrap();
         let sql_node =
-            serde_json::to_value(gdb.node(id, ide::GraphDetail::Bodies).unwrap().unwrap()).unwrap();
+            serde_json::to_value(gdb.node(id, ide::GraphDetail::Bodies, None).unwrap().unwrap())
+                .unwrap();
         assert_eq!(mem_node, sql_node, "node JSON (bodies detail)");
 
         let params = ide::NeighborsParams {
@@ -2030,7 +2303,7 @@ mod tests {
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
         )
         .unwrap();
-        let sql_nb = serde_json::to_value(gdb.neighbors(&params).unwrap().unwrap()).unwrap();
+        let sql_nb = serde_json::to_value(gdb.neighbors(&params, None).unwrap().unwrap()).unwrap();
         assert_eq!(mem_nb, sql_nb, "neighbors JSON");
 
         let ids = [id.to_string()];
@@ -2041,7 +2314,7 @@ mod tests {
         assert_eq!(mem_src, sql_src, "source JSON");
 
         // A malformed/unknown id reports NotFound, not an infra error.
-        let missing = gdb.node("method/common/Нет/Метод", ide::GraphDetail::Names).unwrap();
+        let missing = gdb.node("method/common/Нет/Метод", ide::GraphDetail::Names, None).unwrap();
         assert!(missing.is_err(), "unknown id resolves to a GraphError");
     }
 
@@ -2334,7 +2607,7 @@ mod tests {
         let mem_overview =
             serde_json::to_value(analysis.graph_overview(GRAPH_SOURCE_ROOT, Some(root), 10))
                 .unwrap();
-        let sql_overview = serde_json::to_value(gdb.overview(10).unwrap()).unwrap();
+        let sql_overview = serde_json::to_value(gdb.overview(10, None).unwrap()).unwrap();
         assert_eq!(mem_overview, sql_overview, "overview JSON from a multi-module batch");
         // The module count is the true distinct-module population (both common modules
         // own methods), not just the module nodes that happen to be edge endpoints.
@@ -2376,7 +2649,7 @@ mod tests {
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
         )
         .unwrap();
-        let sql_nb = serde_json::to_value(gdb.neighbors(&params).unwrap().unwrap()).unwrap();
+        let sql_nb = serde_json::to_value(gdb.neighbors(&params, None).unwrap().unwrap()).unwrap();
         assert_eq!(mem_nb, sql_nb, "Mdo neighbours from a multi-module batch");
     }
 
@@ -2429,7 +2702,7 @@ mod tests {
             edge_kind_filter: Vec::new(),
         };
         let mem = analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap();
-        let sql = gdb.neighbors(&params).unwrap().unwrap();
+        let sql = gdb.neighbors(&params, None).unwrap().unwrap();
 
         assert_eq!(mem.total, 3, "all three tied callers counted");
         assert_eq!(mem.nodes.len(), 1);
@@ -2488,7 +2761,7 @@ mod tests {
         let gdb = GraphDb::open(&out).expect("opens");
 
         let canonical = gdb
-            .overview(50)
+            .overview(50, None)
             .unwrap()
             .top_by_centrality
             .iter()
@@ -2503,7 +2776,7 @@ mod tests {
             ["mdo/Catalog/НОМЕНКЛАТУРА", "mdo/catalog/номенклатура", "mdo/Справочник/Номенклатура"]
         {
             let r = gdb
-                .node(variant, ide::GraphDetail::Names)
+                .node(variant, ide::GraphDetail::Names, None)
                 .unwrap()
                 .unwrap_or_else(|e| panic!("{variant} should resolve, got {e:?}"));
             assert_eq!(r.node.id, canonical, "{variant} resolves to the canonical node");
@@ -2513,7 +2786,7 @@ mod tests {
         for garbage in ["garbage", "mdo/NoSuchType/X", "method/file/x"] {
             assert!(
                 matches!(
-                    gdb.node(garbage, ide::GraphDetail::Names).unwrap(),
+                    gdb.node(garbage, ide::GraphDetail::Names, None).unwrap(),
                     Err(ide::GraphError::BadId { .. })
                 ),
                 "{garbage} must be BadId"
@@ -2521,7 +2794,7 @@ mod tests {
         }
         // Well-formed but absent → NotFound.
         assert!(matches!(
-            gdb.node("method/common/Нет/М", ide::GraphDetail::Names).unwrap(),
+            gdb.node("method/common/Нет/М", ide::GraphDetail::Names, None).unwrap(),
             Err(ide::GraphError::NotFound { .. })
         ));
     }
@@ -3090,13 +3363,13 @@ mod tests {
         );
 
         let gdb = GraphDb::open(&out).expect("graph database opens");
-        let overview = gdb.overview(10).unwrap();
+        let overview = gdb.overview(10, None).unwrap();
         assert_eq!(overview.forms, 1);
         assert_eq!(overview.form_items, 2);
 
         // Form node resolves with a localized type segment and mixed casing.
         let node = gdb
-            .node("form/Справочник/номенклатура/ФОРМАЭЛЕМЕНТА", ide::GraphDetail::Names)
+            .node("form/Справочник/номенклатура/ФОРМАЭЛЕМЕНТА", ide::GraphDetail::Names, None)
             .unwrap()
             .expect("form node resolves case-insensitively");
         assert_eq!(node.node.id, "form/Catalog/Номенклатура/ФормаЭлемента");
@@ -3236,10 +3509,14 @@ mod tests {
         );
 
         let gdb = GraphDb::open(&out).expect("graph database opens");
-        assert_eq!(gdb.overview(10).unwrap().form_attributes, 2);
+        assert_eq!(gdb.overview(10, None).unwrap().form_attributes, 2);
         // A form attribute resolves with a localized type segment and mixed casing.
         let node = gdb
-            .node("form_attr/Справочник/номенклатура/ФормаЭлемента/объект", ide::GraphDetail::Names)
+            .node(
+                "form_attr/Справочник/номенклатура/ФормаЭлемента/объект",
+                ide::GraphDetail::Names,
+                None,
+            )
             .unwrap()
             .expect("form attribute resolves case-insensitively");
         assert_eq!(node.node.id, "form_attr/Catalog/Номенклатура/ФормаЭлемента/Объект");
@@ -3248,15 +3525,18 @@ mod tests {
         // Served edges out of the form carry the `contains` kind (not mislabelled
         // `call`), and reach both UI items and form attributes.
         let neighbors = gdb
-            .neighbors(&ide::NeighborsParams {
-                id: form,
-                dir: ide::Direction::Out,
-                depth: 1,
-                max_nodes: 50,
-                detail: ide::GraphDetail::Names,
-                provenance_filter: Vec::new(),
-                edge_kind_filter: Vec::new(),
-            })
+            .neighbors(
+                &ide::NeighborsParams {
+                    id: form,
+                    dir: ide::Direction::Out,
+                    depth: 1,
+                    max_nodes: 50,
+                    detail: ide::GraphDetail::Names,
+                    provenance_filter: Vec::new(),
+                    edge_kind_filter: Vec::new(),
+                },
+                None,
+            )
             .unwrap()
             .expect("form node resolves");
         assert!(
@@ -3392,21 +3672,21 @@ mod tests {
         assert_eq!(count("SELECT COUNT(*) FROM nodes WHERE kind='tabular_section'"), 1);
 
         let gdb = GraphDb::open(&out).expect("graph database opens");
-        let overview = gdb.overview(10).unwrap();
+        let overview = gdb.overview(10, None).unwrap();
         assert_eq!(overview.tabular_sections, 1);
         // ИНН + Цена both stored as `attribute`-kind nodes.
         assert_eq!(overview.attributes, 2);
 
         // The tabular-section column resolves with a localized type + mixed casing.
         let node = gdb
-            .node("ts_attr/Справочник/контрагенты/товары/цена", ide::GraphDetail::Names)
+            .node("ts_attr/Справочник/контрагенты/товары/цена", ide::GraphDetail::Names, None)
             .unwrap()
             .expect("ts column resolves case-insensitively");
         assert_eq!(node.node.id, "ts_attr/Catalog/Контрагенты/Товары/Цена");
         assert_eq!(node.node.kind, "attribute");
         // And the tabular-section node itself.
         let ts = gdb
-            .node("tabular_section/Справочник/Контрагенты/Товары", ide::GraphDetail::Names)
+            .node("tabular_section/Справочник/Контрагенты/Товары", ide::GraphDetail::Names, None)
             .unwrap()
             .expect("tabular section resolves");
         assert_eq!(ts.node.kind, "tabular_section");
@@ -3582,15 +3862,18 @@ mod tests {
         // query answers "which forms show this object field".
         let gdb = GraphDb::open(&out).expect("graph database opens");
         let neighbors = gdb
-            .neighbors(&ide::NeighborsParams {
-                id: "attribute/Catalog/Контрагенты/ИНН",
-                dir: ide::Direction::In,
-                depth: 1,
-                max_nodes: 50,
-                detail: ide::GraphDetail::Names,
-                provenance_filter: Vec::new(),
-                edge_kind_filter: Vec::new(),
-            })
+            .neighbors(
+                &ide::NeighborsParams {
+                    id: "attribute/Catalog/Контрагенты/ИНН",
+                    dir: ide::Direction::In,
+                    depth: 1,
+                    max_nodes: 50,
+                    detail: ide::GraphDetail::Names,
+                    provenance_filter: Vec::new(),
+                    edge_kind_filter: Vec::new(),
+                },
+                None,
+            )
             .unwrap()
             .expect("attribute node resolves");
         assert!(
@@ -4457,7 +4740,7 @@ mod tests {
         let snap1 = graph.snapshot().expect("ready");
         assert!(snap1
             .graph
-            .node("method/common/Ядро/Цель", ide::GraphDetail::Names)
+            .node("method/common/Ядро/Цель", ide::GraphDetail::Names, None)
             .unwrap()
             .is_ok());
 
@@ -4482,11 +4765,15 @@ mod tests {
         }
         let snap2 = settled.expect("reload published generation 2");
         assert!(
-            snap2.graph.node("method/common/Ядро/Цель", ide::GraphDetail::Names).unwrap().is_err(),
+            snap2
+                .graph
+                .node("method/common/Ядро/Цель", ide::GraphDetail::Names, None)
+                .unwrap()
+                .is_err(),
             "removed method no longer resolves after caller-delta reload"
         );
         // The caller's edge into the removed method is gone (Вызов has no out-edges now).
-        let overview = snap2.graph.overview(10).expect("overview");
+        let overview = snap2.graph.overview(10, None).expect("overview");
         assert_eq!(overview.edges, 0, "the caller's edge to the removed method vanished");
     }
 

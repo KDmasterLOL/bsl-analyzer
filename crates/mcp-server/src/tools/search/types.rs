@@ -15,7 +15,12 @@ pub(super) const HYBRID_FETCH_MULTIPLIER: usize = 2;
 ///
 /// `2` adds `root_id` to every code hit: with extensions in the index the same relative path
 /// exists under several roots, so the owning root became part of a hit's identity.
-pub(super) const SEARCH_SCHEMA_VERSION: &str = "2";
+///
+/// `3` adds the location contract: a `location` (or a machine `location_unavailable` reason)
+/// per code hit and, for `search_code`, a `freshness` envelope. The legacy 1-based
+/// `line_start`/`line_end` are untouched. The number is shared with the `reference` profile's
+/// documentation actions, whose own shape did not change.
+pub(super) const SEARCH_SCHEMA_VERSION: &str = "3";
 
 /// The outcome of producing one modality's code hits, separated from presentation so the
 /// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;

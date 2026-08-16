@@ -231,125 +231,19 @@ pub(crate) struct DiagnosticsResident {
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
 }
 
-/// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
-/// that cannot be resolved and a pair resolved against some other root are indistinguishable
-/// to the caller, and the second is a wrong answer wearing the shape of a right one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RootedPathError {
-    /// No root is registered under this id. It is the caller's spelling that is wrong, or
-    /// the workspace declares a different set of extensions than the index the caller read.
-    RootNotRegistered(String),
-    /// An absolute path carries its own root, and a second one cannot be honoured: joining a
-    /// root with an absolute path discards the root silently, so the pair would be answered
-    /// from whichever file the path alone names.
-    AbsolutePathWithRootId(String),
-    /// The path is not a plain relative name under the root: it carries `..`, `.`, a leading
-    /// separator or a drive. Each of those is a way of naming something the root does not
-    /// contain — `Path::join` replaces its base outright for the last two — and `..` cannot be
-    /// resolved here at all, because the kernel collapses it only after dereferencing each
-    /// component, so any answer computed here would disagree with the file that opens.
-    PathIsNotPlainRelative(String),
-}
-
-impl RootedPathError {
-    /// The in-band error code. Two different facts never share one code: an unregistered root
-    /// and a pair that cannot be honoured call for different corrections, and one name for
-    /// both would send the reader looking for the wrong thing.
-    pub(crate) fn code(&self) -> &'static str {
-        match self {
-            Self::RootNotRegistered(_) => "unknown_root",
-            Self::AbsolutePathWithRootId(_) => "absolute_path_under_root",
-            Self::PathIsNotPlainRelative(_) => "path_not_relative_to_root",
-        }
-    }
-}
-
-impl std::fmt::Display for RootedPathError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RootNotRegistered(root_id) => write!(
-                f,
-                "no source root is registered under '{root_id}'; \
-                 `search` reports the roots this workspace knows"
-            ),
-            Self::AbsolutePathWithRootId(root_id) => write!(
-                f,
-                "an absolute path already names its file, so it cannot also be read under \
-                 root '{root_id}'; pass the path relative to that root, or drop `root_id`"
-            ),
-            Self::PathIsNotPlainRelative(root_id) => write!(
-                f,
-                "a path read against root '{root_id}' has to be plain relative names — no `..`, \
-                 no `.`, no leading separator and no drive; spell the file as the hit does"
-            ),
-        }
-    }
-}
-
 impl DiagnosticsResident {
     /// The file a request names, given the root its path is spelled against.
     ///
-    /// A search hit's path is relative to ITS OWN root, so the pair is what identifies the
-    /// file; the path alone is ambiguous the moment an extension repeats the configuration's
-    /// layout. Resolution goes through the root table's own [`bsl_search::WorkspaceRoots::resolve`]
-    /// rather than by rebuilding the directory from `root_id`: the identifier is derived from
-    /// the CANONICAL spelling while the file is read back through the DECLARED one, and
-    /// reconstructing it here would be a second attribution procedure to keep in agreement
-    /// with the first.
-    ///
-    /// `None` for `root_id` means the caller said nothing about roots, and the path keeps
-    /// today's reading. An empty `root_id` is not that — it names the configuration, and
-    /// resolving it is what makes a hit's path work when the configuration sits in a
-    /// subdirectory of the workspace.
+    /// The rule itself is shared with every other file-addressed tool
+    /// ([`crate::tools::file_request::resolve_rooted_path`]); the resident holds nothing but
+    /// the table it is applied to. Two readings of one pair would address two files while
+    /// reporting the same address.
     pub(crate) fn resolve_rooted_path(
         &self,
         root_id: Option<&str>,
         path: &Path,
-    ) -> Result<PathBuf, RootedPathError> {
-        let Some(root_id) = root_id else {
-            return Ok(path.to_path_buf());
-        };
-        if path.is_absolute() {
-            return if root_id.is_empty() {
-                Ok(path.to_path_buf())
-            } else {
-                Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
-            };
-        }
-        if !self.workspace_roots.contains_id(root_id) {
-            // Asked FIRST, so a caller with two wrong halves is told about the one that will
-            // still be wrong after fixing the other.
-            return Err(RootedPathError::RootNotRegistered(root_id.to_owned()));
-        }
-        // One rule, and it is about the SPELLING: every component must be a plain name.
-        //
-        // That covers more than `..`. On Windows neither a leading separator (`\Windows\M.bsl`)
-        // nor a drive-relative spelling (`C:M.bsl`) counts as absolute, yet `join` throws the
-        // base away for both — so a rule written against `..` alone lets exactly the escape
-        // this exists to stop back in through a platform difference. `.` is refused for a
-        // smaller reason: it survives into the graph id, and the graph was built from paths
-        // that never had one.
-        //
-        // `..` in particular is refused rather than resolved. The kernel collapses it only
-        // after dereferencing each component, so a `..` behind a directory link lands where no
-        // textual fold predicts; folding it here would be a second, wrong procedure for naming
-        // files. Two attempts to be cleverer failed on exactly that — one comparing the
-        // canonical target against the root, one asking the table who owned it.
-        //
-        // The cost is nothing real: a key is built by a walk INSIDE its root, so no producer
-        // of `(root_id, path)` emits any of these, and the same file is always reachable by
-        // its plain spelling.
-        if path.components().any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            return Err(RootedPathError::PathIsNotPlainRelative(root_id.to_owned()));
-        }
-        // What follows from stopping here: a link sitting inside a root is a file OF that root,
-        // and reading it yields its target, exactly as it would for anything else opening that
-        // path. The pair names one file; it does not promise the bytes live in this tree.
-        let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
-        self.workspace_roots
-            .resolve(&key)
-            .ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
+    ) -> Result<PathBuf, crate::tools::file_request::RootedPathError> {
+        crate::tools::file_request::resolve_rooted_path(&self.workspace_roots, root_id, path)
     }
 
     /// Resolve a request path to the resident FileId, canonicalising it the same way
@@ -421,6 +315,12 @@ impl DiagnosticsResident {
     /// used to bridge findings to durable `method/file/<rel>::<name>` graph ids.
     pub(crate) fn workspace_root(&self) -> &Path {
         &self.workspace_root
+    }
+
+    /// This resident's own root table — the one its files were enumerated under, so a
+    /// location built from it addresses a file this resident can actually serve.
+    pub(crate) fn workspace_roots(&self) -> &bsl_search::WorkspaceRoots {
+        &self.workspace_roots
     }
 
     /// An `Analysis` view over a cloned db handle. The clone shares the Salsa storage
@@ -966,6 +866,7 @@ mod tests {
     use super::super::test_support::{module_path, sample_workspace, wait_ready, write};
     use super::super::{DiagnosticsState, ResidentOutcome};
     use super::*;
+    use crate::tools::file_request::RootedPathError;
     use ide::DiagnosticsConfig;
 
     /// First use builds the resident db over the workspace and resolves a request

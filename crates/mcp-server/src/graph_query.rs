@@ -17,9 +17,11 @@ use ide::{
     GraphOverview, NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
     MAX_DROPPED_SAMPLE,
 };
+use line_index::TextRange;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::graph_db::SCHEMA_VERSION;
+use crate::tools::location as loc;
 
 /// A node as stored, before projection to a [`NodeRef`].
 struct StoredNode {
@@ -36,6 +38,56 @@ struct StoredNode {
     dispatch: Option<String>,
     is_export: Option<bool>,
     addressable: bool,
+}
+
+/// The full declaration signature, from the keyword line containing `name_offset` through
+/// the header end `sig_end` (the closing `)` or export keyword). Internal runs of
+/// whitespace — including the newlines of a wrapped parameter list — are collapsed to
+/// single spaces so a multi-line declaration reads as one line.
+fn signature_in(text: &str, name_offset: u32, sig_end: u32) -> Option<String> {
+    let name = (name_offset as usize).min(text.len());
+    let end = (sig_end as usize).min(text.len());
+    if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
+        return None;
+    }
+    let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+    let slice = text.get(start..end)?;
+    Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Line endings are normalized to LF before redaction and budget clamping: consumers read
+/// the source, they do not need byte-exact CRLF, and the CR would only inflate the JSON
+/// escaping.
+fn slice_in(text: &str, start: u32, end: u32) -> Option<String> {
+    text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
+}
+
+/// One node's file text, read AT THE POINT OF USE and at most once.
+///
+/// Which consumer needs the bytes is decided by that consumer: the place needs them only
+/// after the pair is built and the row turns out to carry offsets, the signature and the
+/// body only for a method at `signatures`/`bodies`. A predicate deciding this up front
+/// restates those conditions and then drifts away from them — `usages` walks up to 200
+/// callers at `names` with no root table and cannot use a single byte, yet a
+/// detail-and-offsets predicate had it read every caller's file in full.
+///
+/// Memoized per node and NEVER across nodes: a handle is pooled and outlives edits to the
+/// files, so a text remembered across nodes would make the staleness check in
+/// [`GraphDb::node_location`] compare the artefact against itself.
+struct NodeText<'a> {
+    file: Option<&'a str>,
+    read: Option<Option<String>>,
+}
+
+impl<'a> NodeText<'a> {
+    fn new(file: Option<&'a str>) -> Self {
+        Self { file, read: None }
+    }
+
+    fn get(&mut self) -> Option<&str> {
+        let file = self.file?;
+        self.read.get_or_insert_with(|| std::fs::read_to_string(file).ok()).as_deref()
+    }
 }
 
 const NODE_COLUMNS: &str =
@@ -171,7 +223,7 @@ impl GraphDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening graph database at {}", path.display()))?;
-        let db = Self { conn };
+        let db = Self::from_connection(conn);
         db.validate_meta()?;
         Ok(db)
     }
@@ -520,7 +572,9 @@ impl GraphDb {
         let mut by_module: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         let mut sampled = false;
-        if let Ok(result) = self.neighbors(&params)? {
+        // The usages summary counts calling MODULES; the nodes themselves never leave this
+        // function, so no root table is needed to place them.
+        if let Ok(result) = self.neighbors(&params, None)? {
             sampled = result.dropped_count > 0;
             for node in &result.nodes {
                 if let Some(module) = &node.module {
@@ -543,32 +597,24 @@ impl GraphDb {
         Ok(d.unwrap_or(0) as usize)
     }
 
-    /// The full declaration signature, from the keyword line containing `name_offset`
-    /// through the header end `sig_end` (the closing `)` or export keyword). Internal
-    /// runs of whitespace — including the newlines of a wrapped parameter list — are
-    /// collapsed to single spaces so a multi-line declaration reads as one line.
-    fn signature_at(&self, file: &str, name_offset: u32, sig_end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        let name = (name_offset as usize).min(text.len());
-        let end = (sig_end as usize).min(text.len());
-        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
-            return None;
-        }
-        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
-        let slice = text.get(start..end)?;
-        Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
-    }
-
+    /// A source slice read from `file`, for the callers that hold a path rather than text.
+    /// The node projection reads its file once and calls [`slice_in`] directly.
     fn slice(&self, file: &str, start: u32, end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        // Line endings are normalized to LF before redaction and budget clamping:
-        // consumers read the source, they do not need byte-exact CRLF, and the CR
-        // would only inflate the JSON escaping.
-        text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
+        slice_in(&std::fs::read_to_string(file).ok()?, start, end)
     }
 
     /// Project a stored node to its agent-facing [`NodeRef`] at `detail`.
-    fn node_ref(&self, n: &StoredNode, detail: GraphDetail) -> NodeRef {
+    ///
+    /// `roots` is the answering snapshot's root table, passed down rather than owned: the
+    /// table belongs to the publication, and a `GraphDb` outlives any one of them. `None`
+    /// is a real serving state (a cached graph published before the project loaded), and
+    /// the node then names `roots_unavailable` instead of quietly dropping its place.
+    fn node_ref(
+        &self,
+        n: &StoredNode,
+        detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> NodeRef {
         let kind = node_kind(&n.kind);
         let mut node = NodeRef {
             id: n.id.clone(),
@@ -587,23 +633,135 @@ impl GraphDb {
             // query, so it is not done in this projection helper.
             methods: None,
             addressable: n.addressable,
+            location: None,
+            location_unavailable: None,
         };
+        // The file is read at most once per node and only where a consumer actually reaches
+        // for it: the place, the signature and the body all describe the same bytes, and
+        // reading them twice invites two answers.
+        let mut text = NodeText::new(n.file.as_deref());
+
+        match self.node_location(n, roots, &mut text) {
+            Ok(location) => node.location = Some(location),
+            Err(reason) => node.location_unavailable = Some(reason),
+        }
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            if let (Some(file), Some(off), Some(end)) = (&n.file, n.name_offset, n.sig_end) {
-                node.signature = self.signature_at(file, off, end);
+            if let (Some(off), Some(end)) = (n.name_offset, n.sig_end) {
+                node.signature = text.get().and_then(|text| signature_in(text, off, end));
             }
             if detail == GraphDetail::Bodies {
-                if let (Some(file), Some(s), Some(e)) = (&n.file, n.src_start, n.src_end) {
-                    node.source = self.slice(file, s, e);
+                if let (Some(s), Some(e)) = (n.src_start, n.src_end) {
+                    node.source = text.get().and_then(|text| slice_in(text, s, e));
                 }
             }
         }
         node
     }
 
+    /// A stored node's place under the location contract, or the machine reason there is
+    /// none.
+    ///
+    /// The name range is VERIFIED by slicing rather than trusted: the database stores where
+    /// a name starts and where the HEADER ends (`sig_end` — the closing `)` or the export
+    /// keyword), not where the name ends. Publishing the header end as the name's would put
+    /// the parameter list inside a field the contract says is the name, so the range is
+    /// built from the name's own length and dropped unless the text there really is that
+    /// name.
+    fn node_location(
+        &self,
+        n: &StoredNode,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+        text: &mut NodeText<'_>,
+    ) -> Result<serde_json::Value, &'static str> {
+        if !matches!(n.kind.as_str(), "method" | "module") {
+            return Err(loc::LocationUnavailable::NoSourceLocation.code());
+        }
+        let (Some(file), Some(roots)) = (n.file.as_deref(), roots) else {
+            // A method whose row has no file is a path-fallback node seen only as an edge
+            // endpoint; a missing table is the boot window. Neither may answer "no place".
+            // Two different facts, two different codes: a method whose row carries no path
+            // HAS a file (it is a path-fallback node seen only as an edge endpoint) — its
+            // address was lost, not absent. `no_source_location` is reserved for entities
+            // that have no file at all, and saying it here would send a consumer looking in
+            // the wrong direction.
+            return Err(if n.file.is_none() {
+                loc::LocationUnavailable::SourcePathUnavailable.code()
+            } else {
+                loc::LocationUnavailable::RootsUnavailable.code()
+            });
+        };
+        let location = loc::Location::from_path(roots, std::path::Path::new(file))
+            .map_err(|reason| reason.code())?;
+
+        // The pair costs no I/O; only the ranges do, and everything above this line is
+        // decided without touching the disk. A node with no offsets — a synthesized `module`
+        // row — leaves here, so `overview` does not read a module's file for a signature it
+        // will never build out of it.
+        let (Some(name_offset), Some(src_start), Some(src_end)) =
+            (n.name_offset, n.src_start, n.src_end)
+        else {
+            return Ok(location.to_value());
+        };
+        let Some(text) = text.get() else {
+            // The row's offsets describe a file we cannot read now; the pair is still true.
+            return Ok(location.to_value());
+        };
+
+        // Offsets come from the artefact, the text from disk NOW. Between a build and its
+        // catch-up reload those disagree, and an offset that stayed inside the file yields a
+        // plausible but wrong span. The name is the one span we can verify by slicing, so it
+        // gates BOTH ranges: an unverifiable place is published as the file alone rather than
+        // as a range a consumer would happily cut text with.
+        let name_end = name_offset as usize + n.name.len();
+        let named = text
+            .get(name_offset as usize..name_end)
+            .is_some_and(|slice| slice.to_lowercase() == n.name.to_lowercase());
+        if !named {
+            return Ok(location.to_value());
+        }
+
+        // The name alone is not enough. An edit INSIDE the body leaves the name where it
+        // was and still moves `src_end`, so a range built from it would end at the wrong
+        // bytes — plausible, and wrong exactly where a consumer cuts text. A declaration
+        // ends with its closing keyword, so that is what the stored end must land on.
+        let declared_end = text
+            .get(src_start as usize..src_end as usize)
+            .map(|slice| slice.trim_end().to_lowercase())
+            .is_some_and(|slice| {
+                ["конецпроцедуры", "конецфункции", "endprocedure", "endfunction"]
+                    .iter()
+                    .any(|keyword| slice.ends_with(keyword))
+            });
+
+        let index = line_index::LineIndex::new(text);
+        let name = index
+            .utf16_line_col_range(
+                text,
+                TextRange::new(name_offset.into(), (name_end as u32).into()),
+            )
+            .map(loc::PositionRange::from);
+        let enclosing = declared_end
+            .then(|| {
+                index.utf16_line_col_range(text, TextRange::new(src_start.into(), src_end.into()))
+            })
+            .flatten()
+            .map(loc::PositionRange::from);
+
+        Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
+    }
+
+    /// Wrap an open connection.
+    fn from_connection(conn: Connection) -> Self {
+        Self { conn }
+    }
+
     /// Cold-start overview: node/edge tallies, the most-called nodes, and the
     /// provenance/dispatch profile.
-    pub fn overview(&self, top_n: usize) -> anyhow::Result<GraphOverview> {
+    pub fn overview(
+        &self,
+        top_n: usize,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> anyhow::Result<GraphOverview> {
         let nodes = self.count("SELECT COUNT(*) FROM nodes")?;
         let methods = self.count("SELECT COUNT(*) FROM nodes WHERE kind='method'")?;
         let modules = self.count_modules()?;
@@ -640,7 +798,7 @@ impl GraphDb {
         let mut top_by_centrality = Vec::with_capacity(top_ids.len());
         for id in top_ids {
             if let Some(n) = self.fetch_node(&id)? {
-                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures));
+                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures, roots));
             }
         }
 
@@ -667,12 +825,13 @@ impl GraphDb {
         &self,
         id: &str,
         detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NodeResult, GraphError>> {
         let stored = match self.resolve_stored(id)? {
             Ok(n) => n,
             Err(e) => return Ok(Err(e)),
         };
-        let mut node = self.node_ref(&stored, detail);
+        let mut node = self.node_ref(&stored, detail, roots);
         // A `module` node lists its members so an agent discovers them from `node(module/…)`
         // directly, without a traversal.
         if stored.kind == "module" {
@@ -736,6 +895,7 @@ impl GraphDb {
     pub fn neighbors(
         &self,
         params: &NeighborsParams<'_>,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NeighborsResult, GraphError>> {
         let root = match self.resolve_stored(params.id)? {
             Ok(n) => n,
@@ -806,7 +966,7 @@ impl GraphDb {
         let mut nodes = Vec::with_capacity(ranked.len());
         for (_, id) in &ranked {
             if let Some(n) = self.fetch_node(id)? {
-                nodes.push(self.node_ref(&n, params.detail));
+                nodes.push(self.node_ref(&n, params.detail, roots));
             }
         }
 
@@ -857,7 +1017,7 @@ impl GraphDb {
         let returned = nodes.len();
         let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
         Ok(Ok(NeighborsResult {
-            root: self.node_ref(&root, params.detail),
+            root: self.node_ref(&root, params.detail, roots),
             nodes,
             edges,
             total,
@@ -884,7 +1044,9 @@ impl GraphDb {
             Some(n) if n.kind == "method" => n,
             _ => return Ok(None),
         };
-        let nref = self.node_ref(&node, GraphDetail::Signatures);
+        // Not serialized as a node: this projection feeds a text renderer for embedding
+        // enrichment, so it needs no place and takes no table.
+        let nref = self.node_ref(&node, GraphDetail::Signatures, None);
 
         // Mirror the in-memory renderer's facts exactly by EDGE kind, not just target
         // kind: calls come only from `call` edges, reads only from a method's
@@ -1155,7 +1317,7 @@ mod tests {
             conn.execute("INSERT INTO nodes (id, kind) VALUES (?1, ?2)", params![id, kind])
                 .unwrap();
         }
-        GraphDb { conn }
+        GraphDb::from_connection(conn)
     }
 
     /// The reverse lookup must ride the `edges_to` index (equality + half-open range on
@@ -1172,7 +1334,7 @@ mod tests {
              CREATE INDEX edges_from ON edges(from_id);",
         )
         .unwrap();
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let plan: Vec<String> = db
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", super::REFERENCING_FILES_SQL))
@@ -1235,7 +1397,7 @@ mod tests {
         edge("method/common/Г/Ч", "attribute/Catalog/Товары/Код", "query_ref");
         edge("method/common/В/Н", "mdo/Catalog/Другой", "manager_access");
 
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let mut files = db.referencing_files("mdo/Catalog/Товары").unwrap();
         files.sort();
         assert_eq!(

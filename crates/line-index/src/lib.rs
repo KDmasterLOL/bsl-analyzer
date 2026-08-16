@@ -6,6 +6,21 @@ pub struct LineCol {
     pub col: u32,
 }
 
+/// A text span as line/character pairs: 0-based, end-exclusive, characters counted
+/// in UTF-16 code units.
+///
+/// The unit is not a matter of taste here: `LineCol::col` is a byte column and
+/// [`LineIndexExt::byte_col_to_char_col`] counts code points, so a span crossing a
+/// non-BMP character has three different "columns" depending on who is asked. This
+/// type carries the one an external protocol may rely on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LineColRange {
+    pub start_line: u32,
+    pub start_character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineIndex {
     newlines: Box<[TextSize]>,
@@ -132,6 +147,23 @@ impl LineIndex {
         text[line_start..col_end].encode_utf16().count() as u32
     }
 
+    /// A byte range as a 0-based, end-exclusive [`LineColRange`] with UTF-16 columns.
+    ///
+    /// `None` when either endpoint is past the end of the text, so a caller holding a
+    /// range built against different text emits nothing rather than a plausible-looking
+    /// wrong span.
+    pub fn utf16_line_col_range(&self, text: &str, range: TextRange) -> Option<LineColRange> {
+        let start = self.try_line_col(range.start())?;
+        let end = self.try_line_col(range.end())?;
+
+        Some(LineColRange {
+            start_line: start.line,
+            start_character: self.utf16_col(text, start.line, start.col),
+            end_line: end.line,
+            end_character: self.utf16_col(text, end.line, end.col),
+        })
+    }
+
     pub fn utf16_col_to_byte_col(&self, text: &str, line: u32, utf16_col: u32) -> Option<u32> {
         let line_text = self.safe_line_str(text, line)?;
 
@@ -208,6 +240,57 @@ impl LineIndexExt for LineIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cyrillic (2 bytes, 1 code point, 1 UTF-16 unit) plus a non-BMP character
+    /// (4 bytes, 1 code point, 2 UTF-16 units) before the target token, so all three
+    /// candidate units differ and a range built on the wrong one cannot pass.
+    const MIXED: &str = "Перем 𝕏Итог;\nПроцедура Тест()\nКонецПроцедуры\n";
+
+    #[test]
+    fn utf16_range_counts_code_units_not_bytes_or_code_points() {
+        let index = LineIndex::new(MIXED);
+        let start = MIXED.find("Итог").unwrap();
+        let range = TextRange::new(
+            TextSize::from(start as u32),
+            TextSize::from((start + "Итог".len()) as u32),
+        );
+
+        let got = index.utf16_line_col_range(MIXED, range).unwrap();
+
+        assert_eq!(
+            got,
+            LineColRange { start_line: 0, start_character: 8, end_line: 0, end_character: 12 }
+        );
+
+        // The two units this must not be: bytes (15) and code points (7).
+        assert_eq!(index.line_col(range.start()).col, 15);
+        assert_eq!(index.byte_col_to_char_col(MIXED, 0, 15), 7);
+    }
+
+    #[test]
+    fn utf16_range_is_zero_based_and_end_exclusive() {
+        let index = LineIndex::new(MIXED);
+        let line1 = MIXED.find("Процедура").unwrap();
+        let line2 = MIXED.find("КонецПроцедуры").unwrap();
+        let range = TextRange::new(TextSize::from(line1 as u32), TextSize::from(line2 as u32));
+
+        let got = index.utf16_line_col_range(MIXED, range).unwrap();
+
+        // The whole of line 1 spans to the start of line 2, not to the last character
+        // of line 1: the end is exclusive and lines count from zero.
+        assert_eq!(
+            got,
+            LineColRange { start_line: 1, start_character: 0, end_line: 2, end_character: 0 }
+        );
+    }
+
+    #[test]
+    fn utf16_range_past_the_end_yields_nothing() {
+        let index = LineIndex::new(MIXED);
+        let past = TextSize::from(MIXED.len() as u32 + 1);
+
+        assert_eq!(index.utf16_line_col_range(MIXED, TextRange::new(past, past)), None);
+    }
 
     #[test]
     fn test_empty_text() {

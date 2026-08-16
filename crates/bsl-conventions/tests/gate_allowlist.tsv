@@ -70,7 +70,8 @@ crates/hir-def/src/graph_index.rs	module	1	вне-класса: вид узла 
 crates/ide/src/graph.rs	module	3	вне-класса: вид узла графа
 crates/ide/src/symbol_info.rs	module	1	вне-класса: вид символа
 crates/mcp-server/src/contract.rs	module	2	вне-класса: вид узла графа
-crates/mcp-server/src/graph_query.rs	module	7	вне-класса: вид узла графа
+crates/mcp-server/src/graph_query.rs	module	8	вне-класса: вид узла графа
 crates/mcp-server/src/lib.rs	module	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/graph.rs	module	2	вне-класса: вид узла графа
+crates/mcp-server/src/tools/location.rs	module	1	вне-класса: вид узла графа
 crates/mcp-server/src/tools/symbol_info.rs	module	1	вне-класса: вид символа

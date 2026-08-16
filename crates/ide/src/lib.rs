@@ -41,9 +41,10 @@ pub use graph::{
     FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext, GraphDetail, GraphError,
     GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult,
     NodeRef, NodeResult, ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem,
-    SourceResult, MAX_DROPPED_SAMPLE,
+    SourceResult, MAX_DROPPED_SAMPLE, NO_SOURCE_LOCATION, ROOTS_UNAVAILABLE,
 };
 pub use hir::graph_index;
+pub use hir::AnnotationKind;
 pub use hir::ModuleId;
 pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
@@ -191,6 +192,15 @@ impl Analysis {
 
     pub fn document_symbols(&self, file_id: FileId) -> Vec<DocumentSymbol> {
         document_symbols::document_symbols(&self.db, file_id)
+    }
+
+    /// The file's map, whole or narrowed to its regions.
+    ///
+    /// [`OutlineMode::RegionsOnly`] answers "how is this module laid out" for a module too
+    /// big to read method by method. It is a narrower QUESTION, not a trimmed answer: the
+    /// caller asked for less, so nothing about the result is incomplete.
+    pub fn file_outline(&self, file_id: FileId, mode: OutlineMode) -> Vec<DocumentSymbol> {
+        document_symbols::file_outline(&self.db, file_id, mode)
     }
 
     pub fn code_actions(&self, _file_id: FileId, _range: TextRange) -> Vec<Assist> {
@@ -437,13 +447,97 @@ pub struct HoverResult {
     pub range: Option<TextRange>,
 }
 
+/// How much of a file's map to build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineMode {
+    /// Every declaration the module makes.
+    Full,
+    /// Only the region skeleton, without the methods and variables inside it.
+    RegionsOnly,
+}
+
+/// One node of a file's map: what it is called, where it is, and what it is.
+///
+/// The kind is not a field of its own — it is read off [`SymbolDetail`] through
+/// [`DocumentSymbol::kind`]. A separate field would be a second source of truth for the
+/// same fact, free to say `Procedure` beside a `Variable`'s details.
 #[derive(Debug, Clone)]
 pub struct DocumentSymbol {
     pub name: String,
-    pub kind: SymbolKind,
     pub range: TextRange,
     pub selection_range: TextRange,
+    pub detail: SymbolDetail,
     pub children: Vec<DocumentSymbol>,
+}
+
+impl DocumentSymbol {
+    pub fn kind(&self) -> SymbolKind {
+        self.detail.kind()
+    }
+}
+
+/// What a map node is, together with everything the parsed item already knows about it.
+///
+/// This is where a file map stops being a list of names: a consumer that has to open the
+/// file again to learn whether a method is exported, which compilation directives it
+/// carries and what its parameters are would be better off reading the file itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolDetail {
+    Procedure(MethodDetail),
+    Function(MethodDetail),
+    Variable(VariableDetail),
+    Region,
+}
+
+impl SymbolDetail {
+    pub fn kind(&self) -> SymbolKind {
+        match self {
+            Self::Procedure(_) => SymbolKind::Procedure,
+            Self::Function(_) => SymbolKind::Function,
+            Self::Variable(_) => SymbolKind::Variable,
+            Self::Region => SymbolKind::Region,
+        }
+    }
+}
+
+/// A method's declaration, minus its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodDetail {
+    pub is_export: bool,
+    /// Compilation directives in declaration order (`&НаКлиенте`, `&Вместо`, …).
+    pub directives: Vec<AnnotationKind>,
+    pub params: Vec<ParamDetail>,
+}
+
+/// A module variable's declaration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableDetail {
+    pub is_export: bool,
+    pub directives: Vec<AnnotationKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamDetail {
+    pub name: String,
+    /// `Знач` / `Val`: the parameter is passed by value.
+    pub by_value: bool,
+    pub default: ParamDefault,
+}
+
+/// Whether a parameter has a default value, and whether its text could be named.
+///
+/// Three states rather than an `Option<String>`, because two of them are NOT the same
+/// answer to "is this parameter optional": a declaration whose default expression cannot
+/// be read is still optional, and reporting it as required changes the arity a consumer
+/// derives from the signature.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParamDefault {
+    /// No `=` in the declaration: the caller must pass this argument.
+    Required,
+    /// Optional, and the default expression's text was recovered.
+    Value(String),
+    /// Optional — there is an `=` — but the expression's text could not be named.
+    Unknown,
 }
 
 const _: fn() = || {

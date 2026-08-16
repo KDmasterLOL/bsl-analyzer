@@ -296,6 +296,23 @@ struct DiagnosticsParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct OutlineParams {
+    /// Absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+    path: String,
+    /// The source root `path` is spelled against, as carried by every `search` code hit. Omit
+    /// for a path already spelled against the workspace; `""` names the configuration. An
+    /// extension repeats the configuration's layout, so the same relative path exists under
+    /// several roots and the pair is what names one file.
+    root_id: Option<String>,
+    /// `full` (default) — every region and declaration; `regions` — the region skeleton alone,
+    /// for a module too big to read method by method.
+    mode: Option<String>,
+    /// Output budget in tokens (~4 chars each); an over-budget map stops partway through the
+    /// file and the response carries `truncated: true` with a `budget_hint` (default 6000).
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
     /// Natural-language question for the ITS expert help.
     question: String,
@@ -575,8 +592,11 @@ impl McpServer {
     /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
     /// envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
     /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
-    /// line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
-    /// total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+    /// line_start, line_end, location, symbol, kind, graph_id, snippet, snippet_truncated_lines}],
+    /// shown, total, budget_exhausted?, degraded?, freshness}`. `location` is the shared location
+    /// contract (0-based, end-exclusive, UTF-16 columns, `(root_id, path)` as the file key) and
+    /// `freshness` carries machine-readable completeness; the 1-based `line_start`/`line_end`
+    /// stay as they were. Read the structured form: it is the versioned
     /// contract, whereas the text layout may be reformatted in any release. Absent fields mean
     /// absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
     /// durable id to pass to `graph`. `total` is the ranked list before the output budget cut
@@ -952,8 +972,11 @@ impl McpServer {
 
         tokio::task::spawn_blocking(move || {
             let gdb = &snapshot.graph;
-            let value = match p.action.as_str() {
-                "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20)),
+            // The table of the publication that is answering — every node this call serves
+            // is placed against it, or says why it could not be.
+            let roots = snapshot.workspace_roots();
+            let (value, completeness) = match p.action.as_str() {
+                "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20), roots),
                 "resolve" => {
                     let query = require(p.query, "query", "resolve")?;
                     let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
@@ -965,7 +988,7 @@ impl McpServer {
                         .map_err(|e| McpError::invalid_params(e, None))?;
                     let budget =
                         p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
-                    tools::graph::node(gdb, &id, detail, budget)
+                    tools::graph::node(gdb, &id, detail, budget, roots)
                 }
                 "source" => {
                     if p.ids.is_empty() {
@@ -1000,7 +1023,7 @@ impl McpServer {
                     };
                     let budget =
                         p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
-                    tools::graph::neighbors(gdb, &neighbors, budget)
+                    tools::graph::neighbors(gdb, &neighbors, budget, roots)
                 }
                 other => {
                     return Err(contract::unknown_action(McpProfile::Workspace, "graph", other))
@@ -1010,7 +1033,14 @@ impl McpServer {
             // scan may detect drift and kick a background reload, but `revision`
             // and `stale` describe the data actually returned above.
             let freshness = graph.freshness(&snapshot);
-            Ok(tools::graph::envelope(freshness, value))
+            // Modules the artefact could not read are missing nodes and edges: that is
+            // incompleteness of the answer, not merely drift.
+            let completeness = completeness.when(
+                snapshot.unread_files() > 0,
+                tools::location::ReasonCode::UnreadableFiles,
+                "some workspace modules could not be read when the graph was built",
+            );
+            Ok(tools::graph::envelope(freshness, completeness, value))
         })
         .await
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
@@ -1086,7 +1116,10 @@ impl McpServer {
         tokio::task::spawn_blocking(move || {
             let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
                 diag.read(|resident, _generation| {
-                    tools::symbol_info::resolve_card(
+                    // The root table and the unread count are read UNDER the same lock as
+                    // the card, so the envelope describes the resident that answered rather
+                    // than whatever it became afterwards.
+                    let card = tools::symbol_info::resolve_card(
                         resident,
                         symbol.as_deref(),
                         root_id.as_deref(),
@@ -1095,7 +1128,10 @@ impl McpServer {
                         column,
                         sections,
                         locale,
-                    )
+                    );
+                    card.map(|card| {
+                        (card, resident.workspace_roots().clone(), resident.unread_count())
+                    })
                 })
             };
 
@@ -1103,15 +1139,18 @@ impl McpServer {
             // A resident miss on a well-formed qualified name may be a symbol added since the
             // last throttled drift scan: force ONE storm-guarded re-scan and retry, matching the
             // `metadata object` miss path.
-            if let ResidentOutcome::Ready(Ok(None), _) = &outcome {
+            if let ResidentOutcome::Ready(Ok((None, _, _)), _) = &outcome {
                 if symbol.is_some() {
                     diag.force_rescan();
                     outcome = read(&diag);
                 }
             }
 
-            let card = match outcome {
-                ResidentOutcome::Ready(result, _freshness) => result?,
+            let (card, roots, unread_files, freshness) = match outcome {
+                ResidentOutcome::Ready(result, freshness) => {
+                    let (card, roots, unread_files) = result?;
+                    (card, roots, unread_files, freshness)
+                }
                 ResidentOutcome::Loading => {
                     return Ok(tools::metadata::loading(&diag.status_report()))
                 }
@@ -1132,12 +1171,21 @@ impl McpServer {
             let snapshot = graph.snapshot();
             let gdb = snapshot.as_ref().map(|s| &*s.graph);
 
+            let stamp = tools::symbol_info::ResidentStamp {
+                roots: Some(&roots),
+                revision: freshness.revision,
+                topology: freshness.topology,
+                stale: freshness.stale,
+                unread_files,
+            };
+
             match card {
                 Some(card) => Ok(tools::symbol_info::render_card(
                     &card,
                     gdb,
                     tools::symbol_info::DEFAULT_TOP_MODULES,
                     max_output_tokens,
+                    &stamp,
                 )),
                 None => {
                     // Resident miss: offer graph candidates for an imprecise qualified name.
@@ -1146,6 +1194,7 @@ impl McpServer {
                         symbol,
                         gdb,
                         tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
+                        &stamp,
                     ))
                 }
             }
@@ -1263,8 +1312,8 @@ impl McpServer {
             });
             use crate::diagnostics_state::ResidentOutcome;
             match outcome {
-                ResidentOutcome::Ready(result, freshness) => {
-                    Ok(tools::diagnostics::envelope(freshness, result))
+                ResidentOutcome::Ready((result, completeness), freshness) => {
+                    Ok(tools::diagnostics::envelope(freshness, completeness, result))
                 }
                 ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
@@ -1360,8 +1409,8 @@ impl McpServer {
                 tools::diagnostics::workspace_findings(&sweep, generation, max_output_tokens)
             });
             match outcome {
-                ResidentOutcome::Ready(result, freshness) => {
-                    Ok(tools::diagnostics::envelope(freshness, result))
+                ResidentOutcome::Ready((result, completeness), freshness) => {
+                    Ok(tools::diagnostics::envelope(freshness, completeness, result))
                 }
                 ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
@@ -1383,6 +1432,52 @@ impl McpServer {
                 joined.map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
         }
+    }
+
+    /// The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
+    /// variables it declares, each with its export flag, compilation directives, parameters
+    /// (with `Знач` and default values) and 0-based UTF-16 ranges. Method BODIES are never
+    /// returned — read the file for those, or ask `search`. Use it to orient yourself in an
+    /// unfamiliar module before reading it, or to find where a declaration sits. Params: `path`
+    /// (required) with optional `root_id` naming the source root it is spelled against, `mode`
+    /// (`full` | `regions` — the region skeleton alone, for a big module), `max_output_tokens`.
+    /// Answers from one parse of that file: no index is built, nothing is ever `loading`, and
+    /// the answer is the same whether or not the workspace has been analysed.
+    #[tool(name = "outline", annotations(read_only_hint = true))]
+    async fn outline(&self, params: Parameters<OutlineParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let Some(workspace_root) = self.state.workspace_root().cloned() else {
+            return Err(McpError::invalid_params(
+                "`outline` is only available in the workspace profile",
+                None,
+            ));
+        };
+        let mode = tools::outline::parse_mode(p.mode.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+        let path = std::path::PathBuf::from(p.path);
+
+        // Off the async executor: parsing a 1 MB module takes tens of milliseconds, and the
+        // whole answer is one such parse.
+        tokio::task::spawn_blocking(move || {
+            // Built per call, from the project alone. Milliseconds on real configurations, and
+            // caching it would mean a second lifecycle to invalidate beside the resident's.
+            let project = crate::project::at(&workspace_root).map_err(|e| {
+                McpError::internal_error(format!("workspace project failed to load: {e}"), None)
+            })?;
+            let (roots, _rejected) = crate::project::workspace_roots(&project);
+            tools::outline::answer(
+                &roots,
+                &workspace_root,
+                p.root_id.as_deref(),
+                &path,
+                mode,
+                max_output_tokens,
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 }
 
@@ -1546,6 +1641,7 @@ impl ServerHandler for McpServer {
                  - find code by meaning or unknown name → `search`;\n\
                  - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
                  - one symbol's kind/signature/type/doc/definition/usages by name → `symbol_info`;\n\
+                 - one file's map (regions, declarations, parameters) → `outline`;\n\
                  - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
                  (start at catalog to learn the codes);\n\
                  - metadata objects / structure / forms → `metadata`;\n\
@@ -1807,6 +1903,26 @@ mod tool_descriptions {
               - object_type: Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
             `object` and `form`.
 
+            ## outline
+            The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
+            variables it declares, each with its export flag, compilation directives, parameters
+            (with `Знач` and default values) and 0-based UTF-16 ranges. Method BODIES are never
+            returned — read the file for those, or ask `search`. Use it to orient yourself in an
+            unfamiliar module before reading it, or to find where a declaration sits. Params: `path`
+            (required) with optional `root_id` naming the source root it is spelled against, `mode`
+            (`full` | `regions` — the region skeleton alone, for a big module), `max_output_tokens`.
+            Answers from one parse of that file: no index is built, nothing is ever `loading`, and
+            the answer is the same whether or not the workspace has been analysed.
+              - max_output_tokens: Output budget in tokens (~4 chars each); an over-budget map stops partway through the
+            file and the response carries `truncated: true` with a `budget_hint` (default 6000).
+              - mode: `full` (default) — every region and declaration; `regions` — the region skeleton alone,
+            for a module too big to read method by method.
+              - path: Absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+              - root_id: The source root `path` is spelled against, as carried by every `search` code hit. Omit
+            for a path already spelled against the workspace; `""` names the configuration. An
+            extension repeats the configuration's layout, so the same relative path exists under
+            several roots and the pair is what names one file.
+
             ## query
             Validate or execute SDBL (the 1C query language) against the configuration schema. Use
             to check a query for errors before shipping it, to run a read-only query, or to fetch
@@ -1834,8 +1950,11 @@ mod tool_descriptions {
             10, max 50); `status` — index readiness. While the index warms up it returns a retry
             envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
             the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
-            line_start, line_end, symbol, kind, graph_id, snippet, snippet_truncated_lines}], shown,
-            total, budget_exhausted?, degraded?}`. Read the structured form: it is the versioned
+            line_start, line_end, location, symbol, kind, graph_id, snippet, snippet_truncated_lines}],
+            shown, total, budget_exhausted?, degraded?, freshness}`. `location` is the shared location
+            contract (0-based, end-exclusive, UTF-16 columns, `(root_id, path)` as the file key) and
+            `freshness` carries machine-readable completeness; the 1-based `line_start`/`line_end`
+            stay as they were. Read the structured form: it is the versioned
             contract, whereas the text layout may be reformatted in any release. Absent fields mean
             absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
             durable id to pass to `graph`. `total` is the ranked list before the output budget cut

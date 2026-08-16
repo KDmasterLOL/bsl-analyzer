@@ -141,7 +141,13 @@ pub struct Param {
     pub has_default: bool,
     /// Source text of the default-value expression (`= <expr>`), whitespace-collapsed, when the
     /// parameter is optional — so a declaration can be rendered faithfully as `Имя = Неопределено`.
-    /// `None` for a required parameter or when the default expression is absent/unparsable.
+    ///
+    /// `None` for a REQUIRED parameter. An optional parameter whose expression could not be
+    /// read yields `Some("")`, not `None`: the parser builds an expression node after every
+    /// `=`, so the node is there and empty. A reader therefore cannot tell "optional" from
+    /// "required" by this field alone — `has_default` answers that — and must treat an empty
+    /// text as an unknown default rather than as no default, or it will render `Имя = ` with
+    /// a dangling equals sign.
     pub default_value: Option<SmolStr>,
     pub name_range: TextRange,
 }
@@ -163,6 +169,27 @@ pub enum AnnotationKind {
     After,
     Instead,
     ChangeAndValidate,
+}
+
+impl AnnotationKind {
+    /// The canonical wire spelling of a compilation directive.
+    ///
+    /// Each directive has a localized and an English form (`&НаКлиенте` / `&AtClient`), so
+    /// the source text cannot be the name a consumer matches on. `snake_case` to match the
+    /// key style of the agent-facing contracts this travels in.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AtClient => "at_client",
+            Self::AtServer => "at_server",
+            Self::AtClientAtServer => "at_client_at_server",
+            Self::AtClientAtServerNoContext => "at_client_at_server_no_context",
+            Self::AtServerNoContext => "at_server_no_context",
+            Self::Before => "before",
+            Self::After => "after",
+            Self::Instead => "instead",
+            Self::ChangeAndValidate => "change_and_validate",
+        }
+    }
 }
 
 /// Rough live bytes of an [`ItemTree`] for Salsa's `memory_usage` introspection:
@@ -228,6 +255,43 @@ mod tests {
     fn test_item_tree_default() {
         let tree = ItemTree::default();
         assert_eq!(tree.top_level_items().len(), 0);
+    }
+
+    /// Every directive names itself, and no two share a spelling. The match has no `_`
+    /// arm, so a new directive fails the build rather than shipping as an empty string —
+    /// and a consumer matching on the closed set never meets a name it was not told about.
+    #[test]
+    fn every_directive_has_its_own_canonical_spelling() {
+        let all = [
+            AnnotationKind::AtClient,
+            AnnotationKind::AtServer,
+            AnnotationKind::AtClientAtServer,
+            AnnotationKind::AtClientAtServerNoContext,
+            AnnotationKind::AtServerNoContext,
+            AnnotationKind::Before,
+            AnnotationKind::After,
+            AnnotationKind::Instead,
+            AnnotationKind::ChangeAndValidate,
+        ];
+
+        let spellings: Vec<&str> = all.iter().map(|kind| kind.as_str()).collect();
+        assert_eq!(
+            spellings,
+            [
+                "at_client",
+                "at_server",
+                "at_client_at_server",
+                "at_client_at_server_no_context",
+                "at_server_no_context",
+                "before",
+                "after",
+                "instead",
+                "change_and_validate",
+            ]
+        );
+
+        let unique: std::collections::BTreeSet<&str> = spellings.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "two directives share a spelling: {spellings:?}");
     }
 
     #[test]

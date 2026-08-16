@@ -1,0 +1,241 @@
+//! What every file-addressed tool has to agree on: how a `(root_id, path)` pair names a
+//! file, which pair the answer carries back, and what a failure to reach the file is called.
+//!
+//! The pair is the key, so two tools that read it differently address different files while
+//! reporting the same address — a wrong answer wearing the shape of a right one. The rules
+//! live here once rather than in each tool, and the vocabulary of failures is shared for the
+//! same reason: `diagnostics file` and `outline` answering one input with two different codes
+//! would make the codes stop being a vocabulary.
+//!
+//! What is deliberately NOT shared is the prose. Each tool's `detail` describes what THAT
+//! tool does with a file it cannot serve — the resident holds an unreadable file out of
+//! service and re-reads it every drift window, a one-shot parse does neither — so the text
+//! stays at the call site and only the code comes from here.
+
+use std::path::{Path, PathBuf};
+
+use bsl_search::WorkspaceRoots;
+use serde_json::{json, Value};
+
+use crate::tools::location as loc;
+
+/// Why a `(root_id, path)` pair names no file. Every case is answered, never guessed: a pair
+/// that cannot be resolved and a pair resolved against some other root are indistinguishable
+/// to the caller, and the second is a wrong answer wearing the shape of a right one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RootedPathError {
+    /// No root is registered under this id. It is the caller's spelling that is wrong, or
+    /// the workspace declares a different set of extensions than the index the caller read.
+    RootNotRegistered(String),
+    /// An absolute path carries its own root, and a second one cannot be honoured: joining a
+    /// root with an absolute path discards the root silently, so the pair would be answered
+    /// from whichever file the path alone names.
+    AbsolutePathWithRootId(String),
+    /// The path is not a plain relative name under the root: it carries `..`, `.`, a leading
+    /// separator or a drive. Each of those is a way of naming something the root does not
+    /// contain — `Path::join` replaces its base outright for the last two — and `..` cannot be
+    /// resolved here at all, because the kernel collapses it only after dereferencing each
+    /// component, so any answer computed here would disagree with the file that opens.
+    PathIsNotPlainRelative(String),
+}
+
+impl RootedPathError {
+    /// The in-band error code. Two different facts never share one code: an unregistered root
+    /// and a pair that cannot be honoured call for different corrections, and one name for
+    /// both would send the reader looking for the wrong thing.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::RootNotRegistered(_) => "unknown_root",
+            Self::AbsolutePathWithRootId(_) => "absolute_path_under_root",
+            Self::PathIsNotPlainRelative(_) => "path_not_relative_to_root",
+        }
+    }
+}
+
+impl std::fmt::Display for RootedPathError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootNotRegistered(root_id) => write!(
+                f,
+                "no source root is registered under '{root_id}'; \
+                 `search` reports the roots this workspace knows"
+            ),
+            Self::AbsolutePathWithRootId(root_id) => write!(
+                f,
+                "an absolute path already names its file, so it cannot also be read under \
+                 root '{root_id}'; pass the path relative to that root, or drop `root_id`"
+            ),
+            Self::PathIsNotPlainRelative(root_id) => write!(
+                f,
+                "a path read against root '{root_id}' has to be plain relative names — no `..`, \
+                 no `.`, no leading separator and no drive; spell the file as the hit does"
+            ),
+        }
+    }
+}
+
+/// The file a request names, given the root its path is spelled against.
+///
+/// A search hit's path is relative to ITS OWN root, so the pair is what identifies the
+/// file; the path alone is ambiguous the moment an extension repeats the configuration's
+/// layout. Resolution goes through the root table's own [`bsl_search::WorkspaceRoots::resolve`]
+/// rather than by rebuilding the directory from `root_id`: the identifier is derived from
+/// the CANONICAL spelling while the file is read back through the DECLARED one, and
+/// reconstructing it here would be a second attribution procedure to keep in agreement
+/// with the first.
+///
+/// `None` for `root_id` means the caller said nothing about roots, and the path keeps
+/// today's reading. An empty `root_id` is not that — it names the configuration, and
+/// resolving it is what makes a hit's path work when the configuration sits in a
+/// subdirectory of the workspace.
+pub(crate) fn resolve_rooted_path(
+    roots: &WorkspaceRoots,
+    root_id: Option<&str>,
+    path: &Path,
+) -> Result<PathBuf, RootedPathError> {
+    let Some(root_id) = root_id else {
+        return Ok(path.to_path_buf());
+    };
+    if path.is_absolute() {
+        return if root_id.is_empty() {
+            Ok(path.to_path_buf())
+        } else {
+            Err(RootedPathError::AbsolutePathWithRootId(root_id.to_owned()))
+        };
+    }
+    if !roots.contains_id(root_id) {
+        // Asked FIRST, so a caller with two wrong halves is told about the one that will
+        // still be wrong after fixing the other.
+        return Err(RootedPathError::RootNotRegistered(root_id.to_owned()));
+    }
+    // One rule, and it is about the SPELLING: every component must be a plain name.
+    //
+    // That covers more than `..`. On Windows neither a leading separator (`\Windows\M.bsl`)
+    // nor a drive-relative spelling (`C:M.bsl`) counts as absolute, yet `join` throws the
+    // base away for both — so a rule written against `..` alone lets exactly the escape
+    // this exists to stop back in through a platform difference. `.` is refused for a
+    // smaller reason: it survives into the graph id, and the graph was built from paths
+    // that never had one.
+    //
+    // `..` in particular is refused rather than resolved. The kernel collapses it only
+    // after dereferencing each component, so a `..` behind a directory link lands where no
+    // textual fold predicts; folding it here would be a second, wrong procedure for naming
+    // files. Two attempts to be cleverer failed on exactly that — one comparing the
+    // canonical target against the root, one asking the table who owned it.
+    //
+    // The cost is nothing real: a key is built by a walk INSIDE its root, so no producer
+    // of `(root_id, path)` emits any of these, and the same file is always reachable by
+    // its plain spelling.
+    if path.components().any(|component| !matches!(component, std::path::Component::Normal(_))) {
+        return Err(RootedPathError::PathIsNotPlainRelative(root_id.to_owned()));
+    }
+    // What follows from stopping here: a link sitting inside a root is a file OF that root,
+    // and reading it yields its target, exactly as it would for anything else opening that
+    // path. The pair names one file; it does not promise the bytes live in this tree.
+    let key = bsl_search::FileKey::new(root_id, path.to_string_lossy());
+    roots.resolve(&key).ok_or_else(|| RootedPathError::RootNotRegistered(root_id.to_owned()))
+}
+
+/// The pair the ANSWER carries, given how the request spelled the file.
+///
+/// When the caller named a root, that root IS the answer: deriving it again by canonicalizing
+/// the resolved path would rename a file reached through a link inside one root into the root
+/// its target physically lives in, and a consumer feeding the pair back would address a
+/// different copy. Only a caller that named no root — or one whose path was absolute, which
+/// already names its file — gets one derived from the root table.
+pub(crate) fn answer_location(
+    roots: &WorkspaceRoots,
+    root_id: Option<&str>,
+    path_as_given: &Path,
+    abs: &Path,
+) -> Result<loc::Location, loc::LocationUnavailable> {
+    let rooted_spelling =
+        root_id.zip(path_as_given.to_str().filter(|spelling| !Path::new(spelling).is_absolute()));
+    match rooted_spelling {
+        Some((root_id, relative)) => Ok(loc::Location::from_key(root_id, relative)),
+        None => loc::Location::from_path(roots, abs),
+    }
+}
+
+/// Why a file-addressed request has no file to answer about.
+///
+/// One closed vocabulary for every such tool. Two tools that answered the same input with
+/// different codes would leave a consumer unable to write one branch per code, which is the
+/// only thing a code is worth over free-form prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileError {
+    /// The pair itself does not name a file; the reason is the rooted error's own.
+    Rooted(RootedPathError),
+    /// The pair resolved, but there is no workspace `.bsl` file at the end of it — nothing
+    /// there, a directory wearing the name, or a path outside every root.
+    NotInWorkspace,
+    /// The file is there and its bytes are not: permissions, or not valid UTF-8.
+    Unreadable,
+}
+
+impl FileError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Rooted(error) => error.code(),
+            Self::NotInWorkspace => "not_in_workspace",
+            Self::Unreadable => "unreadable",
+        }
+    }
+
+    /// Whether the answer is whole despite the error.
+    ///
+    /// A path that names no workspace file is a COMPLETE answer to a wrong question — there
+    /// is nothing more to say about it. A file whose bytes cannot be read is not: it exists,
+    /// it belongs to the workspace, and what we could not tell about it is missing from
+    /// everything computed over the workspace.
+    pub(crate) fn completeness(&self) -> loc::Completeness {
+        match self {
+            Self::Rooted(_) | Self::NotInWorkspace => loc::Completeness::complete(),
+            Self::Unreadable => loc::Completeness::partial(
+                loc::ReasonCode::UnreadableFiles,
+                "this file's bytes could not be read, so nothing was analysed in it",
+            ),
+        }
+    }
+
+    /// The in-band body. `detail` stays the caller's own: see the module header.
+    pub(crate) fn to_value(&self, detail: &str, path: &Path) -> Value {
+        json!({
+            "error": self.code(),
+            "detail": detail,
+            "path": path.to_string_lossy(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every failure names ONE fact. A consumer branches on the code, so two facts sharing a
+    /// code leave it unable to tell which correction to make.
+    #[test]
+    fn every_file_error_has_its_own_code() {
+        let all = [
+            FileError::Rooted(RootedPathError::RootNotRegistered("a".into())),
+            FileError::Rooted(RootedPathError::AbsolutePathWithRootId("a".into())),
+            FileError::Rooted(RootedPathError::PathIsNotPlainRelative("a".into())),
+            FileError::NotInWorkspace,
+            FileError::Unreadable,
+        ];
+
+        let codes: std::collections::BTreeSet<&str> = all.iter().map(|e| e.code()).collect();
+        assert_eq!(codes.len(), all.len(), "two facts share a code");
+    }
+
+    /// The two file-level failures differ in completeness as well as in code, and that is the
+    /// half a reader acts on: a wrong path leaves nothing missing, an unreadable file does.
+    #[test]
+    fn an_unreadable_file_is_partial_and_a_wrong_path_is_not() {
+        assert!(FileError::NotInWorkspace.completeness().is_complete());
+
+        let partial = FileError::Unreadable.completeness().to_value();
+        assert_eq!(partial["status"], "partial");
+        assert_eq!(partial["reasons"][0]["code"], "unreadable_files");
+    }
+}

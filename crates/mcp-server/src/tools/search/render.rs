@@ -1,4 +1,5 @@
 use super::types::SEARCH_SCHEMA_VERSION;
+use crate::tools::location as loc;
 use crate::tools::response::structured_with_text;
 use bsl_search::{FusedHit, LexicalHit, SearchHit, SemanticHit};
 use rmcp::model::CallToolResult;
@@ -61,9 +62,24 @@ pub(super) fn graph_id_for_hit(
 const SNIPPET_LINES: usize = 5;
 
 /// What the envelope around the hits costs: `schema_version`, `shown`, `total`, the optional
-/// `budget_exhausted` / `degraded` keys, and the hit array's own brackets. An upper bound, not
-/// a measurement — the point is that the wrapper is charged, not that it is charged exactly.
+/// `budget_exhausted` / `degraded` keys, the `freshness` block, and the hit array's own
+/// brackets. An upper bound, not a measurement — the point is that the wrapper is charged,
+/// not that it is charged exactly.
+///
+/// `freshness` alone is ~144 bytes empty and ~216 with a reason, so a response that carries
+/// it must be charged for it, or it would pass the ceiling while still reporting
+/// `budget_exhausted: false` — exactly what this constant exists to prevent. Only the FIXED
+/// part is charged here: a reason's `detail` is as long as the note it repeats, and a flat
+/// constant cannot cover a value that grows, so the caller holding the note charges for it
+/// (see `hybrid::hits_budget`).
+///
+/// The reference profile's documentation actions emit no envelope at all
+/// ([`Envelope::No`]), so charging them for it would shrink their listings for a block they
+/// never produce. Hence two values, picked by the caller that knows which shape it renders.
 pub(super) const ENVELOPE_OVERHEAD_BYTES: usize = 128;
+
+/// [`ENVELOPE_OVERHEAD_BYTES`] plus the `freshness` block, for the responses that carry one.
+pub(super) const ENVELOPE_OVERHEAD_WITH_FRESHNESS_BYTES: usize = 352;
 
 /// One hit rendered in both views: the text block a person reads and the JSON object a machine
 /// reads. Rendering the pair up front lets [`budgeted_hits`] charge the budget for what the
@@ -88,9 +104,12 @@ impl RenderedHits {
     /// The listing as a whole response, its own text serving as the mirror. Callers that wrap
     /// the listing in extra prose — a leading legend, a trailing degradation note — compose
     /// that text themselves and call [`hits_response`] directly.
+    ///
+    /// Used by the `reference` profile's documentation actions only, which are outside the
+    /// location contract — hence no envelope.
     pub(super) fn into_response(mut self) -> CallToolResult {
         let text = std::mem::take(&mut self.text);
-        hits_response(text, self, None)
+        hits_response(text, self, None, Envelope::No)
     }
 }
 
@@ -149,13 +168,20 @@ fn display_name(symbol_name: &str) -> &str {
 /// charging only the text would overshoot the caller's ceiling by roughly the JSON's size.
 /// At least one hit is always kept — a single oversized hit is delivered and flagged by
 /// `budget_exhausted` rather than dropped into an empty-looking answer.
-fn budgeted_hits(blocks: Vec<HitBlock>, max_output_tokens: usize) -> RenderedHits {
+fn budgeted_hits(
+    blocks: Vec<HitBlock>,
+    max_output_tokens: usize,
+    envelope: Envelope,
+) -> RenderedHits {
     let budget = max_output_tokens.saturating_mul(4);
     let total = blocks.len();
     // The hits are not the whole response: they get wrapped in [`hits_response`]'s envelope
     // keys and the `[` + `]` of their own array. Charging for that up front is what keeps
     // `budget_exhausted: false` from appearing on a response that is already over its ceiling.
-    let mut used = ENVELOPE_OVERHEAD_BYTES;
+    let mut used = match envelope {
+        Envelope::Yes => ENVELOPE_OVERHEAD_WITH_FRESHNESS_BYTES,
+        Envelope::No => ENVELOPE_OVERHEAD_BYTES,
+    };
     let mut shown = 0usize;
     for (i, block) in blocks.iter().enumerate() {
         let json_len = serde_json::to_string(&block.json).map(|s| s.len()).unwrap_or(0);
@@ -201,6 +227,7 @@ pub(super) fn hits_response(
     text: String,
     rendered: RenderedHits,
     degraded: Option<&str>,
+    envelope: Envelope,
 ) -> CallToolResult {
     let mut body = json!({
         "schema_version": SEARCH_SCHEMA_VERSION,
@@ -214,12 +241,40 @@ pub(super) fn hits_response(
     if let Some(reason) = degraded {
         body["degraded"] = json!(reason);
     }
+    if matches!(envelope, Envelope::Yes) {
+        // The search index has NO revision or topology of its own, so those fields are
+        // null and the source is named instead. Stamping the resident's or the graph's
+        // identity here would be exactly the borrowed freshness this contract exists to
+        // prevent: a hit may come from a shared baseline neither of them ever saw.
+        let completeness = loc::Completeness::complete()
+            .when(
+                rendered.budget_exhausted,
+                loc::ReasonCode::OutputBudget,
+                "hits trimmed to fit max_output_tokens",
+            )
+            .when(
+                degraded.is_some(),
+                loc::ReasonCode::ModalityDegraded,
+                degraded.unwrap_or_default(),
+            );
+        body["freshness"] =
+            loc::Freshness::new(loc::FreshnessSource::SearchIndex, completeness).to_value();
+    }
     structured_with_text(text, body)
+}
+
+/// Whether this response carries the contract envelope. The doc-search actions of the
+/// `reference` profile share these two functions and are out of the contract's scope, so
+/// the choice is made by the caller rather than guessed from the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Envelope {
+    Yes,
+    No,
 }
 
 /// The empty-listing result, with the same envelope a populated one carries so a consumer
 /// never has to tell "no hits" from "no structured output" by absence.
-pub(super) fn no_hits_response(degraded: Option<&str>) -> CallToolResult {
+pub(super) fn no_hits_response(degraded: Option<&str>, envelope: Envelope) -> CallToolResult {
     hits_response(
         NO_HITS_TEXT.to_owned(),
         RenderedHits {
@@ -230,7 +285,37 @@ pub(super) fn no_hits_response(degraded: Option<&str>) -> CallToolResult {
             budget_exhausted: false,
         },
         degraded,
+        envelope,
     )
+}
+
+/// A code hit's place under the location contract.
+///
+/// The pair is COPIED from the hit, never re-derived: a hit read from a shared baseline
+/// carries the identifier the publisher's table gave it, and this reader's table may not know
+/// that root at all. Handing the hit's relative path to `key_of_path` instead would attach it
+/// to the configuration root, so a configuration hit and an extension hit sharing a relative
+/// path would both come back as the configuration's — while the hit's own `root_id` field kept
+/// saying otherwise.
+///
+/// Ranges are line-granular: the search index stores no columns, so `range` (a symbol's name)
+/// is never emitted and `enclosing_range` covers the chunk's whole lines. A header chunk gets
+/// no ranges at all — its end line is computed by a different rule than a method chunk's, and
+/// publishing it as an end-exclusive line would be a number this contract does not mean.
+fn hit_location(hit: &SearchHit) -> Result<loc::Location, loc::LocationUnavailable> {
+    if Path::new(&hit.file_path).is_absolute() {
+        return Err(loc::LocationUnavailable::AbsolutePathWithoutPair);
+    }
+    let location = loc::Location::from_key(&hit.root_id, &hit.file_path);
+    if hit.symbol_name.is_empty() {
+        return Ok(location);
+    }
+    Ok(location.with_enclosing_range(Some(loc::PositionRange {
+        start_line: hit.line_start,
+        start_character: 0,
+        end_line: hit.line_end,
+        end_character: 0,
+    })))
 }
 
 pub(super) fn format_code_hits(
@@ -281,12 +366,20 @@ pub(super) fn format_code_hits(
                 let _ = writeln!(text, "  graph_id: {id}");
                 json["graph_id"] = json!(id);
             }
+            match hit_location(hit) {
+                Ok(location) => {
+                    json["location"] = location.to_value();
+                }
+                Err(reason) => {
+                    json["location_unavailable"] = json!(reason.code());
+                }
+            }
             push_snippet(&mut text, &mut json, &crate::tools::redact::redact_secrets(&hit.text));
             text.push('\n');
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::Yes)
 }
 
 pub(super) fn format_doc_hits(hits: &[SearchHit], max_output_tokens: usize) -> RenderedHits {
@@ -314,7 +407,7 @@ pub(super) fn format_doc_hits(hits: &[SearchHit], max_output_tokens: usize) -> R
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_lexical_doc_hits(
@@ -354,7 +447,7 @@ pub(super) fn format_lexical_doc_hits(
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_semantic_doc_hits(
@@ -393,7 +486,7 @@ pub(super) fn format_semantic_doc_hits(
             HitBlock { text, json }
         })
         .collect();
-    budgeted_hits(blocks, max_output_tokens)
+    budgeted_hits(blocks, max_output_tokens, Envelope::No)
 }
 
 pub(super) fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String {
@@ -415,7 +508,7 @@ pub(super) fn format_baseline_ref(baseline: &bsl_search::BaselineRef) -> String 
 #[cfg(test)]
 mod tests {
     use super::super::test_support::code_hit;
-    use super::{format_code_hits, format_doc_hits, graph_id_for_hit, no_hits_response};
+    use super::{format_code_hits, format_doc_hits, graph_id_for_hit, no_hits_response, Envelope};
     use bsl_search::{FusedHit, Modality, SearchHit};
     use serde_json::json;
     use std::path::Path;
@@ -461,6 +554,15 @@ mod tests {
 
         assert_eq!(out.hits[0]["root_id"], "", "the configuration keeps the reserved empty id");
         assert_eq!(out.hits[1]["root_id"], "ext-a", "the extension's hit names its root");
+        // The location must not re-derive the root: both hits share a relative path, so a
+        // table lookup would attach BOTH to the configuration and quietly disagree with the
+        // hit's own `root_id` above.
+        assert_eq!(out.hits[0]["location"]["root_id"], "");
+        assert_eq!(out.hits[1]["location"]["root_id"], "ext-a");
+        assert_eq!(
+            out.hits[0]["location"]["path"], out.hits[1]["location"]["path"],
+            "one relative path, two roots — the pair is what separates them",
+        );
         assert!(
             out.text.contains("ext-a"),
             "the human-readable listing distinguishes them too: {}",
@@ -492,6 +594,20 @@ mod tests {
                 "graph_id": "method/common/Утилиты/ПроверитьИНН",
                 "snippet": "строка 1\nстрока 2\nстрока 3\nстрока 4\nстрока 5",
                 "snippet_truncated_lines": 2,
+                // The contract location beside the legacy 1-based line pair: same chunk,
+                // 0-based and end-exclusive, with no columns because the index has none.
+                "location": {
+                    "root_id": "",
+                    "path": "CommonModules/Утилиты/Ext/Module.bsl",
+                    "enclosing_range": {
+                        "start_line": 180,
+                        "start_character": 0,
+                        "end_line": 201,
+                        "end_character": 0,
+                    },
+                    "position_encoding": "utf-16",
+                    "schema_version": "1",
+                },
             }),
         );
         // The listing and the structure describe one answer: every value above is on screen.
@@ -528,6 +644,15 @@ mod tests {
                 "line_start": 1,
                 "line_end": 1,
                 "kind": "procedure",
+                // A header chunk still has a place — the file — but no ranges: its end line
+                // is computed by another rule, and publishing it as end-exclusive would be a
+                // number this contract does not mean.
+                "location": {
+                    "root_id": "",
+                    "path": "CommonModules/М/Ext/Module.bsl",
+                    "position_encoding": "utf-16",
+                    "schema_version": "1",
+                },
             }),
         );
         // The text needs a name in the column; the structure says "no symbol" by absence
@@ -615,7 +740,10 @@ mod tests {
 
     #[test]
     fn empty_listing_still_carries_the_envelope() {
-        let result = no_hits_response(Some("semantic skipped: runtime initialization failed"));
+        let result = no_hits_response(
+            Some("semantic skipped: runtime initialization failed"),
+            Envelope::Yes,
+        );
 
         assert_eq!(result.content[0].raw.as_text().expect("text").text, "No results found.");
         let body = result.structured_content.expect("structured envelope");
@@ -623,6 +751,14 @@ mod tests {
         assert_eq!(body["total"], 0);
         assert_eq!(body["degraded"], "semantic skipped: runtime initialization failed");
         assert!(body.get("budget_exhausted").is_none(), "nothing was cut: {body}");
+        // A degraded modality is incompleteness, and an empty listing is exactly where it
+        // would otherwise be indistinguishable from "there is nothing to find".
+        assert_eq!(body["freshness"]["source"], "search-index");
+        assert_eq!(body["freshness"]["completeness"]["status"], "partial");
+        assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "modality_degraded");
+        // The search index has no revision of its own and must not borrow one.
+        assert!(body["freshness"]["revision"].is_null());
+        assert!(body["freshness"]["topology_fingerprint"].is_null());
     }
 
     /// The table a workspace with one declared extension has. Built from paths that need not
