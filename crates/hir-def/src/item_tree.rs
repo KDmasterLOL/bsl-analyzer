@@ -141,7 +141,13 @@ pub struct Param {
     pub has_default: bool,
     /// Source text of the default-value expression (`= <expr>`), whitespace-collapsed, when the
     /// parameter is optional — so a declaration can be rendered faithfully as `Имя = Неопределено`.
-    /// `None` for a required parameter or when the default expression is absent/unparsable.
+    ///
+    /// `None` for a REQUIRED parameter. An optional parameter whose expression could not be
+    /// read yields `Some("")`, not `None`: the parser builds an expression node after every
+    /// `=`, so the node is there and empty. A reader therefore cannot tell "optional" from
+    /// "required" by this field alone — `has_default` answers that — and must treat an empty
+    /// text as an unknown default rather than as no default, or it will render `Имя = ` with
+    /// a dangling equals sign.
     pub default_value: Option<SmolStr>,
     pub name_range: TextRange,
 }
