@@ -2212,12 +2212,9 @@ impl DefDatabase for RootDatabaseImpl {
         variable_symbol.docs.clone()
     }
 
-    fn workspace_symbols(
-        &self,
-        source_root_id: base_db::SourceRootId,
-    ) -> Arc<hir::WorkspaceSymbols> {
+    fn module_members(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceMembers> {
         let source_root_input = self.source_root_input(source_root_id);
-        hir::workspace_symbols_query(self, source_root_input)
+        hir::module_members_query(self, source_root_input)
     }
 
     fn workspace_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceIndex> {

@@ -284,77 +284,39 @@ fn module_ref(card: &SymbolInfoCard) -> Option<crate::tools::location::ModuleRef
     })
 }
 
-/// The resident-miss response: graph-derived candidates (imprecise-name path). When the graph
-/// is not ready, returns a hint to retry rather than an empty list.
+/// The resident-miss response: the name dictionary's candidates.
+///
+/// It used to be a projection of the call graph, which made the miss useless in
+/// the two cases it mattered most — a platform member, which the graph does not
+/// hold at all, and a workspace with no graph yet, where the answer was an empty
+/// list dressed as an answer. The dictionary asks the platform and the
+/// resident's own tables too, and names whichever source could not be asked.
 pub(crate) fn render_not_found(
     symbol: &str,
-    graph: Option<&GraphDb>,
-    limit: usize,
+    answer: crate::tools::name_answer::NameAnswer,
     stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
-    let Some(graph) = graph else {
-        // Answering with an empty candidate list while an index is still building is
-        // exactly `index_building`: the answer is real, but a source of it was not asked.
-        let completeness = Completeness::partial(
-            ReasonCode::IndexBuilding,
-            "the call graph is still indexing, so no candidates were searched",
-        );
-        return structured(json!({
-            "resolved": false,
-            "symbol": symbol,
-            "candidates": [],
-            "hint": "call graph is still indexing; retry shortly for candidate matches",
-            "freshness": stamp.freshness(completeness).to_value(),
-        }));
-    };
-    match graph.resolve(symbol, limit) {
-        Ok(result) => {
-            // Candidates carry DURABLE GRAPH IDS (`method/common/…`), not `symbol_info` qualified
-            // names — they are not re-feedable as `symbol` (resident parsing expects a dotted BSL
-            // name). Expose them as `id` and point the agent at `graph`, or at refining the name.
-            let candidates: Vec<Value> = result
-                .candidates
-                .iter()
-                .map(|c| json!({ "id": c.id, "kind": c.kind, "match": c.match_kind }))
-                .collect();
-            let completeness = Completeness::complete()
-                .when(
-                    result.truncated,
-                    ReasonCode::ResultCap,
-                    "candidate list capped; raise the limit or refine the name",
-                )
-                // Here the counter matters: the symbol was not found, and an unread module
-                // is a place it could have been.
-                .when(
-                    stamp.unread_files > 0,
-                    ReasonCode::UnreadableFiles,
-                    "some workspace files could not be read, so the search was not exhaustive",
-                );
-            structured(json!({
-                "resolved": false,
-                "symbol": symbol,
-                "candidates": candidates,
-                "total": result.total,
-                "truncated": result.truncated,
-                "hint": "no exact resident match; open a candidate id in `graph`, or refine to a \
-                         qualified BSL name for `symbol_info`",
-                "freshness": stamp.freshness(completeness).to_value(),
-            }))
-        }
-        Err(e) => structured(json!({
-            "resolved": false,
-            "symbol": symbol,
-            "candidates": [],
-            "error": "internal",
-            "detail": e.to_string(),
-            "freshness": stamp
-                .freshness(Completeness::partial(
-                    ReasonCode::ModalityDegraded,
-                    "the call graph failed to answer",
-                ))
-                .to_value(),
-        })),
-    }
+    let mut body = serde_json::Map::new();
+    body.insert("resolved".into(), json!(false));
+    body.insert("symbol".into(), json!(symbol));
+    let completeness = answer.insert_into(&mut body);
+    // Here the counter matters: the symbol was not found, and an unread module is
+    // a place it could have been.
+    let completeness = completeness.when(
+        stamp.unread_files > 0,
+        ReasonCode::UnreadableFiles,
+        "some workspace files could not be read, so the search was not exhaustive",
+    );
+    body.insert(
+        "hint".into(),
+        json!(
+            "no exact resident match; feed a candidate's `address.symbol` back to \
+             `symbol_info`, open its `address.graph_id` in `graph`, or read its \
+             `address.syntax_help` in `syntax_help`"
+        ),
+    );
+    body.insert("freshness".into(), stamp.freshness(completeness).to_value());
+    structured(Value::Object(body))
 }
 
 fn usages(graph: &GraphDb, graph_id: &str, top_modules: usize) -> Option<Value> {
@@ -649,16 +611,47 @@ mod tests {
         assert!(members.len() < 200 && !members.is_empty());
     }
 
+    /// A miss carries the envelope, and an empty list says which source could
+    /// not be consulted.
+    ///
+    /// The test this replaces asked for a name nothing could ever hold, so it
+    /// stayed green whether the miss consulted five sources or none — the shape
+    /// it checked was the shape of "no candidates", not of "no candidates and
+    /// here is why".
     #[test]
-    fn not_found_without_graph_returns_retry_hint() {
+    fn a_miss_names_the_source_it_could_not_consult() {
         let roots = stand_roots();
-        let result =
-            render_not_found("НетТакого.Метод", None, DEFAULT_CANDIDATE_LIMIT, &stamp(&roots));
-        let body = result.structured_content.unwrap();
+        let analysis = ide::Analysis::new();
+        let found = ide::NameLookupResult {
+            candidates: Vec::new(),
+            total: 0,
+            total_exact: true,
+            truncated: false,
+            providers: vec![
+                ide::ProviderReport {
+                    provider: ide::ProviderId::Platform,
+                    state: ide::ProviderState::Answered,
+                },
+                ide::ProviderReport {
+                    provider: ide::ProviderId::Graph,
+                    state: ide::ProviderState::NotReady,
+                },
+            ],
+        };
+        let answer = crate::tools::name_answer::NameAnswer::render(
+            analysis.database(),
+            Some(&roots),
+            &found,
+        );
+
+        let body =
+            render_not_found("НетТакого.Метод", answer, &stamp(&roots)).structured_content.unwrap();
+
         assert_eq!(body["resolved"], false);
         assert_eq!(body["symbol"], "НетТакого.Метод");
-        assert_eq!(body["candidates"].as_array().unwrap().len(), 0);
-        assert!(body["hint"].as_str().unwrap().contains("indexing"));
+        assert!(body["candidates"].as_array().unwrap().is_empty());
+        assert_eq!(body["providers"][1]["provider"], "graph");
+        assert_eq!(body["providers"][1]["state"], "not_ready");
         // The miss shape is assembled by its own function, so it is the one that would
         // silently ship without an envelope.
         assert_eq!(body["freshness"]["source"], "resident");

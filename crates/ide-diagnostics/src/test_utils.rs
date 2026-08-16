@@ -517,11 +517,11 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         }
     }
 
-    fn workspace_symbols(
+    fn module_members(
         &self,
         source_root_id: ide_db::base_db::SourceRootId,
-    ) -> std::sync::Arc<hir::WorkspaceSymbols> {
-        self.db.workspace_symbols(source_root_id)
+    ) -> std::sync::Arc<hir::WorkspaceMembers> {
+        self.db.module_members(source_root_id)
     }
 
     fn module_index(

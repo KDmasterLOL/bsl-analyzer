@@ -2272,7 +2272,7 @@ pub fn module_id_of_method(method_id: &str) -> Option<String> {
 /// The trailing name segment of a durable id: the part after the last `::` (a file
 /// module's member separator) or, failing that, the last `/`. Used by
 /// [`rank_resolve_candidates`] to match a bare method/object name against full ids.
-fn resolve_name_segment(id: &str) -> &str {
+pub fn resolve_name_segment(id: &str) -> &str {
     if let Some(pos) = id.rfind("::") {
         return &id[pos + 2..];
     }

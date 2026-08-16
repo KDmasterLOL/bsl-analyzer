@@ -234,7 +234,7 @@ pub trait AnalysisProvider {
         out
     }
 
-    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols>;
+    fn module_members(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceMembers>;
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex>;
 

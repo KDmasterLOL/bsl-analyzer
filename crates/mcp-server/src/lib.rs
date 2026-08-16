@@ -370,6 +370,24 @@ fn require<T>(val: Option<T>, field: &str, action: &str) -> Result<T, McpError> 
     })
 }
 
+/// How the graph's lifecycle reads as a name-provider verdict.
+///
+/// Both entries to the name dictionary need it, and they must agree: an agent
+/// told `not_ready` by one and `failed` by the other would draw opposite
+/// conclusions about whether waiting helps.
+fn graph_provider_state(status: &GraphStatus, has_snapshot: bool) -> ide::ProviderState {
+    match status {
+        GraphStatus::Ready { .. } if has_snapshot => ide::ProviderState::Answered,
+        // Ready with no snapshot is a race, not a build failure: the answer is the
+        // same as still-building — ask again.
+        GraphStatus::Ready { .. } | GraphStatus::Idle | GraphStatus::Loading => {
+            ide::ProviderState::NotReady
+        }
+        GraphStatus::Failed(_) => ide::ProviderState::Failed,
+        GraphStatus::Disabled => ide::ProviderState::Unavailable,
+    }
+}
+
 #[derive(Clone)]
 pub struct McpServer {
     profile: McpProfile,
@@ -917,14 +935,94 @@ impl McpServer {
         }
     }
 
+    /// The name dictionary behind `graph action=resolve`.
+    ///
+    /// Five providers, each of which may be missing for its own reason, and the
+    /// answer says which were. Neither the graph nor the resident is required:
+    /// a host with neither still answers from the platform, and reports the two
+    /// as `not_ready` instead of returning an empty list that would read as a
+    /// proven zero.
+    async fn resolve_names(&self, query: String, limit: usize) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+
+        let graph = self.state.graph().clone();
+        let snapshot = graph.snapshot();
+        let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
+
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        let resident_ready = matches!(diag.status(), DiagnosticsStatus::Ready { .. });
+
+        tokio::task::spawn_blocking(move || {
+            let source = match (&snapshot, graph_state) {
+                (Some(snapshot), ide::ProviderState::Answered) => {
+                    crate::graph_query::GraphNameSource::answering(&snapshot.graph)
+                }
+                (_, state) => crate::graph_query::GraphNameSource::absent(state),
+            };
+
+            let served = |db: &ide::RootDatabaseImpl,
+                          ready: bool,
+                          roots: Option<&bsl_search::WorkspaceRoots>| {
+                tools::graph::resolve(db, ready, &source, roots, &query, limit)
+            };
+
+            let answer = if resident_ready {
+                match diag.read(|resident, _generation| {
+                    let analysis = resident.analysis();
+                    let (value, completeness) =
+                        served(analysis.database(), true, Some(resident.workspace_roots()));
+                    (value, completeness, resident.unread_count())
+                }) {
+                    ResidentOutcome::Ready((value, completeness, unread), _) => {
+                        // Modules that could not be read hold members this search
+                        // would have matched.
+                        Some((
+                            value,
+                            completeness.when(
+                                unread > 0,
+                                tools::location::ReasonCode::UnreadableFiles,
+                                "some workspace files could not be read, so the search was \
+                                 not exhaustive",
+                            ),
+                        ))
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // No resident: an empty database, and `workspace_ready: false` so its
+            // three providers report `not_ready` and are never consulted. The
+            // platform still answers, which is the whole point of serving this
+            // action ahead of the gate.
+            let (value, completeness) = answer.unwrap_or_else(|| {
+                let empty = ide::Analysis::new();
+                served(empty.database(), false, None)
+            });
+
+            // Not `graph::envelope`: that one stamps the graph's revision and
+            // drift verdict, and this answer is not the graph's.
+            Ok(tools::response::structured(serde_json::json!({
+                "freshness": tools::name_answer::NameAnswer::freshness(completeness).to_value(),
+                "result": value,
+            })))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
     /// Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
     /// durable node id. Use to understand call relationships and change impact — start with
     /// `overview` on an unfamiliar project, then `node`/`callers`/`callees`/`neighbors` on the
     /// ids it returns. Not for finding code by meaning (use `search`) and not for analyzer
     /// findings (use `diagnostics`). Actions: `overview`, `schema`, `status`, `resolve`
-    /// (imprecise name → node id), `node`, `source`, `neighbors`, `callers`, `callees`.
-    /// Source-bearing actions honour `max_output_tokens` and flag `budget_exhausted` on
-    /// truncation. Lazily indexes on first use; while it builds it returns a retry envelope.
+    /// (imprecise name → candidates, each with every address that works), `node`, `source`,
+    /// `neighbors`, `callers`, `callees`. Source-bearing actions honour `max_output_tokens`
+    /// and flag `budget_exhausted` on truncation. Lazily indexes on first use; while it
+    /// builds, traversal returns a retry envelope — but `resolve` answers anyway, from the
+    /// name dictionary, and names every source it could not consult.
     #[tool(name = "graph", annotations(read_only_hint = true))]
     async fn graph(&self, params: Parameters<GraphParams>) -> Result<CallToolResult, McpError> {
         let p = params.0;
@@ -947,6 +1045,18 @@ impl McpServer {
 
         // Lazily trigger the background load on first use.
         graph.ensure_loading();
+
+        // `resolve` is a name lookup, not a graph traversal: the platform answers it
+        // with no index at all and the resident's tables answer it without the graph,
+        // so it is served BEFORE the readiness gate rather than behind a `loading`
+        // envelope that carried no candidates. The `ensure_loading` above still runs —
+        // without it the `graph: not_ready` this action reports would never converge,
+        // because nothing else would start the build.
+        if p.action == "resolve" {
+            let query = require(p.query, "query", "resolve")?;
+            let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
+            return self.resolve_names(query, limit).await;
+        }
 
         match graph.status() {
             GraphStatus::Disabled => {
@@ -977,11 +1087,6 @@ impl McpServer {
             let roots = snapshot.workspace_roots();
             let (value, completeness) = match p.action.as_str() {
                 "overview" => tools::graph::overview(gdb, p.top.unwrap_or(20), roots),
-                "resolve" => {
-                    let query = require(p.query, "query", "resolve")?;
-                    let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
-                    tools::graph::resolve(gdb, &query, limit)
-                }
                 "node" => {
                     let id = require(p.id, "id", "node")?;
                     let detail = tools::graph::detail_from(p.detail.as_deref())
@@ -1169,6 +1274,7 @@ impl McpServer {
             };
 
             let snapshot = graph.snapshot();
+            let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
             let gdb = snapshot.as_ref().map(|s| &*s.graph);
 
             let stamp = tools::symbol_info::ResidentStamp {
@@ -1188,14 +1294,40 @@ impl McpServer {
                     &stamp,
                 )),
                 None => {
-                    // Resident miss: offer graph candidates for an imprecise qualified name.
+                    // Resident miss: offer the name dictionary's candidates for an
+                    // imprecise name. The lookup runs under the resident lock — it
+                    // reads that database's tables, and placing a candidate needs
+                    // the same file set that produced it.
                     let symbol = symbol.as_deref().unwrap_or_default();
-                    Ok(tools::symbol_info::render_not_found(
-                        symbol,
-                        gdb,
-                        tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
-                        &stamp,
-                    ))
+                    let source = match (&snapshot, graph_state) {
+                        (Some(snapshot), ide::ProviderState::Answered) => {
+                            crate::graph_query::GraphNameSource::answering(&snapshot.graph)
+                        }
+                        (_, state) => crate::graph_query::GraphNameSource::absent(state),
+                    };
+                    let answer = diag.read(|resident, _generation| {
+                        let analysis = resident.analysis();
+                        let db = analysis.database();
+                        let query = ide::NameQuery::new(
+                            symbol,
+                            tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
+                        );
+                        let found = ide::lookup_names(db, &query, &[&source]);
+                        tools::name_answer::NameAnswer::render(
+                            db,
+                            Some(resident.workspace_roots()),
+                            &found,
+                        )
+                    });
+                    match answer {
+                        ResidentOutcome::Ready(answer, _) => {
+                            Ok(tools::symbol_info::render_not_found(symbol, answer, &stamp))
+                        }
+                        // The resident was evicted between the card read and this
+                        // one; a retry envelope is the honest answer, not a miss
+                        // with no candidates.
+                        _ => Ok(tools::metadata::loading(&diag.status_report())),
+                    }
                 }
             }
         })
@@ -1857,9 +1989,11 @@ mod tool_descriptions {
             `overview` on an unfamiliar project, then `node`/`callers`/`callees`/`neighbors` on the
             ids it returns. Not for finding code by meaning (use `search`) and not for analyzer
             findings (use `diagnostics`). Actions: `overview`, `schema`, `status`, `resolve`
-            (imprecise name → node id), `node`, `source`, `neighbors`, `callers`, `callees`.
-            Source-bearing actions honour `max_output_tokens` and flag `budget_exhausted` on
-            truncation. Lazily indexes on first use; while it builds it returns a retry envelope.
+            (imprecise name → candidates, each with every address that works), `node`, `source`,
+            `neighbors`, `callers`, `callees`. Source-bearing actions honour `max_output_tokens`
+            and flag `budget_exhausted` on truncation. Lazily indexes on first use; while it
+            builds, traversal returns a retry envelope — but `resolve` answers anyway, from the
+            name dictionary, and names every source it could not consult.
               - action: overview | schema | status | node | source | neighbors | callers | callees | resolve
               - depth: Traversal depth for neighbors (default: 1).
               - detail: names | signatures | bodies (default: signatures).

@@ -1086,7 +1086,18 @@ pub fn handle_workspace_symbol(
 ) -> Result<Option<WorkspaceSymbolResponse>> {
     let _p = tracing::info_span!("handle_workspace_symbol", query = %params.query).entered();
 
-    let symbols = ctx.analysis.workspace_symbols(&params.query);
+    let found = ctx.analysis.workspace_symbols(&params.query);
+    if found.truncated {
+        // `workspace/symbol` has no field for an incomplete answer, so the cut
+        // cannot reach the client. It can reach whoever is reading the log.
+        tracing::info!(
+            total = found.total,
+            total_exact = found.total_exact,
+            returned = found.candidates.len(),
+            "workspace/symbol result was capped; the protocol cannot say so to the client",
+        );
+    }
+    let symbols = found.candidates;
     if symbols.is_empty() {
         return Ok(None);
     }
@@ -1094,7 +1105,8 @@ pub fn handle_workspace_symbol(
     // Reuse the per-file text/line-index cache; the "source" file is just the
     // first result's file, fetched the same overlay-or-disk way the converter
     // itself uses for the rest.
-    let source_file = symbols[0].file_id;
+    let source_file =
+        symbols[0].place.expect("`workspace_symbols` asks for candidates with a place").file_id;
     let source_uri = ctx.url_for_file_id(source_file)?;
     let source_text = match ctx.mem_docs.get(&source_uri) {
         Some(doc) => doc.text().to_string(),
@@ -1104,11 +1116,14 @@ pub fn handle_workspace_symbol(
 
     let mut result = Vec::with_capacity(symbols.len());
     for symbol in symbols {
-        let location =
-            converter.convert(IdeLocation { file_id: symbol.file_id, range: symbol.range })?;
+        let Some(place) = symbol.place else { continue };
+        // A module or a metadata object has no declaration node of its own; the
+        // file start is where its card is anchored too.
+        let range = place.range.unwrap_or_else(|| ide::TextRange::empty(0.into()));
+        let location = converter.convert(IdeLocation { file_id: place.file_id, range })?;
         result.push(LspWorkspaceSymbol {
-            name: symbol.name,
-            kind: workspace_symbol_kind(symbol.kind),
+            name: symbol.display,
+            kind: workspace_symbol_kind(symbol.category),
             tags: None,
             container_name: None,
             location: OneOf::Left(location),
@@ -1118,11 +1133,24 @@ pub fn handle_workspace_symbol(
     Ok(Some(WorkspaceSymbolResponse::Nested(result)))
 }
 
-fn workspace_symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
-    match kind {
-        ide::SymbolKind::Procedure | ide::SymbolKind::Function => SymbolKind::FUNCTION,
-        ide::SymbolKind::Variable => SymbolKind::VARIABLE,
-        ide::SymbolKind::Region => SymbolKind::NAMESPACE,
+/// The dictionary's category as an LSP kind.
+///
+/// The mapping lives here, at the protocol boundary, because it is a fact about
+/// LSP and not about BSL. It is also lossy in a way the old one already was: a
+/// procedure and a function were distinct in the analyzer and both `FUNCTION`
+/// here, so collapsing them into one category costs the client nothing.
+fn workspace_symbol_kind(category: ide::NameCategory) -> SymbolKind {
+    match category {
+        ide::NameCategory::CommonModule | ide::NameCategory::Module => SymbolKind::MODULE,
+        ide::NameCategory::ModuleMethod => SymbolKind::FUNCTION,
+        ide::NameCategory::ModuleVariable => SymbolKind::VARIABLE,
+        ide::NameCategory::MetadataObject => SymbolKind::CLASS,
+        ide::NameCategory::MetadataMember => SymbolKind::FIELD,
+        ide::NameCategory::Form => SymbolKind::OBJECT,
+        // Unreachable in practice: a platform member has no file, and the
+        // request asks only for candidates that have one. The arm exists
+        // because the vocabulary is closed, not because the case can arrive.
+        ide::NameCategory::PlatformMember => SymbolKind::FUNCTION,
     }
 }
 

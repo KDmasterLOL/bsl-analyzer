@@ -13,6 +13,7 @@ pub mod graph;
 mod hover;
 mod inlay_hints;
 pub mod jsonl;
+mod name_lookup;
 mod references;
 mod rename;
 mod selection_range;
@@ -20,7 +21,6 @@ mod signature_help;
 pub mod symbol_info;
 mod syntax_highlighting;
 mod type_definition;
-mod workspace_symbols;
 
 pub use call_hierarchy::{CallHierarchyCall, CallHierarchyItem};
 pub use call_hierarchy_index::{
@@ -37,11 +37,12 @@ pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
     build_workspace_graph_rows, classify_graph_id, confidence_label, method_graph_id,
     method_id_for_path, module_id_of_method, rank_resolve_candidates, reproject_changed_modules,
-    scope_for_path, warm_batch_config_roots, BatchDbOpener, ChunkRow, Direction, EdgeRef,
-    FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext, GraphDetail, GraphError,
-    GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult,
-    NodeRef, NodeResult, ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem,
-    SourceResult, MAX_DROPPED_SAMPLE, NO_SOURCE_LOCATION, ROOTS_UNAVAILABLE,
+    resolve_name_segment, scope_for_path, warm_batch_config_roots, BatchDbOpener, ChunkRow,
+    Direction, EdgeRef, FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext,
+    GraphDetail, GraphError, GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod,
+    NeighborsParams, NeighborsResult, NodeRef, NodeResult, ReprojectedRows, ResolveCandidate,
+    ResolveResult, SourceItem, SourceResult, MAX_DROPPED_SAMPLE, NO_SOURCE_LOCATION,
+    ROOTS_UNAVAILABLE,
 };
 pub use hir::graph_index;
 pub use hir::AnnotationKind;
@@ -61,6 +62,11 @@ pub use ide_diagnostics::{
     SoftwareQuality, TextEdit,
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
+pub use name_lookup::{
+    lookup_names, match_tier, resolve_place, ExternalNameSource, NameCandidate, NameCategory,
+    NameLookupResult, NameMatchTier, NamePlace, NameQuery, PlatformRef, ProviderHits, ProviderId,
+    ProviderReport, ProviderState, ResolvedPlace, WORKSPACE_SYMBOL_LIMIT,
+};
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
@@ -68,7 +74,6 @@ pub use symbol_info::{
     SymbolInfoSections, SymbolMember, SymbolPosition,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
-pub use workspace_symbols::WorkspaceSymbol;
 
 use ide_db::base_db::DiagnosticsConfigInput;
 use std::path::PathBuf;
@@ -164,9 +169,15 @@ impl Analysis {
         inlay_hints::inlay_hints(&self.db, file_id, range)
     }
 
-    pub fn workspace_symbols(&self, query: &str) -> Vec<WorkspaceSymbol> {
-        use ide_db::base_db::SourceRootId;
-        workspace_symbols::workspace_symbols(&self.db, SourceRootId(0), query)
+    /// Symbols for `workspace/symbol`: dictionary candidates that have a place
+    /// in a file.
+    ///
+    /// The narrowing is part of the QUESTION — an editor offers what it can jump
+    /// to — so it happens where the answer is assembled, not as a filter in the
+    /// handler that would drop rows without saying so.
+    pub fn workspace_symbols(&self, query: &str) -> NameLookupResult {
+        let query = NameQuery::new(query, name_lookup::WORKSPACE_SYMBOL_LIMIT).requiring_location();
+        name_lookup::lookup_names(&self.db, &query, &[])
     }
 
     pub fn selection_ranges(&self, file_id: FileId, offsets: &[TextSize]) -> Vec<Vec<TextRange>> {

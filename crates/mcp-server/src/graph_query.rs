@@ -144,6 +144,107 @@ fn method_id_range(module_id: &str) -> Option<(String, String)> {
     Some((prefix, upper))
 }
 
+/// The graph, as a name provider for [`ide::lookup_names`].
+///
+/// It selects and counts; ranking, folding and the limit belong to the merge.
+/// Whether the graph is built, still building or failed is the host's fact, not
+/// the store's, so the caller states it — an absent graph still gets a named
+/// verdict rather than silently contributing nothing.
+pub struct GraphNameSource<'a> {
+    graph: Option<&'a GraphDb>,
+    state: ide::ProviderState,
+}
+
+impl<'a> GraphNameSource<'a> {
+    pub fn answering(graph: &'a GraphDb) -> Self {
+        Self { graph: Some(graph), state: ide::ProviderState::Answered }
+    }
+
+    /// The graph cannot answer, and the reason travels into the report.
+    pub fn absent(state: ide::ProviderState) -> Self {
+        debug_assert_ne!(
+            state,
+            ide::ProviderState::Answered,
+            "an absent graph cannot be reported as having answered",
+        );
+        Self { graph: None, state }
+    }
+}
+
+/// Everything the graph holds. A durable id is matched whatever it names, so a
+/// narrowed question must not silently skip the store that owns the id.
+const GRAPH_CATEGORIES: &[ide::NameCategory] = &[
+    ide::NameCategory::CommonModule,
+    ide::NameCategory::Module,
+    ide::NameCategory::ModuleMethod,
+    ide::NameCategory::MetadataObject,
+    ide::NameCategory::MetadataMember,
+    ide::NameCategory::Form,
+];
+
+/// Which category a stored node belongs to. The kind alone does not settle a
+/// module node: only a `common/` scope is callable by name.
+fn node_category(kind: &str, id: &str) -> ide::NameCategory {
+    match kind {
+        "module" if id.starts_with("module/common/") => ide::NameCategory::CommonModule,
+        "module" => ide::NameCategory::Module,
+        "mdo" => ide::NameCategory::MetadataObject,
+        "attribute" | "tabular_section" => ide::NameCategory::MetadataMember,
+        "form" | "form_item" | "form_attribute" => ide::NameCategory::Form,
+        _ => ide::NameCategory::ModuleMethod,
+    }
+}
+
+impl ide::ExternalNameSource for GraphNameSource<'_> {
+    fn provider(&self) -> ide::ProviderId {
+        ide::ProviderId::Graph
+    }
+
+    fn state(&self) -> ide::ProviderState {
+        self.state
+    }
+
+    fn categories(&self) -> &'static [ide::NameCategory] {
+        GRAPH_CATEGORIES
+    }
+
+    /// Stored nodes carry a file and byte offsets, but this source hands over a
+    /// durable id and nothing else — `graph action=node` is where a node's
+    /// place is served, and inventing a second path to it here would be a
+    /// second answer to one question.
+    fn supplies_location(&self) -> bool {
+        false
+    }
+
+    fn candidates(&self, query: &str, limit: usize) -> Result<ide::ProviderHits, String> {
+        let Some(graph) = self.graph else {
+            return Ok(ide::ProviderHits::new(Vec::new(), 0));
+        };
+        let result = graph.resolve(query, limit).map_err(|e| e.to_string())?;
+        let candidates = result
+            .candidates
+            .iter()
+            .map(|c| {
+                // The tier is the ranker's own verdict, carried across rather
+                // than recomputed: recomputing it here would be a second
+                // opinion on the same question, free to disagree.
+                let tier = ide::NameMatchTier::from_code(c.match_kind)
+                    .unwrap_or(ide::NameMatchTier::Substring);
+                ide::NameCandidate::new(
+                    ide::resolve_name_segment(&c.id),
+                    node_category(c.kind, &c.id),
+                    tier,
+                    ide::ProviderId::Graph,
+                )
+                .with_graph_id(&c.id)
+            })
+            .collect();
+        // `total` is the ranker's pre-cap count, so a name matching thousands of
+        // nodes is not handed over as if twenty were all of them.
+        Ok(ide::ProviderHits::new(candidates, result.total))
+    }
+}
+
 /// Map a stored node kind to the agent-facing static label `NodeRef` expects.
 fn node_kind(kind: &str) -> &'static str {
     match kind {
@@ -1266,7 +1367,7 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{edge_kind, method_id_range, provenance, GraphDb};
+    use super::{edge_kind, method_id_range, node_category, provenance, GraphDb, GraphNameSource};
     use crate::graph_db::{GraphDbWriter, GraphMeta};
     use rusqlite::{params, Connection};
 
@@ -1446,6 +1547,95 @@ mod tests {
             res.candidates.iter().filter(|c| c.id == "module/common/Сервер").collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].match_kind, "exact");
+    }
+
+    /// The dictionary must not narrow what `resolve` accepts: all four id tiers
+    /// keep working when the graph answers through the merge instead of
+    /// serialising its own result.
+    #[test]
+    fn every_id_tier_survives_the_trip_through_the_name_source() {
+        use ide::ExternalNameSource;
+
+        let db = graph_db_with_nodes(&[(
+            "method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку",
+            "method",
+        )]);
+        let source = GraphNameSource::answering(&db);
+
+        let tier_of = |query: &str| {
+            source
+                .candidates(query, 10)
+                .unwrap()
+                .candidates
+                .first()
+                .map(|c| c.match_tier)
+                .unwrap_or_else(|| panic!("`{query}` found nothing"))
+        };
+
+        assert_eq!(
+            tier_of("method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку"),
+            ide::NameMatchTier::Exact,
+        );
+        assert_eq!(
+            tier_of("method/common/строковыефункцииклиентсервер/подставитьпараметрывстроку"),
+            ide::NameMatchTier::CaseInsensitive,
+        );
+        assert_eq!(tier_of("ПодставитьПараметрыВСтроку"), ide::NameMatchTier::Name);
+        assert_eq!(tier_of("ПараметрыВСтр"), ide::NameMatchTier::Substring);
+    }
+
+    /// A module node is a common module only when its scope says so; calling an
+    /// object module "callable by name" would publish a category its consumer
+    /// would act on.
+    #[test]
+    fn a_module_node_is_categorised_by_its_scope_not_its_kind() {
+        assert_eq!(
+            node_category("module", "module/common/Сервер"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(
+            node_category("module", "module/object/Catalog/Товары"),
+            ide::NameCategory::Module,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject);
+        assert_eq!(
+            node_category("attribute", "attribute/Catalog/Товары/Код"),
+            ide::NameCategory::MetadataMember,
+        );
+        assert_eq!(
+            node_category("form_item", "form_item/Catalog/Товары/Форма/Кнопка"),
+            ide::NameCategory::Form,
+        );
+    }
+
+    /// The count the merge relies on: what the graph withheld has to be visible,
+    /// or an answer capped at the limit reads as exhaustive.
+    #[test]
+    fn the_source_reports_what_it_did_not_hand_over() {
+        use ide::ExternalNameSource;
+
+        let rows: Vec<(String, &str)> = (0..8)
+            .map(|i| (format!("method/common/М{i}/ПриСозданииНаСервере"), "method"))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            rows.iter().map(|(id, kind)| (id.as_str(), *kind)).collect();
+        let db = graph_db_with_nodes(&borrowed);
+        let source = GraphNameSource::answering(&db);
+
+        let hits = source.candidates("ПриСозданииНаСервере", 3).unwrap();
+        assert_eq!(hits.candidates.len(), 3);
+        assert_eq!(hits.total, 8, "the pre-cap count, not the delivered count");
+    }
+
+    /// An absent graph reports its reason instead of an empty answer that would
+    /// read as a proven zero.
+    #[test]
+    fn an_absent_graph_names_its_state() {
+        use ide::ExternalNameSource;
+
+        let source = GraphNameSource::absent(ide::ProviderState::NotReady);
+        assert_eq!(source.state(), ide::ProviderState::NotReady);
+        assert_eq!(source.provider(), ide::ProviderId::Graph);
     }
 
     #[test]
