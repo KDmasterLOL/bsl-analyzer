@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, WorkspaceSweep};
 // Aliased: the resident has a `Freshness` of its own, and the contract's is a different
 // type serving a different purpose — the two must not be confusable at a glance.
+use crate::tools::file_request::{answer_location, FileError};
 use crate::tools::location as loc;
 use crate::tools::response::{structured, trim_items_to_budget};
 
@@ -186,21 +187,15 @@ pub(crate) fn file_findings(
     // scope verdict, and each of them reads it against the workspace on its own. Shadowing is
     // what makes the root-relative spelling unreachable below rather than merely unwanted —
     // the compiler cannot tell the two apart, they are both `&Path`.
-    // Kept before the shadowing below: this is the only place the caller's own spelling is
+    // Bound before the shadowing below: this is the only place the caller's own spelling is
     // still visible, and it is what the published location must echo.
-    let rooted_spelling =
-        root_id.zip(path.to_str().filter(|spelling| !Path::new(spelling).is_absolute()));
+    let requested_spelling = path;
     let path = match resident.resolve_rooted_path(root_id, path) {
         Ok(resolved) => resolved,
         Err(error) => {
-            return (
-                json!({
-                    "error": error.code(),
-                    "detail": error.to_string(),
-                    "path": path.to_string_lossy(),
-                }),
-                loc::Completeness::complete(),
-            );
+            let detail = error.to_string();
+            let error = FileError::Rooted(error);
+            return (error.to_value(&detail, requested_spelling), error.completeness());
         }
     };
     let path = path.as_path();
@@ -211,25 +206,17 @@ pub(crate) fn file_findings(
         // "wrong path" from "this module is unanalysed".
         if resident.is_unread(path) {
             return (
-                json!({
-                    "error": "unreadable",
-                    "detail": "workspace .bsl file exists but its bytes could not be read; \
-                               it is held out of service and re-read every drift window",
-                    "path": path.to_string_lossy(),
-                }),
-                loc::Completeness::partial(
-                    loc::ReasonCode::UnreadableFiles,
-                    "this file's bytes could not be read, so it is not analysed at all",
+                FileError::Unreadable.to_value(
+                    "workspace .bsl file exists but its bytes could not be read; \
+                     it is held out of service and re-read every drift window",
+                    path,
                 ),
+                FileError::Unreadable.completeness(),
             );
         }
         return (
-            json!({
-                "error": "not_in_workspace",
-                "detail": "path is not a resident workspace .bsl file",
-                "path": path.to_string_lossy(),
-            }),
-            loc::Completeness::complete(),
+            FileError::NotInWorkspace.to_value("path is not a resident workspace .bsl file", path),
+            FileError::NotInWorkspace.completeness(),
         );
     };
     let analysis = resident.analysis();
@@ -269,15 +256,12 @@ pub(crate) fn file_findings(
     // Method spans for the graph bridge: each finding inside a method carries the
     // method's durable graph id so the agent can pivot to `graph callers`.
     let methods = method_ranges(&analysis.document_symbols(file_id));
-    // The pair the ANSWER carries must be the pair the request was served under. When the
-    // caller named a root, that root is the answer — deriving it again by canonicalizing
-    // the resolved path would rename a file reached through a link inside one root into
-    // the root its target physically lives in, and a consumer feeding the pair back would
-    // address a different copy. Only a caller that named no root gets one derived.
-    let file_location = match rooted_spelling {
-        Some((root_id, relative)) => Ok(loc::Location::from_key(root_id, relative)),
-        None => loc::Location::from_path(resident.workspace_roots(), &resident.abs_path_for(path)),
-    };
+    let file_location = answer_location(
+        resident.workspace_roots(),
+        root_id,
+        requested_spelling,
+        &resident.abs_path_for(path),
+    );
     let line_index = line_index::LineIndex::new(&file_text);
 
     let mut counts = Counts::default();
@@ -699,7 +683,14 @@ fn schema_json() -> Value {
             "revision": "u64 — resident-db generation the answer was computed at; DEPRECATED in favour of freshness.revision, which carries the same value",
             "stale": "bool — this answer is not current: the workspace drifted on disk since this generation, and/or some workspace file could not be read (see unread_files); DEPRECATED in favour of freshness.stale",
             "reload": "none | running | failed — background reload state",
-            "freshness": "the location contract's envelope: { source, revision, topology_fingerprint, stale, completeness }. `completeness` is { status: complete | partial, reasons: [{ code, detail }] } with code one of output_budget | result_cap | index_building | unreadable_files | out_of_analysis_scope | modality_degraded",
+            "freshness": format!(
+                "the location contract's envelope: {{ source, revision, topology_fingerprint, \
+                 stale, completeness }}. `source` is one of {}. `completeness` is \
+                 {{ status: complete | partial, reasons: [{{ code, detail }}] }} with code one \
+                 of {}",
+                loc::FreshnessSource::vocabulary(),
+                loc::ReasonCode::vocabulary(),
+            ),
             "result": "the action payload (or an {error} object)"
         }
     })
@@ -776,6 +767,31 @@ mod tests {
             body["finding"]["range"].as_str().unwrap().contains("DEPRECATED"),
             "the legacy range is marked, not silently kept",
         );
+    }
+
+    /// The `schema` action exists so a consumer can write one branch per value it may see.
+    /// That is worth something only while the published list is the served one, so both
+    /// closed vocabularies of the envelope are read out of their enums here rather than
+    /// retyped in the prose beside them.
+    #[test]
+    fn the_schema_publishes_both_envelope_vocabularies_in_full() {
+        let body = schema().structured_content.expect("structuredContent");
+        let freshness = body["envelope"]["freshness"].as_str().expect("prose");
+
+        for source in loc::FreshnessSource::ALL {
+            assert!(
+                freshness.contains(source.as_str()),
+                "{} answers requests but the schema does not name it: {freshness}",
+                source.as_str(),
+            );
+        }
+        for reason in loc::ReasonCode::ALL {
+            assert!(
+                freshness.contains(reason.as_str()),
+                "{} can appear in an envelope but the schema does not name it: {freshness}",
+                reason.as_str(),
+            );
+        }
     }
 
     #[test]

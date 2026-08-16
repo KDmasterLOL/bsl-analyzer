@@ -296,6 +296,23 @@ struct DiagnosticsParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct OutlineParams {
+    /// Absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+    path: String,
+    /// The source root `path` is spelled against, as carried by every `search` code hit. Omit
+    /// for a path already spelled against the workspace; `""` names the configuration. An
+    /// extension repeats the configuration's layout, so the same relative path exists under
+    /// several roots and the pair is what names one file.
+    root_id: Option<String>,
+    /// `full` (default) — every region and declaration; `regions` — the region skeleton alone,
+    /// for a module too big to read method by method.
+    mode: Option<String>,
+    /// Output budget in tokens (~4 chars each); an over-budget map stops partway through the
+    /// file and the response carries `truncated: true` with a `budget_hint` (default 6000).
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct ItsHelpParams {
     /// Natural-language question for the ITS expert help.
     question: String,
@@ -1416,6 +1433,52 @@ impl McpServer {
             }
         }
     }
+
+    /// The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
+    /// variables it declares, each with its export flag, compilation directives, parameters
+    /// (with `Знач` and default values) and 0-based UTF-16 ranges. Method BODIES are never
+    /// returned — read the file for those, or ask `search`. Use it to orient yourself in an
+    /// unfamiliar module before reading it, or to find where a declaration sits. Params: `path`
+    /// (required) with optional `root_id` naming the source root it is spelled against, `mode`
+    /// (`full` | `regions` — the region skeleton alone, for a big module), `max_output_tokens`.
+    /// Answers from one parse of that file: no index is built, nothing is ever `loading`, and
+    /// the answer is the same whether or not the workspace has been analysed.
+    #[tool(name = "outline", annotations(read_only_hint = true))]
+    async fn outline(&self, params: Parameters<OutlineParams>) -> Result<CallToolResult, McpError> {
+        let p = params.0;
+        let Some(workspace_root) = self.state.workspace_root().cloned() else {
+            return Err(McpError::invalid_params(
+                "`outline` is only available in the workspace profile",
+                None,
+            ));
+        };
+        let mode = tools::outline::parse_mode(p.mode.as_deref())
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let max_output_tokens =
+            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+        let path = std::path::PathBuf::from(p.path);
+
+        // Off the async executor: parsing a 1 MB module takes tens of milliseconds, and the
+        // whole answer is one such parse.
+        tokio::task::spawn_blocking(move || {
+            // Built per call, from the project alone. Milliseconds on real configurations, and
+            // caching it would mean a second lifecycle to invalidate beside the resident's.
+            let project = crate::project::at(&workspace_root).map_err(|e| {
+                McpError::internal_error(format!("workspace project failed to load: {e}"), None)
+            })?;
+            let (roots, _rejected) = crate::project::workspace_roots(&project);
+            tools::outline::answer(
+                &roots,
+                &workspace_root,
+                p.root_id.as_deref(),
+                &path,
+                mode,
+                max_output_tokens,
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
 }
 
 /// Await the sweep's blocking task under the rmcp per-request token. Cancellation
@@ -1578,6 +1641,7 @@ impl ServerHandler for McpServer {
                  - find code by meaning or unknown name → `search`;\n\
                  - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
                  - one symbol's kind/signature/type/doc/definition/usages by name → `symbol_info`;\n\
+                 - one file's map (regions, declarations, parameters) → `outline`;\n\
                  - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
                  (start at catalog to learn the codes);\n\
                  - metadata objects / structure / forms → `metadata`;\n\
@@ -1838,6 +1902,26 @@ mod tool_descriptions {
             selects the owner object (omit for a configuration-level common form).
               - object_type: Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
             `object` and `form`.
+
+            ## outline
+            The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
+            variables it declares, each with its export flag, compilation directives, parameters
+            (with `Знач` and default values) and 0-based UTF-16 ranges. Method BODIES are never
+            returned — read the file for those, or ask `search`. Use it to orient yourself in an
+            unfamiliar module before reading it, or to find where a declaration sits. Params: `path`
+            (required) with optional `root_id` naming the source root it is spelled against, `mode`
+            (`full` | `regions` — the region skeleton alone, for a big module), `max_output_tokens`.
+            Answers from one parse of that file: no index is built, nothing is ever `loading`, and
+            the answer is the same whether or not the workspace has been analysed.
+              - max_output_tokens: Output budget in tokens (~4 chars each); an over-budget map stops partway through the
+            file and the response carries `truncated: true` with a `budget_hint` (default 6000).
+              - mode: `full` (default) — every region and declaration; `regions` — the region skeleton alone,
+            for a module too big to read method by method.
+              - path: Absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+              - root_id: The source root `path` is spelled against, as carried by every `search` code hit. Omit
+            for a path already spelled against the workspace; `""` names the configuration. An
+            extension repeats the configuration's layout, so the same relative path exists under
+            several roots and the pair is what names one file.
 
             ## query
             Validate or execute SDBL (the 1C query language) against the configuration schema. Use

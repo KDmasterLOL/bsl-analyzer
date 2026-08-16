@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.6";
+pub const CONTRACT_VERSION: &str = "1.7";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -144,6 +144,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         output_schema_version: None,
     },
     tool("diagnostics", DIAGNOSTICS_ACTIONS),
+    tool("outline", &[]),
 ];
 
 const REFERENCE_TOOLS: &[ToolDecl] = &[
@@ -544,7 +545,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.6",
+              "contract_version": "1.7",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -1358,6 +1359,35 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "integer"
+                          },
+                          {
+                            "name": "root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "outline",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "mode",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "path",
+                            "required": true,
+                            "type": "string"
                           },
                           {
                             "name": "root_id",

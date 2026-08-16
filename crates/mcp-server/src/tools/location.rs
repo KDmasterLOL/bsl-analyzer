@@ -44,7 +44,10 @@ impl From<LineColRange> for PositionRange {
 }
 
 impl PositionRange {
-    fn to_value(self) -> Value {
+    /// Public because an answer about ONE file publishes the pair once at its root and gives
+    /// its nodes bare ranges. Those ranges are still the contract's, and this module is still
+    /// the only place that writes their keys.
+    pub fn to_value(self) -> Value {
         json!({
             "start_line": self.start_line,
             "start_character": self.start_character,
@@ -237,34 +240,60 @@ fn normalize_separators(path: &str) -> String {
     }
 }
 
-/// Why an answer is not the whole answer. A closed vocabulary: a new reason means a
-/// new version of the contract, not a new free-form string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReasonCode {
+/// Declared by one table for the reason spelled out over [`LocationUnavailable`]: a list
+/// written by hand beside the enum is the one place a new variant is not forced to join.
+macro_rules! reason_code {
+    ($( $(#[$doc:meta])* $variant:ident => $code:literal; )+) => {
+        /// Why an answer is not the whole answer. A closed vocabulary: a new reason means a
+        /// new version of the contract, not a new free-form string.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum ReasonCode {
+            $( $(#[$doc])* $variant, )+
+        }
+
+        impl ReasonCode {
+            /// The whole vocabulary, for every place that PUBLISHES the list.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
+
+            pub fn as_str(self) -> &'static str {
+                match self { $( Self::$variant => $code, )+ }
+            }
+        }
+    };
+}
+
+reason_code! {
     /// The output budget cut the answer short.
-    OutputBudget,
+    OutputBudget => "output_budget";
     /// A count limit (`max_findings`, `max_nodes`, a candidate cap) cut it short.
-    ResultCap,
+    ResultCap => "result_cap";
     /// An index needed for part of the answer is still being built.
-    IndexBuilding,
+    IndexBuilding => "index_building";
     /// Some files could not be read.
-    UnreadableFiles,
+    UnreadableFiles => "unreadable_files";
     /// Part of the request lies outside the configured analysis scope.
-    OutOfAnalysisScope,
+    OutOfAnalysisScope => "out_of_analysis_scope";
     /// A modality or subsystem the answer would normally use was unavailable.
-    ModalityDegraded,
+    ModalityDegraded => "modality_degraded";
+}
+
+/// The accepted values of one field, `a | b | c`, for a tool's `schema` action to publish.
+///
+/// Generated rather than retyped: a `schema` action exists to tell a consumer what it may
+/// match on, and a hand-written list there is a promise nothing keeps.
+fn joined(values: impl Iterator<Item = &'static str>) -> String {
+    values.collect::<Vec<_>>().join(" | ")
 }
 
 impl ReasonCode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::OutputBudget => "output_budget",
-            Self::ResultCap => "result_cap",
-            Self::IndexBuilding => "index_building",
-            Self::UnreadableFiles => "unreadable_files",
-            Self::OutOfAnalysisScope => "out_of_analysis_scope",
-            Self::ModalityDegraded => "modality_degraded",
-        }
+    pub fn vocabulary() -> String {
+        joined(Self::ALL.iter().map(|code| code.as_str()))
+    }
+}
+
+impl FreshnessSource {
+    pub fn vocabulary() -> String {
+        joined(Self::ALL.iter().map(|source| source.as_str()))
     }
 }
 
@@ -319,23 +348,41 @@ impl Completeness {
     }
 }
 
-/// Which subsystem produced an answer. Named because the freshness fields below mean
-/// different things — and are known to a different extent — per source.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FreshnessSource {
-    Resident,
-    Graph,
-    SearchIndex,
+/// Declare the vocabulary of "who answered" ONCE, for the reason spelled out over
+/// [`LocationUnavailable`]: a hand-written `ALL` is the one part a new variant is not forced
+/// to join, and the gate that checks the published vocabulary would then keep passing while
+/// serving a source the contract document never names.
+macro_rules! freshness_source {
+    ($( $(#[$doc:meta])* $variant:ident => $code:literal; )+) => {
+        /// Which subsystem produced an answer. Named because the freshness fields below mean
+        /// different things — and are known to a different extent — per source.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum FreshnessSource {
+            $( $(#[$doc])* $variant, )+
+        }
+
+        impl FreshnessSource {
+            /// The whole vocabulary, for every place that PUBLISHES the list.
+            pub const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
+
+            pub fn as_str(self) -> &'static str {
+                match self { $( Self::$variant => $code, )+ }
+            }
+        }
+    };
 }
 
-impl FreshnessSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Resident => "resident",
-            Self::Graph => "graph",
-            Self::SearchIndex => "search-index",
-        }
-    }
+freshness_source! {
+    /// The resident analysis database: its own revision, topology and drift verdict.
+    Resident => "resident";
+    /// The call graph's store.
+    Graph => "graph";
+    /// The search index, which has no revision of its own.
+    SearchIndex => "search-index";
+    /// One file parsed for this call and nothing else — no index, no resident, no graph.
+    /// It has no identity to report: there is no revision such a parse belongs to and no
+    /// topology it was taken under, so both come back `null` rather than borrowed.
+    FileParse => "file-parse";
 }
 
 /// The envelope every tool of the contract carries: what answered, at which revision
@@ -515,6 +562,51 @@ mod tests {
                 contract.contains(&format!("`{}`", reason.code())),
                 "{} is served but the contract document does not list it",
                 reason.code(),
+            );
+        }
+    }
+
+    /// The section of the contract document that describes the envelope.
+    fn envelope_section() -> &'static str {
+        let contract = include_str!("../../../../docs/mcp/LOCATION_CONTRACT.md");
+        let after_heading = contract
+            .split_once("\n## Конверт\n")
+            .expect("the contract describes the envelope under its own heading")
+            .1;
+        match after_heading.split_once("\n## ") {
+            Some((section, _)) => section,
+            None => after_heading,
+        }
+    }
+
+    /// The same rule as for the reasons above, with one addition: the envelope's two closed
+    /// vocabularies have to be published WHERE the envelope is described, not merely somewhere
+    /// in the document.
+    ///
+    /// The section bound is not decoration. `` `graph` `` appears four times in this file and
+    /// none of them is in the envelope section — a gate reading the whole document would pass
+    /// on a source the envelope never mentions, which is precisely the reader who needs it.
+    #[test]
+    fn both_envelope_vocabularies_are_named_where_the_envelope_is_described() {
+        let envelope = envelope_section();
+
+        let mut seen = std::collections::BTreeSet::new();
+        for source in FreshnessSource::ALL {
+            assert!(seen.insert(source.as_str()), "two sources share the name {}", source.as_str());
+            assert!(
+                envelope.contains(&format!("`{}`", source.as_str())),
+                "{} answers requests but the envelope section does not name it",
+                source.as_str(),
+            );
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for reason in ReasonCode::ALL {
+            assert!(seen.insert(reason.as_str()), "two reasons share the code {}", reason.as_str());
+            assert!(
+                envelope.contains(&format!("`{}`", reason.as_str())),
+                "{} can appear in an envelope but the envelope section does not name it",
+                reason.as_str(),
             );
         }
     }
