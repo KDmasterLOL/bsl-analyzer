@@ -125,6 +125,13 @@ pub fn loading(report: &StatusReport) -> CallToolResult {
     crate::tools::resident::loading(report, "diagnostics database is building; retry shortly")
 }
 
+/// Who answers a `diagnostics` request — every branch of it, including the in-band errors.
+///
+/// Named once and read by both the envelope and the `schema` action, because a tool's schema
+/// says what THAT tool can return: publishing the contract's whole vocabulary there would have
+/// a consumer write branches for sources this tool never produces.
+const ANSWERED_BY: loc::FreshnessSource = loc::FreshnessSource::Resident;
+
 /// Wrap a `file` result in the freshness envelope, matching the `graph` tool.
 ///
 /// `completeness` is passed in rather than derived here: the facts that make an answer
@@ -139,7 +146,7 @@ pub fn envelope(
         "revision": freshness.revision,
         "stale": freshness.stale,
         "reload": freshness.reload,
-        "freshness": loc::Freshness::new(loc::FreshnessSource::Resident, completeness)
+        "freshness": loc::Freshness::new(ANSWERED_BY, completeness)
             .with_revision(freshness.revision)
             .with_topology(freshness.topology)
             .with_stale(freshness.stale)
@@ -685,9 +692,12 @@ fn schema_json() -> Value {
             "reload": "none | running | failed — background reload state",
             "freshness": format!(
                 "the location contract's envelope: {{ source, revision, topology_fingerprint, \
-                 stale, completeness }}. `source` is one of {}. `completeness` is \
+                 stale, completeness }}. `source` is always `{}` here — this tool answers from \
+                 the resident database and from nothing else; the contract's full vocabulary of \
+                 sources ({}) is in docs/mcp/LOCATION_CONTRACT.md. `completeness` is \
                  {{ status: complete | partial, reasons: [{{ code, detail }}] }} with code one \
                  of {}",
+                ANSWERED_BY.as_str(),
                 loc::FreshnessSource::vocabulary(),
                 loc::ReasonCode::vocabulary(),
             ),
@@ -770,25 +780,38 @@ mod tests {
     }
 
     /// The `schema` action exists so a consumer can write one branch per value it may see.
-    /// That is worth something only while the published list is the served one, so both
-    /// closed vocabularies of the envelope are read out of their enums here rather than
-    /// retyped in the prose beside them.
+    /// Two halves to that, and they pull in opposite directions:
+    ///
+    /// - the reason codes are the contract's whole closed list, read out of the enum rather
+    ///   than retyped, so a new one cannot ship with the prose lagging behind it;
+    /// - the source is the ONE this tool serves, checked against what the envelope actually
+    ///   stamps. Publishing the contract's full list here would have a consumer write branches
+    ///   for sources `diagnostics` never produces.
     #[test]
-    fn the_schema_publishes_both_envelope_vocabularies_in_full() {
+    fn the_schema_names_the_source_this_tool_serves_and_every_reason_it_may_carry() {
         let body = schema().structured_content.expect("structuredContent");
-        let freshness = body["envelope"]["freshness"].as_str().expect("prose");
+        let prose = body["envelope"]["freshness"].as_str().expect("prose");
 
-        for source in loc::FreshnessSource::ALL {
-            assert!(
-                freshness.contains(source.as_str()),
-                "{} answers requests but the schema does not name it: {freshness}",
-                source.as_str(),
-            );
-        }
+        let stamped = envelope(
+            Freshness { revision: 1, topology: 2, stale: false, reload: "none" },
+            loc::Completeness::complete(),
+            json!({}),
+        )
+        .structured_content
+        .expect("structuredContent");
+        assert_eq!(
+            stamped["freshness"]["source"], "resident",
+            "the tool's own answers are what the schema describes",
+        );
+        assert!(
+            prose.contains(&format!("`{}`", stamped["freshness"]["source"].as_str().unwrap())),
+            "the schema must name the source the envelope stamps: {prose}",
+        );
+
         for reason in loc::ReasonCode::ALL {
             assert!(
-                freshness.contains(reason.as_str()),
-                "{} can appear in an envelope but the schema does not name it: {freshness}",
+                prose.contains(reason.as_str()),
+                "{} can appear in an envelope but the schema does not name it: {prose}",
                 reason.as_str(),
             );
         }

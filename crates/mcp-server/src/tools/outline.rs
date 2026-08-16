@@ -46,6 +46,11 @@ const DEFAULT_TEXT_CHARS: usize = 200;
 const MODE_FULL: &str = "full";
 const MODE_REGIONS: &str = "regions";
 
+/// `[]` — what an array costs in the rendered body before anything is in it.
+const EMPTY_ARRAY: usize = 2;
+/// `,"":` around a key — the separating comma, the quotes and the colon.
+const QUOTED_KEY_FRAMING: usize = 4;
+
 /// Parse the `mode` enum. An unknown value is refused rather than defaulted, so a caller is
 /// never served a different question than it asked.
 pub(crate) fn parse_mode(mode: Option<&str>) -> Result<OutlineMode, String> {
@@ -93,10 +98,14 @@ impl DefaultState {
     }
 }
 
-/// A file this tool agreed to answer about: where its bytes are, and the pair the answer
-/// carries.
+/// A file this tool agreed to answer about: where its bytes are, how the request spelled it,
+/// and the pair the answer carries.
 struct RequestedFile {
     abs: PathBuf,
+    /// The path as the shared resolution returned it — before this tool joined it to the
+    /// workspace root to open it. What an in-band refusal echoes, so that `outline` and
+    /// `diagnostics file` name one file the same way; see [`resolve`].
+    spelling: PathBuf,
     location: loc::Location,
 }
 
@@ -144,6 +153,14 @@ fn resolve(
         let detail = error.to_string();
         Refusal { error: FileError::Rooted(error), detail, path: path.to_path_buf() }
     })?;
+    // Every refusal below echoes THIS spelling, not the absolute path built next. Joining the
+    // workspace root is how this tool opens a file; `diagnostics file` finds its FileId by
+    // another route and echoes what resolution returned. Echoing the join would leave the two
+    // tools naming one refused file differently — and the `path` field travels in the same
+    // in-band body as the code they share, so a consumer reading one reads the other.
+    let spelling = resolved.clone();
+    let refuse = |detail: &str| Refusal::not_in_workspace(&spelling, detail);
+
     // Canonicalization failing is NOT an error: a path that names nothing still has to reach
     // the classification below, where it is answered `not_in_workspace` — the same answer
     // `diagnostics file` gives it. Refusing here would make the two tools disagree about one
@@ -151,26 +168,24 @@ fn resolve(
     let abs = if resolved.is_absolute() { resolved } else { workspace_root.join(resolved) };
     let abs = abs.canonicalize().unwrap_or(abs);
 
-    let location = answer_location(roots, root_id, path, &abs).map_err(|_| {
-        Refusal::not_in_workspace(&abs, "the path lies outside every registered source root")
-    })?;
+    let location = answer_location(roots, root_id, path, &abs)
+        .map_err(|_| refuse("the path lies outside every registered source root"))?;
     // The shared predicate, not a second extension check: this one compares without regard to
     // case and already serves the LSP server and the CLI, and a second procedure would differ
     // from it on exactly the inputs nobody tests.
     if !project_model::is_bsl_source_path(&abs) {
-        return Err(Refusal::not_in_workspace(&abs, "the path does not name a `.bsl` source file"));
+        return Err(refuse("the path does not name a `.bsl` source file"));
     }
     // Asked BEFORE the read, and about a REGULAR file. `read_to_string` reports a missing file
     // and a directory through the same error kind as an unreadable one, and answering either
     // `unreadable` would disagree with `diagnostics file`, which knows nothing of them and
     // says `not_in_workspace`.
     if !abs.is_file() {
-        return Err(Refusal::not_in_workspace(
-            &abs,
+        return Err(refuse(
             "no regular file lies at that path: nothing is there, or it is a directory",
         ));
     }
-    Ok(RequestedFile { abs, location })
+    Ok(RequestedFile { abs, spelling, location })
 }
 
 /// The map of `symbols`, split per level into regions and declarations and fitted to a
@@ -198,7 +213,18 @@ struct Level {
 
 impl<'a> Walk<'a> {
     fn new(text: &'a str, index: &'a LineIndex, mode: OutlineMode, budget: usize) -> Self {
-        Self { text, index, mode, budget, used: 0, kept: 0, dropped: false, capped_text: false }
+        // Starts at the brackets of the answer's own top-level arrays, which exist whether or
+        // not a single node survives.
+        let used = EMPTY_ARRAY + usize::from(mode == OutlineMode::Full) * EMPTY_ARRAY;
+        Self { text, index, mode, budget, used, kept: 0, dropped: false, capped_text: false }
+    }
+
+    /// What the child arrays cost a region node: `,"regions":[]` and, in the full map,
+    /// `,"members":[]`. Their CONTENT is priced node by node as the walk reaches it; this is
+    /// the frame that content sits in.
+    fn child_arrays_framing(&self) -> usize {
+        let frame = |key: &str| key.len() + QUOTED_KEY_FRAMING + EMPTY_ARRAY;
+        frame("regions") + usize::from(self.mode == OutlineMode::Full) * frame("members")
     }
 
     /// Whether the response exceeds or falls short of the whole map. Both halves matter: a
@@ -236,9 +262,15 @@ impl<'a> Walk<'a> {
     /// trims rendered JSON, which is the only way a response stays parseable at any budget.
     fn node(&mut self, symbol: &DocumentSymbol) -> Result<Option<Value>, String> {
         let (mut body, cut_a_text) = shallow(symbol, self)?;
-        // `+1` is the comma this node costs its array; the framing of the arrays themselves is
-        // small and constant, and pricing it per node would over-charge nested levels.
-        let cost = serde_json::to_string(&body).map(|json| json.len()).unwrap_or(0) + 1;
+        // `+1` is the comma this node costs its array. A region also pays for the frame its
+        // children sit in — the two array keys are spliced in BELOW, after this price is
+        // taken, and there is one such frame per region rather than one per response, so
+        // leaving them out lets the answer exceed its budget by a margin that grows with the
+        // module's markup while nothing is ever dropped.
+        let mut cost = serde_json::to_string(&body).map(|json| json.len()).unwrap_or(0) + 1;
+        if symbol.detail == SymbolDetail::Region {
+            cost += self.child_arrays_framing();
+        }
         if self.kept > 0 && self.used + cost > self.budget {
             self.dropped = true;
             return Ok(None);
@@ -276,21 +308,37 @@ impl<'a> Walk<'a> {
     }
 }
 
-/// What to do about a map that did not fit — and only what this caller has not done already.
+/// What to do about a map that did not fit — and only what would actually help THIS caller.
 ///
-/// A skeleton deep enough in nested regions overflows the budget on its own, and there the
-/// narrower question is the one being asked: offering it back sends the caller in a circle,
-/// which is worse than no hint at all, since the hint is the whole point of the field.
-fn budget_hint(mode: OutlineMode) -> &'static str {
-    match mode {
-        OutlineMode::Full => {
+/// Two ways the standing advice "ask for the skeleton instead" turns into a wasted round trip,
+/// and the field is nothing but advice, so a wrong one is worse than none:
+///
+/// - the caller is already asking for the skeleton, and a skeleton deep enough in nested
+///   regions overflows a budget on its own;
+/// - the file has no `#Область` at all, so the narrower question answers with an empty map
+///   that calls itself complete — which reads as "this module declares nothing".
+fn budget_hint(mode: OutlineMode, file_has_regions: bool) -> &'static str {
+    match (mode, file_has_regions) {
+        (OutlineMode::Full, true) => {
             "ask `mode: \"regions\"` for the module's skeleton, or raise `max_output_tokens`"
         }
-        OutlineMode::RegionsOnly => {
+        (OutlineMode::Full, false) => {
+            "raise `max_output_tokens`: this file declares no regions, so the region skeleton \
+             would come back empty"
+        }
+        (OutlineMode::RegionsOnly, _) => {
             "raise `max_output_tokens`: this is already the narrowest question, and the \
              region skeleton alone does not fit"
         }
     }
+}
+
+/// Whether the file declares a region anywhere. Read off the WHOLE map rather than the
+/// published one: a map cut short says nothing about what lies past the cut.
+fn any_region(symbols: &[DocumentSymbol]) -> bool {
+    symbols
+        .iter()
+        .any(|symbol| symbol.detail == SymbolDetail::Region || any_region(&symbol.children))
 }
 
 /// The node itself, without its children, and whether building it had to cut a default's text.
@@ -407,9 +455,8 @@ pub(crate) fn answer(
         // which is the same fact `not_in_workspace` reports, not a reading failure.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Refusal::not_in_workspace(
-                &file.abs,
-                "the file disappeared before it \
-                 could be read",
+                &file.spelling,
+                "the file disappeared before it could be read",
             )
             .into_result(mode))
         }
@@ -419,7 +466,7 @@ pub(crate) fn answer(
                 detail: format!(
                     "the file is there but its bytes could not be read as UTF-8 text: {error}"
                 ),
-                path: file.abs,
+                path: file.spelling,
             }
             .into_result(mode))
         }
@@ -463,7 +510,7 @@ pub(crate) fn answer(
         map.insert("members".into(), Value::Array(level.members));
     }
     if truncated {
-        map.insert("budget_hint".into(), json!(budget_hint(mode)));
+        map.insert("budget_hint".into(), json!(budget_hint(mode, any_region(&symbols))));
     }
     Ok(structured(body))
 }
@@ -474,6 +521,10 @@ mod tests {
     use std::fs;
 
     const MODULE_REL: &str = "CommonModules/М/Ext/Module.bsl";
+
+    /// The advice itself, not the word: a hint may name regions while explaining why it does
+    /// NOT send the caller after them, and a check on the bare word cannot tell the two apart.
+    const OFFER_OF_REGIONS: &str = "ask `mode: \"regions\"`";
 
     /// A workspace that IS its own configuration, holding one module with `body`.
     fn stand(body: &str) -> (tempfile::TempDir, PathBuf) {
@@ -684,14 +735,15 @@ mod tests {
         let (_dir, workspace) = stand(&source);
         let whole = call(&workspace, None, MODULE_REL, OutlineMode::Full, 100_000);
 
-        // The budget is the price of exactly two shell nodes by the walk's own formula — the
-        // node WITHOUT its children plus its comma — and not the length of two finished nodes,
-        // which already carry their subtrees.
+        // Room for exactly two SHELL nodes — a node without its children, which is what the
+        // walk prices — and not for two finished nodes, which already carry their subtrees.
+        // The margin covers what a shell costs beyond its own text (its comma, and for a
+        // region the frame its child arrays sit in); it stays far below the price of the next
+        // node in file order, a whole procedure of some two hundred characters.
+        const SHELL_MARGIN: usize = 60;
         let first = shallow_len(&whole["members"][0]);
         let region = shallow_len(&whole["regions"][0]);
-        // Rounded UP into tokens: the walk budgets in characters at four per token, and a
-        // rounded-down budget would be a few characters short of the two nodes on purpose.
-        let budget_chars = first + 1 + region + 1;
+        let budget_chars = first + region + SHELL_MARGIN;
         let body = call(&workspace, None, MODULE_REL, OutlineMode::Full, budget_chars.div_ceil(4));
 
         assert_eq!(body["truncated"], true, "{body}");
@@ -722,6 +774,51 @@ mod tests {
         assert_eq!(whole["freshness"]["completeness"]["status"], "complete", "{whole}");
         assert_eq!(names(&whole["members"]), ["Первая", "Между"], "{whole}");
         assert_eq!(names(&whole["regions"]), ["A", "B"], "{whole}");
+    }
+
+    /// A map that says it fits the budget fits it.
+    ///
+    /// The input is regions and nothing else, because that is where the unpriced part lives: a
+    /// region node carries two child-array keys added AFTER it is priced, so the overshoot
+    /// grows with the number of regions rather than staying a constant of the response. On a
+    /// module of methods this same check passes whatever the accounting.
+    #[test]
+    fn a_map_that_calls_itself_whole_fits_the_budget_it_was_given() {
+        let mut source = String::new();
+        for i in 0..200 {
+            source.push_str(&format!("#Область Область_{i}\n#КонецОбласти\n"));
+        }
+        let (_dir, workspace) = stand(&source);
+
+        let whole = call(&workspace, None, MODULE_REL, OutlineMode::Full, 1_000_000);
+        assert_eq!(whole["regions"].as_array().expect("regions").len(), 200, "the stand is flat");
+        let text_only: usize =
+            whole["regions"].as_array().unwrap().iter().map(shallow_len).sum::<usize>();
+
+        // Swept rather than measured at one point, and the sweep starts where the nodes' own
+        // TEXT ends: an accounting that omits the per-region frame keeps every node at exactly
+        // that budget and overshoots it, which is the failure this checks for. The far end is
+        // generous enough that nothing is dropped, so both outcomes appear.
+        let mut saw_whole = false;
+        let mut saw_truncated = false;
+        for budget_tokens in
+            (text_only.div_ceil(4)..=(text_only + 200 * 40).div_ceil(4)).step_by(400)
+        {
+            let body = call(&workspace, None, MODULE_REL, OutlineMode::Full, budget_tokens);
+            if body["truncated"] == true {
+                saw_truncated = true;
+                continue;
+            }
+            saw_whole = true;
+            let published = serde_json::to_string(&body["regions"]).unwrap().len()
+                + serde_json::to_string(&body["members"]).unwrap().len();
+            assert!(
+                published <= budget_tokens * 4,
+                "the map calls itself whole at {published} chars against a budget of {}",
+                budget_tokens * 4,
+            );
+        }
+        assert!(saw_whole && saw_truncated, "the sweep must cross the boundary to mean anything");
     }
 
     /// И10. A runaway default is cut, says so, and is reported as a count cap rather than as
@@ -797,6 +894,40 @@ mod tests {
         assert!(kept_reasons.contains("result_cap"), "{whole}");
     }
 
+    /// The hint offers the narrower question only when that question has an answer.
+    ///
+    /// A module with no `#Область` at all — an ordinary older common module — answers
+    /// `mode=regions` with an empty map that calls itself COMPLETE. Sending a caller there
+    /// costs a round trip and returns a page that reads as "this module declares nothing".
+    #[test]
+    fn the_budget_hint_does_not_offer_a_skeleton_the_file_does_not_have() {
+        let mut source = String::new();
+        for i in 0..200 {
+            source.push_str(&format!("Процедура П_{i}()\nКонецПроцедуры\n"));
+        }
+        let (_dir, workspace) = stand(&source);
+
+        let body = call(&workspace, None, MODULE_REL, OutlineMode::Full, 500);
+        assert_eq!(body["truncated"], true, "the stand must truncate: {body}");
+        let hint = body["budget_hint"].as_str().expect("a hint");
+        assert!(!hint.contains(OFFER_OF_REGIONS), "there is no region to narrow to: {hint}");
+
+        // What the discarded advice would have led to: complete, and empty.
+        let skeleton = call(&workspace, None, MODULE_REL, OutlineMode::RegionsOnly, 500);
+        assert_eq!(skeleton["regions"], json!([]), "{skeleton}");
+        assert_eq!(skeleton["freshness"]["completeness"]["status"], "complete", "{skeleton}");
+
+        // Control: the same overflowing module WITH a region does get the offer, so the
+        // assertion above is about this file and not about a hint stripped of the advice.
+        let (_dir, with_region) = stand(&format!("#Область Служебные\n{source}#КонецОбласти\n"));
+        let framed = call(&with_region, None, MODULE_REL, OutlineMode::Full, 500);
+        assert_eq!(framed["truncated"], true, "{framed}");
+        assert!(
+            framed["budget_hint"].as_str().expect("a hint").contains(OFFER_OF_REGIONS),
+            "{framed}",
+        );
+    }
+
     /// The hint names a correction the caller has not already made. In `regions` mode there is
     /// no narrower question left, so pointing at it sends the caller in a circle.
     #[test]
@@ -814,14 +945,14 @@ mod tests {
         assert_eq!(skeleton["truncated"], true, "the stand must actually truncate: {skeleton}");
 
         let hint = skeleton["budget_hint"].as_str().expect("a hint");
-        assert!(!hint.contains("regions"), "already in that mode: {hint}");
+        assert!(!hint.contains(OFFER_OF_REGIONS), "already in that mode: {hint}");
         assert!(hint.contains("max_output_tokens"), "{hint}");
 
         // In `full` mode the narrower question is a real correction, so it is still offered:
         // a hint stripped of it everywhere would pass the assertion above for the wrong reason.
         let full = call(&workspace, None, MODULE_REL, OutlineMode::Full, 50);
         assert_eq!(full["truncated"], true, "{full}");
-        assert!(full["budget_hint"].as_str().expect("a hint").contains("regions"), "{full}");
+        assert!(full["budget_hint"].as_str().expect("a hint").contains(OFFER_OF_REGIONS), "{full}",);
     }
 
     /// И12. Columns are UTF-16 code units.
@@ -989,6 +1120,64 @@ mod tests {
         fs::write(workspace.join("README.md"), "текст").unwrap();
         let not_bsl = refuse(Some(""), "README.md");
         assert_eq!(not_bsl["error"], "not_in_workspace", "{not_bsl}");
+    }
+
+    /// One input, two tools, one answer — the `path` echoed back among it.
+    ///
+    /// The shared vocabulary is worth something only while both tools answer the same request
+    /// the same way, and `path` travels in the same in-band body as the code. Checking the code
+    /// alone would pass on two tools that disagree about which file they are talking about.
+    ///
+    /// The input is the case the rest of the addressing treats as primary: a relative path with
+    /// no `root_id`. With a root named, both tools resolve through the same function and the
+    /// question does not arise.
+    #[test]
+    fn both_tools_echo_the_same_path_for_the_same_refusal() {
+        use crate::diagnostics_state::{DiagnosticsState, DiagnosticsStatus, ResidentOutcome};
+
+        let missing = "CommonModules/НетТакого/Ext/Module.bsl";
+        let (_dir, workspace) = stand("Процедура П() КонецПроцедуры\n");
+
+        let from_outline = call(&workspace, None, missing, OutlineMode::Full, 100_000);
+
+        let state = DiagnosticsState::for_workspace(workspace.clone());
+        state.ensure_loading();
+        let ready = (0..300).any(|_| match state.status() {
+            DiagnosticsStatus::Ready { .. } => true,
+            DiagnosticsStatus::Failed(message) => panic!("the resident failed to load: {message}"),
+            _ => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(ready, "the resident must be ready for the comparison to mean anything");
+        let filters = crate::tools::diagnostics::FileFilters {
+            min_severity: ide::SeverityBucket::Warning,
+            codes: Vec::new(),
+            range: None,
+            max_findings: 200,
+            max_output_tokens: None,
+            detailed: false,
+        };
+        let from_diagnostics = match state.read(|resident, generation| {
+            crate::tools::diagnostics::file_findings(
+                resident,
+                None,
+                Path::new(missing),
+                &filters,
+                generation,
+            )
+        }) {
+            ResidentOutcome::Ready((body, _completeness), _) => body,
+            _ => panic!("the resident is ready, so it must answer"),
+        };
+
+        assert_eq!(from_outline["error"], "not_in_workspace", "{from_outline}");
+        assert_eq!(from_diagnostics["error"], from_outline["error"], "{from_outline}");
+        assert_eq!(
+            from_diagnostics["path"], from_outline["path"],
+            "one input, two tools: the file they refuse must be spelled the same way",
+        );
     }
 
     /// Publishing children on regions alone loses nothing only while nothing else has any.
