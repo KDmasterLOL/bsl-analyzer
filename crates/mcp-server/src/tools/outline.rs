@@ -235,7 +235,7 @@ impl<'a> Walk<'a> {
     /// as they are reached) and either enters the answer complete or not at all. Nothing here
     /// trims rendered JSON, which is the only way a response stays parseable at any budget.
     fn node(&mut self, symbol: &DocumentSymbol) -> Result<Option<Value>, String> {
-        let mut body = self.shallow(symbol)?;
+        let (mut body, cut_a_text) = shallow(symbol, self)?;
         // `+1` is the comma this node costs its array; the framing of the arrays themselves is
         // small and constant, and pricing it per node would over-charge nested levels.
         let cost = serde_json::to_string(&body).map(|json| json.len()).unwrap_or(0) + 1;
@@ -245,6 +245,11 @@ impl<'a> Walk<'a> {
         }
         self.used += cost;
         self.kept += 1;
+        // Recorded only now, after the node is certain to be published. A reason describes
+        // what the ANSWER carries; a node built, priced and refused carries nothing, and
+        // `result_cap` beside no `text_truncated` tells a consumer that raising the budget
+        // cannot help — the opposite of true when the budget is exactly what refused it.
+        self.capped_text |= cut_a_text;
 
         // Only a region holds anything: stage B's map has no children under a method, and the
         // corpus test below is what keeps that true rather than this comment.
@@ -258,51 +263,6 @@ impl<'a> Walk<'a> {
         Ok(Some(Value::Object(body)))
     }
 
-    /// The node itself, without its children.
-    fn shallow(&mut self, symbol: &DocumentSymbol) -> Result<Map<String, Value>, String> {
-        let name_range = self.project(symbol.selection_range)?;
-        let whole_range = self.project(symbol.range)?;
-
-        let mut body = Map::new();
-        body.insert("kind".into(), json!(symbol.kind().as_str()));
-        body.insert("name".into(), json!(symbol.name));
-        match &symbol.detail {
-            SymbolDetail::Procedure(method) | SymbolDetail::Function(method) => {
-                body.insert("export".into(), json!(method.is_export));
-                body.insert("directives".into(), directives(&method.directives));
-                let params: Vec<Value> =
-                    method.params.iter().map(|param| self.param(param)).collect();
-                body.insert("params".into(), Value::Array(params));
-            }
-            SymbolDetail::Variable(variable) => {
-                body.insert("export".into(), json!(variable.is_export));
-                body.insert("directives".into(), directives(&variable.directives));
-            }
-            SymbolDetail::Region => {}
-        }
-        body.insert("range".into(), name_range.to_value());
-        body.insert("enclosing_range".into(), whole_range.to_value());
-        Ok(body)
-    }
-
-    fn param(&mut self, param: &ParamDetail) -> Value {
-        let mut default = Map::new();
-        default.insert("state".into(), json!(DefaultState::of(&param.default).as_str()));
-        if let ParamDefault::Value(text) = &param.default {
-            let (text, cut) = cap_chars(text, DEFAULT_TEXT_CHARS);
-            default.insert("text".into(), json!(text));
-            if cut {
-                self.capped_text = true;
-                default.insert("text_truncated".into(), json!(true));
-            }
-        }
-        json!({
-            "name": param.name,
-            "by_value": param.by_value,
-            "default": Value::Object(default),
-        })
-    }
-
     /// A node's span in the units the location contract publishes.
     ///
     /// The failure is an error rather than an omitted range: the span comes from a parse of
@@ -314,6 +274,83 @@ impl<'a> Walk<'a> {
             .map(loc::PositionRange::from)
             .ok_or_else(|| format!("a node's span {range:?} does not lie in the file it came from"))
     }
+}
+
+/// What to do about a map that did not fit — and only what this caller has not done already.
+///
+/// A skeleton deep enough in nested regions overflows the budget on its own, and there the
+/// narrower question is the one being asked: offering it back sends the caller in a circle,
+/// which is worse than no hint at all, since the hint is the whole point of the field.
+fn budget_hint(mode: OutlineMode) -> &'static str {
+    match mode {
+        OutlineMode::Full => {
+            "ask `mode: \"regions\"` for the module's skeleton, or raise `max_output_tokens`"
+        }
+        OutlineMode::RegionsOnly => {
+            "raise `max_output_tokens`: this is already the narrowest question, and the \
+             region skeleton alone does not fit"
+        }
+    }
+}
+
+/// The node itself, without its children, and whether building it had to cut a default's text.
+///
+/// A free function taking `&Walk` rather than a method taking `&mut Walk`: what it discovers
+/// travels back in the return value, so a node the caller then refuses cannot leave a mark on
+/// the walk. The borrow checker is what enforces that, rather than a rule someone remembers.
+fn shallow(symbol: &DocumentSymbol, walk: &Walk<'_>) -> Result<(Map<String, Value>, bool), String> {
+    let name_range = walk.project(symbol.selection_range)?;
+    let whole_range = walk.project(symbol.range)?;
+
+    let mut cut_a_text = false;
+    let mut body = Map::new();
+    body.insert("kind".into(), json!(symbol.kind().as_str()));
+    body.insert("name".into(), json!(symbol.name));
+    match &symbol.detail {
+        SymbolDetail::Procedure(method) | SymbolDetail::Function(method) => {
+            body.insert("export".into(), json!(method.is_export));
+            body.insert("directives".into(), directives(&method.directives));
+            let params: Vec<Value> = method
+                .params
+                .iter()
+                .map(|param| {
+                    let (value, cut) = published_param(param);
+                    cut_a_text |= cut;
+                    value
+                })
+                .collect();
+            body.insert("params".into(), Value::Array(params));
+        }
+        SymbolDetail::Variable(variable) => {
+            body.insert("export".into(), json!(variable.is_export));
+            body.insert("directives".into(), directives(&variable.directives));
+        }
+        SymbolDetail::Region => {}
+    }
+    body.insert("range".into(), name_range.to_value());
+    body.insert("enclosing_range".into(), whole_range.to_value());
+    Ok((body, cut_a_text))
+}
+
+/// One parameter, and whether its default's text had to be cut.
+fn published_param(param: &ParamDetail) -> (Value, bool) {
+    let mut cut_a_text = false;
+    let mut default = Map::new();
+    default.insert("state".into(), json!(DefaultState::of(&param.default).as_str()));
+    if let ParamDefault::Value(text) = &param.default {
+        let (text, cut) = cap_chars(text, DEFAULT_TEXT_CHARS);
+        default.insert("text".into(), json!(text));
+        if cut {
+            cut_a_text = true;
+            default.insert("text_truncated".into(), json!(true));
+        }
+    }
+    let value = json!({
+        "name": param.name,
+        "by_value": param.by_value,
+        "default": Value::Object(default),
+    });
+    (value, cut_a_text)
 }
 
 fn directives(kinds: &[ide::AnnotationKind]) -> Value {
@@ -426,12 +463,7 @@ pub(crate) fn answer(
         map.insert("members".into(), Value::Array(level.members));
     }
     if truncated {
-        map.insert(
-            "budget_hint".into(),
-            json!(
-                "ask `mode: \"regions\"` for the module's skeleton, or raise `max_output_tokens`"
-            ),
-        );
+        map.insert("budget_hint".into(), json!(budget_hint(mode)));
     }
     Ok(structured(body))
 }
@@ -719,6 +751,77 @@ mod tests {
             "{short}",
         );
         assert_eq!(short["freshness"]["completeness"]["status"], "complete", "{short}");
+    }
+
+    /// A reason describes what the ANSWER carries. A node priced and then dropped for want of
+    /// budget carries nothing, so nothing it did on the way may reach the envelope.
+    ///
+    /// The input is the only shape where the two facts meet: a runaway default on a node the
+    /// budget then refuses. Without it the sticky flag is invisible — on every other input the
+    /// node that cut a text is also a node that survives.
+    #[test]
+    fn a_dropped_node_leaves_no_trace_of_the_text_it_never_published() {
+        let source = format!(
+            "Процедура Первая()\nКонецПроцедуры\nПроцедура Вторая(А = \"{}\nКонецПроцедуры\n",
+            "ы".repeat(500),
+        );
+        let (_dir, workspace) = stand(&source);
+        let whole = call(&workspace, None, MODULE_REL, OutlineMode::Full, 100_000);
+
+        // Room for the first procedure and nothing more, so the second — the one with the
+        // runaway default — is priced and refused.
+        let budget = (shallow_len(&whole["members"][0]) + 1).div_ceil(4);
+        let body = call(&workspace, None, MODULE_REL, OutlineMode::Full, budget);
+
+        assert_eq!(names(&body["members"]), ["Первая"], "{body}");
+        assert_eq!(body["truncated"], true, "{body}");
+        let rendered = serde_json::to_string(&body).unwrap();
+        assert!(!rendered.contains("text_truncated"), "nothing was cut in this answer: {body}");
+        let reasons: Vec<&str> = body["freshness"]["completeness"]["reasons"]
+            .as_array()
+            .expect("reasons")
+            .iter()
+            .map(|reason| reason["code"].as_str().expect("a code"))
+            .collect();
+        assert_eq!(
+            reasons,
+            ["output_budget"],
+            "result_cap here would tell a consumer that raising the budget cannot help, \
+             which is the opposite of true: {body}",
+        );
+
+        // Control: the same module at a budget that fits BOTH nodes does publish the cut, so
+        // the assertion above is about the dropped node and not about the cap never firing.
+        assert!(whole["members"][1]["params"][0]["default"]["text_truncated"] == true, "{whole}");
+        let kept_reasons = whole["freshness"]["completeness"]["reasons"].to_string();
+        assert!(kept_reasons.contains("result_cap"), "{whole}");
+    }
+
+    /// The hint names a correction the caller has not already made. In `regions` mode there is
+    /// no narrower question left, so pointing at it sends the caller in a circle.
+    #[test]
+    fn the_budget_hint_does_not_offer_the_mode_the_caller_is_already_in() {
+        let mut source = String::new();
+        for i in 0..60 {
+            source.push_str(&format!("#Область Область_С_Длинным_Именем_{i}\n"));
+        }
+        for _ in 0..60 {
+            source.push_str("#КонецОбласти\n");
+        }
+
+        let (_dir, workspace) = stand(&source);
+        let skeleton = call(&workspace, None, MODULE_REL, OutlineMode::RegionsOnly, 50);
+        assert_eq!(skeleton["truncated"], true, "the stand must actually truncate: {skeleton}");
+
+        let hint = skeleton["budget_hint"].as_str().expect("a hint");
+        assert!(!hint.contains("regions"), "already in that mode: {hint}");
+        assert!(hint.contains("max_output_tokens"), "{hint}");
+
+        // In `full` mode the narrower question is a real correction, so it is still offered:
+        // a hint stripped of it everywhere would pass the assertion above for the wrong reason.
+        let full = call(&workspace, None, MODULE_REL, OutlineMode::Full, 50);
+        assert_eq!(full["truncated"], true, "{full}");
+        assert!(full["budget_hint"].as_str().expect("a hint").contains("regions"), "{full}");
     }
 
     /// И12. Columns are UTF-16 code units.
