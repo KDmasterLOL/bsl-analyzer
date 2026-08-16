@@ -1028,16 +1028,7 @@ pub fn handle_document_symbol(
 
     let symbols = ctx.analysis.document_symbols(file_id);
 
-    if symbols.is_empty() {
-        return Ok(None);
-    }
-
-    let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
-        .into_iter()
-        .filter_map(|s| convert_document_symbol(line_index, text, s, ctx.position_encoding))
-        .collect();
-
-    Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+    document_symbol_response(line_index, text, symbols, ctx.position_encoding, &uri)
 }
 
 pub fn handle_selection_range(
@@ -1716,7 +1707,7 @@ fn convert_document_symbol(
     let selection_range =
         crate::lsp::range_with_encoding(line_index, text, sym.selection_range, encoding)?;
 
-    let kind = match sym.kind {
+    let kind = match sym.kind() {
         ide::SymbolKind::Procedure | ide::SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
         ide::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
         ide::SymbolKind::Region => lsp_types::SymbolKind::NAMESPACE,
@@ -1725,16 +1716,7 @@ fn convert_document_symbol(
     let children = if sym.children.is_empty() {
         None
     } else {
-        let converted: Vec<_> = sym
-            .children
-            .into_iter()
-            .filter_map(|c| convert_document_symbol(line_index, text, c, encoding))
-            .collect();
-        if converted.is_empty() {
-            None
-        } else {
-            Some(converted)
-        }
+        Some(convert_document_symbols(line_index, text, sym.children, encoding)?)
     };
 
     #[allow(deprecated)]
@@ -1748,6 +1730,57 @@ fn convert_document_symbol(
         selection_range,
         children,
     })
+}
+
+/// The whole map or nothing.
+///
+/// A node whose range does not project onto the buffer means the analysis snapshot and the
+/// open document have drifted apart. Dropping just that node — and, since children hang off
+/// it, its whole subtree — leaves a map that reads as the truth about the file: an empty
+/// region looks like an empty region, a missing method looks like a method that is not
+/// there. `documentSymbol` has no field to mark an answer partial, so the only honest
+/// answers are the whole map or a refusal, and a refusal is self-healing: the client asks
+/// again after the next edit.
+fn convert_document_symbols(
+    line_index: &LineIndex,
+    text: &str,
+    symbols: Vec<ide::DocumentSymbol>,
+    encoding: crate::lsp::PositionEncoding,
+) -> Option<Vec<lsp_types::DocumentSymbol>> {
+    symbols
+        .into_iter()
+        .map(|symbol| convert_document_symbol(line_index, text, symbol, encoding))
+        .collect()
+}
+
+/// The `documentSymbol` answer: no symbols, the whole map, or a refusal naming the file.
+///
+/// Split from the handler so the choice between those three is testable without an LSP
+/// context — it is the part with a decision in it, and the handler around it is wiring.
+fn document_symbol_response(
+    line_index: &LineIndex,
+    text: &str,
+    symbols: Vec<ide::DocumentSymbol>,
+    encoding: crate::lsp::PositionEncoding,
+    uri: &lsp_types::Url,
+) -> Result<Option<DocumentSymbolResponse>> {
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+
+    match convert_document_symbols(line_index, text, symbols, encoding) {
+        Some(converted) => Ok(Some(DocumentSymbolResponse::Nested(converted))),
+        None => {
+            tracing::warn!(
+                uri = %uri,
+                "document symbol range does not project onto the open buffer; \
+                 the analysis snapshot and the document have drifted apart",
+            );
+            Err(anyhow::anyhow!(
+                "document symbols for {uri} could not be projected onto the current buffer"
+            ))
+        }
+    }
 }
 
 struct ReferenceLocationConverter<'ctx> {
@@ -2111,6 +2144,84 @@ mod tests {
 
     mod call_hierarchy_trace_tests;
     mod inlay_hint_tests;
+
+    /// A symbol whose range does not project onto the open buffer is the one case where a
+    /// map can lie without looking wrong: the answer stays well-formed while a method — or
+    /// a whole region's contents — silently vanishes from it. These four inputs pin the
+    /// three answers the request may give, and the second one is the case the old
+    /// `filter_map` swallowed.
+    mod document_symbol_response_tests {
+        use super::super::document_symbol_response;
+        use crate::lsp::PositionEncoding;
+        use ide::{DocumentSymbol, MethodDetail, SymbolDetail, TextRange};
+        use line_index::LineIndex;
+
+        const SOURCE: &str = "Процедура П()\nКонецПроцедуры";
+
+        fn method(
+            name: &str,
+            start: u32,
+            end: u32,
+            children: Vec<DocumentSymbol>,
+        ) -> DocumentSymbol {
+            DocumentSymbol {
+                name: name.to_string(),
+                range: TextRange::new(start.into(), end.into()),
+                selection_range: TextRange::new(start.into(), (start + 2).into()),
+                detail: SymbolDetail::Procedure(MethodDetail {
+                    is_export: false,
+                    directives: Vec::new(),
+                    params: Vec::new(),
+                }),
+                children,
+            }
+        }
+
+        fn answer(
+            symbols: Vec<DocumentSymbol>,
+        ) -> anyhow::Result<Option<lsp_types::DocumentSymbolResponse>> {
+            let line_index = LineIndex::new(SOURCE);
+            let uri = lsp_types::Url::parse("file:///ws/Module.bsl").expect("uri");
+            document_symbol_response(&line_index, SOURCE, symbols, PositionEncoding::Utf16, &uri)
+        }
+
+        /// Past the end of the buffer: the offsets belong to a different text than the one
+        /// open, so nothing about this file can be answered.
+        const PAST_END: u32 = 10_000;
+
+        #[test]
+        fn a_root_symbol_that_does_not_project_refuses_instead_of_vanishing() {
+            assert!(answer(vec![method("П", PAST_END, PAST_END + 20, Vec::new())]).is_err());
+        }
+
+        #[test]
+        fn a_child_that_does_not_project_refuses_instead_of_vanishing() {
+            let parent =
+                method("П", 0, 27, vec![method("Внутри", PAST_END, PAST_END + 20, Vec::new())]);
+
+            assert!(
+                answer(vec![parent]).is_err(),
+                "a map missing the child reads as a file without it",
+            );
+        }
+
+        #[test]
+        fn a_map_that_projects_whole_is_served_whole() {
+            let parent = method("П", 0, 27, vec![method("Вложенный", 0, 13, Vec::new())]);
+
+            let served = answer(vec![parent]).expect("projects").expect("not empty");
+            let lsp_types::DocumentSymbolResponse::Nested(roots) = served else {
+                panic!("nested response expected");
+            };
+            assert_eq!(roots.len(), 1);
+            assert_eq!(roots[0].children.as_ref().map(Vec::len), Some(1));
+        }
+
+        #[test]
+        fn an_empty_map_is_an_empty_answer_and_not_a_refusal() {
+            assert!(answer(Vec::new()).expect("no symbols is not a failure").is_none());
+        }
+    }
 
     #[test]
     fn workspace_scope_filters_by_extension_root() {

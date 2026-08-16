@@ -549,7 +549,7 @@ fn method_ranges(symbols: &[DocumentSymbol]) -> Vec<(String, TextRange)> {
 
 fn collect_methods(symbols: &[DocumentSymbol], out: &mut Vec<(String, TextRange)>) {
     for s in symbols {
-        if matches!(s.kind, SymbolKind::Procedure | SymbolKind::Function) {
+        if matches!(s.kind(), SymbolKind::Procedure | SymbolKind::Function) {
             out.push((s.name.clone(), s.range));
         }
         if !s.children.is_empty() {
@@ -1466,9 +1466,13 @@ mod tests {
     fn graph_id_maps_a_finding_to_its_containing_method() {
         let method = DocumentSymbol {
             name: "Считать".to_string(),
-            kind: SymbolKind::Function,
             range: TextRange::new(10u32.into(), 50u32.into()),
             selection_range: TextRange::new(10u32.into(), 20u32.into()),
+            detail: ide::SymbolDetail::Function(ide::MethodDetail {
+                is_export: true,
+                directives: Vec::new(),
+                params: Vec::new(),
+            }),
             children: Vec::new(),
         };
         let methods = method_ranges(std::slice::from_ref(&method));
@@ -1499,14 +1503,18 @@ mod tests {
         // children) is still collected.
         let region = DocumentSymbol {
             name: "Служебные".to_string(),
-            kind: SymbolKind::Region,
             range: TextRange::new(0u32.into(), 100u32.into()),
             selection_range: TextRange::new(0u32.into(), 10u32.into()),
+            detail: ide::SymbolDetail::Region,
             children: vec![DocumentSymbol {
                 name: "Внутренняя".to_string(),
-                kind: SymbolKind::Procedure,
                 range: TextRange::new(20u32.into(), 80u32.into()),
                 selection_range: TextRange::new(20u32.into(), 30u32.into()),
+                detail: ide::SymbolDetail::Procedure(ide::MethodDetail {
+                    is_export: false,
+                    directives: Vec::new(),
+                    params: Vec::new(),
+                }),
                 children: Vec::new(),
             }],
         };
