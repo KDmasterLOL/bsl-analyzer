@@ -695,31 +695,56 @@ impl<'q> Merge<'q> {
     /// alike, so one entity leaves as two half-addressed rows, costs two slots
     /// of the limit, and loses the id outright once the cut reaches it.
     ///
-    /// The union is claimed only where it is certain: exactly one placed
-    /// candidate of that category carries that name. Two files of one name — a
-    /// configuration module and the extension module beside it — stay apart,
-    /// because a single id cannot say which of them it meant and attaching it
-    /// to whichever sorted first would invent an answer.
-    fn fold_durable_ids(&mut self) {
+    /// The union is claimed only where the correspondence is PROVEN, never
+    /// where it is merely unopposed. An id that names a module scope is folded
+    /// onto the file whose module key is that scope and onto no other; matching
+    /// by name alone would be a guess, and a wrong one in an ordinary
+    /// configuration: the graph holds a node for every method, exported or not,
+    /// while `module_members` publishes only the exported ones, so a private
+    /// `Тест` in one module and an exported `Тест` in another leave exactly one
+    /// placed candidate and two graph rows — and the id of the private method
+    /// would land on the exported method's row, pointing `graph_id` and
+    /// `location` at different code.
+    ///
+    /// Ids that name no module scope — a metadata object, a form, an attribute —
+    /// have no key to compare, so those fold only when the name is held by one
+    /// placed candidate AND one graph row: with one of each there is nothing to
+    /// choose between.
+    fn fold_durable_ids(&mut self, db: &RootDatabaseImpl) {
         if !self.candidates.iter().any(|c| c.graph_id.is_some() && c.place.is_none()) {
             return;
         }
 
-        let mut placed: rustc_hash::FxHashMap<(NameCategory, String), Option<usize>> =
+        let source_root = db.source_root_input(ROOT).root(db);
+        let file_set = source_root.file_set();
+        let mut owners: rustc_hash::FxHashMap<FileId, Option<ModuleKey>> = Default::default();
+        let mut owner_of = |file_id: FileId| -> Option<ModuleKey> {
+            owners
+                .entry(file_id)
+                .or_insert_with(|| {
+                    file_set
+                        .path_for_file(&file_id)
+                        .and_then(|path| module_key_for_path(&path.as_path().to_string_lossy()))
+                })
+                .clone()
+        };
+
+        // Both sides of the name, counted separately: a name unopposed among
+        // placed candidates can still be crowded on the graph's side.
+        let mut placed: rustc_hash::FxHashMap<(NameCategory, String), Vec<usize>> =
+            Default::default();
+        let mut graph_rows: rustc_hash::FxHashMap<(NameCategory, String), usize> =
             Default::default();
         for (i, candidate) in self.candidates.iter().enumerate() {
-            if candidate.place.is_none() {
-                continue;
+            let key = (candidate.category, candidate.display.fold_lower());
+            if candidate.place.is_some() {
+                placed.entry(key).or_default().push(i);
+            } else if candidate.graph_id.is_some() {
+                *graph_rows.entry(key).or_insert(0) += 1;
             }
-            placed
-                .entry((candidate.category, candidate.display.fold_lower()))
-                // `None` marks a name held by more than one file: ambiguous, and
-                // the entry stays that way once it is.
-                .and_modify(|slot| *slot = None)
-                .or_insert(Some(i));
         }
 
-        let mut absorbed = Vec::new();
+        let mut absorbed = std::collections::HashSet::new();
         let mut reranked = false;
         for i in 0..self.candidates.len() {
             let candidate = &self.candidates[i];
@@ -728,7 +753,25 @@ impl<'q> Merge<'q> {
             }
             let Some(id) = candidate.graph_id.clone() else { continue };
             let key = (candidate.category, candidate.display.fold_lower());
-            let Some(&Some(target)) = placed.get(&key) else { continue };
+            let Some(here) = placed.get(&key) else { continue };
+
+            let target = match crate::graph::classify_graph_id(&id).ok().and_then(scope_of) {
+                Some(scope) => {
+                    let mut matching = here.iter().copied().filter(|&target| {
+                        self.candidates[target]
+                            .place
+                            .is_some_and(|place| owner_of(place.file_id).as_ref() == Some(&scope))
+                    });
+                    match (matching.next(), matching.next()) {
+                        (Some(only), None) => only,
+                        _ => continue,
+                    }
+                }
+                // No scope to compare: fold only one-to-one.
+                None if here.len() == 1 && graph_rows.get(&key) == Some(&1) => here[0],
+                None => continue,
+            };
+
             if self.candidates[target].graph_id.is_some() {
                 continue;
             }
@@ -739,13 +782,12 @@ impl<'q> Merge<'q> {
                 host.match_tier = tier;
                 reranked = true;
             }
-            absorbed.push(i);
+            absorbed.insert(i);
         }
 
         if absorbed.is_empty() {
             return;
         }
-        let absorbed: std::collections::HashSet<usize> = absorbed.into_iter().collect();
         let mut index = 0;
         self.candidates.retain(|_| {
             let keep = !absorbed.contains(&index);
@@ -763,7 +805,7 @@ impl<'q> Merge<'q> {
 
     /// Rank, fold and cut — the single place where order and completeness are
     /// decided, so adding a provider cannot change either by accident.
-    fn finish(mut self) -> NameLookupResult {
+    fn finish(mut self, db: &RootDatabaseImpl) -> NameLookupResult {
         // Cached, not recomputed per comparison: the ordering key folds the
         // name, and a broad query ranks tens of thousands of candidates — two
         // allocations per COMPARISON is where the whole answer goes.
@@ -774,7 +816,7 @@ impl<'q> Merge<'q> {
         let mut seen = std::collections::HashSet::new();
         self.candidates.retain(|c| seen.insert(c.identity()));
 
-        self.fold_durable_ids();
+        self.fold_durable_ids(db);
 
         let distinct = self.candidates.len();
         let (total, total_exact) =
@@ -832,7 +874,7 @@ pub fn lookup_names(
         }
     }
 
-    let mut result = merge.finish();
+    let mut result = merge.finish(db);
     spell_symbols(db, &mut result.candidates);
     result
 }
@@ -1053,6 +1095,19 @@ fn platform_owner_display(type_name: &str) -> Option<String> {
             .map(|ty| ty.name.to_string())
             .unwrap_or_else(|| type_name.to_string()),
     )
+}
+
+/// The module a durable id points into, when it points into one at all.
+///
+/// Only these two id shapes name a module scope; a metadata object, a form or an
+/// attribute is addressed by its own coordinates and has no module key to
+/// compare a file against.
+fn scope_of(kind: crate::graph::GraphIdKind) -> Option<ModuleKey> {
+    match kind {
+        crate::graph::GraphIdKind::Method { scope, .. }
+        | crate::graph::GraphIdKind::Module { scope } => Some(scope),
+        _ => None,
+    }
 }
 
 /// Exported methods and module variables of every module in the root.
@@ -1569,6 +1624,50 @@ mod tests {
         assert_eq!(merged.graph_id.as_deref(), Some("module/common/Настройки"));
         assert_eq!(found.total, 1, "a folded pair is one answer, not two");
         assert!(found.total_exact);
+    }
+
+    /// The graph holds a node for every method; `module_members` publishes only
+    /// the exported ones. So a private `Тест` in one module and an exported
+    /// `Тест` in another leave ONE placed candidate against TWO graph rows, and
+    /// a fold that only checks its own side would hang the private method's id
+    /// on the exported method's row — one answer whose `location` and
+    /// `graph_id` point at different code, which is worse than the two rows it
+    /// replaced.
+    #[test]
+    fn a_durable_id_is_never_hung_on_a_namesake_in_another_module() {
+        let db = build(&[
+            common_module("Утил", "Процедура Тест() Экспорт\nКонецПроцедуры\n"),
+            common_module("Другое", "Процедура Тест()\nКонецПроцедуры\n"),
+        ]);
+        // Sorted as the real ranker sorts them — by id — so the WRONG one comes
+        // first and a fold that takes whatever it meets takes this.
+        let graph = FakeSource::answering(
+            ProviderId::Graph,
+            vec![
+                graph_candidate("Тест", "method/common/Другое/Тест"),
+                graph_candidate("Тест", "method/common/Утил/Тест"),
+            ],
+            2,
+        );
+
+        let found =
+            lookup_names(&db, &NameQuery::new("Тест", 20).with_categories(METHODS), &[&graph]);
+
+        let exported = found
+            .candidates
+            .iter()
+            .find(|c| c.place.is_some())
+            .expect("the exported method is an answer");
+        assert_eq!(exported.symbol.as_deref(), Some("Утил.Тест"));
+        assert_eq!(
+            exported.graph_id.as_deref(),
+            Some("method/common/Утил/Тест"),
+            "the id folded onto it must name the module it is written in",
+        );
+        // The other module's node is still an answer of its own, unclaimed.
+        assert!(found.candidates.iter().any(
+            |c| c.place.is_none() && c.graph_id.as_deref() == Some("method/common/Другое/Тест")
+        ));
     }
 
     /// The limit of the fold above. Two files of the same name — a configuration

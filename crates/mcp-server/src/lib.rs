@@ -388,6 +388,116 @@ fn graph_provider_state(status: &GraphStatus, has_snapshot: bool) -> ide::Provid
     }
 }
 
+/// The verdict that travels with the EMPTY database when the resident did not
+/// hand itself over.
+///
+/// Both inputs are here on purpose. The status seen before the read is the only
+/// evidence when no read was attempted; the moment one was, it is stale — the
+/// idle sweeper can evict the base between the two, and then the earlier
+/// `answered` would describe tables that were never consulted as exhaustively
+/// searched.
+fn fallback_workspace_state<R>(
+    before_read: ide::ProviderState,
+    read: Option<&crate::diagnostics_state::ResidentOutcome<R>>,
+) -> ide::ProviderState {
+    match read {
+        None => before_read,
+        Some(outcome) => unread_resident_state(outcome),
+    }
+}
+
+/// What a read that did NOT hand over the resident says about it.
+///
+/// Separate from the status taken before the read, and that separation is the
+/// point: the idle sweeper can evict the base between the two, and reusing the
+/// earlier `answered` would serve an EMPTY database under a verdict that says
+/// every table was consulted — a proven zero over nothing at all.
+fn unread_resident_state<R>(
+    outcome: &crate::diagnostics_state::ResidentOutcome<R>,
+) -> ide::ProviderState {
+    use crate::diagnostics_state::ResidentOutcome;
+    match outcome {
+        // A read that succeeded is not this function's business; answering
+        // `answered` here is what the caller must never be able to do.
+        ResidentOutcome::Ready(..) | ResidentOutcome::Loading => ide::ProviderState::NotReady,
+        ResidentOutcome::Disabled => ide::ProviderState::Unavailable,
+        ResidentOutcome::Failed(_) => ide::ProviderState::Failed,
+    }
+}
+
+#[cfg(test)]
+mod resident_state_tests {
+    use super::*;
+    use crate::diagnostics_state::ResidentOutcome;
+
+    /// The empty database served when a read hands nothing over must never be
+    /// described as consulted. `answered` over empty tables is a proven zero
+    /// about a workspace nobody looked at — the one verdict `providers` exists
+    /// to make impossible.
+    #[test]
+    fn an_unread_resident_is_never_answered() {
+        let outcomes: [ResidentOutcome<()>; 4] = [
+            ResidentOutcome::Loading,
+            ResidentOutcome::Disabled,
+            ResidentOutcome::Failed("сборка упала".into()),
+            // Ready reaches this path only when the caller misroutes it, and
+            // even then the answer must not claim the tables were read.
+            ResidentOutcome::Ready(
+                (),
+                crate::diagnostics_state::Freshness {
+                    revision: 0,
+                    stale: false,
+                    reload: "",
+                    topology: 0,
+                },
+            ),
+        ];
+        for outcome in &outcomes {
+            assert_ne!(unread_resident_state(outcome), ide::ProviderState::Answered);
+        }
+    }
+
+    /// The regression this decision exists to prevent: the status said `ready`,
+    /// the read then found nothing to hand over, and the empty database went out
+    /// under `answered`. The state before the read is evidence only while no
+    /// read has happened.
+    #[test]
+    fn a_read_that_handed_nothing_over_overrides_the_status_before_it() {
+        assert_eq!(
+            fallback_workspace_state(
+                ide::ProviderState::Answered,
+                Some(&ResidentOutcome::<()>::Loading)
+            ),
+            ide::ProviderState::NotReady,
+        );
+        // And the other direction: with no read attempted the status IS the
+        // evidence, so a decision that always looked at the outcome would be
+        // just as wrong.
+        assert_eq!(
+            fallback_workspace_state(ide::ProviderState::Failed, None::<&ResidentOutcome<()>>),
+            ide::ProviderState::Failed,
+        );
+    }
+
+    /// And each non-ready outcome keeps its own advice: waiting helps, waiting
+    /// is pointless, or there is nothing to wait for.
+    #[test]
+    fn each_unread_outcome_keeps_its_own_advice() {
+        assert_eq!(
+            unread_resident_state(&ResidentOutcome::<()>::Loading),
+            ide::ProviderState::NotReady
+        );
+        assert_eq!(
+            unread_resident_state(&ResidentOutcome::<()>::Disabled),
+            ide::ProviderState::Unavailable
+        );
+        assert_eq!(
+            unread_resident_state(&ResidentOutcome::<()>::Failed("нет".into())),
+            ide::ProviderState::Failed
+        );
+    }
+}
+
 /// The same reading for the resident database, which backs three of the five
 /// providers at once.
 ///
@@ -989,8 +1099,8 @@ impl McpServer {
                 tools::graph::resolve(db, workspace, &source, roots, &query, limit)
             };
 
-            let answer = if resident_ready {
-                match diag.read(|resident, _generation| {
+            let outcome = resident_ready.then(|| {
+                diag.read(|resident, _generation| {
                     let analysis = resident.analysis();
                     let (value, completeness) = served(
                         analysis.database(),
@@ -998,34 +1108,37 @@ impl McpServer {
                         Some(resident.workspace_roots()),
                     );
                     (value, completeness, resident.unread_count())
-                }) {
-                    ResidentOutcome::Ready((value, completeness, unread), _) => {
-                        // Modules that could not be read hold members this search
-                        // would have matched.
-                        Some((
-                            value,
-                            completeness.when(
-                                unread > 0,
-                                tools::location::ReasonCode::UnreadableFiles,
-                                "some workspace files could not be read, so the search was \
-                                 not exhaustive",
-                            ),
-                        ))
-                    }
-                    _ => None,
+                })
+            });
+
+            // Decided from the read that actually happened, while the outcome is
+            // still in hand.
+            let workspace = fallback_workspace_state(resident_state, outcome.as_ref());
+
+            let answer = match outcome {
+                Some(ResidentOutcome::Ready((value, completeness, unread), _)) => {
+                    // Modules that could not be read hold members this search
+                    // would have matched.
+                    Some((
+                        value,
+                        completeness.when(
+                            unread > 0,
+                            tools::location::ReasonCode::UnreadableFiles,
+                            "some workspace files could not be read, so the search was \
+                             not exhaustive",
+                        ),
+                    ))
                 }
-            } else {
-                None
+                _ => None,
             };
 
-            // No resident: an empty database, and the resident's own verdict
-            // carried through so its three providers report what is actually
-            // true of it — building, failed, or absent from this profile. The
-            // platform still answers, which is the whole point of serving this
-            // action ahead of the gate.
+            // No resident: an empty database under the verdict decided above, so
+            // its three providers report what is actually true of it — building,
+            // failed, or absent from this profile. The platform still answers,
+            // which is the whole point of serving this action ahead of the gate.
             let (value, completeness) = answer.unwrap_or_else(|| {
                 let empty = ide::Analysis::new();
-                served(empty.database(), resident_state, None)
+                served(empty.database(), workspace, None)
             });
 
             // Not `graph::envelope`: that one stamps the graph's revision and

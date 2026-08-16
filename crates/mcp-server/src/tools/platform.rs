@@ -353,12 +353,12 @@ fn search_member_of_type(
     if platform.get_method(type_name, member_name).is_some() {
         return search_method(platform, type_name, member_name);
     }
+    // The property table is keyed by the owner the platform records, and for a
+    // member of the global context that owner is `Global context` — the very
+    // string the dictionary publishes. There is no second lookup to fall back
+    // to: searching the global properties by bare name would answer a WRONG
+    // `type_name` with a card about something else instead of refusing it.
     if let Some(property) = platform.get_property(type_name, member_name) {
-        return Ok(property_card(platform, property));
-    }
-    // A global-context property is spelled with its owner too, and the owner is
-    // not a type the property table is keyed by.
-    if let Some(property) = platform.get_global_property(member_name) {
         return Ok(property_card(platform, property));
     }
     Err(McpError::invalid_params(
@@ -813,6 +813,23 @@ mod tests {
         assert!(checked >= 5, "too few references to prove anything: {checked}");
         assert!(kinds.contains("property"), "no property was published: {kinds:?}");
         assert!(kinds.len() >= 2, "only one kind of reference was exercised: {kinds:?}");
+    }
+
+    /// A wrong `type_name` is a miss, not a licence to answer about something
+    /// else. `Справочники` is a property of the global context and of no other
+    /// type; asked for on `Массив` it has to be refused, or a client with a typo
+    /// gets a confident card about a different object.
+    #[test]
+    fn a_member_asked_for_on_the_wrong_type_is_refused() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+
+        assert!(syntax_help_card("Справочники", Some("Массив")).is_err());
+        // The premise: the same name on its own owner does answer, so the
+        // refusal above is about the owner and not about the name being unknown.
+        assert!(syntax_help_card("Справочники", Some("Global context")).is_ok());
     }
 
     #[test]
