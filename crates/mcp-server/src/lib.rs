@@ -388,6 +388,26 @@ fn graph_provider_state(status: &GraphStatus, has_snapshot: bool) -> ide::Provid
     }
 }
 
+/// The same reading for the resident database, which backs three of the five
+/// providers at once.
+///
+/// It has to be a state and not "ready or not". A resident whose build failed
+/// and one still building are the same emptiness and opposite advice, and a
+/// reference-profile server has no resident to wait for at all — three answers
+/// a boolean cannot hold, which is how a failed build came to be reported as
+/// one still in progress.
+fn resident_provider_state(
+    status: &crate::diagnostics_state::DiagnosticsStatus,
+) -> ide::ProviderState {
+    use crate::diagnostics_state::DiagnosticsStatus;
+    match status {
+        DiagnosticsStatus::Ready { .. } => ide::ProviderState::Answered,
+        DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => ide::ProviderState::NotReady,
+        DiagnosticsStatus::Failed(_) => ide::ProviderState::Failed,
+        DiagnosticsStatus::Disabled => ide::ProviderState::Unavailable,
+    }
+}
+
 #[derive(Clone)]
 pub struct McpServer {
     profile: McpProfile,
@@ -939,11 +959,12 @@ impl McpServer {
     ///
     /// Five providers, each of which may be missing for its own reason, and the
     /// answer says which were. Neither the graph nor the resident is required:
-    /// a host with neither still answers from the platform, and reports the two
-    /// as `not_ready` instead of returning an empty list that would read as a
-    /// proven zero.
+    /// a host with neither still answers from the platform, and each of the two
+    /// says what it is actually doing — building, failed, or absent from this
+    /// profile — instead of returning an empty list that would read as a proven
+    /// zero.
     async fn resolve_names(&self, query: String, limit: usize) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::ResidentOutcome;
 
         let graph = self.state.graph().clone();
         let snapshot = graph.snapshot();
@@ -951,7 +972,8 @@ impl McpServer {
 
         let diag = self.state.diagnostics().clone();
         diag.ensure_loading();
-        let resident_ready = matches!(diag.status(), DiagnosticsStatus::Ready { .. });
+        let resident_state = resident_provider_state(&diag.status());
+        let resident_ready = resident_state == ide::ProviderState::Answered;
 
         tokio::task::spawn_blocking(move || {
             let source = match (&snapshot, graph_state) {
@@ -962,16 +984,19 @@ impl McpServer {
             };
 
             let served = |db: &ide::RootDatabaseImpl,
-                          ready: bool,
+                          workspace: ide::ProviderState,
                           roots: Option<&bsl_search::WorkspaceRoots>| {
-                tools::graph::resolve(db, ready, &source, roots, &query, limit)
+                tools::graph::resolve(db, workspace, &source, roots, &query, limit)
             };
 
             let answer = if resident_ready {
                 match diag.read(|resident, _generation| {
                     let analysis = resident.analysis();
-                    let (value, completeness) =
-                        served(analysis.database(), true, Some(resident.workspace_roots()));
+                    let (value, completeness) = served(
+                        analysis.database(),
+                        ide::ProviderState::Answered,
+                        Some(resident.workspace_roots()),
+                    );
                     (value, completeness, resident.unread_count())
                 }) {
                     ResidentOutcome::Ready((value, completeness, unread), _) => {
@@ -993,13 +1018,14 @@ impl McpServer {
                 None
             };
 
-            // No resident: an empty database, and `workspace_ready: false` so its
-            // three providers report `not_ready` and are never consulted. The
+            // No resident: an empty database, and the resident's own verdict
+            // carried through so its three providers report what is actually
+            // true of it — building, failed, or absent from this profile. The
             // platform still answers, which is the whole point of serving this
             // action ahead of the gate.
             let (value, completeness) = answer.unwrap_or_else(|| {
                 let empty = ide::Analysis::new();
-                served(empty.database(), false, None)
+                served(empty.database(), resident_state, None)
             });
 
             // Not `graph::envelope`: that one stamps the graph's revision and

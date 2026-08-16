@@ -57,6 +57,18 @@ enum SyntaxHelpItem {
         parameters: Vec<SyntaxDocParameter>,
         min_version: Option<String>,
     },
+    Property {
+        name: String,
+        english_name: String,
+        owner_type: Option<String>,
+        property_types: Vec<String>,
+        read_only: bool,
+        min_version: Option<String>,
+        contexts: Vec<SyntaxContext>,
+        description: Option<String>,
+        notes: Option<String>,
+        see_also: Vec<String>,
+    },
 }
 
 #[derive(JsonSchema, Serialize)]
@@ -221,7 +233,7 @@ fn syntax_help_card(
     let platform = PlatformDataInner::instance();
 
     if let Some(tn) = type_name {
-        return search_method(platform, tn, name);
+        return search_member_of_type(platform, tn, name);
     }
 
     if let Some(func) = platform.get_global_function(name) {
@@ -315,10 +327,89 @@ fn syntax_help_card(
         ));
     }
 
+    if let Some(property) = platform.get_global_property(name) {
+        return Ok(property_card(platform, property));
+    }
+
     Err(McpError::invalid_params(
-        format!("'{name}' не найдено среди типов, методов, глобальных функций и ключевых слов платформы"),
+        format!(
+            "'{name}' не найдено среди типов, методов, свойств, глобальных функций и ключевых \
+             слов платформы"
+        ),
         None,
     ))
+}
+
+/// A member of a named type: a method, or failing that a property.
+///
+/// Both are members and both are addressed the same way — `(type, name)` — so
+/// one of them answering and the other not made every property of every type a
+/// name the dictionary could find and this tool could not open.
+fn search_member_of_type(
+    platform: &PlatformDataInner,
+    type_name: &str,
+    member_name: &str,
+) -> Result<(String, SyntaxHelpItem), McpError> {
+    if platform.get_method(type_name, member_name).is_some() {
+        return search_method(platform, type_name, member_name);
+    }
+    if let Some(property) = platform.get_property(type_name, member_name) {
+        return Ok(property_card(platform, property));
+    }
+    // A global-context property is spelled with its owner too, and the owner is
+    // not a type the property table is keyed by.
+    if let Some(property) = platform.get_global_property(member_name) {
+        return Ok(property_card(platform, property));
+    }
+    Err(McpError::invalid_params(
+        format!("'{member_name}' не найдено среди методов и свойств типа '{type_name}'"),
+        None,
+    ))
+}
+
+fn property_card(
+    platform: &PlatformDataInner,
+    property: &bsl_platform::PlatformProperty,
+) -> (String, SyntaxHelpItem) {
+    let docs = platform.get_property_docs(property.id);
+    let owner = (!property.type_name.is_empty()).then(|| property.type_name.to_string());
+
+    let mut out = match &owner {
+        Some(owner) => {
+            format!("# {}.{} / {}.{}\n\n", owner, property.name, owner, property.english_name)
+        }
+        None => format!("# {} / {}\n\n", property.name, property.english_name),
+    };
+    if !property.property_types.is_empty() {
+        let _ = writeln!(out, "Тип: {}\n", property.property_types.join(", "));
+    }
+    if property.is_readonly {
+        let _ = writeln!(out, "Только чтение.\n");
+    }
+    if let Some(docs) = &docs {
+        if !docs.description.is_empty() {
+            let _ = writeln!(out, "## Описание\n\n{}\n", docs.description);
+        }
+        if let Some(notes) = &docs.notes {
+            let _ = writeln!(out, "## Примечания\n\n{notes}\n");
+        }
+    }
+
+    (
+        out,
+        SyntaxHelpItem::Property {
+            name: property.name.to_string(),
+            english_name: property.english_name.to_string(),
+            owner_type: owner,
+            property_types: property.property_types.iter().map(ToString::to_string).collect(),
+            read_only: property.is_readonly,
+            min_version: property.min_version.as_ref().map(ToString::to_string),
+            contexts: context_names(property.context),
+            description: docs.as_ref().map(|d| d.description.clone()),
+            notes: docs.as_ref().and_then(|d| d.notes.clone()),
+            see_also: docs.map(|d| d.see_also).unwrap_or_default(),
+        },
+    )
 }
 
 fn search_method(
@@ -672,6 +763,56 @@ mod tests {
 
     fn structured(result: &CallToolResult) -> &serde_json::Value {
         result.structured_content.as_ref().expect("expected structuredContent")
+    }
+
+    /// The dictionary's operational rule, for the one address class this tool
+    /// owns: a published `syntax_help` reference has to open here.
+    ///
+    /// The round trip is the check, not a list of "which platform members are
+    /// addressable" — such a list beside the code would be a second source of
+    /// truth about this resolver and would drift from it in silence. It did:
+    /// every property of every type was published with an address that resolved
+    /// through the method table alone.
+    #[test]
+    fn every_published_platform_reference_opens_here() {
+        let platform = PlatformDataInner::instance();
+        if platform.all_types().is_empty() {
+            return;
+        }
+        let db = ide::RootDatabaseImpl::new();
+
+        let mut checked = 0usize;
+        let mut kinds = std::collections::BTreeSet::new();
+        for needle in ["Справочники", "Документы", "Массив", "СтрНайти", "ФоновыеЗадания"]
+        {
+            let query = ide::NameQuery::new(needle, 100)
+                .with_categories(&[ide::NameCategory::PlatformMember]);
+            for candidate in ide::lookup_names(&db, &query, &[]).candidates {
+                let Some(reference) = &candidate.platform_ref else { continue };
+                let (_, item) = syntax_help_card(&reference.name, reference.type_name.as_deref())
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "`{}` (type {:?}) is published as a syntax_help address and this tool \
+                             refuses it: {error}",
+                            reference.name, reference.type_name,
+                        )
+                    });
+                checked += 1;
+                kinds.insert(match item {
+                    SyntaxHelpItem::Type { .. } => "type",
+                    SyntaxHelpItem::Method { .. } => "method",
+                    SyntaxHelpItem::GlobalFunction { .. } => "global_function",
+                    SyntaxHelpItem::Keyword { .. } => "keyword",
+                    SyntaxHelpItem::Property { .. } => "property",
+                });
+            }
+        }
+
+        // Without these the loop is green on a stand that published nothing, or
+        // only the easy class. A property is the class that used to be dead.
+        assert!(checked >= 5, "too few references to prove anything: {checked}");
+        assert!(kinds.contains("property"), "no property was published: {kinds:?}");
+        assert!(kinds.len() >= 2, "only one kind of reference was exercised: {kinds:?}");
     }
 
     #[test]

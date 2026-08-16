@@ -135,19 +135,25 @@ name_vocabulary! {
 name_vocabulary! {
     /// How a candidate's spelling matched the query.
     ///
-    /// Declaration order IS rank order: an exact spelling beats a case-folded
-    /// one, and a name that STARTS with the query beats one that merely
-    /// contains it. Dropping the prefix tier is not cosmetic — it silently
-    /// reorders `workspace/symbol`, whose own ranking put prefixes first.
+    /// Declaration order IS rank order, and it runs from equality outward: the
+    /// query spelled exactly, then case-folded, then equal to the last segment
+    /// of a durable id, then merely begun, then merely contained.
+    ///
+    /// `Name` sits above `Prefix` because it is still an equality — the id
+    /// `method/common/Настройки/Тест` IS named `Тест` — while a prefix only
+    /// starts alike. Only the graph reports `Name` and only [`match_tier`]
+    /// reports `Prefix`, so swapping the two demotes every graph hit below any
+    /// longer resident name that happens to begin with the query, and a narrow
+    /// limit then drops the exact answer.
     NameMatchTier {
         /// Spelled exactly as asked.
         Exact => "exact";
         /// Equal after bilingual case folding.
         CaseInsensitive => "case_insensitive";
-        /// Begins with the query.
-        Prefix => "prefix";
         /// The query is the trailing segment of a durable identifier.
         Name => "name";
+        /// Begins with the query.
+        Prefix => "prefix";
         /// The query occurs somewhere inside.
         Substring => "substring";
     }
@@ -418,16 +424,27 @@ pub struct NameQuery<'a> {
     /// Keep only candidates that have a place in a file. `workspace/symbol`
     /// needs it — a symbol it cannot jump to is not one it can offer.
     pub require_location: bool,
-    /// Whether the database holds the whole workspace. `false` puts the three
-    /// database-backed providers in `not_ready`: their empty answer then means
-    /// "not built yet", not "nothing there", and that difference is what tells
-    /// a proven zero from an unbuilt index.
-    pub workspace_ready: bool,
+    /// What the database holding the workspace is doing, as the three
+    /// database-backed providers should report it when it is not
+    /// [`ProviderState::Answered`].
+    ///
+    /// A state and not a flag, because the three answers a caller draws from it
+    /// differ: `not_ready` says waiting helps, `failed` says it does not, and
+    /// `unavailable` says there is nothing to wait for in this configuration.
+    /// Collapsing them into "ready or not" told an agent to wait out a build
+    /// that had already failed.
+    pub workspace: ProviderState,
 }
 
 impl<'a> NameQuery<'a> {
     pub fn new(text: &'a str, limit: usize) -> Self {
-        Self { text, limit, categories: None, require_location: false, workspace_ready: true }
+        Self {
+            text,
+            limit,
+            categories: None,
+            require_location: false,
+            workspace: ProviderState::Answered,
+        }
     }
 
     pub fn with_categories(mut self, categories: &'a [NameCategory]) -> Self {
@@ -440,8 +457,8 @@ impl<'a> NameQuery<'a> {
         self
     }
 
-    pub fn with_workspace_ready(mut self, ready: bool) -> Self {
-        self.workspace_ready = ready;
+    pub fn with_workspace(mut self, state: ProviderState) -> Self {
+        self.workspace = state;
         self
     }
 
@@ -482,14 +499,23 @@ pub struct NameLookupResult {
 }
 
 impl NameLookupResult {
-    fn empty() -> Self {
-        Self {
-            candidates: Vec::new(),
-            total: 0,
-            total_exact: true,
-            truncated: false,
-            providers: Vec::new(),
-        }
+    /// Nothing was asked, and the answer says so about every source.
+    ///
+    /// An empty `providers` list here would be the one shape this envelope
+    /// exists to forbid: a complete, exact zero that names not a single source
+    /// it consulted. Naming them all as `not_asked` says the truth instead —
+    /// the question was empty, so nobody was asked.
+    fn nothing_asked(external: &[&dyn ExternalNameSource]) -> Self {
+        let mut providers: Vec<ProviderReport> =
+            [MODULE_INDEX, METADATA_LISTING, PLATFORM, MODULE_MEMBERS]
+                .into_iter()
+                .map(|shape| ProviderReport { provider: shape.id, state: ProviderState::NotAsked })
+                .collect();
+        providers.extend(external.iter().map(|source| ProviderReport {
+            provider: source.provider(),
+            state: ProviderState::NotAsked,
+        }));
+        Self { candidates: Vec::new(), total: 0, total_exact: true, truncated: false, providers }
     }
 
     /// Whether some index that could have contributed was not in a position to.
@@ -640,8 +666,8 @@ impl<'q> Merge<'q> {
             self.report(shape.id, ProviderState::NotAsked);
             return;
         }
-        if shape.needs_workspace && !self.query.workspace_ready {
-            self.report(shape.id, ProviderState::NotReady);
+        if shape.needs_workspace && self.query.workspace != ProviderState::Answered {
+            self.report(shape.id, self.query.workspace);
             return;
         }
         let provider = shape.id;
@@ -662,6 +688,79 @@ impl<'q> Merge<'q> {
         self.report(provider, ProviderState::Answered);
     }
 
+    /// Move a durable id onto the candidate that holds the same thing.
+    ///
+    /// De-duplication by identity cannot do this. The graph knows an id and no
+    /// file; every other provider knows a file and no id — the two never key
+    /// alike, so one entity leaves as two half-addressed rows, costs two slots
+    /// of the limit, and loses the id outright once the cut reaches it.
+    ///
+    /// The union is claimed only where it is certain: exactly one placed
+    /// candidate of that category carries that name. Two files of one name — a
+    /// configuration module and the extension module beside it — stay apart,
+    /// because a single id cannot say which of them it meant and attaching it
+    /// to whichever sorted first would invent an answer.
+    fn fold_durable_ids(&mut self) {
+        if !self.candidates.iter().any(|c| c.graph_id.is_some() && c.place.is_none()) {
+            return;
+        }
+
+        let mut placed: rustc_hash::FxHashMap<(NameCategory, String), Option<usize>> =
+            Default::default();
+        for (i, candidate) in self.candidates.iter().enumerate() {
+            if candidate.place.is_none() {
+                continue;
+            }
+            placed
+                .entry((candidate.category, candidate.display.fold_lower()))
+                // `None` marks a name held by more than one file: ambiguous, and
+                // the entry stays that way once it is.
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(i));
+        }
+
+        let mut absorbed = Vec::new();
+        let mut reranked = false;
+        for i in 0..self.candidates.len() {
+            let candidate = &self.candidates[i];
+            if candidate.place.is_some() {
+                continue;
+            }
+            let Some(id) = candidate.graph_id.clone() else { continue };
+            let key = (candidate.category, candidate.display.fold_lower());
+            let Some(&Some(target)) = placed.get(&key) else { continue };
+            if self.candidates[target].graph_id.is_some() {
+                continue;
+            }
+            let tier = candidate.match_tier;
+            let host = &mut self.candidates[target];
+            host.graph_id = Some(id);
+            if tier < host.match_tier {
+                host.match_tier = tier;
+                reranked = true;
+            }
+            absorbed.push(i);
+        }
+
+        if absorbed.is_empty() {
+            return;
+        }
+        let absorbed: std::collections::HashSet<usize> = absorbed.into_iter().collect();
+        let mut index = 0;
+        self.candidates.retain(|_| {
+            let keep = !absorbed.contains(&index);
+            index += 1;
+            keep
+        });
+        // A host that took the better of the two tiers may now outrank what was
+        // above it; nothing else here can disturb the order.
+        if reranked {
+            self.candidates.sort_by_cached_key(|c| {
+                (c.match_tier, c.category, c.display.fold_lower(), c.display.clone())
+            });
+        }
+    }
+
     /// Rank, fold and cut — the single place where order and completeness are
     /// decided, so adding a provider cannot change either by accident.
     fn finish(mut self) -> NameLookupResult {
@@ -674,6 +773,8 @@ impl<'q> Merge<'q> {
 
         let mut seen = std::collections::HashSet::new();
         self.candidates.retain(|c| seen.insert(c.identity()));
+
+        self.fold_durable_ids();
 
         let distinct = self.candidates.len();
         let (total, total_exact) =
@@ -699,7 +800,7 @@ pub fn lookup_names(
 ) -> NameLookupResult {
     let needle_folded = query.text.fold_lower();
     if needle_folded.is_empty() {
-        return NameLookupResult::empty();
+        return NameLookupResult::nothing_asked(external);
     }
 
     let mut merge = Merge::new(query, needle_folded);
@@ -813,16 +914,22 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
             // The module body is the useful destination; its XML is the fallback
             // for a module whose `.bsl` could not be read.
             let file_id = entry.module_file.unwrap_or(entry.main);
-            out.push(
-                NameCandidate::new(
-                    &entry.name,
-                    NameCategory::CommonModule,
-                    tier,
-                    ProviderId::MetadataListing,
-                )
-                .with_symbol(&entry.name)
-                .with_place(NamePlace::whole_file(file_id)),
-            );
+            let mut candidate = NameCandidate::new(
+                &entry.name,
+                NameCategory::CommonModule,
+                tier,
+                ProviderId::MetadataListing,
+            )
+            .with_place(NamePlace::whole_file(file_id));
+            // `symbol_info` reaches a common module through the path-derived
+            // module index, which only knows modules that have a readable body.
+            // A protected module — listed in the XML, no `.bsl` beside it — is
+            // real, findable and openable, and naming it as a `symbol` would
+            // hand out a key the card refuses.
+            if entry.module_file.is_some() {
+                candidate = candidate.with_symbol(&entry.name);
+            }
+            out.push(candidate);
         }
 
         // Objects with no BSL-addressable spelling: found by name and opened by
@@ -1115,6 +1222,43 @@ mod tests {
         assert!(look(&db, &NameQuery::new("", 20)).candidates.is_empty());
     }
 
+    /// An empty question is answered by nobody, and the envelope has to say
+    /// that rather than present silence as an exhaustive zero — the very shape
+    /// `providers` was added to make impossible.
+    #[test]
+    fn an_empty_question_still_names_every_source() {
+        let db = build(&[common_module("Настройки", "Процедура Ф() Экспорт\nКонецПроцедуры\n")]);
+        let graph = FakeSource::answering(ProviderId::Graph, Vec::new(), 0);
+
+        let found = lookup_names(&db, &NameQuery::new("", 20), &[&graph]);
+
+        let named: std::collections::BTreeSet<_> =
+            found.providers.iter().map(|r| r.provider).collect();
+        assert_eq!(named.len(), ProviderId::ALL.len(), "{:?}", found.providers);
+        assert!(found.providers.iter().all(|r| r.state == ProviderState::NotAsked));
+    }
+
+    /// A build that failed and a build still running are different advice.
+    ///
+    /// The three database-backed providers report whatever the caller says the
+    /// workspace is doing; reporting `not_ready` for a failed resident sends an
+    /// agent to wait for something that will never arrive.
+    #[test]
+    fn a_failed_workspace_is_not_reported_as_one_still_building() {
+        let db = build(&[]);
+
+        let found =
+            look(&db, &NameQuery::new("Настройки", 20).with_workspace(ProviderState::Failed));
+
+        for provider in
+            [ProviderId::ModuleIndex, ProviderId::MetadataListing, ProviderId::ModuleMembers]
+        {
+            assert_eq!(found.state_of(provider), Some(ProviderState::Failed), "{provider:?}");
+        }
+        // The platform reads no workspace, so a broken one changes nothing for it.
+        assert_eq!(found.state_of(ProviderId::Platform), Some(ProviderState::Answered));
+    }
+
     /// The fixture is chosen so the alphabet works AGAINST the answer: without
     /// a prefix tier the secondary key puts `АааТест` first.
     #[test]
@@ -1370,6 +1514,112 @@ mod tests {
         assert!(variable.place.is_some());
     }
 
+    /// A durable id whose trailing segment IS the query beats a longer name
+    /// that merely begins with it.
+    ///
+    /// The two tiers come from different providers — only the graph reports
+    /// `Name`, only [`match_tier`] reports `Prefix` — so their relative order is
+    /// what decides whether the graph's exact hit survives a narrow limit. The
+    /// ranking this replaced put an exact name second, right after the
+    /// case-folded one, and nothing between.
+    #[test]
+    fn an_exact_name_outranks_a_longer_prefix() {
+        let db =
+            build(&[common_module("Настройки", "Процедура ТестА() Экспорт\nКонецПроцедуры\n")]);
+        let graph = FakeSource::answering(
+            ProviderId::Graph,
+            vec![graph_candidate("Тест", "method/common/Прочее/Тест")],
+            1,
+        );
+
+        let found =
+            lookup_names(&db, &NameQuery::new("Тест", 20).with_categories(METHODS), &[&graph]);
+
+        assert_eq!(displays(&found), vec!["Тест", "ТестА"]);
+    }
+
+    /// A graph node and a resident record of the same thing are one answer with
+    /// two addresses, not two answers with one each.
+    ///
+    /// The graph carries no place and the resident carries no durable id, so
+    /// nothing folds them by identity alone. Left apart they cost two slots of
+    /// the limit, inflate `total` under `total_exact`, and — once the cut bites —
+    /// drop the `graph_id` that `resolve` exists to hand out.
+    #[test]
+    fn a_graph_node_and_its_resident_record_fold_into_one_candidate() {
+        let db = build(&[common_module("Настройки", "Процедура Ф() Экспорт\nКонецПроцедуры\n")]);
+        let mut node = NameCandidate::new(
+            "Настройки",
+            NameCategory::CommonModule,
+            NameMatchTier::Name,
+            ProviderId::Graph,
+        );
+        node.graph_id = Some("module/common/Настройки".to_string());
+        let graph = FakeSource::answering(ProviderId::Graph, vec![node], 1);
+
+        let found = lookup_names(
+            &db,
+            &NameQuery::new("Настройки", 20).with_categories(&[NameCategory::CommonModule]),
+            &[&graph],
+        );
+
+        assert_eq!(found.candidates.len(), 1, "{:?}", displays(&found));
+        let merged = &found.candidates[0];
+        assert!(merged.place.is_some(), "the place survived the fold");
+        assert_eq!(merged.graph_id.as_deref(), Some("module/common/Настройки"));
+        assert_eq!(found.total, 1, "a folded pair is one answer, not two");
+        assert!(found.total_exact);
+    }
+
+    /// The limit of the fold above. Two files of the same name — a configuration
+    /// module and the extension module that shares its name — are two answers,
+    /// and one durable id cannot say which it means. Guessing would attach the
+    /// graph's id to whichever happened to sort first.
+    #[test]
+    fn a_name_shared_by_two_files_keeps_the_graph_row_apart() {
+        let base = "/ws/src/cf/CommonModules/Настройки/Ext/Module.bsl";
+        let extension = "/ws/src/cfe/CommonModules/Настройки/Ext/Module.bsl";
+        let body = "Процедура Ф() Экспорт\nКонецПроцедуры\n";
+        let mut db = db_with_files(&[(base, body), (extension, body)]);
+        let base_root = std::path::PathBuf::from("/ws/src/cf");
+        let extension_root = std::path::PathBuf::from("/ws/src/cfe");
+        db.set_all_config_paths(vec![
+            (None, base_root.clone()),
+            (Some("Расширение".to_string()), extension_root.clone()),
+        ]);
+        for (root, file_id) in [(&base_root, FileId(0)), (&extension_root, FileId(1))] {
+            db.set_metadata_listing(
+                &root.to_string_lossy(),
+                MetadataListingData {
+                    common_modules: vec![CommonModuleEntry {
+                        name: "Настройки".to_string(),
+                        main: file_id,
+                        module_file: Some(file_id),
+                        unread_module_file: None,
+                    }],
+                    ..MetadataListingData::default()
+                },
+            );
+        }
+        let mut node = NameCandidate::new(
+            "Настройки",
+            NameCategory::CommonModule,
+            NameMatchTier::Name,
+            ProviderId::Graph,
+        );
+        node.graph_id = Some("module/common/Настройки".to_string());
+        let graph = FakeSource::answering(ProviderId::Graph, vec![node], 1);
+
+        let found = lookup_names(
+            &db,
+            &NameQuery::new("Настройки", 20).with_categories(&[NameCategory::CommonModule]),
+            &[&graph],
+        );
+
+        assert_eq!(found.candidates.len(), 3, "{:?}", displays(&found));
+        assert_eq!(found.candidates.iter().filter(|c| c.graph_id.is_some()).count(), 1);
+    }
+
     /// What `workspace/symbol` needs: a candidate it cannot jump to is not one
     /// it can offer, and asking for that must not turn into a silent filter
     /// downstream.
@@ -1400,7 +1650,8 @@ mod tests {
     fn the_platform_answers_on_a_host_that_has_built_nothing() {
         let db = build(&[]);
 
-        let found = look(&db, &NameQuery::new("СтрНайти", 20).with_workspace_ready(false));
+        let found =
+            look(&db, &NameQuery::new("СтрНайти", 20).with_workspace(ProviderState::NotReady));
 
         assert_eq!(found.state_of(ProviderId::Platform), Some(ProviderState::Answered));
         assert_eq!(found.state_of(ProviderId::ModuleMembers), Some(ProviderState::NotReady));
@@ -1424,7 +1675,8 @@ mod tests {
         assert!(proven.candidates.is_empty());
         assert!(!proven.is_partial(), "every provider answered");
 
-        let unbuilt = look(&db, &NameQuery::new("НетТакого", 20).with_workspace_ready(false));
+        let unbuilt =
+            look(&db, &NameQuery::new("НетТакого", 20).with_workspace(ProviderState::NotReady));
         assert!(unbuilt.candidates.is_empty());
         assert!(unbuilt.is_partial());
         assert_eq!(unbuilt.state_of(ProviderId::ModuleMembers), Some(ProviderState::NotReady));

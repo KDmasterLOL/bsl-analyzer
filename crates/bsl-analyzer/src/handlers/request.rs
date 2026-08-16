@@ -1102,17 +1102,9 @@ pub fn handle_workspace_symbol(
         return Ok(None);
     }
 
-    // Reuse the per-file text/line-index cache; the "source" file is just the
-    // first result's file, fetched the same overlay-or-disk way the converter
-    // itself uses for the rest.
-    let source_file =
-        symbols[0].place.expect("`workspace_symbols` asks for candidates with a place").file_id;
-    let source_uri = ctx.url_for_file_id(source_file)?;
-    let source_text = match ctx.mem_docs.get(&source_uri) {
-        Some(doc) => doc.text().to_string(),
-        None => ctx.analysis.file_text(source_file),
-    };
-    let mut converter = ReferenceLocationConverter::new(&ctx, source_file, &source_text);
+    // No document of its own: this request names no file, and every candidate's
+    // file is read the same overlay-or-disk way.
+    let mut converter = ReferenceLocationConverter::detached(&ctx);
 
     let mut result = Vec::with_capacity(symbols.len());
     for symbol in symbols {
@@ -1120,7 +1112,26 @@ pub fn handle_workspace_symbol(
         // A module or a metadata object has no declaration node of its own; the
         // file start is where its card is anchored too.
         let range = place.range.unwrap_or_else(|| ide::TextRange::empty(0.into()));
-        let location = converter.convert(IdeLocation { file_id: place.file_id, range })?;
+        // Reading a closed file's text panics when it changed under analysis or
+        // became unreadable — a race this answer walks straight into, since a
+        // name search returns files nobody asked about and metadata XML is
+        // rewritten by the configurator and by git alike. One racing file must
+        // not fail the whole request; a `salsa::Cancelled` is a real abort and
+        // keeps unwinding.
+        let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            converter.convert(IdeLocation { file_id: place.file_id, range })
+        }));
+        let location = match converted {
+            Ok(location) => location?,
+            Err(payload) if payload.is::<salsa::Cancelled>() => std::panic::resume_unwind(payload),
+            Err(_) => {
+                tracing::warn!(
+                    file_id = place.file_id.0,
+                    "workspace/symbol: skipping a candidate after a text-read panic"
+                );
+                continue;
+            }
+        };
         result.push(LspWorkspaceSymbol {
             name: symbol.display,
             kind: workspace_symbol_kind(symbol.category),
@@ -1813,8 +1824,10 @@ fn document_symbol_response(
 
 struct ReferenceLocationConverter<'ctx> {
     ctx: &'ctx LatencyRequestContext,
-    source_file_id: FileId,
-    source_text: String,
+    /// The requested document's text, already in hand and not worth re-reading.
+    /// Absent for a request that has no document of its own — a workspace-wide
+    /// search answers about files the caller never named.
+    source: Option<(FileId, String)>,
     target_files: FxHashMap<FileId, ReferenceTargetFile>,
 }
 
@@ -1828,10 +1841,15 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     fn new(ctx: &'ctx LatencyRequestContext, source_file_id: FileId, source_text: &str) -> Self {
         Self {
             ctx,
-            source_file_id,
-            source_text: source_text.to_string(),
+            source: Some((source_file_id, source_text.to_string())),
             target_files: FxHashMap::default(),
         }
+    }
+
+    /// A converter for a request with no document of its own: every file it
+    /// touches is read through the overlay-or-disk path like any other target.
+    fn detached(ctx: &'ctx LatencyRequestContext) -> Self {
+        Self { ctx, source: None, target_files: FxHashMap::default() }
     }
 
     fn convert(&mut self, ide_loc: IdeLocation) -> Result<Location> {
@@ -1850,8 +1868,10 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     fn target_file(&mut self, file_id: FileId) -> Result<&ReferenceTargetFile> {
         if !self.target_files.contains_key(&file_id) {
             let uri = self.ctx.url_for_file_id(file_id)?;
-            let text = if file_id == self.source_file_id {
-                self.source_text.clone()
+            let text = if let Some((_, text)) =
+                self.source.as_ref().filter(|(source_id, _)| *source_id == file_id)
+            {
+                text.clone()
             } else if let Some(doc) = self.ctx.mem_docs.get(&uri) {
                 doc.text().to_string()
             } else {
@@ -3470,6 +3490,90 @@ mod tests {
             "source.fixAll must be filtered out when only quickfix is requested"
         );
         assert!(!actions_of_kind(&result, "quickfix").is_empty(), "quick fixes must remain");
+    }
+
+    /// A name search answers about files nobody named, and one of them can be
+    /// gone by the time its location is built: metadata XML is rewritten by the
+    /// configurator and by git alike, and reading a closed file that changed
+    /// under analysis panics by design.
+    ///
+    /// One racing file must cost its own candidate, not the whole request. The
+    /// readable neighbour in the stand is what keeps this from passing on an
+    /// answer that is simply empty.
+    #[test]
+    fn workspace_symbol_skips_a_candidate_whose_file_is_gone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_path = tmp.path().join("Ровный.bsl");
+        let module_text = "Процедура ДрейфТестМетод() Экспорт\nКонецПроцедуры\n";
+        std::fs::write(&module_path, module_text).expect("write module");
+        let xml_path = tmp.path().join("ДрейфТест.xml");
+        std::fs::write(&xml_path, "<MetaDataObject/>").expect("write xml");
+
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let module_uri = lsp_types::Url::parse(&format!("file://{}", module_path.display()))
+            .expect("module url");
+        let module_id = state.vfs_file_for_url(&module_uri).unwrap();
+        let xml_id = {
+            let mut vfs = state.vfs.write();
+            vfs.alloc_file_id(VfsPath::new(xml_path.clone()))
+        };
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(VfsPath::new(module_path.clone()), Some(Arc::from(module_text)));
+            vfs.set_file_contents(
+                VfsPath::new(xml_path.clone()),
+                Some(Arc::from("<MetaDataObject/>")),
+            );
+        }
+        state.process_changes(false);
+
+        {
+            let db = state.analysis_host.raw_database_mut();
+            db.set_all_config_paths(vec![(None, tmp.path().to_path_buf())]);
+            db.set_metadata_listing(
+                &tmp.path().to_string_lossy(),
+                ide_db::metadata::MetadataListingData {
+                    entries: vec![ide_db::metadata::MdoEntry {
+                        kind: bsl_metadata::MdoType::Catalog,
+                        name: "ДрейфТест".to_string(),
+                        main: xml_id,
+                        predefined: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Both candidates are in the answer before anything goes wrong: without
+        // this the assertion below would hold on a stand that never found the
+        // XML in the first place.
+        {
+            let analysis = state.analysis_host.analysis();
+            let found = analysis.workspace_symbols("ДрейфТест");
+            let files: std::collections::BTreeSet<_> =
+                found.candidates.iter().filter_map(|c| c.place.map(|p| p.file_id)).collect();
+            assert!(files.contains(&xml_id), "the XML is a candidate: {files:?}");
+            assert!(files.contains(&module_id), "the module is a candidate: {files:?}");
+        }
+
+        // The XML goes away between the lookup and the location: exactly the
+        // race, and `file_text` answers it with a panic.
+        std::fs::remove_file(&xml_path).expect("remove xml");
+
+        let ctx = latency_ctx(&state);
+        let response = handle_workspace_symbol(
+            ctx,
+            WorkspaceSymbolParams { query: "ДрейфТест".to_string(), ..Default::default() },
+        )
+        .expect("one unreadable file must not fail the request");
+
+        let Some(WorkspaceSymbolResponse::Nested(symbols)) = response else {
+            panic!("the readable neighbour is still an answer: {response:?}");
+        };
+        assert_eq!(symbols.len(), 1, "{symbols:?}");
+        assert_eq!(symbols[0].name, "ДрейфТестМетод");
     }
 
     #[test]
