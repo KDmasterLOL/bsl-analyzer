@@ -272,6 +272,11 @@ pub struct NameCandidate {
     pub category: NameCategory,
     pub match_tier: NameMatchTier,
     pub provider: ProviderId,
+    /// A workspace path from a provider that knows where a thing is written but
+    /// not the id the database files it under. Turned into a [`NamePlace`] on
+    /// arrival, so nothing downstream sees two ways of saying where something
+    /// is; left as `None` by providers that hand over a place directly.
+    source_path: Option<String>,
     /// Private on purpose: it is bookkeeping for the assembly, not part of the
     /// answer. Filled in for the survivors before the result leaves
     /// [`lookup_names`], and `None` by the time a consumer sees it.
@@ -287,6 +292,7 @@ impl NameCandidate {
     ) -> Self {
         Self {
             display: display.into(),
+            source_path: None,
             symbol: None,
             graph_id: None,
             platform_ref: None,
@@ -320,12 +326,42 @@ impl NameCandidate {
         self
     }
 
+    /// Where this is written, as a path, for a provider that has no file id of
+    /// its own. The lookup resolves it against the database the answer is being
+    /// built from — the only place where a path and an id are the same file by
+    /// construction rather than by resemblance.
+    pub fn with_source_path(mut self, path: impl Into<String>) -> Self {
+        self.source_path = Some(path.into());
+        self
+    }
+
     /// A candidate nothing can address is not worth publishing.
     pub fn is_addressable(&self) -> bool {
         self.symbol.is_some()
             || self.graph_id.is_some()
             || self.platform_ref.is_some()
             || self.place.is_some()
+    }
+
+    /// Take from another row of the SAME thing every address this one lacks.
+    ///
+    /// Only gaps are filled: the row that got here first sorted better, so its
+    /// tier and its provider are the answer's, and an address it already has is
+    /// the one a consumer was going to get anyway.
+    fn absorb_addresses(&mut self, other: NameCandidate) {
+        self.symbol = self.symbol.take().or(other.symbol);
+        self.graph_id = self.graph_id.take().or(other.graph_id);
+        self.platform_ref = self.platform_ref.take().or(other.platform_ref);
+        // A place with ranges says more than a whole-file one, and the graph
+        // hands over the file alone.
+        if self.place.is_none_or(|place| place.range.is_none()) {
+            if let Some(better) = other.place.filter(|p| p.range.is_some()) {
+                self.place = Some(better);
+            } else {
+                self.place = self.place.or(other.place);
+            }
+        }
+        self.spelling = self.spelling.or(other.spelling);
     }
 
     /// Identity for de-duplication: the ADDRESS, never the displayed name.
@@ -606,10 +642,60 @@ const MODULE_MEMBERS: ProviderShape = ProviderShape {
     supplies_location: true,
 };
 
+/// Turns a workspace path into the file id the database knows it by.
+///
+/// Two spellings of one path are the ordinary case: the graph stores them with
+/// forward slashes whatever the platform, while the file set holds them as the
+/// platform writes them. The exact match is tried first and costs nothing; the
+/// folded table is built once and only after a miss — where the spellings agree
+/// it is never built at all.
+///
+/// The root is ASKED for, not asserted. A database with no source root is an
+/// ordinary state on the path this exists to serve — the graph answering while
+/// the resident is still building — and asserting one there turned the whole
+/// answer into a panic.
+struct PathPlaces<'a> {
+    db: &'a RootDatabaseImpl,
+    /// The root input, not the root itself: it is a handle, while a `SourceRoot`
+    /// holds the whole file set and cloning one to keep it here would copy every
+    /// path in the workspace.
+    root: Option<Option<ide_db::base_db::SourceRootInput>>,
+    normalized: Option<rustc_hash::FxHashMap<String, FileId>>,
+}
+
+impl<'a> PathPlaces<'a> {
+    fn new(db: &'a RootDatabaseImpl) -> Self {
+        Self { db, root: None, normalized: None }
+    }
+
+    fn of(&mut self, path: &str) -> Option<NamePlace> {
+        let db = self.db;
+        let root = (*self.root.get_or_insert_with(|| db.try_source_root_input(ROOT)))?;
+        let file_set = root.root(db).file_set();
+
+        if let Some(&file_id) =
+            file_set.file_for_path(&vfs::VfsPath::new(std::path::PathBuf::from(path)))
+        {
+            return Some(NamePlace::whole_file(file_id));
+        }
+        let table = self.normalized.get_or_insert_with(|| {
+            file_set
+                .iter()
+                .filter_map(|file_id| {
+                    let path = file_set.path_for_file(&file_id)?;
+                    Some((path.as_path().to_str()?.replace('\\', "/"), file_id))
+                })
+                .collect()
+        });
+        table.get(&path.replace('\\', "/")).copied().map(NamePlace::whole_file)
+    }
+}
+
 /// Accumulates one lookup: candidates, provider verdicts and whether anyone
 /// capped. Every provider funnels through here so no second place can decide
 /// what the answer contains.
 struct Merge<'q> {
+    db: &'q RootDatabaseImpl,
     query: &'q NameQuery<'q>,
     needle_raw: &'q str,
     needle_folded: String,
@@ -620,8 +706,9 @@ struct Merge<'q> {
 }
 
 impl<'q> Merge<'q> {
-    fn new(query: &'q NameQuery<'q>, needle_folded: String) -> Self {
+    fn new(db: &'q RootDatabaseImpl, query: &'q NameQuery<'q>, needle_folded: String) -> Self {
         Self {
+            db,
             query,
             needle_raw: query.text,
             needle_folded,
@@ -683,129 +770,28 @@ impl<'q> Merge<'q> {
             self.capped = true;
         }
         self.provider_total += hits.total;
-        let kept: Vec<_> = hits.candidates.into_iter().filter(|c| self.accepts(c)).collect();
+        let mut placed = PathPlaces::new(self.db);
+        let kept: Vec<_> = hits
+            .candidates
+            .into_iter()
+            .map(|mut candidate| {
+                // Before `accepts`: a path IS a place, and a caller asking only
+                // for locatable candidates must not lose one for having said so
+                // in the other of the two ways.
+                if let Some(path) = candidate.source_path.take() {
+                    candidate.place = candidate.place.or_else(|| placed.of(&path));
+                }
+                candidate
+            })
+            .filter(|c| self.accepts(c))
+            .collect();
         self.candidates.extend(kept);
         self.report(provider, ProviderState::Answered);
     }
 
-    /// Move a durable id onto the candidate that holds the same thing.
-    ///
-    /// De-duplication by identity cannot do this. The graph knows an id and no
-    /// file; every other provider knows a file and no id — the two never key
-    /// alike, so one entity leaves as two half-addressed rows, costs two slots
-    /// of the limit, and loses the id outright once the cut reaches it.
-    ///
-    /// The union is claimed only where the correspondence is PROVEN, never
-    /// where it is merely unopposed. An id that names a module scope is folded
-    /// onto the file whose module key is that scope and onto no other; matching
-    /// by name alone would be a guess, and a wrong one in an ordinary
-    /// configuration: the graph holds a node for every method, exported or not,
-    /// while `module_members` publishes only the exported ones, so a private
-    /// `Тест` in one module and an exported `Тест` in another leave exactly one
-    /// placed candidate and two graph rows — and the id of the private method
-    /// would land on the exported method's row, pointing `graph_id` and
-    /// `location` at different code.
-    ///
-    /// Ids that name no module scope — a metadata object, a form, an attribute —
-    /// have no key to compare, so those fold only when the name is held by one
-    /// placed candidate AND one graph row: with one of each there is nothing to
-    /// choose between.
-    fn fold_durable_ids(&mut self, db: &RootDatabaseImpl) {
-        if !self.candidates.iter().any(|c| c.graph_id.is_some() && c.place.is_none()) {
-            return;
-        }
-
-        let source_root = db.source_root_input(ROOT).root(db);
-        let file_set = source_root.file_set();
-        let mut owners: rustc_hash::FxHashMap<FileId, Option<ModuleKey>> = Default::default();
-        let mut owner_of = |file_id: FileId| -> Option<ModuleKey> {
-            owners
-                .entry(file_id)
-                .or_insert_with(|| {
-                    file_set
-                        .path_for_file(&file_id)
-                        .and_then(|path| module_key_for_path(&path.as_path().to_string_lossy()))
-                })
-                .clone()
-        };
-
-        // Both sides of the name, counted separately: a name unopposed among
-        // placed candidates can still be crowded on the graph's side.
-        let mut placed: rustc_hash::FxHashMap<(NameCategory, String), Vec<usize>> =
-            Default::default();
-        let mut graph_rows: rustc_hash::FxHashMap<(NameCategory, String), usize> =
-            Default::default();
-        for (i, candidate) in self.candidates.iter().enumerate() {
-            let key = (candidate.category, candidate.display.fold_lower());
-            if candidate.place.is_some() {
-                placed.entry(key).or_default().push(i);
-            } else if candidate.graph_id.is_some() {
-                *graph_rows.entry(key).or_insert(0) += 1;
-            }
-        }
-
-        let mut absorbed = std::collections::HashSet::new();
-        let mut reranked = false;
-        for i in 0..self.candidates.len() {
-            let candidate = &self.candidates[i];
-            if candidate.place.is_some() {
-                continue;
-            }
-            let Some(id) = candidate.graph_id.clone() else { continue };
-            let key = (candidate.category, candidate.display.fold_lower());
-            let Some(here) = placed.get(&key) else { continue };
-
-            let target = match crate::graph::classify_graph_id(&id).ok().and_then(scope_of) {
-                Some(scope) => {
-                    let mut matching = here.iter().copied().filter(|&target| {
-                        self.candidates[target]
-                            .place
-                            .is_some_and(|place| owner_of(place.file_id).as_ref() == Some(&scope))
-                    });
-                    match (matching.next(), matching.next()) {
-                        (Some(only), None) => only,
-                        _ => continue,
-                    }
-                }
-                // No scope to compare: fold only one-to-one.
-                None if here.len() == 1 && graph_rows.get(&key) == Some(&1) => here[0],
-                None => continue,
-            };
-
-            if self.candidates[target].graph_id.is_some() {
-                continue;
-            }
-            let tier = candidate.match_tier;
-            let host = &mut self.candidates[target];
-            host.graph_id = Some(id);
-            if tier < host.match_tier {
-                host.match_tier = tier;
-                reranked = true;
-            }
-            absorbed.insert(i);
-        }
-
-        if absorbed.is_empty() {
-            return;
-        }
-        let mut index = 0;
-        self.candidates.retain(|_| {
-            let keep = !absorbed.contains(&index);
-            index += 1;
-            keep
-        });
-        // A host that took the better of the two tiers may now outrank what was
-        // above it; nothing else here can disturb the order.
-        if reranked {
-            self.candidates.sort_by_cached_key(|c| {
-                (c.match_tier, c.category, c.display.fold_lower(), c.display.clone())
-            });
-        }
-    }
-
     /// Rank, fold and cut — the single place where order and completeness are
     /// decided, so adding a provider cannot change either by accident.
-    fn finish(mut self, db: &RootDatabaseImpl) -> NameLookupResult {
+    fn finish(mut self) -> NameLookupResult {
         // Cached, not recomputed per comparison: the ordering key folds the
         // name, and a broad query ranks tens of thousands of candidates — two
         // allocations per COMPARISON is where the whole answer goes.
@@ -813,10 +799,25 @@ impl<'q> Merge<'q> {
             (c.match_tier, c.category, c.display.fold_lower(), c.display.clone())
         });
 
-        let mut seen = std::collections::HashSet::new();
-        self.candidates.retain(|c| seen.insert(c.identity()));
-
-        self.fold_durable_ids(db);
+        // One entity, one row, with every address any provider knew for it.
+        //
+        // Dropping the later row instead of absorbing it is what used to split
+        // an entity in two: the graph knows a durable id, the resident a symbol
+        // and a place, and whichever sorted first took the slot while the
+        // other's address went in the bin. They are the same row because they
+        // are the same FILE — proven, not inferred from the name.
+        let mut first: rustc_hash::FxHashMap<_, usize> = Default::default();
+        let mut merged: Vec<NameCandidate> = Vec::with_capacity(self.candidates.len());
+        for candidate in std::mem::take(&mut self.candidates) {
+            match first.get(&candidate.identity()) {
+                Some(&at) => merged[at].absorb_addresses(candidate),
+                None => {
+                    first.insert(candidate.identity(), merged.len());
+                    merged.push(candidate);
+                }
+            }
+        }
+        self.candidates = merged;
 
         let distinct = self.candidates.len();
         let (total, total_exact) =
@@ -845,7 +846,7 @@ pub fn lookup_names(
         return NameLookupResult::nothing_asked(external);
     }
 
-    let mut merge = Merge::new(query, needle_folded);
+    let mut merge = Merge::new(db, query, needle_folded);
 
     merge.run(MODULE_INDEX, |m| from_module_index(db, m));
     merge.run(METADATA_LISTING, |m| from_metadata_listing(db, m));
@@ -874,7 +875,7 @@ pub fn lookup_names(
         }
     }
 
-    let mut result = merge.finish(db);
+    let mut result = merge.finish();
     spell_symbols(db, &mut result.candidates);
     result
 }
@@ -1097,19 +1098,6 @@ fn platform_owner_display(type_name: &str) -> Option<String> {
     )
 }
 
-/// The module a durable id points into, when it points into one at all.
-///
-/// Only these two id shapes name a module scope; a metadata object, a form or an
-/// attribute is addressed by its own coordinates and has no module key to
-/// compare a file against.
-fn scope_of(kind: crate::graph::GraphIdKind) -> Option<ModuleKey> {
-    match kind {
-        crate::graph::GraphIdKind::Method { scope, .. }
-        | crate::graph::GraphIdKind::Module { scope } => Some(scope),
-        _ => None,
-    }
-}
-
 /// Exported methods and module variables of every module in the root.
 fn from_module_members(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCandidate> {
     let members = db.module_members(ROOT);
@@ -1269,6 +1257,13 @@ mod tests {
         );
         candidate.graph_id = Some(id.to_string());
         candidate
+    }
+
+    /// The graph as it really answers: a durable id AND the file the node is
+    /// written in. A stand that hands over the id alone tests a source that no
+    /// longer exists.
+    fn graph_candidate_in(display: &str, id: &str, path: &str) -> NameCandidate {
+        graph_candidate(display, id).with_source_path(path)
     }
 
     #[test]
@@ -1610,6 +1605,7 @@ mod tests {
             ProviderId::Graph,
         );
         node.graph_id = Some("module/common/Настройки".to_string());
+        let node = node.with_source_path("/ws/CommonModules/Настройки/Ext/Module.bsl");
         let graph = FakeSource::answering(ProviderId::Graph, vec![node], 1);
 
         let found = lookup_names(
@@ -1639,13 +1635,22 @@ mod tests {
             common_module("Утил", "Процедура Тест() Экспорт\nКонецПроцедуры\n"),
             common_module("Другое", "Процедура Тест()\nКонецПроцедуры\n"),
         ]);
-        // Sorted as the real ranker sorts them — by id — so the WRONG one comes
-        // first and a fold that takes whatever it meets takes this.
+        // Sorted as the real ranker sorts them — by id — so the row for the
+        // OTHER module comes first, and a merge that took whatever it met first
+        // would take this one.
         let graph = FakeSource::answering(
             ProviderId::Graph,
             vec![
-                graph_candidate("Тест", "method/common/Другое/Тест"),
-                graph_candidate("Тест", "method/common/Утил/Тест"),
+                graph_candidate_in(
+                    "Тест",
+                    "method/common/Другое/Тест",
+                    "/ws/CommonModules/Другое/Ext/Module.bsl",
+                ),
+                graph_candidate_in(
+                    "Тест",
+                    "method/common/Утил/Тест",
+                    "/ws/CommonModules/Утил/Ext/Module.bsl",
+                ),
             ],
             2,
         );
@@ -1656,26 +1661,95 @@ mod tests {
         let exported = found
             .candidates
             .iter()
-            .find(|c| c.place.is_some())
+            .find(|c| c.symbol.as_deref() == Some("Утил.Тест"))
             .expect("the exported method is an answer");
-        assert_eq!(exported.symbol.as_deref(), Some("Утил.Тест"));
         assert_eq!(
             exported.graph_id.as_deref(),
             Some("method/common/Утил/Тест"),
-            "the id folded onto it must name the module it is written in",
+            "the id on it must name the module it is written in",
         );
-        // The other module's node is still an answer of its own, unclaimed.
-        assert!(found.candidates.iter().any(
-            |c| c.place.is_none() && c.graph_id.as_deref() == Some("method/common/Другое/Тест")
-        ));
+        // The namesake in the other module is an answer of its own, filed under
+        // its own file — not merged into the row above.
+        let other = found
+            .candidates
+            .iter()
+            .find(|c| c.graph_id.as_deref() == Some("method/common/Другое/Тест"))
+            .expect("the namesake in the other module is an answer too");
+        assert_ne!(other.place, exported.place);
     }
 
-    /// The limit of the fold above. Two files of the same name — a configuration
-    /// module and the extension module that shares its name — are two answers,
-    /// and one durable id cannot say which it means. Guessing would attach the
-    /// graph's id to whichever happened to sort first.
+    /// The answer this action exists to give: the graph is built, the resident
+    /// is not, and a database with no source root at all is what the caller
+    /// hands over. Asking it for a root is fine; asserting one is a panic, and a
+    /// panic here is an internal error instead of the candidates the graph and
+    /// the platform were ready to give.
     #[test]
-    fn a_name_shared_by_two_files_keeps_the_graph_row_apart() {
+    fn a_ready_graph_answers_over_a_database_with_no_source_root() {
+        let db = RootDatabaseImpl::new();
+        let graph = FakeSource::answering(
+            ProviderId::Graph,
+            vec![graph_candidate_in(
+                "Тест",
+                "method/common/Утил/Тест",
+                "/ws/CommonModules/Утил/Ext/Module.bsl",
+            )],
+            1,
+        );
+
+        let found = lookup_names(
+            &db,
+            &NameQuery::new("Тест", 20)
+                .with_categories(METHODS)
+                .with_workspace(ProviderState::NotReady),
+            &[&graph],
+        );
+
+        assert_eq!(found.candidates.len(), 1, "{:?}", displays(&found));
+        assert_eq!(found.candidates[0].graph_id.as_deref(), Some("method/common/Утил/Тест"));
+        // No root, so no place — and that is said by omission, not by a guess.
+        assert!(found.candidates[0].place.is_none());
+    }
+
+    /// A provider that hit its own cap delivers SOME of its matches, and which
+    /// ones is the ranker's business. What arrives must still land on the file
+    /// it names — a merge that reasoned from how many rows it happened to
+    /// receive would put a capped provider's one row on whatever else carried
+    /// the name.
+    #[test]
+    fn a_capped_provider_still_lands_its_row_on_the_file_it_names() {
+        let db = build(&[
+            common_module("Утил", "Процедура Тест() Экспорт\nКонецПроцедуры\n"),
+            common_module("Другое", "Процедура Тест() Экспорт\nКонецПроцедуры\n"),
+        ]);
+        // Two matched, one was delivered: `total` above the list is the cap.
+        let graph = FakeSource::answering(
+            ProviderId::Graph,
+            vec![graph_candidate_in(
+                "Тест",
+                "method/common/Другое/Тест",
+                "/ws/CommonModules/Другое/Ext/Module.bsl",
+            )],
+            2,
+        );
+
+        let found =
+            lookup_names(&db, &NameQuery::new("Тест", 20).with_categories(METHODS), &[&graph]);
+
+        let carrying: Vec<_> = found
+            .candidates
+            .iter()
+            .filter(|c| c.graph_id.is_some())
+            .map(|c| c.symbol.as_deref())
+            .collect();
+        assert_eq!(carrying, vec![Some("Другое.Тест")], "{:?}", found.candidates);
+    }
+
+    /// One name, two files — a configuration module and the extension module
+    /// beside it — are two answers, and the durable id belongs to exactly one of
+    /// them. The graph says which by naming its file; the case that used to need
+    /// a guard needs none, because there is nothing left to guess.
+    #[test]
+    fn a_name_shared_by_two_files_takes_the_id_to_the_file_it_names() {
         let base = "/ws/src/cf/CommonModules/Настройки/Ext/Module.bsl";
         let extension = "/ws/src/cfe/CommonModules/Настройки/Ext/Module.bsl";
         let body = "Процедура Ф() Экспорт\nКонецПроцедуры\n";
@@ -1707,6 +1781,8 @@ mod tests {
             ProviderId::Graph,
         );
         node.graph_id = Some("module/common/Настройки".to_string());
+        // The graph's node is the EXTENSION's module, and it says so.
+        let node = node.with_source_path(extension);
         let graph = FakeSource::answering(ProviderId::Graph, vec![node], 1);
 
         let found = lookup_names(
@@ -1715,8 +1791,15 @@ mod tests {
             &[&graph],
         );
 
-        assert_eq!(found.candidates.len(), 3, "{:?}", displays(&found));
-        assert_eq!(found.candidates.iter().filter(|c| c.graph_id.is_some()).count(), 1);
+        // Two modules, two answers; the id sits on the one the graph named.
+        assert_eq!(found.candidates.len(), 2, "{:?}", displays(&found));
+        let carrying: Vec<_> = found
+            .candidates
+            .iter()
+            .filter(|c| c.graph_id.is_some())
+            .filter_map(|c| c.place.map(|p| p.file_id))
+            .collect();
+        assert_eq!(carrying, vec![FileId(1)], "{:?}", found.candidates);
     }
 
     /// What `workspace/symbol` needs: a candidate it cannot jump to is not one

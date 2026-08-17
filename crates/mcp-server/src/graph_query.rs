@@ -208,12 +208,13 @@ impl ide::ExternalNameSource for GraphNameSource<'_> {
         GRAPH_CATEGORIES
     }
 
-    /// Stored nodes carry a file and byte offsets, but this source hands over a
-    /// durable id and nothing else — `graph action=node` is where a node's
-    /// place is served, and inventing a second path to it here would be a
-    /// second answer to one question.
+    /// A stored node knows the file it is written in, and handing it over is
+    /// what lets the dictionary recognise the graph's row and the resident's row
+    /// as ONE thing instead of guessing at it from the name. The ranges stay
+    /// with `graph action=node`: two answers about a node's exact span would be
+    /// two answers to one question, while the file is the identity itself.
     fn supplies_location(&self) -> bool {
-        false
+        true
     }
 
     fn candidates(&self, query: &str, limit: usize) -> Result<ide::ProviderHits, String> {
@@ -230,13 +231,26 @@ impl ide::ExternalNameSource for GraphNameSource<'_> {
                 // opinion on the same question, free to disagree.
                 let tier = ide::NameMatchTier::from_code(c.match_kind)
                     .unwrap_or(ide::NameMatchTier::Substring);
-                ide::NameCandidate::new(
+                let candidate = ide::NameCandidate::new(
                     ide::resolve_name_segment(&c.id),
                     node_category(c.kind, &c.id),
                     tier,
                     ide::ProviderId::Graph,
                 )
-                .with_graph_id(&c.id)
+                .with_graph_id(&c.id);
+                // Looked up per DELIVERED candidate, never per match: the ranker
+                // has already cut the list to `limit`, and the file of a node
+                // nobody will see is a query for nothing.
+                match graph.node_file(&c.id) {
+                    Ok(Some(file)) => candidate.with_source_path(file),
+                    // A node whose file the store does not know is still an
+                    // answer, addressed by its id alone.
+                    Ok(None) => candidate,
+                    Err(error) => {
+                        tracing::warn!(id = %c.id, %error, "graph node file lookup failed");
+                        candidate
+                    }
+                }
             })
             .collect();
         // `total` is the ranker's pre-cap count, so a name matching thousands of
@@ -646,6 +660,18 @@ impl GraphDb {
         let (candidates, total) =
             ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
         Ok(ide::ResolveResult::new(query, candidates, total))
+    }
+
+    /// The file a node is written in, for the name dictionary's identity.
+    ///
+    /// A module node is usually absent from the table — it is persisted only
+    /// when it happens to be an edge endpoint — so the synthesized form answers
+    /// for it, deriving the file from the module's own method rows.
+    pub(crate) fn node_file(&self, id: &str) -> anyhow::Result<Option<String>> {
+        if let Some(node) = self.fetch_node(id)? {
+            return Ok(node.file);
+        }
+        Ok(self.synthesize_module_node(id)?.and_then(|node| node.file))
     }
 
     /// Usage summary for a durable node id: the inbound-edge count plus the top calling

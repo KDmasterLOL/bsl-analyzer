@@ -36,6 +36,13 @@ pub trait SourceDatabase: salsa::Database {
 
     fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput;
 
+    /// The same, for a caller that is ASKING whether a root is registered rather
+    /// than asserting it. A database with no roots at all is an ordinary state —
+    /// a tool answering from the platform alone before any workspace is built
+    /// holds one — and such a caller must not have to risk the panic above to
+    /// find out.
+    fn try_source_root_input(&self, source_root_id: SourceRootId) -> Option<SourceRootInput>;
+
     fn file_source_root_input(&self, file_id: FileId) -> FileSourceRootInput;
 
     fn set_file_text(&mut self, file_id: FileId, text: &str);
@@ -175,6 +182,10 @@ impl Files {
 
     pub fn try_file_revision(&self, file_id: FileId) -> Option<FileRevisionInput> {
         self.file_revisions.get(&file_id).map(|entry| *entry.value())
+    }
+
+    pub fn try_source_root(&self, source_root_id: SourceRootId) -> Option<SourceRootInput> {
+        self.source_roots.get(&source_root_id).map(|entry| *entry.value())
     }
 
     /// Register a file's content revision WITHOUT storing its text (the
@@ -443,6 +454,10 @@ mod tests {
 
         fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput {
             self.files.source_root(source_root_id)
+        }
+
+        fn try_source_root_input(&self, source_root_id: SourceRootId) -> Option<SourceRootInput> {
+            self.files.try_source_root(source_root_id)
         }
 
         fn file_source_root_input(&self, file_id: FileId) -> FileSourceRootInput {
