@@ -11,16 +11,22 @@
 //! `schema` action advertises the contract. Both are computed from compile-time
 //! metadata, so no resident analysis database is required.
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
+use ide::diagnostics_baseline::{
+    classify_diagnostics, BaselineDiagnosticCandidate, DiagnosticsBaselineCoverage,
+    DiagnosticsBaselineRange, DiagnosticsBaselineSummary,
+};
 use ide::{
     catalog_entry, diagnostic_catalog, DiagnosticCode, DocumentSymbol, Locale, SeverityBucket,
     SymbolKind, TextRange,
 };
 use rmcp::model::CallToolResult;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde_json::{json, Value};
 
 use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, WorkspaceSweep};
@@ -43,6 +49,121 @@ pub(crate) const DEFAULT_MAX_SWEEP_FILES: usize = 1000;
 /// unbounded whole-config pass that stalls the server for minutes. A larger config is
 /// reported as `truncated` with the true `files_total`.
 pub(crate) const MAX_SWEEP_FILES_CEILING: usize = 5000;
+
+pub struct DiagnosticsResponseSchema;
+
+impl JsonSchema for DiagnosticsResponseSchema {
+    fn schema_name() -> Cow<'static, str> {
+        "DiagnosticsResponse".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "oneOf": [
+                generator.subschema_for::<DiagnosticsBaselineSuccessEnvelope>(),
+                generator.subschema_for::<DiagnosticsBaselineErrorEnvelope>(),
+                generator.subschema_for::<DiagnosticsActionResponse>(),
+                generator.subschema_for::<DiagnosticsSchemaResponse>(),
+                generator.subschema_for::<DiagnosticsStateResponse>(),
+                generator.subschema_for::<DiagnosticsLoadingResponse>(),
+            ]
+        })
+    }
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccessEnvelope {
+    pub revision: u64,
+    pub stale: bool,
+    pub reload: String,
+    pub result: DiagnosticsBaselineSuccessResult,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineErrorEnvelope {
+    pub revision: u64,
+    pub stale: bool,
+    pub reload: String,
+    pub result: DiagnosticsBaselineErrorResult,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccessResult {
+    pub baseline: DiagnosticsBaselineSuccess,
+    #[schemars(flatten)]
+    pub additional: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineErrorResult {
+    pub baseline: DiagnosticsBaselineError,
+    #[schemars(flatten)]
+    pub additional: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccess {
+    pub state: DiagnosticsBaselineSuccessState,
+    pub complete: bool,
+    pub new: Option<usize>,
+    pub known: Option<usize>,
+    pub resolved: Option<usize>,
+}
+
+#[derive(JsonSchema)]
+#[schemars(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum DiagnosticsBaselineSuccessState {
+    Disabled,
+    Full,
+    Partial,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineError {
+    pub state: DiagnosticsBaselineErrorState,
+    pub complete: bool,
+    pub error_code: String,
+    pub detail: String,
+}
+
+#[derive(JsonSchema)]
+#[schemars(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum DiagnosticsBaselineErrorState {
+    Error,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsActionResponse {
+    pub action: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsSchemaResponse {
+    pub schema_version: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsStateResponse {
+    pub state: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsLoadingResponse {
+    pub status: String,
+}
 
 /// Filters applied to a file's diagnostics before they become findings.
 pub(crate) struct FileFilters {
@@ -140,8 +261,15 @@ const ANSWERED_BY: loc::FreshnessSource = loc::FreshnessSource::Resident;
 pub fn envelope(
     freshness: Freshness,
     completeness: loc::Completeness,
-    result: Value,
+    mut result: Value,
 ) -> CallToolResult {
+    if (freshness.stale || freshness.reload != "none")
+        && matches!(result["baseline"]["state"].as_str(), Some("full" | "partial"))
+    {
+        result["baseline"]["state"] = json!("partial");
+        result["baseline"]["complete"] = json!(false);
+        result["baseline"]["resolved"] = json!(0);
+    }
     structured(json!({
         "revision": freshness.revision,
         "stale": freshness.stale,
@@ -203,7 +331,10 @@ pub(crate) fn file_findings(
         Err(error) => {
             let detail = error.to_string();
             let error = FileError::Rooted(error);
-            return (error.to_value(&detail, requested_spelling), error.completeness());
+            let completeness = error.completeness();
+            let mut body = error.to_value(&detail, requested_spelling);
+            body["baseline"] = unclassified_baseline(resident);
+            return (body, completeness);
         }
     };
     let path = path.as_path();
@@ -213,19 +344,19 @@ pub(crate) fn file_findings(
         // first one ("no findings"). The two are kept apart so an agent can tell
         // "wrong path" from "this module is unanalysed".
         if resident.is_unread(path) {
-            return (
-                FileError::Unreadable.to_value(
-                    "workspace .bsl file exists but its bytes could not be read; \
+            let error = FileError::Unreadable;
+            let mut body = error.to_value(
+                "workspace .bsl file exists but its bytes could not be read; \
                      it is held out of service and re-read every drift window",
-                    path,
-                ),
-                FileError::Unreadable.completeness(),
+                path,
             );
+            body["baseline"] = unclassified_baseline(resident);
+            return (body, error.completeness());
         }
-        return (
-            FileError::NotInWorkspace.to_value("path is not a resident workspace .bsl file", path),
-            FileError::NotInWorkspace.completeness(),
-        );
+        let error = FileError::NotInWorkspace;
+        let mut body = error.to_value("path is not a resident workspace .bsl file", path);
+        body["baseline"] = unclassified_baseline(resident);
+        return (body, error.completeness());
     };
     // The caller's handle, not a fresh clone: inside a cancellable read the request's
     // salsa scope is attached to THAT handle, and a second one would be a different
@@ -234,6 +365,28 @@ pub(crate) fn file_findings(
     // Analyse against the project's effective config (the single source of truth shared
     // with LSP and CLI), so disabled rules and tuned thresholds are honoured.
     let diagnostics = analysis.diagnostics(file_id, resident.config());
+    let (diagnostics, baseline) =
+        match classify_file_baseline(resident, path, &file_text, diagnostics) {
+            Ok(result) => result,
+            Err(baseline) => {
+                return (
+                    json!({
+                        "result_id": format!(
+                            "{}@{}@{}",
+                            path.to_string_lossy(),
+                            generation,
+                            resident.diagnostics_baseline().epoch(),
+                        ),
+                        "kind": "full",
+                        "baseline": baseline,
+                    }),
+                    loc::Completeness::partial(
+                        loc::ReasonCode::ModalityDegraded,
+                        "diagnostics baseline could not classify this file",
+                    ),
+                );
+            }
+        };
 
     // Author filter before any histogram or shaping, so `counts` reflects what
     // the response can actually show. Blame failures keep everything (fail-open).
@@ -326,12 +479,14 @@ pub(crate) fn file_findings(
     if let Some(filter) = resident.author_filter() {
         rid = format!("{rid}@{}", filter.short_identity());
     }
+    rid = format!("{rid}@{}", resident.diagnostics_baseline().epoch());
     let mut body = json!({
         "result_id": rid,
         "kind": "full",
         "counts": counts.to_value(),
         "truncated": count_capped || budget_exhausted,
         "findings": findings,
+        "baseline": baseline,
     });
     // An empty report for a file outside the vendor-diff scope must not read as
     // "no findings": say explicitly that the file was not analyzed.
@@ -384,6 +539,107 @@ pub(crate) fn file_findings(
     (body, completeness)
 }
 
+fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineSummary {
+    use ide::diagnostics_baseline::DiagnosticsBaselineState;
+    use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
+
+    match resident.diagnostics_baseline() {
+        DiagnosticsBaselineSnapshot::Disabled => DiagnosticsBaselineSummary::disabled(),
+        snapshot @ DiagnosticsBaselineSnapshot::Error { .. } => {
+            snapshot.error_summary().expect("error snapshot has a summary")
+        }
+        DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
+            DiagnosticsBaselineSummary {
+                state: DiagnosticsBaselineState::Partial,
+                new: Some(0),
+                known: Some(0),
+                resolved: Some(0),
+                path: Some(project_path.clone()),
+                schema_version: Some(baseline.schema_version),
+                complete: false,
+                error_code: None,
+                detail: None,
+            }
+        }
+    }
+}
+
+fn classify_file_baseline(
+    resident: &DiagnosticsResident,
+    path: &Path,
+    file_text: &str,
+    diagnostics: Vec<ide::Diagnostic>,
+) -> Result<(Vec<ide::Diagnostic>, DiagnosticsBaselineSummary), Box<DiagnosticsBaselineSummary>> {
+    use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
+    let snapshot = resident.diagnostics_baseline();
+    let (baseline, baseline_path) = match snapshot {
+        DiagnosticsBaselineSnapshot::Disabled => {
+            return Ok((diagnostics, DiagnosticsBaselineSummary::disabled()))
+        }
+        DiagnosticsBaselineSnapshot::Error { .. } => {
+            return Err(Box::new(snapshot.error_summary().expect("error snapshot has a summary")))
+        }
+        DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
+            (baseline, project_path)
+        }
+    };
+    let relative = path
+        .strip_prefix(resident.workspace_root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let source_lines: Vec<_> = file_text.lines().collect();
+    let candidates: Vec<_> = diagnostics
+        .into_iter()
+        .enumerate()
+        .map(|(index, diagnostic)| {
+            let output = diagnostic.to_output(file_text);
+            BaselineDiagnosticCandidate {
+                diagnostic: (index, diagnostic),
+                path: relative.clone(),
+                code: output.code,
+                snippet: Some(ide::diagnostics_baseline::diagnostic_line_snippet(
+                    &source_lines,
+                    output.start_line,
+                )),
+                message: output.message,
+                severity: output.severity,
+                range: DiagnosticsBaselineRange {
+                    start_line: output.start_line as u32,
+                    start_column: output.start_column as u32,
+                    end_line: output.end_line as u32,
+                    end_column: output.end_column as u32,
+                },
+            }
+        })
+        .collect();
+    let completed_files = if resident.config().scope.is_none() {
+        std::collections::BTreeSet::from([relative])
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let classified = classify_diagnostics(
+        baseline,
+        baseline_path.clone(),
+        candidates,
+        &DiagnosticsBaselineCoverage::Partial { completed_files },
+    )
+    .map_err(|error| {
+        Box::new(DiagnosticsBaselineSummary {
+            state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+            new: None,
+            known: None,
+            resolved: None,
+            path: Some(baseline_path.clone()),
+            schema_version: Some(baseline.schema_version),
+            complete: false,
+            error_code: Some("missing_snippet".to_owned()),
+            detail: Some(error.to_string()),
+        })
+    })?;
+    Ok((classified.new.into_iter().map(|item| item.diagnostic.1).collect(), classified.summary))
+}
+
 /// The `workspace` action's result body: whole-config diagnostics aggregated per code
 /// (`{code, severity, count, files_affected}`), never per-finding — an opt-in, bounded
 /// overview. `result_id` is generation-keyed (no per-file content hash applies).
@@ -418,12 +674,14 @@ pub(crate) fn workspace_findings(
         Some(identity) => format!("workspace@{generation}@{identity}"),
         None => format!("workspace@{generation}"),
     };
+    let rid = format!("{rid}@{}", sweep.baseline_epoch);
     let mut body = json!({
         "result_id": rid,
         "files_swept": sweep.files_swept,
         "files_total": sweep.files_total,
         "truncated": sweep.truncated || budget_exhausted,
         "aggregates": aggregates,
+        "baseline": sweep.baseline,
     });
     if sweep.files_unread > 0 {
         body["files_unread"] = json!(sweep.files_unread);
@@ -974,6 +1232,57 @@ mod tests {
         }
 
         #[test]
+        fn diagnostics_baseline_response_covers_schema_errors_and_minimum_budget() {
+            let schema = Value::Object(
+                rmcp::handler::server::tool::schema_for_type::<DiagnosticsResponseSchema>()
+                    .as_ref()
+                    .clone(),
+            );
+            assert_eq!(schema["type"], "object");
+            assert!(schema["oneOf"].as_array().is_some_and(|branches| branches.len() >= 2));
+            let encoded = schema.to_string();
+            for required in ["baseline", "state", "complete", "error_code", "detail"] {
+                assert!(encoded.contains(&format!("\"{required}\"")), "missing {required}");
+            }
+
+            let disabled_dir = tempfile::tempdir().unwrap();
+            sample_workspace(disabled_dir.path());
+            let disabled_state = ready_state(disabled_dir.path());
+            let mut filters = default_filters();
+            filters.max_output_tokens = Some(1);
+            let disabled = run(
+                &disabled_state,
+                &disabled_dir.path().join("CommonModules/Сервер/Ext/Module.bsl"),
+                &filters,
+            );
+            assert_eq!(disabled["baseline"]["state"], "disabled");
+            let response =
+                envelope(Freshness { revision: 1, stale: false, reload: "none" }, disabled);
+            assert_structured_mirrors_text(&response);
+            assert!(body_of(&response)["result"]["baseline"].is_object());
+
+            let error_dir = tempfile::tempdir().unwrap();
+            sample_workspace(error_dir.path());
+            write(
+                error_dir.path(),
+                "bsl-analyzer.toml",
+                "[diagnostics.baseline]\npath = \"baseline.json\"\n",
+            );
+            write(error_dir.path(), "baseline.json", "{broken");
+            let error_state = ready_state(error_dir.path());
+            let error = run(
+                &error_state,
+                &error_dir.path().join("CommonModules/Сервер/Ext/Module.bsl"),
+                &default_filters(),
+            );
+            assert_eq!(error["baseline"]["state"], "error");
+            assert!(error["baseline"]["error_code"].is_string());
+            assert!(error["baseline"]["detail"].is_string());
+            assert!(error.get("findings").is_none());
+            assert!(error.get("counts").is_none());
+        }
+
+        #[test]
         fn file_findings_shapes_the_result() {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
@@ -989,11 +1298,12 @@ mod tests {
                 assert!(body["counts"][sev].is_u64(), "counts.{sev} present");
             }
             assert!(body["findings"].is_array());
-            // result_id = <path>@<generation>@<content-hash>.
+            // result_id = <path>@<generation>@<content-hash>@<baseline-epoch>.
             let id = body["result_id"].as_str().unwrap();
-            let parts: Vec<&str> = id.rsplitn(3, '@').collect();
-            assert_eq!(parts.len(), 3, "result_id has path@gen@hash shape: {id}");
-            assert_eq!(parts[0].len(), 16, "content hash is 16 hex chars");
+            let parts: Vec<&str> = id.rsplitn(4, '@').collect();
+            assert_eq!(parts.len(), 4, "result_id carries the baseline epoch: {id}");
+            assert_eq!(parts[0], "disabled");
+            assert_eq!(parts[1].len(), 16, "content hash is 16 hex chars");
         }
 
         #[test]
@@ -1398,9 +1708,9 @@ mod tests {
             for sev in ["error", "warning", "info", "hint"] {
                 assert_eq!(body["counts"][sev], 0, "counts.{sev} must be filtered: {body}");
             }
-            // result_id = <path>@<gen>@<hash>@<blame-head>.
+            // result_id = <path>@<gen>@<hash>@<blame-head>@<baseline-epoch>.
             let id = body["result_id"].as_str().unwrap();
-            assert_eq!(id.rsplitn(4, '@').count(), 4, "result_id carries the blame head: {id}");
+            assert_eq!(id.rsplitn(5, '@').count(), 5, "result_id carries both epochs: {id}");
 
             let sweep = match state.read(|resident, _| {
                 resident.workspace_aggregates(
@@ -1465,6 +1775,185 @@ mod tests {
                 &default_filters(),
             );
             assert!(!has_line_length(&loose_body), "huge threshold suppresses LineLength");
+        }
+
+        #[test]
+        fn diagnostics_baseline_snapshot_filters_file_and_workspace_without_rebuilding_salsa() {
+            use ide::diagnostics_baseline::{
+                diagnostic_fingerprint, diagnostics_baseline_json, DiagnosticsBaseline,
+                DiagnosticsBaselineEntry, DiagnosticsBaselineRange, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(root, "bsl-analyzer.toml", "[diagnostics.baseline]\npath = \"baseline.json\"\n");
+            let baseline_path = root.join("baseline.json");
+            let mut baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![],
+            };
+            fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
+
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+            let filters = FileFilters { detailed: true, ..default_filters() };
+            let first = run(&state, &path, &filters);
+            let finding = first["findings"].as_array().unwrap().first().unwrap();
+            let relative = "CommonModules/Сервер/Ext/Module.bsl";
+            let line = finding["range"]["start_line"].as_u64().unwrap() as usize;
+            let text = fs::read_to_string(&path).unwrap();
+            let snippet = ide::diagnostics_baseline::normalize_diagnostic_snippet(
+                text.lines().nth(line).unwrap(),
+            );
+            let code = finding["code"].as_str().unwrap().to_owned();
+            baseline.diagnostics.push(DiagnosticsBaselineEntry {
+                fingerprint: diagnostic_fingerprint(relative, &code, &snippet, 0),
+                path: relative.to_owned(),
+                code,
+                snippet,
+                occurrence: 0,
+                message: finding["message"].as_str().unwrap().to_owned(),
+                severity: finding["internal_severity"].as_str().unwrap().to_owned(),
+                range: DiagnosticsBaselineRange {
+                    start_line: finding["range"]["start_line"].as_u64().unwrap() as u32,
+                    start_column: finding["range"]["start_column"].as_u64().unwrap() as u32,
+                    end_line: finding["range"]["end_line"].as_u64().unwrap() as u32,
+                    end_column: finding["range"]["end_column"].as_u64().unwrap() as u32,
+                },
+            });
+            let generation = state.generation();
+            fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
+
+            let second = run(&state, &path, &filters);
+            assert_eq!(second["baseline"]["known"], 1);
+            assert_eq!(
+                second["findings"].as_array().unwrap().len() + 1,
+                first["findings"].as_array().unwrap().len()
+            );
+            assert_eq!(state.generation(), generation, "baseline reload must not rebuild Salsa");
+            assert_ne!(second["result_id"], first["result_id"]);
+
+            let sweep = match state.read(|resident, _| {
+                resident.workspace_aggregates(
+                    resident.config(),
+                    &SweepOptions {
+                        min_severity: SeverityBucket::Hint,
+                        codes: Vec::new(),
+                        max_files: 100,
+                    },
+                    &SweepCancel::default(),
+                )
+            }) {
+                ResidentOutcome::Ready(sweep, _) => sweep,
+                _ => panic!("expected Ready outcome"),
+            };
+            assert_eq!(sweep.baseline.known, Some(1));
+            assert!(sweep.baseline.complete);
+        }
+
+        #[test]
+        fn diagnostics_baseline_file_in_active_diff_scope_resolves_nothing() {
+            use ide::diagnostics_baseline::{
+                diagnostic_fingerprint, diagnostics_baseline_json, DiagnosticsBaseline,
+                DiagnosticsBaselineEntry, DiagnosticsBaselineRange, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(
+                root,
+                "bsl-analyzer.toml",
+                "[analysis]\ndiff_base = \"HEAD\"\n[diagnostics.baseline]\npath = \"baseline.json\"\n",
+            );
+            let relative = "CommonModules/Сервер/Ext/Module.bsl";
+            let baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![DiagnosticsBaselineEntry {
+                    fingerprint: diagnostic_fingerprint(relative, "UnreachableCode", "Возврат;", 0),
+                    path: relative.to_owned(),
+                    code: "UnreachableCode".to_owned(),
+                    snippet: "Возврат;".to_owned(),
+                    occurrence: 0,
+                    message: "known outside diff".to_owned(),
+                    severity: "warning".to_owned(),
+                    range: DiagnosticsBaselineRange {
+                        start_line: 0,
+                        start_column: 0,
+                        end_line: 0,
+                        end_column: 8,
+                    },
+                }],
+            };
+            fs::write(root.join("baseline.json"), diagnostics_baseline_json(&baseline).unwrap())
+                .unwrap();
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", "baseline"]);
+            fs::write(root.join(relative), "Процедура Изменена()\nКонецПроцедуры\n").unwrap();
+
+            let state = ready_state(root);
+            let body = run(&state, &root.join(relative), &default_filters());
+            assert_ne!(body["out_of_scope"], true);
+            assert_eq!(body["baseline"]["state"], "partial");
+            assert_eq!(body["baseline"]["resolved"], 0);
+        }
+
+        #[test]
+        fn diagnostics_baseline_reload_observes_write_replace_and_delete_without_rebuilding_salsa()
+        {
+            use ide::diagnostics_baseline::{
+                diagnostics_baseline_json, DiagnosticsBaseline, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+            use std::io::Write;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(root, "bsl-analyzer.toml", "[diagnostics.baseline]\npath = \"baseline.json\"\n");
+            let baseline_path = root.join("baseline.json");
+            let baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![],
+            };
+            let bytes = diagnostics_baseline_json(&baseline).unwrap();
+            fs::write(&baseline_path, &bytes).unwrap();
+
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+            let generation = state.generation();
+            let first = run(&state, &path, &default_filters());
+
+            let mut rewritten = bytes.clone();
+            rewritten.push(b'\n');
+            fs::write(&baseline_path, &rewritten).unwrap();
+            let changed = run(&state, &path, &default_filters());
+            assert_ne!(changed["result_id"], first["result_id"]);
+            assert_eq!(state.generation(), generation);
+
+            let mut replacement = tempfile::NamedTempFile::new_in(root).unwrap();
+            replacement.write_all(b" \n").unwrap();
+            replacement.write_all(&bytes).unwrap();
+            replacement.flush().unwrap();
+            replacement.as_file().sync_all().unwrap();
+            replacement.persist(&baseline_path).unwrap();
+            let replaced = run(&state, &path, &default_filters());
+            assert_ne!(replaced["result_id"], changed["result_id"]);
+            assert_eq!(state.generation(), generation);
+
+            fs::remove_file(&baseline_path).unwrap();
+            let removed = run(&state, &path, &default_filters());
+            assert_eq!(removed["baseline"]["state"], "error");
+            assert_eq!(removed["baseline"]["error_code"], "missing");
+            assert_ne!(removed["result_id"], replaced["result_id"]);
+            assert_eq!(state.generation(), generation);
         }
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {

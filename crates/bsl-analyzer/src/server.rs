@@ -1093,6 +1093,9 @@ fn handle_vfs_msg(
         // The same external batch may be a checkout/pull that moved the git state
         // the vendor-diff scope was computed against.
         state.request_scope_rebuild();
+        if outcome.diagnostics_baseline_changed {
+            state.request_workspace_diagnostic_refresh();
+        }
     }
 
     Ok(())
@@ -1598,6 +1601,8 @@ mod tests {
             file_ids: std::sync::Arc::new(Vec::new()),
             file_paths: crate::frozen_context::FrozenFilePaths::default(),
             config: state.diagnostics_config().clone(),
+            diagnostics_baseline: std::sync::Arc::clone(&state.diagnostics_baseline),
+            workspace_root: state.workspace_root.clone(),
             position_encoding: state.position_encoding,
             chunk_size: 500,
             pool: None,

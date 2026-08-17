@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.12";
+pub const CONTRACT_VERSION: &str = "1.13";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -161,7 +161,12 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         // did not ask.
         default_enabled: false,
     },
-    tool("diagnostics", DIAGNOSTICS_ACTIONS),
+    ToolDecl {
+        name: "diagnostics",
+        actions: DIAGNOSTICS_ACTIONS,
+        note: None,
+        output_schema_version: Some("12"),
+    },
     tool("outline", &[]),
 ];
 
@@ -605,7 +610,12 @@ mod tests {
                     let schema = output_schema(profile, decl.name).unwrap_or_else(|| {
                         panic!("{}/{} has no outputSchema", profile.as_str(), decl.name)
                     });
-                    assert_eq!(schema["type"], "object");
+                    assert!(
+                        schema["type"] == "object" || schema["oneOf"].is_array(),
+                        "{}/{} outputSchema must describe object responses",
+                        profile.as_str(),
+                        decl.name
+                    );
                     assert!(
                         schema.to_string().contains("schema_version"),
                         "{}/{} outputSchema has no schema_version",
@@ -712,7 +722,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.12",
+              "contract_version": "1.13",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -1563,6 +1573,8 @@ mod tests {
                           }
                         ],
                         "name": "diagnostics",
+                        "output_schema_fingerprint": "blake3:ee1399d6715624fa3b4cd0766990a96175c1b5dc3f987f0af48dcf025f207105",
+                        "output_schema_version": "12",
                         "params": [
                           {
                             "name": "action",

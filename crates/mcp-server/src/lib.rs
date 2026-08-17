@@ -1733,7 +1733,13 @@ impl McpServer {
     /// per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
     /// of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
     /// Reads the resident host; while it builds it returns a retry envelope.
-    #[tool(name = "diagnostics", annotations(read_only_hint = true))]
+    #[tool(
+        name = "diagnostics",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            tools::diagnostics::DiagnosticsResponseSchema,
+        >(),
+        annotations(read_only_hint = true)
+    )]
     async fn diagnostics(
         &self,
         params: Parameters<DiagnosticsParams>,

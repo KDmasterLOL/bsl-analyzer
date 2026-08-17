@@ -4,6 +4,7 @@ mod call_hierarchy_index;
 mod completion;
 pub mod config_finder;
 mod declarations;
+pub mod diagnostics_baseline;
 pub mod diagnostics_catalog;
 mod document_highlight;
 mod document_symbols;

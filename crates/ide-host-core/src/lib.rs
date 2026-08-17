@@ -5,6 +5,7 @@
 //! memory model, LRU/durability tuning, and load discipline are shared: optimising
 //! the host once benefits LSP, MCP, and CLI alike.
 
+pub mod diagnostics_baseline;
 mod load;
 mod metadata;
 

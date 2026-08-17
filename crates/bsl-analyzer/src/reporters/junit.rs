@@ -36,6 +36,14 @@ impl Reporter for JunitReporter {
             w,
             r#"<testsuites name="bsl-analyzer" tests="{total_tests}" failures="{total_failures}">"#
         )?;
+        let baseline = serde_json::to_string(&results.baseline)?;
+        writeln!(w, "  <properties>")?;
+        writeln!(
+            w,
+            r#"    <property name="diagnostics.baseline" value="{}"/>"#,
+            escape_attr(&baseline)
+        )?;
+        writeln!(w, "  </properties>")?;
 
         let mut files: Vec<&FileAnalysis> = results.diagnostics.iter().collect();
         files.sort_by_key(|f| junit_path(&f.relative_path));
@@ -190,6 +198,7 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -215,6 +224,7 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -242,6 +252,7 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -264,6 +275,7 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -287,10 +299,61 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
         assert!(xml.contains(r#"<testsuite name="clean.bsl" tests="1" failures="0">"#));
         assert!(xml.contains(r#"<testcase name="clean.bsl" classname="clean.bsl"/>"#));
+    }
+
+    #[test]
+    fn junit_baseline_summary_does_not_change_test_counts() {
+        let mut results = AnalysisResults {
+            files_analyzed: 1,
+            files_with_issues: 1,
+            total_diagnostics: 1,
+            elapsed_secs: 0.1,
+            diagnostics: vec![FileAnalysis {
+                path: PathBuf::from("a.bsl"),
+                relative_path: PathBuf::from("a.bsl"),
+                diagnostics: vec![diag("Rule", "message", 0)],
+                line_snippets: vec![],
+            }],
+            source_dir: PathBuf::from("."),
+            workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+        };
+        for state in [
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Partial,
+        ] {
+            if state != ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled {
+                results.baseline = ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                    state,
+                    new: Some(1),
+                    known: Some(0),
+                    resolved: Some(0),
+                    path: Some("baseline.json".to_owned()),
+                    schema_version: Some(1),
+                    complete: state == ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+                    error_code: None,
+                    detail: None,
+                };
+            }
+            let xml = render(&results);
+            assert!(xml.contains(r#"tests="1" failures="1""#));
+            assert!(xml.contains(r#"name="diagnostics.baseline""#));
+            assert!(xml.contains(&format!(
+                r#"&quot;state&quot;:&quot;{}&quot;"#,
+                match state {
+                    ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled => "disabled",
+                    ide::diagnostics_baseline::DiagnosticsBaselineState::Full => "full",
+                    ide::diagnostics_baseline::DiagnosticsBaselineState::Partial => "partial",
+                    ide::diagnostics_baseline::DiagnosticsBaselineState::Error => unreachable!(),
+                }
+            )));
+        }
     }
 }

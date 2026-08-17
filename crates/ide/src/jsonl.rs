@@ -66,6 +66,9 @@ pub struct DoneEvent {
     pub total_diagnostics: usize,
 
     pub failed_files: usize,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<crate::diagnostics_baseline::DiagnosticsBaselineSummary>,
 }
 
 impl DoneEvent {
@@ -75,7 +78,22 @@ impl DoneEvent {
         total_diagnostics: usize,
         failed_files: usize,
     ) -> Self {
-        Self { event_type: "done", elapsed_secs, total_files, total_diagnostics, failed_files }
+        Self {
+            event_type: "done",
+            elapsed_secs,
+            total_files,
+            total_diagnostics,
+            failed_files,
+            baseline: None,
+        }
+    }
+
+    pub fn with_baseline(
+        mut self,
+        baseline: crate::diagnostics_baseline::DiagnosticsBaselineSummary,
+    ) -> Self {
+        self.baseline = Some(baseline);
+        self
     }
 }
 
@@ -154,5 +172,42 @@ mod tests {
         assert!(json.contains(r#""total_files":6540"#));
         assert!(json.contains(r#""total_diagnostics":1234"#));
         assert!(json.contains(r#""failed_files":5"#));
+    }
+
+    #[test]
+    fn jsonl_baseline_summary_extends_only_done_and_preserves_failed_files() {
+        use crate::diagnostics_baseline::{DiagnosticsBaselineState, DiagnosticsBaselineSummary};
+
+        for state in [
+            DiagnosticsBaselineState::Disabled,
+            DiagnosticsBaselineState::Full,
+            DiagnosticsBaselineState::Partial,
+        ] {
+            let baseline = if state == DiagnosticsBaselineState::Disabled {
+                DiagnosticsBaselineSummary::disabled()
+            } else {
+                DiagnosticsBaselineSummary {
+                    state,
+                    new: Some(1),
+                    known: Some(2),
+                    resolved: Some(3),
+                    path: Some("baseline.json".to_owned()),
+                    schema_version: Some(1),
+                    complete: state == DiagnosticsBaselineState::Full,
+                    error_code: None,
+                    detail: None,
+                }
+            };
+            let value =
+                serde_json::to_value(DoneEvent::new(1.0, 4, 5, 2).with_baseline(baseline)).unwrap();
+            assert_eq!(value["failed_files"], 2);
+            assert!(value["baseline"]["state"].is_string());
+        }
+
+        assert!(serde_json::to_value(StartEvent::new(1)).unwrap().get("baseline").is_none());
+        assert!(serde_json::to_value(FileEvent::new("x".into(), vec![], None, None))
+            .unwrap()
+            .get("baseline")
+            .is_none());
     }
 }

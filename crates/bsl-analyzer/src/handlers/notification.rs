@@ -57,6 +57,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
         Some(t) => t,
         None => return,
     };
+    let path = uri.to_file_path().ok();
+    let workspace_root = state.workspace_root.clone();
+    let diagnostics_baseline = Arc::clone(&state.diagnostics_baseline);
 
     // Advance the generation only once the schedule will actually spawn, so a
     // no-op call (unresolved file / not an open buffer) cannot orphan a prior
@@ -92,6 +95,16 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
             let file_id_input = FileIdInput::new(&db, file_id);
             let config_id = base_db::DiagnosticsConfigId::new(&db, config);
             let ide_diagnostics = file_diagnostics_query(&db, file_id_input, config_id);
+            let ide_diagnostics = match (workspace_root.as_deref(), path.as_deref()) {
+                (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+                    &diagnostics_baseline,
+                    root,
+                    path,
+                    &text,
+                    ide_diagnostics.iter().cloned().collect(),
+                ),
+                _ => ide_diagnostics.iter().cloned().collect(),
+            };
             let line_index = LineIndex::new(&text);
             crate::lsp::diagnostics_with_encoding(
                 &line_index,

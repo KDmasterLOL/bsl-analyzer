@@ -4,7 +4,9 @@ use std::path::Path;
 
 use serde::ser::{Serialize, SerializeSeq, Serializer};
 
-use super::{normalize_source_line, AnalysisResults, FileAnalysis, Reporter};
+use ide::diagnostics_baseline::{diagnostic_fingerprint, normalize_diagnostic_snippet};
+
+use super::{AnalysisResults, FileAnalysis, Reporter};
 
 /// GitLab Code Quality reporter (CodeClimate JSON schema).
 ///
@@ -57,7 +59,7 @@ impl Serialize for CodeQualitySeq<'_> {
                 if file.line_snippets.is_empty() && !file.diagnostics.is_empty() {
                     std::fs::read_to_string(&file.path)
                         .ok()
-                        .map(|text| text.lines().map(normalize_source_line).collect())
+                        .map(|text| text.lines().map(normalize_diagnostic_snippet).collect())
                 } else {
                     None
                 };
@@ -91,7 +93,7 @@ impl Serialize for CodeQualitySeq<'_> {
 
             for (diagnostic, snippet) in rows {
                 let occurrence = occurrences.entry((&diagnostic.code, snippet)).or_insert(0);
-                let fingerprint = fingerprint(
+                let fingerprint = diagnostic_fingerprint(
                     &cq_path(&file.relative_path),
                     &diagnostic.code,
                     snippet,
@@ -184,22 +186,6 @@ fn cq_severity(severity: &str) -> &'static str {
     }
 }
 
-/// Line-number-independent fingerprint. `snippet` is the normalized source line
-/// captured at analysis time; when it is empty (producer supplied none) the
-/// `(path, code, occurrence)` triple still yields a stable value that survives
-/// line shifts.
-fn fingerprint(path: &str, code: &str, snippet: &str, occurrence: u32) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(path.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(code.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(snippet.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(&occurrence.to_le_bytes());
-    hasher.finalize().to_hex().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -250,6 +236,7 @@ mod tests {
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         }
     }
 
@@ -328,6 +315,7 @@ mod tests {
                 }],
                 source_dir: PathBuf::from("."),
                 workspace_dir: PathBuf::from("."),
+                baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
             };
             CodeQualityReporter.report(&results, temp.path()).unwrap();
             read_report(&temp)[0]["fingerprint"].as_str().unwrap().to_string()
@@ -379,6 +367,7 @@ mod tests {
             ],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         CodeQualityReporter.report(&results, temp.path()).unwrap();
         let report = read_report(&temp);

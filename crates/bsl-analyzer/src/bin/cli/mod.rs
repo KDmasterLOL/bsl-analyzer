@@ -4,6 +4,7 @@ pub mod check_config;
 pub mod contract;
 pub mod dap;
 pub mod deps;
+pub mod diagnostics_baseline;
 pub mod extension;
 pub mod format;
 pub mod logging;
