@@ -3184,7 +3184,8 @@ fn call_hierarchy_index_fixture_parity() {
     // When: the compact batch projection builds the reverse index.
     let (graph_index, reverse_index) = compact_call_hierarchy_index(&db, &modules, 1);
     let compact = hir::call_hierarchy_method_digest(&reverse_index, &graph_index, &paths, None);
-    let encoder = GraphRowEncoder::new(&graph_index, &paths, None);
+    let no_objects = hir::graph_index::MdoFiles::default();
+    let encoder = GraphRowEncoder::new(&graph_index, &paths, None, &no_objects);
     let salsa = db.workspace_call_graph(source_root_id);
     let folded = method_call_digest_from_fold(&salsa, &encoder);
 
@@ -3367,7 +3368,8 @@ fn call_hierarchy_index_cfe_parity() {
     // When: the compact index resolves the extension against the base module.
     let (graph_index, reverse_index) = compact_call_hierarchy_index(&db, &modules, 1);
     let compact = hir::call_hierarchy_method_digest(&reverse_index, &graph_index, &paths, None);
-    let encoder = GraphRowEncoder::new(&graph_index, &paths, None);
+    let no_objects = hir::graph_index::MdoFiles::default();
+    let encoder = GraphRowEncoder::new(&graph_index, &paths, None, &no_objects);
     let salsa = db.workspace_call_graph(source_root_id);
     let folded = method_call_digest_from_fold(&salsa, &encoder);
 

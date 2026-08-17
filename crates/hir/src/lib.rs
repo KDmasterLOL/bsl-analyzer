@@ -56,7 +56,7 @@ pub use hir_def::region_tree::{RegionIdx, RegionTree};
 pub use hir_def::symbol_tree::MethodSymbol;
 pub use hir_def::{
     module_key_for_path, module_path_segment_modes, parse_form_module_path, ConditionalTree,
-    FormKey, ItemTree, ModuleIndex, ModuleKey, SymbolTree, WorkspaceSymbols,
+    FormKey, ItemTree, ModuleIndex, ModuleKey, SymbolTree, WorkspaceMembers,
 };
 
 pub use hir_def::resolver::{
@@ -155,9 +155,9 @@ pub use hir_def::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query,
     file_name_offsets_query, file_name_usage_query, item_tree_query, method_body_query,
     method_body_with_source_map_query, module_bodies_query, module_call_summary_query,
-    module_data_query, module_index_query, region_tree_query, set_module_bodies_lru_sweep_mode,
-    source_root_name_usage_query, symbol_tree_query, workspace_index_query,
-    workspace_symbols_query,
+    module_data_query, module_index_query, module_members_query, region_tree_query,
+    set_module_bodies_lru_sweep_mode, source_root_name_usage_query, symbol_tree_query,
+    workspace_index_query,
 };
 
 pub use bsl_config::VisibleConfig;

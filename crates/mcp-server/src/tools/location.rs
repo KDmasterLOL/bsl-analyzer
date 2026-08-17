@@ -383,6 +383,12 @@ freshness_source! {
     /// It has no identity to report: there is no revision such a parse belongs to and no
     /// topology it was taken under, so both come back `null` rather than borrowed.
     FileParse => "file-parse";
+    /// Several artefacts at once, each with a revision of its own — the name lookup asks
+    /// the module tables, the metadata listing, the platform and the graph in one call.
+    /// No single revision describes such an answer, so all three fields come back `null`
+    /// and the per-source truth travels in the answer's own `providers` array. Borrowing
+    /// one participant's revision would claim freshness for the four that did not lend it.
+    NameDictionary => "name-dictionary";
 }
 
 /// The envelope every tool of the contract carries: what answered, at which revision

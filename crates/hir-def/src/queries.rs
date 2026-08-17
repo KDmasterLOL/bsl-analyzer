@@ -11,7 +11,7 @@ use crate::{
     body::ExternalRef,
     call_graph::{GraphNode, MethodDispatch, WorkspaceCallEdge},
     module_index::ModuleIndex,
-    DefDatabase, ModuleBodies, ModuleData, ModuleId, WorkspaceSymbols,
+    DefDatabase, ModuleBodies, ModuleData, ModuleId, WorkspaceMembers,
 };
 
 pub use crate::conditional_tree::conditional_tree_query;
@@ -177,19 +177,19 @@ pub fn set_module_bodies_lru_sweep_mode(db: &mut dyn DefDatabase, sweep: bool) {
     module_bodies_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
 }
 
-#[salsa::tracked(lru = 16, heap_size = crate::workspace::workspace_symbols_heap, returns(clone))]
-pub fn workspace_symbols_query(
+#[salsa::tracked(lru = 16, heap_size = crate::workspace::module_members_heap, returns(clone))]
+pub fn module_members_query(
     db: &dyn DefDatabase,
     source_root_input: base_db::SourceRootInput,
-) -> Arc<WorkspaceSymbols> {
+) -> Arc<WorkspaceMembers> {
     let source_root = source_root_input.root(db);
     let file_set = source_root.file_set();
     let files: Vec<_> = source_root
         .iter()
         .filter(|&file_id| crate::workspace::is_bsl_source(file_set, file_id))
         .collect();
-    let _span = tracing::info_span!("workspace_symbols", file_count = files.len()).entered();
-    Arc::new(crate::workspace::workspace_symbols(db, &files))
+    let _span = tracing::info_span!("module_members", file_count = files.len()).entered();
+    Arc::new(crate::workspace::module_members(db, &files))
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::module_call_summary_heap, returns(clone))]

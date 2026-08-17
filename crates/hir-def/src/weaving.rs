@@ -238,6 +238,7 @@ mod tests {
                 .collect(),
             annotations: Vec::new(),
             source_range: syntax::TextRange::empty(0.into()),
+            name_range: syntax::TextRange::empty(0.into()),
             docs: None,
             return_type_ref: None,
         }

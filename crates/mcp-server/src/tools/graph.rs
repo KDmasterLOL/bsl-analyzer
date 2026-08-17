@@ -94,19 +94,29 @@ pub fn overview(
 /// Default cap on the candidate ids returned by `resolve`.
 pub const DEFAULT_RESOLVE_LIMIT: usize = 20;
 
-pub fn resolve(graph: &GraphDb, query: &str, limit: usize) -> (Value, loc::Completeness) {
-    match graph.resolve(query, limit) {
-        Ok(result) => {
-            // `resolve` caps its candidate list; it has no `dropped_count`, only this flag.
-            let completeness = loc::Completeness::complete().when(
-                result.truncated,
-                loc::ReasonCode::ResultCap,
-                "candidate list capped; raise `top` or refine the query",
-            );
-            (to_value(&result), completeness)
-        }
-        Err(e) => (internal(e), read_failure()),
-    }
+/// `resolve` answers from the name dictionary, not from the graph alone.
+///
+/// The graph is one provider among five here, which is why the action is served
+/// before the readiness gate: the platform answers without any index at all, and
+/// the resident's tables answer without the graph. What could NOT be consulted
+/// is named in `providers` rather than left to look like an absence of matches.
+pub fn resolve(
+    db: &ide::RootDatabaseImpl,
+    workspace: ide::ProviderState,
+    graph: &dyn ide::ExternalNameSource,
+    roots: Option<&bsl_search::WorkspaceRoots>,
+    query: &str,
+    limit: usize,
+) -> (Value, loc::Completeness) {
+    let name_query =
+        ide::NameQuery { text: query, limit, categories: None, require_location: false, workspace };
+    let found = ide::lookup_names(db, &name_query, &[graph]);
+
+    let mut body = serde_json::Map::new();
+    body.insert("query".into(), json!(query));
+    let completeness =
+        crate::tools::name_answer::NameAnswer::render(db, roots, &found).insert_into(&mut body);
+    (Value::Object(body), completeness)
 }
 
 /// Default body-output budget (in tokens, ~4 chars each) for `node`/`neighbors` at
@@ -316,13 +326,13 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "30",
+        "schema_version": "32",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, unread_files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `unread_files` counts modules whose bytes could not be read when the artefact was built or last patched: they contributed no nodes and no edges, so the graph is missing them, `stale` is true, and no fingerprint comparison reveals it (stat needs no read permission). A patch never clears an inherited one — only a full rebuild restores the missing rows. `files` here is the module count the artefact COVERS, unread ones included, so `unread_files` is a subset of it — unlike `diagnostics status`, whose `files` counts only what it serves and excludes them; do not apply one arithmetic to both. `superseded: true` (emitted only when it holds) means another daemon generation now owns this workspace's derived caches: answers keep coming from the snapshot this server already has, but it no longer rebuilds, so a `stale` snapshot stays stale — reconnect to pick up the daemon that does.",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
         "node_shape": "`qualified` (russified display path) is emitted only for metadata nodes — for code nodes it would restate `module` + `name`; `addressable` is emitted only when false (absent = the id round-trips); `truncated: true` is emitted on a node whose `detail=bodies` source was cut short — or, when `source` is absent, dropped — to fit the output budget (so a short body is not mistaken for a complete one, nor a budget-dropped body for a method with no body)",
         "notes": "`node(module/<scope>)` resolves for any code module and returns a `methods` array ({id, name, is_export}) of the module's members; module membership is served on demand and is not a graph edge, so `neighbors(module/…)` stays empty",
-        "resolve": "`resolve(query)` returns candidate durable ids ({id, kind, match}) for an imprecise query — wrong casing, a bare method/object name, or a partial id — so a `not_found` from `node`/`neighbors` is recoverable without guessing. `match` is exact|case_insensitive|name|substring (strongest first); the list is capped (default 20). `total` reports the distinct match count before the cap and `truncated: true` is set when the cap dropped candidates, so a frequent name (e.g. thousands of `ПриСозданииНаСервере`) is not mistaken for a complete list — refine the query, raise `limit`, or use `search_code`. It is symbol/id-oriented, NOT a natural-language search: a free-text phrase (e.g. several object/form/method words) returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
+        "resolve": "`resolve(query)` is the name dictionary, not a graph traversal: it answers from five sources (module_index, metadata_listing, platform, module_members, graph) and therefore WORKS BEFORE THE GRAPH IS BUILT — a platform member needs no index at all, a metadata object and a common module only the resident. Use it for an imprecise query (wrong casing, a bare method/object name, a partial id) and to recover from a `not_found` in `node`/`neighbors`. Each candidate is {display, category, match, provider, address} plus `id` (kept for compatibility, present only when it equals `address.graph_id`). Every key in `address` is accepted by the tool it names — `symbol` by `symbol_info`, `graph_id` by `node`, `syntax_help` by the `syntax_help` tool, `location` as a (root_id, path) pair by `outline`/`diagnostics file`; a key that would be refused is not published at all, and there is always at least one. `category` is common_module|module|module_method|module_variable|metadata_object|metadata_member|form|platform_member; `match` is exact|case_insensitive|name|prefix|substring (strongest first; `name` is equality with a durable id's trailing segment, so it outranks a mere prefix). One entity arrives as ONE candidate even when several sources know it: a graph node and the resident's record of the same thing carry `graph_id` and `location` in the same `address`. `providers[]` names every source and its state (answered|not_ready|not_asked|unavailable|failed), so an empty list is a proven zero ONLY when every source answered — otherwise the envelope carries `index_building`. `total` counts matches before the cap; `total_exact: false` means a source hit its own cap and the count is an estimate. `truncated: true` means the cap dropped candidates — refine the query, raise `top`, or use `search_code`. It is symbol/name-oriented, NOT a natural-language search: a free-text phrase returns no candidates — use `search_code` for semantic lookup, then pass the emitted `graph_id` here.",
         "edge_kinds": ["call", "manager_creates", "manager_access", "query_ref", "register_movement", "register_records", "register_record_set", "contains", "data_binding", "notify_ref", "idle_handler", "event_subscription", "subsystem_membership", "role_reference"],
         "edge_kinds_note": "All edge kinds below are kept separate from `call`, so `edge_kinds=[call]` is a pure 'who really calls whom'. String-dispatched callbacks (provenance `string_resolved`, resolved conservatively — only ЭтотОбъект/ЭтаФорма and explicit common-module handlers resolve, an unresolved receiver/handler produces no edge): `notify_ref` (Новый ОписаниеОповещения) links the registering method/module body to BOTH the success handler (ИмяПроцедуры, Модуль) and the error handler (ИмяПроцедурыОбработкиОшибки, МодульОбработкиОшибки) named by string literals; `idle_handler` (ПодключитьОбработчикОжидания) links to the named handler, resolved in the current module or, failing that, in a UNIQUE global common module exporting it (an ambiguous name exported by several global modules is left unresolved, not guessed); `event_subscription` links a `ПодпискаНаСобытие` `mdo` node to its exported handler method. The reference is modelled regardless of the target's client/server dispatch (validity is a diagnostics concern; the reference matters for rename impact either way); a handler hosted in the application module (`МодульПриложения`) is a known unmodelled case. Metadata-reference edges: `register_movement` links a document method/module that writes or reads register records via its `Движения` collection — `Движения.<Регистр>.<метод>()` (bare or through a receiver) or a locally-literal dynamic index `Движения[<строка>]` / `Движения[Метаданные.<РегистрыКоллекция>.<X>.Имя]` — to the register's `mdo` node, type resolved from configuration (provenance `inferred`); a variable index (`Движения[ИмяРегистра]`) needs value flow and is not yet modelled; `subsystem_membership` links a subsystem `mdo` node (type `Subsystem`) to each metadata object it contains and each child subsystem, from its `Content`/`ChildObjects` (provenance `resolved`); `role_reference` links a role `mdo` node (type `Role`) to each object it grants rights on (`resolved`) plus each object named only inside an RLS `restrictionByCondition` query (`inferred`, parsed from the restriction text), while top-level reusable `restrictionTemplate` conditions are not parsed (no host object to resolve against) — a known recall gap. `register_records` links a document `mdo` node (type `Document`) to each register it declares it posts, from the document's `RegisterRecords` metadata (provenance `resolved`) — the declared post contract, sound even when the posting code addresses the register dynamically (a string name into `РегистрыНакопления[…]` or a `Движения[…]` index) which the code-level `register_movement` cannot see; it is the declared capability, not a guarantee every post writes every register. `register_record_set` links a method/module that reaches a register's record-set engine through a literal manager creator (`РегистрыНакопления.<X>.СоздатьНаборЗаписей()` / `СоздатьМенеджерЗаписи()`) to the register's `mdo` node (provenance `inferred`) — register write-capable access (a record set can also be read), the code-level complement that catches non-document writers (typically common modules) which `register_records` (documents only) and `register_movement` (a registrator's `Движения`) miss. `neighbors(mdo/<Type>/<Object>, dir=in, edge_kinds=[subsystem_membership])` / `[role_reference]` / `[register_records]` / `[register_record_set]` answer 'which subsystems contain' / 'which roles grant rights on or restrict' / 'which documents post' / 'which code touches (read or write) via its record-set engine' this object; combine `[register_records, register_movement, register_record_set]` for the full register touch/impact set (a write-capable superset, not a proven-write set) before a register rename/delete.",
         "provenance": ["resolved", "inferred", "visibility_blocked", "unresolved", "string_resolved"],
@@ -528,10 +538,17 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "30");
+        assert_eq!(schema["schema_version"], "32");
         // A bumped number over unchanged text would certify a contract the server no longer
         // honours, so the new keys are asserted by description, not by version alone.
         assert!(schema["envelope"]["freshness"].is_string(), "the freshness envelope advertised");
+        // `resolve` stopped being a projection of graph nodes: it answers from five
+        // sources and reports each one's state, and the schema has to say so or an
+        // agent keeps reading an empty list as a proven zero.
+        let resolve = schema["resolve"].as_str().expect("the resolve action described");
+        assert!(resolve.contains("providers[]"), "{resolve}");
+        assert!(resolve.contains("BEFORE THE GRAPH IS BUILT"), "{resolve}");
+        assert!(resolve.contains("address"), "{resolve}");
         assert!(
             schema["envelope"]["node_location"].is_string(),
             "the node location contract advertised",
@@ -619,7 +636,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "30");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "32");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

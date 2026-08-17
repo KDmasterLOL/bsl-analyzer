@@ -7,6 +7,7 @@ pub mod graph;
 pub mod its_help;
 pub mod location;
 pub mod metadata;
+pub mod name_answer;
 pub mod outline;
 pub mod platform;
 pub mod query;

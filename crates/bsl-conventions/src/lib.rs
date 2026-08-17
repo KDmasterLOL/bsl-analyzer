@@ -15,8 +15,13 @@
 //! composition — is owned by `bsl_metadata`'s module-path spec.
 
 mod probe;
+mod tree;
 
-pub use probe::{find_child_ci, find_child_stem_exact, resolve_chain_ci};
+pub use probe::{
+    find_child_ci, find_child_ci_in, find_child_stem_exact, find_child_stem_exact_in,
+    resolve_chain_ci, resolve_chain_ci_in,
+};
+pub use tree::{DirTree, EntryKind, PathSetTree, RealFs, TreeEntry};
 
 /// Every conventional name the dump layout uses and the workspace compares.
 ///

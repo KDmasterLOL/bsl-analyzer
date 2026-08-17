@@ -38,6 +38,8 @@ pub struct MethodSymbol {
 
     pub source_range: TextRange,
 
+    pub name_range: TextRange,
+
     pub docs: Option<Arc<MethodDocs>>,
 
     pub return_type_ref: Option<TypeRef>,
@@ -155,6 +157,7 @@ impl SymbolTree {
                         params: proc.params.iter().map(ParamSymbol::from).collect(),
                         annotations: proc.annotations.to_vec(),
                         source_range: proc.source_range,
+                        name_range: proc.name_range,
                         docs: None,
                         return_type_ref: None,
                     };
@@ -173,6 +176,7 @@ impl SymbolTree {
                         params: func.params.iter().map(ParamSymbol::from).collect(),
                         annotations: func.annotations.to_vec(),
                         source_range: func.source_range,
+                        name_range: func.name_range,
                         docs: None,
                         return_type_ref: None,
                     };
@@ -303,6 +307,7 @@ impl<'a> SymbolTreeBuilder<'a> {
             params: Self::params_with_hints(&proc.params, hints.as_ref()),
             annotations: proc.annotations.to_vec(),
             source_range: proc.source_range,
+            name_range: proc.name_range,
             return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
         };
@@ -324,6 +329,7 @@ impl<'a> SymbolTreeBuilder<'a> {
             params: Self::params_with_hints(&func.params, hints.as_ref()),
             annotations: func.annotations.to_vec(),
             source_range: func.source_range,
+            name_range: func.name_range,
             return_type_ref: hints.as_ref().map(|h| h.ret.clone()),
             docs,
         };

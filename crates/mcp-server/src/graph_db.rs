@@ -59,7 +59,11 @@ use crate::graph::input::{build_source_root, db_for_files};
 // never produce. Nothing about the workspace changed, so no fingerprint moves and
 // nothing else would ever force the rebuild; only the version says the projection
 // itself is of another generation.
-pub(crate) const SCHEMA_VERSION: u32 = 17;
+// 18: `mdo` rows carry the file the object is defined by. A version-17 artefact
+// holds them with a null file, and nothing about the workspace changed, so no
+// fingerprint moves: a stale artefact would keep answering about metadata objects
+// with a durable id and no place, which is the split this version closes.
+pub(crate) const SCHEMA_VERSION: u32 = 18;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -682,6 +686,15 @@ fn build_graph_database_inner(
     let file_paths: FxHashMap<FileId, PathBuf> =
         files.iter().map(|(f, p)| (*f, p.clone())).collect();
 
+    // Where each metadata object is defined, read off the universe this build
+    // already scanned rather than a fresh walk of the disk.
+    let mdo_files = crate::graph::mdo_files::mdo_files(
+        &project.configs,
+        &bsl_conventions::PathSetTree::from_files(
+            universe.stats.iter().map(|stat| PathBuf::from(&stat.path)),
+        ),
+    );
+
     // The whole-workspace source root, built once and shared (cheap `Arc` clone)
     // into every per-batch database, so the 25k-path file set is assembled a single
     // time for the build rather than re-cloned per batch.
@@ -730,6 +743,7 @@ fn build_graph_database_inner(
             &modules,
             &paths,
             Some(&project.workspace_root),
+            &mdo_files,
             batch_size,
             &mut open_batch,
             &mut sink,
@@ -932,9 +946,12 @@ fn incremental_safety_check(
         .map(|e| e.to_id.as_str())
         .filter(|t| t.starts_with("mdo/") || t.starts_with("attribute/"))
         .collect();
+    // A surviving reference is one from BSL source outside the changed set. The
+    // kind says so; `file` alone no longer does, now that an object carries one.
     let survivors_sql = format!(
         "SELECT COUNT(*) FROM edges e JOIN nodes n ON e.from_id = n.id \
-         WHERE e.to_id = ?1 AND n.file NOT IN ({placeholders})"
+         WHERE e.to_id = ?1 AND n.kind IN ('method','module') \
+           AND n.file NOT IN ({placeholders})"
     );
     for dropped in old_aux.iter().filter(|x| !new_aux.contains(x.as_str())) {
         let mut params: Vec<&dyn rusqlite::ToSql> = vec![dropped];
@@ -1007,6 +1024,15 @@ pub(crate) fn update_graph_database_bodies(
     let file_paths: FxHashMap<FileId, PathBuf> =
         files.iter().map(|(f, p)| (*f, p.clone())).collect();
 
+    // Where each metadata object is defined, read off the universe this build
+    // already scanned rather than a fresh walk of the disk.
+    let mdo_files = crate::graph::mdo_files::mdo_files(
+        &project.configs,
+        &bsl_conventions::PathSetTree::from_files(
+            universe.stats.iter().map(|stat| PathBuf::from(&stat.path)),
+        ),
+    );
+
     // Map changed canonical paths → ModuleIds, preserving file-id order so a new aux
     // object's first-seen spelling matches a full build's.
     let changed_set: std::collections::HashSet<&Path> =
@@ -1049,6 +1075,7 @@ pub(crate) fn update_graph_database_bodies(
         &changed_modules,
         &paths,
         Some(&project.workspace_root),
+        &mdo_files,
         batch_size,
         &mut open_batch,
         Some(&ticker),
@@ -1450,11 +1477,11 @@ pub fn caller_delta_plan(
     let placeholders = changed_files.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
     // A signature change in an event-subscription handler module can invalidate its
-    // config-level `mdo -> method` subscription edge — but that edge's source is a
-    // fileless `mdo` node, so the resolved-caller fan-out below (which requires
-    // `n2.file IS NOT NULL`) never selects it, and the body-only reproject never
-    // re-derives Phase F. Bail to a full rebuild so a removed/unexported/renamed
-    // handler cannot leave a dangling subscription edge.
+    // config-level `mdo -> method` subscription edge — but that edge's source is an
+    // `mdo` node, which the resolved-caller fan-out below never selects (it asks for
+    // BSL source by kind), and the body-only reproject never re-derives Phase F.
+    // Bail to a full rebuild so a removed/unexported/renamed handler cannot leave a
+    // dangling subscription edge.
     {
         let sql = format!(
             "SELECT 1 FROM edges e JOIN nodes n1 ON e.to_id = n1.id \
@@ -1471,7 +1498,8 @@ pub fn caller_delta_plan(
         "SELECT DISTINCT n2.file FROM edges e \
          JOIN nodes n1 ON e.to_id = n1.id \
          JOIN nodes n2 ON e.from_id = n2.id \
-         WHERE n1.file IN ({placeholders}) AND n1.kind = 'method' AND n2.file IS NOT NULL"
+         WHERE n1.file IN ({placeholders}) AND n1.kind = 'method' \
+           AND n2.kind IN ('method','module') AND n2.file IS NOT NULL"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
@@ -1768,6 +1796,148 @@ mod tests {
         assert!(
             plan.is_none(),
             "a signature change to a subscription handler module must force a full rebuild"
+        );
+    }
+
+    /// Everything a build needs to see one catalog and one module.
+    fn stage_catalog_workspace(root: &Path, module_body: &str) {
+        std::fs::create_dir_all(root.join("CommonModules/Модуль/Ext")).unwrap();
+        std::fs::create_dir_all(root.join("Catalogs")).unwrap();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(
+            root.join("CommonModules/Модуль.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+    <CommonModule uuid="00000000-0000-0000-0000-000000000001">
+        <Properties><Name>Модуль</Name><Server>true</Server></Properties>
+    </CommonModule>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("CommonModules/Модуль/Ext/Module.bsl"), module_body).unwrap();
+    }
+
+    fn write_catalog(root: &Path) {
+        std::fs::write(
+            root.join("Catalogs/Товары.xml"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+    <Catalog uuid="00000000-0000-0000-0000-000000000002">
+        <Properties><Name>Товары</Name></Properties>
+    </Catalog>
+</MetaDataObject>"#,
+        )
+        .unwrap();
+    }
+
+    fn build_meta() -> GraphMeta {
+        GraphMeta {
+            revision: 1,
+            fingerprint: GraphFp::default(),
+            files: 0,
+            built_at: "t".to_string(),
+        }
+    }
+
+    fn scanned_project(
+        root: &Path,
+    ) -> (crate::graph::ProjectSnapshot, crate::graph::universe::ScannedUniverse) {
+        let project = crate::graph::ProjectSnapshot::load(root);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        (project, universe)
+    }
+
+    /// `None` covers both "no such row" and "a row with no file": neither is a
+    /// placed object, and the tests below care only about that.
+    fn stored_file(db: &Path, id: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        Connection::open(db)
+            .unwrap()
+            .query_row("SELECT file FROM nodes WHERE id = ?1", [id], |row| {
+                row.get::<_, Option<String>>(0)
+            })
+            .optional()
+            .unwrap()
+            .flatten()
+    }
+
+    /// The path the build is expected to store, taken from the tree rather than
+    /// spelled out: a hand-built string would agree with a row written in any
+    /// shape, and the shape is the whole point — the dictionary resolves this
+    /// against the scanned universe.
+    fn expected_file(root: &Path, relative: &str) -> String {
+        root.join(relative).canonicalize().unwrap().to_string_lossy().replace('\\', "/")
+    }
+
+    /// The full build is the path that places an object: the catalog, role and
+    /// subsystem passes run there and nowhere else, and the incremental pass
+    /// never overwrites a row it finds.
+    #[test]
+    fn a_full_build_stores_the_file_an_object_is_defined_by() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        stage_catalog_workspace(
+            root,
+            "&НаСервере\nПроцедура Выполнить() Экспорт\nСправочники.Товары.СоздатьЭлемент();\nКонецПроцедуры",
+        );
+        write_catalog(root);
+
+        let db = root.join(".build/graph.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let (project, universe) = scanned_project(root);
+        build_graph_database(&project, &universe, &db, 1, &build_meta()).unwrap();
+
+        assert_eq!(
+            stored_file(&db, "mdo/Catalog/Товары"),
+            Some(expected_file(root, "Catalogs/Товары.xml")),
+        );
+    }
+
+    /// The incremental path emits objects as the endpoints of the edges it
+    /// reprojects. It cannot overwrite a row already stored, so the only case in
+    /// which its map is observable is an object that did not exist at the last
+    /// full build — which is exactly the case a relaxed eligibility gate would
+    /// start delivering here.
+    #[test]
+    fn the_incremental_path_places_an_object_that_appeared_after_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        stage_catalog_workspace(root, "&НаСервере\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
+
+        let db_pre = root.join(".build/pre.db");
+        std::fs::create_dir_all(db_pre.parent().unwrap()).unwrap();
+        let (project, universe) = scanned_project(root);
+        build_graph_database(&project, &universe, &db_pre, 1, &build_meta()).unwrap();
+        assert_eq!(
+            stored_file(&db_pre, "mdo/Catalog/Товары"),
+            None,
+            "the object must be unplaced before the edit, or the incremental write is invisible",
+        );
+
+        write_catalog(root);
+        let module = root.join("CommonModules/Модуль/Ext/Module.bsl");
+        std::fs::write(
+            &module,
+            "&НаСервере\nПроцедура Выполнить() Экспорт\nСправочники.Товары.СоздатьЭлемент();\nКонецПроцедуры",
+        )
+        .unwrap();
+
+        let (edited_project, edited_universe) = scanned_project(root);
+        let db_incremental = root.join(".build/incremental.db");
+        update_graph_database_bodies(
+            &edited_project,
+            &edited_universe,
+            &db_pre,
+            &db_incremental,
+            &[module.canonicalize().unwrap()],
+            1,
+            &build_meta(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stored_file(&db_incremental, "mdo/Catalog/Товары"),
+            Some(expected_file(root, "Catalogs/Товары.xml")),
         );
     }
 

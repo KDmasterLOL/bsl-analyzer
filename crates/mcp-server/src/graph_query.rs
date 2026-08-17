@@ -101,12 +101,18 @@ const NODE_COLUMNS: &str =
 /// freshly opened build) flips the range arm to a full `nodes` scan + `edges_from` probe,
 /// i.e. O(nodes). The hint makes the O(inbound-edges) plan a guarantee, not a planner guess.
 /// Params: `?1` = the `mdo/…` node id, `?2`/`?3` = the half-open `attribute/…` id range bounds.
+///
+/// The source has to be a node with BSL source, and that is asked of its KIND.
+/// A non-null `file` used to imply it, back when only methods and modules
+/// carried one; an object carries its own file now, and a `contains` edge would
+/// otherwise report an object's XML as a file that references it.
 const REFERENCING_FILES_SQL: &str = "\
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id = ?1 \
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL AND e.to_id = ?1 \
     UNION \
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id >= ?2 AND e.to_id < ?3";
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL \
+       AND e.to_id >= ?2 AND e.to_id < ?3";
 
 fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     Ok(StoredNode {
@@ -142,6 +148,126 @@ fn method_id_range(module_id: &str) -> Option<(String, String)> {
     let last = upper.pop()?; // ASCII '/' or ':'
     upper.push(((last as u8) + 1) as char);
     Some((prefix, upper))
+}
+
+/// The graph, as a name provider for [`ide::lookup_names`].
+///
+/// It selects and counts; ranking, folding and the limit belong to the merge.
+/// Whether the graph is built, still building or failed is the host's fact, not
+/// the store's, so the caller states it — an absent graph still gets a named
+/// verdict rather than silently contributing nothing.
+pub struct GraphNameSource<'a> {
+    graph: Option<&'a GraphDb>,
+    state: ide::ProviderState,
+}
+
+impl<'a> GraphNameSource<'a> {
+    pub fn answering(graph: &'a GraphDb) -> Self {
+        Self { graph: Some(graph), state: ide::ProviderState::Answered }
+    }
+
+    /// The graph cannot answer, and the reason travels into the report.
+    pub fn absent(state: ide::ProviderState) -> Self {
+        debug_assert_ne!(
+            state,
+            ide::ProviderState::Answered,
+            "an absent graph cannot be reported as having answered",
+        );
+        Self { graph: None, state }
+    }
+}
+
+/// Everything the graph holds. A durable id is matched whatever it names, so a
+/// narrowed question must not silently skip the store that owns the id.
+const GRAPH_CATEGORIES: &[ide::NameCategory] = &[
+    ide::NameCategory::CommonModule,
+    ide::NameCategory::Module,
+    ide::NameCategory::ModuleMethod,
+    ide::NameCategory::MetadataObject,
+    ide::NameCategory::MetadataMember,
+    ide::NameCategory::Form,
+];
+
+/// Which category a stored node belongs to. The kind alone does not settle a
+/// module node: only a `common/` scope is callable by name.
+fn node_category(kind: &str, id: &str) -> ide::NameCategory {
+    match kind {
+        "module" if id.starts_with("module/common/") => ide::NameCategory::CommonModule,
+        "module" => ide::NameCategory::Module,
+        // A subsystem's `<Content>` lists common modules, so the graph holds an
+        // `mdo` node for one. It is the same entity the resident publishes as a
+        // common module, and answering `metadata_object` here would leave the
+        // two rows unable to meet.
+        "mdo" if id.starts_with("mdo/CommonModule/") => ide::NameCategory::CommonModule,
+        "mdo" => ide::NameCategory::MetadataObject,
+        "attribute" | "tabular_section" => ide::NameCategory::MetadataMember,
+        "form" | "form_item" | "form_attribute" => ide::NameCategory::Form,
+        _ => ide::NameCategory::ModuleMethod,
+    }
+}
+
+impl ide::ExternalNameSource for GraphNameSource<'_> {
+    fn provider(&self) -> ide::ProviderId {
+        ide::ProviderId::Graph
+    }
+
+    fn state(&self) -> ide::ProviderState {
+        self.state
+    }
+
+    fn categories(&self) -> &'static [ide::NameCategory] {
+        GRAPH_CATEGORIES
+    }
+
+    /// A stored node knows the file it is written in, and handing it over is
+    /// what lets the dictionary recognise the graph's row and the resident's row
+    /// as ONE thing instead of guessing at it from the name. The ranges stay
+    /// with `graph action=node`: two answers about a node's exact span would be
+    /// two answers to one question, while the file is the identity itself.
+    fn supplies_location(&self) -> bool {
+        true
+    }
+
+    fn candidates(&self, query: &str, limit: usize) -> Result<ide::ProviderHits, String> {
+        let Some(graph) = self.graph else {
+            return Ok(ide::ProviderHits::new(Vec::new(), 0));
+        };
+        let result = graph.resolve(query, limit).map_err(|e| e.to_string())?;
+        let candidates = result
+            .candidates
+            .iter()
+            .map(|c| {
+                // The tier is the ranker's own verdict, carried across rather
+                // than recomputed: recomputing it here would be a second
+                // opinion on the same question, free to disagree.
+                let tier = ide::NameMatchTier::from_code(c.match_kind)
+                    .unwrap_or(ide::NameMatchTier::Substring);
+                let candidate = ide::NameCandidate::new(
+                    ide::resolve_name_segment(&c.id),
+                    node_category(c.kind, &c.id),
+                    tier,
+                    ide::ProviderId::Graph,
+                )
+                .with_graph_id(&c.id);
+                // Looked up per DELIVERED candidate, never per match: the ranker
+                // has already cut the list to `limit`, and the file of a node
+                // nobody will see is a query for nothing.
+                match graph.node_file(&c.id) {
+                    Ok(Some(file)) => candidate.with_source_path(file),
+                    // A node whose file the store does not know is still an
+                    // answer, addressed by its id alone.
+                    Ok(None) => candidate,
+                    Err(error) => {
+                        tracing::warn!(id = %c.id, %error, "graph node file lookup failed");
+                        candidate
+                    }
+                }
+            })
+            .collect();
+        // `total` is the ranker's pre-cap count, so a name matching thousands of
+        // nodes is not handed over as if twenty were all of them.
+        Ok(ide::ProviderHits::new(candidates, result.total))
+    }
 }
 
 /// Map a stored node kind to the agent-facing static label `NodeRef` expects.
@@ -545,6 +671,18 @@ impl GraphDb {
         let (candidates, total) =
             ide::rank_resolve_candidates(candidates.into_iter(), query, limit);
         Ok(ide::ResolveResult::new(query, candidates, total))
+    }
+
+    /// The file a node is written in, for the name dictionary's identity.
+    ///
+    /// A module node is usually absent from the table — it is persisted only
+    /// when it happens to be an edge endpoint — so the synthesized form answers
+    /// for it, deriving the file from the module's own method rows.
+    pub(crate) fn node_file(&self, id: &str) -> anyhow::Result<Option<String>> {
+        if let Some(node) = self.fetch_node(id)? {
+            return Ok(node.file);
+        }
+        Ok(self.synthesize_module_node(id)?.and_then(|node| node.file))
     }
 
     /// Usage summary for a durable node id: the inbound-edge count plus the top calling
@@ -1266,7 +1404,7 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{edge_kind, method_id_range, provenance, GraphDb};
+    use super::{edge_kind, method_id_range, node_category, provenance, GraphDb, GraphNameSource};
     use crate::graph_db::{GraphDbWriter, GraphMeta};
     use rusqlite::{params, Connection};
 
@@ -1294,6 +1432,97 @@ mod tests {
 
         // Then: a graph from the prior projection schema is rejected for rebuilding.
         assert!(result.is_err(), "prior projection graphs must be rebuilt");
+    }
+
+    /// A subsystem's `<Content>` puts a common module into the graph as an `mdo`
+    /// node. It is the same entity the resident publishes as a common module, and
+    /// only a shared category lets the two rows meet.
+    #[test]
+    fn a_common_module_reached_through_a_subsystem_keeps_its_own_category() {
+        assert_eq!(
+            node_category("mdo", "mdo/CommonModule/Настройки"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject,);
+    }
+
+    /// `file` says where a node is defined, not that it holds BSL source. An
+    /// object carries one now, and the reverse lookup must still answer with the
+    /// files that REFERENCE the object — never with the object's own XML, which a
+    /// `contains` edge would otherwise hand back.
+    #[test]
+    fn an_objects_own_file_is_not_a_file_that_references_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer
+            .write_nodes(&[
+                ide::graph_index::NodeRow {
+                    id: "method/common/Вызов/Читать".to_string(),
+                    kind: "method",
+                    name: "Читать".to_string(),
+                    qualified: "ОбщийМодуль.Вызов.Читать".to_string(),
+                    module: Some("ОбщийМодуль.Вызов".to_string()),
+                    file: Some("CommonModules/Вызов/Ext/Module.bsl".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: Some(true),
+                    addressable: true,
+                },
+                ide::graph_index::NodeRow {
+                    id: "mdo/Catalog/Товары".to_string(),
+                    kind: "mdo",
+                    name: "Товары".to_string(),
+                    qualified: "Справочник.Товары".to_string(),
+                    module: None,
+                    file: Some("Catalogs/Товары.xml".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: None,
+                    addressable: true,
+                },
+            ])
+            .unwrap();
+        writer
+            .write_edges(&[
+                ide::graph_index::EdgeRow {
+                    from_id: "method/common/Вызов/Читать".to_string(),
+                    to_id: "mdo/Catalog/Товары".to_string(),
+                    kind: "read",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+                // The object contains its own attribute, and the edge points back
+                // at the object exactly as the catalog pass writes it.
+                ide::graph_index::EdgeRow {
+                    from_id: "mdo/Catalog/Товары".to_string(),
+                    to_id: "attribute/Catalog/Товары/Код".to_string(),
+                    kind: "contains",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        let db = GraphDb::open(&path).unwrap();
+        assert_eq!(
+            db.referencing_files("mdo/Catalog/Товары").unwrap(),
+            vec!["CommonModules/Вызов/Ext/Module.bsl".to_string()],
+        );
     }
 
     #[test]
@@ -1446,6 +1675,95 @@ mod tests {
             res.candidates.iter().filter(|c| c.id == "module/common/Сервер").collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].match_kind, "exact");
+    }
+
+    /// The dictionary must not narrow what `resolve` accepts: all four id tiers
+    /// keep working when the graph answers through the merge instead of
+    /// serialising its own result.
+    #[test]
+    fn every_id_tier_survives_the_trip_through_the_name_source() {
+        use ide::ExternalNameSource;
+
+        let db = graph_db_with_nodes(&[(
+            "method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку",
+            "method",
+        )]);
+        let source = GraphNameSource::answering(&db);
+
+        let tier_of = |query: &str| {
+            source
+                .candidates(query, 10)
+                .unwrap()
+                .candidates
+                .first()
+                .map(|c| c.match_tier)
+                .unwrap_or_else(|| panic!("`{query}` found nothing"))
+        };
+
+        assert_eq!(
+            tier_of("method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку"),
+            ide::NameMatchTier::Exact,
+        );
+        assert_eq!(
+            tier_of("method/common/строковыефункцииклиентсервер/подставитьпараметрывстроку"),
+            ide::NameMatchTier::CaseInsensitive,
+        );
+        assert_eq!(tier_of("ПодставитьПараметрыВСтроку"), ide::NameMatchTier::Name);
+        assert_eq!(tier_of("ПараметрыВСтр"), ide::NameMatchTier::Substring);
+    }
+
+    /// A module node is a common module only when its scope says so; calling an
+    /// object module "callable by name" would publish a category its consumer
+    /// would act on.
+    #[test]
+    fn a_module_node_is_categorised_by_its_scope_not_its_kind() {
+        assert_eq!(
+            node_category("module", "module/common/Сервер"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(
+            node_category("module", "module/object/Catalog/Товары"),
+            ide::NameCategory::Module,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject);
+        assert_eq!(
+            node_category("attribute", "attribute/Catalog/Товары/Код"),
+            ide::NameCategory::MetadataMember,
+        );
+        assert_eq!(
+            node_category("form_item", "form_item/Catalog/Товары/Форма/Кнопка"),
+            ide::NameCategory::Form,
+        );
+    }
+
+    /// The count the merge relies on: what the graph withheld has to be visible,
+    /// or an answer capped at the limit reads as exhaustive.
+    #[test]
+    fn the_source_reports_what_it_did_not_hand_over() {
+        use ide::ExternalNameSource;
+
+        let rows: Vec<(String, &str)> = (0..8)
+            .map(|i| (format!("method/common/М{i}/ПриСозданииНаСервере"), "method"))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            rows.iter().map(|(id, kind)| (id.as_str(), *kind)).collect();
+        let db = graph_db_with_nodes(&borrowed);
+        let source = GraphNameSource::answering(&db);
+
+        let hits = source.candidates("ПриСозданииНаСервере", 3).unwrap();
+        assert_eq!(hits.candidates.len(), 3);
+        assert_eq!(hits.total, 8, "the pre-cap count, not the delivered count");
+    }
+
+    /// An absent graph reports its reason instead of an empty answer that would
+    /// read as a proven zero.
+    #[test]
+    fn an_absent_graph_names_its_state() {
+        use ide::ExternalNameSource;
+
+        let source = GraphNameSource::absent(ide::ProviderState::NotReady);
+        assert_eq!(source.state(), ide::ProviderState::NotReady);
+        assert_eq!(source.provider(), ide::ProviderId::Graph);
     }
 
     #[test]

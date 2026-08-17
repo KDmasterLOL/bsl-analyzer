@@ -219,8 +219,8 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.resolve_common_module_files(file_id, name)
     }
 
-    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceSymbols> {
-        self.db.workspace_symbols(source_root_id)
+    fn module_members(&self, source_root_id: SourceRootId) -> Arc<hir::WorkspaceMembers> {
+        self.db.module_members(source_root_id)
     }
 
     fn module_index(&self, source_root_id: SourceRootId) -> Arc<ModuleIndex> {
