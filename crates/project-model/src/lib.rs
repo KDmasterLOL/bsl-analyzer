@@ -38,6 +38,59 @@ impl fmt::Display for ConfigLoadError {
 
 impl std::error::Error for ConfigLoadError {}
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBaselineProjectScope {
+    pub source_root: String,
+    pub extensions: Vec<DiagnosticsBaselineProjectExtension>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBaselineProjectExtension {
+    pub name: String,
+    pub path: String,
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedDiagnosticsBaseline {
+    pub path: PathBuf,
+    pub project_path: String,
+    pub scope: DiagnosticsBaselineProjectScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticsBaselineProjectError {
+    CannotResolve { path: PathBuf, message: String },
+    OutsideProject(PathBuf),
+    Symlink(PathBuf),
+    NotAFile(PathBuf),
+    NonUtf8(PathBuf),
+    PathCollision(String),
+}
+
+impl fmt::Display for DiagnosticsBaselineProjectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CannotResolve { path, message } => {
+                write!(f, "cannot resolve {}: {message}", path.display())
+            }
+            Self::OutsideProject(path) => {
+                write!(f, "path is outside the project: {}", path.display())
+            }
+            Self::Symlink(path) => {
+                write!(f, "diagnostics baseline target is a symlink: {}", path.display())
+            }
+            Self::NotAFile(path) => {
+                write!(f, "diagnostics baseline target is not a file: {}", path.display())
+            }
+            Self::NonUtf8(path) => write!(f, "project path is not valid UTF-8: {}", path.display()),
+            Self::PathCollision(path) => write!(f, "project roots collide at: {path}"),
+        }
+    }
+}
+
+impl std::error::Error for DiagnosticsBaselineProjectError {}
+
 #[derive(Debug, Clone)]
 pub enum ProjectError {
     ConfigLoad(ConfigLoadError),
@@ -128,6 +181,48 @@ impl Project {
 
     pub fn configuration_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
+    }
+
+    pub fn diagnostics_baseline(
+        &self,
+    ) -> Result<Option<ResolvedDiagnosticsBaseline>, DiagnosticsBaselineProjectError> {
+        let Some(configured_path) = self.config.diagnostics_baseline_path(&self.root) else {
+            return Ok(None);
+        };
+        let project_root = canonicalize_baseline_path(&self.root)?;
+        let target = resolve_baseline_target(&configured_path, &project_root)?;
+        let source_root = relative_baseline_path(
+            &canonicalize_baseline_path(self.source_path())?,
+            &project_root,
+        )?;
+
+        let mut seen = std::collections::HashSet::from([source_root.clone()]);
+        let mut extensions = Vec::with_capacity(self.topology.nodes().len());
+        for id in self.topology.topological_order() {
+            let node = self.topology.node(*id);
+            let path = relative_baseline_path(
+                &canonicalize_baseline_path(node.canonical_path())?,
+                &project_root,
+            )?;
+            if !seen.insert(path.clone()) {
+                return Err(DiagnosticsBaselineProjectError::PathCollision(path));
+            }
+            extensions.push(DiagnosticsBaselineProjectExtension {
+                name: node.name().to_owned(),
+                path,
+                depends_on: node
+                    .depends_on()
+                    .iter()
+                    .map(|id| self.topology.node(*id).name().to_owned())
+                    .collect(),
+            });
+        }
+
+        Ok(Some(ResolvedDiagnosticsBaseline {
+            project_path: relative_baseline_path(&target, &project_root)?,
+            path: target,
+            scope: DiagnosticsBaselineProjectScope { source_root, extensions },
+        }))
     }
 
     fn discover_source_path(root: &Path, config: &ProjectConfig) -> Option<PathBuf> {
@@ -337,6 +432,70 @@ impl Project {
         tracing::info!(name = %name, path = %path.display(), "resolved extension");
         Some((name, path))
     }
+}
+
+fn canonicalize_baseline_path(path: &Path) -> Result<PathBuf, DiagnosticsBaselineProjectError> {
+    std::fs::canonicalize(path).map_err(|error| DiagnosticsBaselineProjectError::CannotResolve {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+fn resolve_baseline_target(
+    path: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, DiagnosticsBaselineProjectError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() {
+                return Err(DiagnosticsBaselineProjectError::Symlink(path.to_path_buf()));
+            }
+            if !metadata.is_file() {
+                return Err(DiagnosticsBaselineProjectError::NotAFile(path.to_path_buf()));
+            }
+            let target = canonicalize_baseline_path(path)?;
+            relative_baseline_path(&target, project_root)?;
+            Ok(target)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent =
+                path.parent().ok_or_else(|| DiagnosticsBaselineProjectError::CannotResolve {
+                    path: path.to_path_buf(),
+                    message: "target has no parent directory".to_owned(),
+                })?;
+            let file_name =
+                path.file_name().ok_or_else(|| DiagnosticsBaselineProjectError::CannotResolve {
+                    path: path.to_path_buf(),
+                    message: "target has no file name".to_owned(),
+                })?;
+            let target = canonicalize_baseline_path(parent)?.join(file_name);
+            relative_baseline_path(&target, project_root)?;
+            Ok(target)
+        }
+        Err(error) => Err(DiagnosticsBaselineProjectError::CannotResolve {
+            path: path.to_path_buf(),
+            message: error.to_string(),
+        }),
+    }
+}
+
+fn relative_baseline_path(
+    path: &Path,
+    project_root: &Path,
+) -> Result<String, DiagnosticsBaselineProjectError> {
+    let relative = path
+        .strip_prefix(project_root)
+        .map_err(|_| DiagnosticsBaselineProjectError::OutsideProject(path.to_path_buf()))?;
+    relative
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .ok_or_else(|| DiagnosticsBaselineProjectError::NonUtf8(path.to_path_buf()))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|components| components.join("/"))
 }
 
 /// Expands an `extensions` entry whose final path segment contains `*`
@@ -733,7 +892,11 @@ impl<'de> Deserialize<'de> for ExtensionDecl {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
     #[serde(default)]
-    pub diagnostics: serde_json::Value,
+    pub diagnostics: ProjectDiagnosticsConfig,
+
+    #[serde(skip)]
+    #[doc(hidden)]
+    pub config_file_path: Option<PathBuf>,
 
     #[serde(default)]
     pub code_lens: CodeLensConfig,
@@ -812,7 +975,7 @@ impl ProjectConfig {
                 let config = Self::load_from_file(&config_path)?;
                 tracing::info!(
                     path = %config_path.display(),
-                    diagnostics_has_content = !config.diagnostics.is_null(),
+                    diagnostics_has_content = !config.diagnostics.is_empty(),
                     "loaded project config"
                 );
                 return Ok(Some(config));
@@ -830,16 +993,30 @@ impl ProjectConfig {
         if path.extension().is_some_and(|ext| ext == "toml") {
             let toml_config =
                 toml::from_str::<TomlConfig>(&content).map_err(|e| err(e.to_string()))?;
-            let config = ProjectConfig::from(toml_config);
+            let mut config = ProjectConfig::from(toml_config);
+            config.config_file_path = Some(path.to_path_buf());
             tracing::info!(
                 path = %path.display(),
-                diagnostics_has_content = !config.diagnostics.is_null(),
+                diagnostics_has_content = !config.diagnostics.is_empty(),
                 "loaded TOML project config"
             );
             Ok(config)
         } else {
-            serde_json::from_str(&content).map_err(|e| err(e.to_string()))
+            let mut config: ProjectConfig =
+                serde_json::from_str(&content).map_err(|e| err(e.to_string()))?;
+            config.config_file_path = Some(path.to_path_buf());
+            Ok(config)
         }
+    }
+
+    pub fn config_file_path(&self) -> Option<&Path> {
+        self.config_file_path.as_deref()
+    }
+
+    pub fn diagnostics_baseline_path(&self, project_root: &Path) -> Option<PathBuf> {
+        let path = &self.diagnostics.baseline.as_ref()?.path;
+        let base = self.config_file_path.as_deref().and_then(Path::parent).unwrap_or(project_root);
+        Some(base.join(path))
     }
 
     pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
@@ -873,6 +1050,30 @@ impl ProjectConfig {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProjectDiagnosticsConfig {
+    #[serde(default)]
+    pub baseline: Option<DiagnosticsBaselineConfig>,
+    #[serde(flatten)]
+    rules: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ProjectDiagnosticsConfig {
+    pub fn rules_json(&self) -> serde_json::Value {
+        serde_json::Value::Object(self.rules.clone())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.baseline.is_none() && self.rules.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsBaselineConfig {
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1418,15 +1619,15 @@ fn discover_git_dir(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TomlConfig {
     #[serde(default)]
     source: TomlSourceConfig,
     #[serde(default)]
     analysis: TomlAnalysisConfig,
-    #[serde(default = "default_toml_table")]
-    diagnostics: toml::Value,
+    #[serde(default)]
+    diagnostics: ProjectDiagnosticsConfig,
     #[serde(default)]
     code_lens: CodeLensConfig,
     #[serde(default)]
@@ -1439,22 +1640,6 @@ struct TomlConfig {
     features: FeaturesConfig,
     #[serde(default)]
     output: OutputConfig,
-}
-
-impl Default for TomlConfig {
-    fn default() -> Self {
-        Self {
-            source: TomlSourceConfig::default(),
-            analysis: TomlAnalysisConfig::default(),
-            diagnostics: default_toml_table(),
-            code_lens: CodeLensConfig::default(),
-            formatting: FormattingConfig::default(),
-            target_platform_version: None,
-            search: TomlSearchConfig::default(),
-            features: FeaturesConfig::default(),
-            output: OutputConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1519,16 +1704,12 @@ struct TomlSearchPostgresCredentialHelperConfig {
     args: Vec<String>,
 }
 
-fn default_toml_table() -> toml::Value {
-    toml::Value::Table(Default::default())
-}
-
 impl From<TomlConfig> for ProjectConfig {
     fn from(toml: TomlConfig) -> Self {
-        let diagnostics = toml_value_to_json(toml.diagnostics);
         let pg = toml.search.baseline.postgres;
         Self {
-            diagnostics,
+            diagnostics: toml.diagnostics,
+            config_file_path: None,
             code_lens: toml.code_lens,
             formatting: toml.formatting,
             configuration_root: toml.source.root,
@@ -1560,23 +1741,6 @@ impl From<TomlConfig> for ProjectConfig {
             },
             features: toml.features,
             output: toml.output,
-        }
-    }
-}
-
-fn toml_value_to_json(value: toml::Value) -> serde_json::Value {
-    match value {
-        toml::Value::String(s) => serde_json::Value::String(s),
-        toml::Value::Integer(i) => serde_json::json!(i),
-        toml::Value::Float(f) => serde_json::json!(f),
-        toml::Value::Boolean(b) => serde_json::Value::Bool(b),
-        toml::Value::Datetime(d) => serde_json::Value::String(d.to_string()),
-        toml::Value::Array(arr) => {
-            serde_json::Value::Array(arr.into_iter().map(toml_value_to_json).collect())
-        }
-        toml::Value::Table(table) => {
-            let map = table.into_iter().map(|(k, v)| (k, toml_value_to_json(v))).collect();
-            serde_json::Value::Object(map)
         }
     }
 }
@@ -2008,8 +2172,9 @@ mod tests {
     use super::{
         branch_pattern_matches, current_git_branch, current_git_commit,
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
-        resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches, ExtensionDecl,
-        FeaturesConfig, PostgresAccessMode, Project, ProjectConfig, ProjectError,
+        resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches,
+        DiagnosticsBaselineConfig, DiagnosticsBaselineProjectError, ExtensionDecl, FeaturesConfig,
+        PostgresAccessMode, Project, ProjectConfig, ProjectDiagnosticsConfig, ProjectError,
         ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
         SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
         SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
@@ -3134,9 +3299,205 @@ LineLength = { maxLineLength = 120 }
 "#;
         let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
         let project = ProjectConfig::from(config);
-        assert!(project.diagnostics.is_object());
-        assert_eq!(project.diagnostics["parameters"]["EmptyCodeBlock"], false);
-        assert_eq!(project.diagnostics["parameters"]["LineLength"]["maxLineLength"], 120);
+        let rules = project.diagnostics.rules_json();
+        assert!(rules.is_object());
+        assert_eq!(rules["parameters"]["EmptyCodeBlock"], false);
+        assert_eq!(rules["parameters"]["LineLength"]["maxLineLength"], 120);
+    }
+
+    #[test]
+    fn diagnostics_baseline_path_uses_toml_origin_and_stays_out_of_rules() {
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir(&config_dir).unwrap();
+        let path = config_dir.join("project.toml");
+        fs::write(
+            &path,
+            r#"
+[diagnostics.baseline]
+path = "../baseline.json"
+
+[diagnostics.parameters]
+LineLength = { maxLineLength = 120 }
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.config_file_path(), Some(path.as_path()));
+        assert_eq!(
+            config.diagnostics_baseline_path(dir.path()),
+            Some(config_dir.join("../baseline.json"))
+        );
+        let rules = config.diagnostics.rules_json();
+        assert!(rules.get("baseline").is_none());
+        assert_eq!(rules["parameters"]["LineLength"]["maxLineLength"], 120);
+    }
+
+    #[test]
+    fn diagnostics_baseline_path_uses_json_origin_and_stays_out_of_rules() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custom.json");
+        fs::write(
+            &path,
+            r#"{"diagnostics":{"baseline":{"path":"baseline.json"},"parameters":{"EmptyCodeBlock":false}}}"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.config_file_path(), Some(path.as_path()));
+        assert_eq!(
+            config.diagnostics_baseline_path(std::path::Path::new("ignored")),
+            Some(dir.path().join("baseline.json"))
+        );
+        let rules = config.diagnostics.rules_json();
+        assert!(rules.get("baseline").is_none());
+        assert_eq!(rules["parameters"]["EmptyCodeBlock"], false);
+    }
+
+    #[test]
+    fn diagnostics_baseline_scope_preserves_topology_and_normalized_paths() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/vendor");
+        touch_extension(dir.path(), "src/cfe/tests");
+        let config = ProjectConfig {
+            diagnostics: baseline_config("baseline.json"),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![
+                structured("tests", "src/cfe/tests", &["vendor"]),
+                structured("vendor", "src/cfe/vendor", &[]),
+            ]),
+            ..Default::default()
+        };
+
+        let resolved = Project::with_config(dir.path(), config)
+            .unwrap()
+            .diagnostics_baseline()
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.path, dir.path().join("baseline.json"));
+        assert_eq!(resolved.project_path, "baseline.json");
+        assert_eq!(resolved.scope.source_root, "src/cf");
+        assert_eq!(resolved.scope.extensions[0].name, "vendor");
+        assert_eq!(resolved.scope.extensions[0].path, "src/cfe/vendor");
+        assert_eq!(resolved.scope.extensions[1].name, "tests");
+        assert_eq!(resolved.scope.extensions[1].depends_on, ["vendor"]);
+    }
+
+    #[test]
+    fn diagnostics_baseline_scope_is_independent_of_working_directory() {
+        const ROOT_ENV: &str = "BSL_TEST_DIAGNOSTICS_BASELINE_SCOPE_ROOT";
+        if let Some(root) = std::env::var_os(ROOT_ENV) {
+            let root = std::path::PathBuf::from(root);
+            let config = ProjectConfig::load_from_file(&root.join("config/project.toml")).unwrap();
+            let resolved = Project::with_config(&root, config)
+                .unwrap()
+                .diagnostics_baseline()
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.path, root.join("baseline.json"));
+            assert_eq!(resolved.scope.source_root, "src/cf");
+            return;
+        }
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("project");
+        let other = dir.path().join("other");
+        write_configuration_xml(&root.join("src/cf"), "<xml/>");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir(&other).unwrap();
+        fs::write(
+            root.join("config/project.toml"),
+            "[source]\nroot = \"src/cf\"\n[diagnostics.baseline]\npath = \"../baseline.json\"\n",
+        )
+        .unwrap();
+
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("tests::diagnostics_baseline_scope_is_independent_of_working_directory")
+            .arg("--nocapture")
+            .current_dir(other)
+            .env(ROOT_ENV, &root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn diagnostics_baseline_scope_rejects_external_roots_and_target() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        let outside = parent.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        write_configuration_xml(&outside.join("cf"), "<xml/>");
+
+        let external_source = ProjectConfig {
+            diagnostics: baseline_config("baseline.json"),
+            configuration_root: Some("../outside/cf".to_owned()),
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let error = Project::with_config(&root, external_source)
+            .unwrap()
+            .diagnostics_baseline()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::OutsideProject(_)));
+
+        write_configuration_xml(&root.join("src/cf"), "<xml/>");
+        let external_target = ProjectConfig {
+            diagnostics: baseline_config(outside.join("baseline.json").to_str().unwrap()),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let error = Project::with_config(&root, external_target)
+            .unwrap()
+            .diagnostics_baseline()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::OutsideProject(_)));
+    }
+
+    #[test]
+    fn diagnostics_baseline_scope_rejects_root_collision() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        let config = ProjectConfig {
+            diagnostics: baseline_config("baseline.json"),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![structured("same", "src/cf", &[])]),
+            ..Default::default()
+        };
+        let error =
+            Project::with_config(dir.path(), config).unwrap().diagnostics_baseline().unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::PathCollision(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diagnostics_baseline_scope_rejects_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        fs::write(dir.path().join("real.json"), "{}").unwrap();
+        symlink("real.json", dir.path().join("baseline.json")).unwrap();
+        let config = ProjectConfig {
+            diagnostics: baseline_config("baseline.json"),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let error =
+            Project::with_config(dir.path(), config).unwrap().diagnostics_baseline().unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::Symlink(_)));
+    }
+
+    fn baseline_config(path: &str) -> ProjectDiagnosticsConfig {
+        ProjectDiagnosticsConfig {
+            baseline: Some(DiagnosticsBaselineConfig { path: path.to_owned() }),
+            ..Default::default()
+        }
     }
 
     #[test]

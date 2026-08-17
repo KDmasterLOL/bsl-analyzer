@@ -29,6 +29,7 @@ pub struct ChangeOutcome {
     /// A project config file (`bsl-analyzer.toml` / `.json`) changed, triggering
     /// a full project reload.
     pub config_file_changed: bool,
+    pub diagnostics_baseline_changed: bool,
     /// A change was applied that can affect the analysis of *other* documents — a
     /// metadata XML edit or any `.bsl` source content (add / modify / delete). Open
     /// documents must be re-analyzed even though their own buffers did not change
@@ -84,9 +85,13 @@ impl GlobalState {
         );
 
         let configs_snapshot = ide_db::metadata::WorkspaceConfigsSnapshot::from_project(&project);
+        let diagnostics_baseline =
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(&project);
+        let diagnostics_baseline_path = diagnostics_baseline.path().map(Path::to_path_buf);
 
         self.workspace_root = Some(root.clone());
         self.project = Some(project);
+        self.install_diagnostics_baseline(diagnostics_baseline);
 
         {
             self.analysis_host.request_cancellation();
@@ -111,12 +116,15 @@ impl GlobalState {
 
         self.vfs_progress_config_version += 1;
 
-        let config_files: Vec<paths::AbsPathBuf> = project_model::CONFIG_FILE_NAMES
+        let mut config_files: Vec<paths::AbsPathBuf> = project_model::CONFIG_FILE_NAMES
             .iter()
             .map(|name| root.join(name))
             .filter(|p| p.exists())
             .map(paths::AbsPathBuf::assert_utf8)
             .collect();
+        if let Some(path) = diagnostics_baseline_path {
+            config_files.push(paths::AbsPathBuf::assert_utf8(path));
+        }
 
         let mut include = vec![paths::AbsPathBuf::assert_utf8(source_path)];
 
@@ -179,6 +187,8 @@ impl GlobalState {
 
         self.analysis_host.request_cancellation();
 
+        let diagnostics_baseline_path = self.diagnostics_baseline.path().map(Path::to_path_buf);
+
         let db = self.analysis_host.raw_database_mut();
         let source_root_id = base_db::SourceRootId(0);
 
@@ -187,6 +197,7 @@ impl GlobalState {
         let mut file_set = source_root.file_set().clone();
         let mut file_set_modified = false;
         let mut config_file_changed = false;
+        let mut diagnostics_baseline_changed = false;
         let mut bsl_source_changed = false;
         let mut call_hierarchy_body_edits = Vec::new();
         let mut call_hierarchy_structural_change = false;
@@ -206,6 +217,15 @@ impl GlobalState {
                 vfs::Change::Create(content, _) | vfs::Change::Modify(content, _) => Some(content),
                 vfs::Change::Delete => None,
             };
+
+            let is_diagnostics_baseline = {
+                let vfs = self.vfs.read();
+                diagnostics_baseline_path.as_deref() == Some(vfs.file_path(file.file_id).as_path())
+            };
+            if is_diagnostics_baseline {
+                diagnostics_baseline_changed = true;
+                continue;
+            }
 
             db.set_file_source_root(file.file_id, source_root_id);
 
@@ -323,6 +343,10 @@ impl GlobalState {
             }
         }
 
+        if diagnostics_baseline_changed && !suppress_metadata_bump {
+            self.reload_diagnostics_baseline();
+        }
+
         if !changed_metadata_paths.is_empty() {
             if suppress_metadata_bump {
                 tracing::debug!("suppressing metadata revision bump during initial sync");
@@ -379,8 +403,39 @@ impl GlobalState {
         let metadata_changed = !suppress_metadata_bump && !changed_metadata_paths.is_empty();
         ChangeOutcome {
             config_file_changed: !suppress_metadata_bump && config_file_changed,
-            affects_open_documents: bsl_source_changed || metadata_changed,
+            diagnostics_baseline_changed: !suppress_metadata_bump && diagnostics_baseline_changed,
+            affects_open_documents: bsl_source_changed
+                || metadata_changed
+                || (!suppress_metadata_bump && diagnostics_baseline_changed),
         }
+    }
+
+    fn install_diagnostics_baseline(
+        &mut self,
+        snapshot: ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot,
+    ) {
+        if let ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Error {
+            code,
+            detail,
+            epoch,
+            ..
+        } = &snapshot
+        {
+            if self.diagnostics_baseline_notified_epoch.as_deref() != Some(epoch) {
+                self.show_error_message(format!(
+                    "bsl-analyzer: diagnostics baseline {code}: {detail}"
+                ));
+                self.diagnostics_baseline_notified_epoch = Some(epoch.clone());
+            }
+        }
+        self.diagnostics_baseline = std::sync::Arc::new(snapshot);
+    }
+
+    fn reload_diagnostics_baseline(&mut self) {
+        let Some(project) = self.project.as_ref() else { return };
+        self.install_diagnostics_baseline(
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(project),
+        );
     }
 
     /// Handle a removed directory subtree (delivered when a watch backend reports
@@ -747,4 +802,118 @@ fn path_in_workspace(
         return true;
     }
     open_paths.contains(path)
+}
+
+#[cfg(test)]
+mod diagnostics_baseline_tests {
+    use super::*;
+    use ide::diagnostics_baseline::{
+        diagnostics_baseline_json, DiagnosticsBaseline, DiagnosticsBaselineScope,
+        DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+    };
+    use std::io::Write;
+    use std::sync::Arc;
+
+    #[test]
+    fn lsp_diagnostics_baseline_reload_handles_write_replace_and_delete_without_replacing_salsa() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let baseline_path = root.join("baseline.json");
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            "[diagnostics.baseline]\npath = \"baseline.json\"\n",
+        )
+        .unwrap();
+        let baseline = DiagnosticsBaseline {
+            schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            diagnostics: vec![],
+        };
+        let bytes = diagnostics_baseline_json(&baseline).unwrap();
+        std::fs::write(&baseline_path, &bytes).unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.to_path_buf()).unwrap();
+        let database = std::ptr::from_ref(state.analysis_host.raw_database());
+        let first_epoch = state.diagnostics_baseline.epoch().to_owned();
+
+        let mut changed = bytes.clone();
+        changed.push(b'\n');
+        std::fs::write(&baseline_path, &changed).unwrap();
+        state.vfs.write().set_file_contents(
+            VfsPath::new(baseline_path.clone()),
+            Some(Arc::from(String::from_utf8(changed).unwrap())),
+        );
+        assert!(state.process_changes(false).affects_open_documents);
+        assert_ne!(state.diagnostics_baseline.epoch(), first_epoch);
+        assert_eq!(std::ptr::from_ref(state.analysis_host.raw_database()), database);
+
+        let previous_epoch = state.diagnostics_baseline.epoch().to_owned();
+        let mut replacement = tempfile::NamedTempFile::new_in(root).unwrap();
+        replacement.write_all(b" \n").unwrap();
+        replacement.write_all(&bytes).unwrap();
+        replacement.persist(&baseline_path).unwrap();
+        let replacement_text = std::fs::read_to_string(&baseline_path).unwrap();
+        state.vfs.write().set_file_contents(
+            VfsPath::new(baseline_path.clone()),
+            Some(Arc::from(replacement_text)),
+        );
+        state.process_changes(false);
+        assert_ne!(state.diagnostics_baseline.epoch(), previous_epoch);
+        assert_eq!(std::ptr::from_ref(state.analysis_host.raw_database()), database);
+
+        std::fs::remove_file(&baseline_path).unwrap();
+        state.vfs.write().set_file_contents(VfsPath::new(baseline_path), None);
+        state.process_changes(false);
+        assert!(matches!(
+            &*state.diagnostics_baseline,
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Error {
+                code,
+                ..
+            } if code == "missing"
+        ));
+        assert_eq!(std::ptr::from_ref(state.analysis_host.raw_database()), database);
+    }
+
+    #[test]
+    fn lsp_diagnostics_baseline_error_notifies_once_per_fingerprint_and_recovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let baseline_path = root.join("baseline.json");
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            "[diagnostics.baseline]\npath = \"baseline.json\"\n",
+        )
+        .unwrap();
+        std::fs::write(&baseline_path, "{broken").unwrap();
+
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.to_path_buf()).unwrap();
+        assert!(matches!(receiver.recv().unwrap(), lsp_server::Message::Notification(_)));
+
+        state.reload_diagnostics_baseline();
+        assert!(receiver.try_recv().is_err(), "same fingerprint must not notify twice");
+
+        std::fs::write(&baseline_path, "{different").unwrap();
+        state.reload_diagnostics_baseline();
+        assert!(matches!(receiver.recv().unwrap(), lsp_server::Message::Notification(_)));
+
+        let valid = diagnostics_baseline_json(&DiagnosticsBaseline {
+            schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            diagnostics: vec![],
+        })
+        .unwrap();
+        std::fs::write(&baseline_path, valid).unwrap();
+        state.reload_diagnostics_baseline();
+        assert!(matches!(
+            &*state.diagnostics_baseline,
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Ready { .. }
+        ));
+        assert!(receiver.try_recv().is_err(), "recovery is silent");
+    }
 }
