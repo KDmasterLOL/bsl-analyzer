@@ -18,10 +18,15 @@ use ide::graph_index::{mdo_files_key, MdoFiles};
 /// that defines it. The collision is decided on the FOLDED key, because that is
 /// the only key on which a base `товары` and an extension `Товары` meet at all.
 ///
-/// Only families whose kind exists as an [`MdoType`] are collected: the graph
-/// can emit an `Mdo` node for no other kind, so a defined type or a scheduled
-/// job has nothing to key on. A kind that is discovered but never emitted costs
-/// only a map entry nobody reads.
+/// Collected here is what `bsl_metadata` can discover AND the graph can key: a
+/// defined type or a scheduled job is discovered but has no [`MdoType`], so no
+/// `Mdo` node ever names it.
+///
+/// The reverse gap is real and is not covered: `MdoType::ExternalDataSource`
+/// exists and the graph does emit nodes for it, but nothing discovers that
+/// family, so those nodes keep no file. They are not published by the resident's
+/// listing either, so nothing is split in two — the object is simply reached by
+/// its durable id alone, exactly as it was before this map existed.
 /// The roots are taken CANONICALIZED, because the tree this reads is the scanned
 /// universe and the universe stores canonical paths. A root spelled through a
 /// symlink would share no prefix with them and discover nothing at all.

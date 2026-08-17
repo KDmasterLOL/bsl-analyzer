@@ -58,17 +58,19 @@ impl DirTree for RealFs {
         Some(if meta.is_dir() { EntryKind::Dir } else { EntryKind::File })
     }
 
+    /// The kind is asked of the TARGET, not of the link: a dump may place an
+    /// object's directory behind a symlink, and `DirEntry::file_type` — which
+    /// stops at the link — would call it a file and send the object down the
+    /// branch that has no sidecars. Costs one stat per entry, which is what the
+    /// `is_dir` probes this replaced already cost.
     fn entries(&self, dir: &Path) -> Vec<TreeEntry> {
         let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
         entries
             .flatten()
-            .filter_map(|entry| {
-                let kind = match entry.file_type() {
-                    Ok(file_type) if file_type.is_dir() => EntryKind::Dir,
-                    Ok(_) => EntryKind::File,
-                    Err(_) => return None,
-                };
-                Some(TreeEntry { path: entry.path(), kind })
+            .map(|entry| {
+                let path = entry.path();
+                let kind = if path.is_dir() { EntryKind::Dir } else { EntryKind::File };
+                TreeEntry { path, kind }
             })
             .collect()
     }
@@ -78,9 +80,15 @@ impl DirTree for RealFs {
 ///
 /// Only files are listed anywhere, so a directory exists here exactly when some
 /// listed file lies under it. A directory holding nothing that was scanned is
-/// therefore invisible, and that is the one way this source differs from
-/// [`RealFs`] on the same tree. The layout rules are written not to depend on
-/// bare directory existence for that reason.
+/// therefore invisible; the layout rules are written not to depend on bare
+/// directory existence for that reason.
+///
+/// It also differs in CASE. This source matches byte-exactly, while [`RealFs`]
+/// inherits the filesystem's own answer: where that filesystem folds case, an
+/// exact probe for a constructed spelling hits, and the probe returns the
+/// spelling it constructed rather than the one on disk. Two sources reading one
+/// such tree then name a file differently — the constructed spelling here, the
+/// real one there.
 pub struct PathSetTree {
     children: HashMap<PathBuf, Vec<TreeEntry>>,
 }

@@ -31,7 +31,7 @@ pub fn find_child_ci_in(tree: &dyn DirTree, dir: &Path, conventional: &str) -> O
         return Some(exact);
     }
     for entry in tree.entries(dir) {
-        let name = entry.path.file_name()?.to_owned();
+        let Some(name) = entry.path.file_name().map(|n| n.to_owned()) else { continue };
         if name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(conventional)) {
             return Some(dir.join(name));
         }

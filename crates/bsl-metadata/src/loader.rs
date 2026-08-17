@@ -3191,6 +3191,24 @@ mod tree_source_tests {
         );
     }
 
+    /// A dump may place an object's directory behind a symlink. The kind has to
+    /// be the TARGET's, or the object takes the branch that has no sidecar and
+    /// its `Ext/Predefined.xml` is silently dropped — while the loader beside
+    /// this one, which follows the link, still parses it.
+    #[cfg(unix)]
+    #[test]
+    fn an_object_behind_a_directory_symlink_keeps_its_predefined_sidecar() {
+        let root = temp_root("symlink");
+        let target = root.join("общее/Товары");
+        write(&target.join("Ext/Predefined.xml"), "<PredefinedItems/>");
+        write(&root.join("Catalogs/Товары.xml"), "<MetaDataObject/>");
+        std::os::unix::fs::symlink(&target, root.join("Catalogs/Товары")).unwrap();
+
+        let found = discover_metadata_structure(&root, &RealFs);
+        let object = found.iter().find(|mdo| mdo.name == "Товары").expect("the catalog is listed");
+        assert!(object.predefined.is_some(), "the sidecar behind the link was dropped: {object:?}",);
+    }
+
     /// The protected module is found through this input on the real filesystem
     /// too — the one above cannot say so, because there the directory exists.
     #[test]
