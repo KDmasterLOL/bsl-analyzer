@@ -19,11 +19,15 @@ use stdx::case::CaseExt;
 use syntax::TextRange;
 use vfs::FileId;
 
-/// The one source root the server registers. `BSL_SOURCE_ROOT` *is*
-/// `SourceRootId(0)` (`base-db/src/input.rs`), and extension sources are
-/// registered into it alongside the base configuration — there is no second
-/// root to walk.
+/// The source root holding `.bsl`. Extension sources are registered into it
+/// alongside the base configuration, so one root covers every module.
 const ROOT: SourceRootId = BSL_SOURCE_ROOT;
+
+/// The source root holding metadata XML. A metadata object's place is its XML,
+/// and that file is deliberately kept out of [`ROOT`] so the BSL iterators never
+/// walk it — which also means a path lookup confined to [`ROOT`] can never place
+/// an object of metadata.
+const METADATA_ROOT: SourceRootId = ide_db::base_db::METADATA_SOURCE_ROOT;
 
 /// Declare a closed vocabulary ONCE: the variants, their wire codes and the
 /// list of them all come out of a single table.
@@ -343,6 +347,17 @@ impl NameCandidate {
             || self.place.is_some()
     }
 
+    /// Which durable id an entity answers with when the graph holds it under
+    /// more than one.
+    ///
+    /// A common module listed in a subsystem's `<Content>` gets an `mdo` node
+    /// beside its module node. The module node is the callable identity that
+    /// graph traversal follows; the membership endpoint yields to it, and says
+    /// so here rather than by whichever provider happened to arrive first.
+    fn graph_id_rank(id: &str) -> u8 {
+        u8::from(id.starts_with("mdo/CommonModule/"))
+    }
+
     /// Take from another row of the SAME thing every address this one lacks.
     ///
     /// Only gaps are filled: the row that got here first sorted better, so its
@@ -350,7 +365,16 @@ impl NameCandidate {
     /// the one a consumer was going to get anyway.
     fn absorb_addresses(&mut self, other: NameCandidate) {
         self.symbol = self.symbol.take().or(other.symbol);
-        self.graph_id = self.graph_id.take().or(other.graph_id);
+        self.graph_id = match (self.graph_id.take(), other.graph_id) {
+            (Some(mine), Some(theirs)) => {
+                Some(if Self::graph_id_rank(&theirs) < Self::graph_id_rank(&mine) {
+                    theirs
+                } else {
+                    mine
+                })
+            }
+            (mine, theirs) => mine.or(theirs),
+        };
         self.platform_ref = self.platform_ref.take().or(other.platform_ref);
         // A place with ranges says more than a whole-file one, and the graph
         // hands over the file alone.
@@ -656,27 +680,36 @@ const MODULE_MEMBERS: ProviderShape = ProviderShape {
 /// answer into a panic.
 struct PathPlaces<'a> {
     db: &'a RootDatabaseImpl,
+    /// A `.bsl` lives in [`ROOT`], a metadata XML in [`METADATA_ROOT`]. Both are
+    /// searched: confining the lookup to one of them places half the answers and
+    /// silently leaves the other half unaddressed.
+    roots: [RootPlaces; 2],
+}
+
+/// One root's lazily-resolved path lookup.
+struct RootPlaces {
+    id: SourceRootId,
     /// The root input, not the root itself: it is a handle, while a `SourceRoot`
     /// holds the whole file set and cloning one to keep it here would copy every
     /// path in the workspace.
-    root: Option<Option<ide_db::base_db::SourceRootInput>>,
+    input: Option<Option<ide_db::base_db::SourceRootInput>>,
     normalized: Option<rustc_hash::FxHashMap<String, FileId>>,
 }
 
-impl<'a> PathPlaces<'a> {
-    fn new(db: &'a RootDatabaseImpl) -> Self {
-        Self { db, root: None, normalized: None }
+impl RootPlaces {
+    fn new(id: SourceRootId) -> Self {
+        Self { id, input: None, normalized: None }
     }
 
-    fn of(&mut self, path: &str) -> Option<NamePlace> {
-        let db = self.db;
-        let root = (*self.root.get_or_insert_with(|| db.try_source_root_input(ROOT)))?;
+    fn file_for(&mut self, db: &RootDatabaseImpl, path: &str) -> Option<FileId> {
+        let id = self.id;
+        let root = (*self.input.get_or_insert_with(|| db.try_source_root_input(id)))?;
         let file_set = root.root(db).file_set();
 
         if let Some(&file_id) =
             file_set.file_for_path(&vfs::VfsPath::new(std::path::PathBuf::from(path)))
         {
-            return Some(NamePlace::whole_file(file_id));
+            return Some(file_id);
         }
         let table = self.normalized.get_or_insert_with(|| {
             file_set
@@ -687,7 +720,18 @@ impl<'a> PathPlaces<'a> {
                 })
                 .collect()
         });
-        table.get(&path.replace('\\', "/")).copied().map(NamePlace::whole_file)
+        table.get(&path.replace('\\', "/")).copied()
+    }
+}
+
+impl<'a> PathPlaces<'a> {
+    fn new(db: &'a RootDatabaseImpl) -> Self {
+        Self { db, roots: [RootPlaces::new(ROOT), RootPlaces::new(METADATA_ROOT)] }
+    }
+
+    fn of(&mut self, path: &str) -> Option<NamePlace> {
+        let db = self.db;
+        self.roots.iter_mut().find_map(|root| root.file_for(db, path)).map(NamePlace::whole_file)
     }
 }
 
@@ -1168,7 +1212,7 @@ fn method_symbol(key: &ModuleKey, method: &str) -> String {
 mod tests {
     use super::*;
     use ide_db::base_db::SourceRoot;
-    use ide_db::metadata::{CommonModuleEntry, MetadataListingData};
+    use ide_db::metadata::{CommonModuleEntry, MdoEntry, MetadataListingData};
     use vfs::{file_set::FileSet, VfsPath};
 
     fn db_with_files(files: &[(&str, &str)]) -> RootDatabaseImpl {
@@ -1183,6 +1227,45 @@ mod tests {
             db.set_file_source_root(file_id, ROOT);
             db.set_file_text(file_id, text);
         }
+        db
+    }
+
+    /// A stand where an object's XML lives where it really lives — the metadata
+    /// root — and a base config root's listing publishes it. `db_with_files`
+    /// registers every path under `BSL_SOURCE_ROOT`, where a metadata path
+    /// resolves by accident, so a test built on it never reaches the metadata
+    /// root at all.
+    fn db_with_metadata_object(
+        root: &str,
+        kind: bsl_metadata::MdoType,
+        name: &str,
+        xml: &str,
+    ) -> RootDatabaseImpl {
+        let mut db = RootDatabaseImpl::default();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new(xml));
+        db.set_source_root(
+            ide_db::base_db::METADATA_SOURCE_ROOT,
+            SourceRoot::new_metadata(file_set),
+        );
+        db.set_file_source_root(file_id, ide_db::base_db::METADATA_SOURCE_ROOT);
+        db.set_file_text(file_id, "<MetaDataObject/>");
+
+        let root_path = std::path::PathBuf::from(root);
+        db.set_all_config_paths(vec![(None, root_path.clone())]);
+        db.set_metadata_listing(
+            &root_path.to_string_lossy(),
+            MetadataListingData {
+                entries: vec![MdoEntry {
+                    kind,
+                    name: name.to_string(),
+                    main: file_id,
+                    predefined: None,
+                }],
+                ..MetadataListingData::default()
+            },
+        );
         db
     }
 
@@ -1620,6 +1703,81 @@ mod tests {
         assert_eq!(merged.graph_id.as_deref(), Some("module/common/Настройки"));
         assert_eq!(found.total, 1, "a folded pair is one answer, not two");
         assert!(found.total_exact);
+    }
+
+    /// A metadata object lives in an XML, and that XML is registered under the
+    /// metadata root — not the `.bsl` root. A stand that puts it in
+    /// `BSL_SOURCE_ROOT` resolves the path today and would stay green through
+    /// every change this test exists to guard.
+    #[test]
+    fn a_metadata_object_known_to_both_sides_is_one_candidate() {
+        let xml = "/ws/src/cf/Catalogs/Товары/Товары.xml";
+        let db =
+            db_with_metadata_object("/ws/src/cf", bsl_metadata::MdoType::Catalog, "Товары", xml);
+
+        let mut node = NameCandidate::new(
+            "Товары",
+            NameCategory::MetadataObject,
+            NameMatchTier::Name,
+            ProviderId::Graph,
+        )
+        .with_source_path(xml);
+        node.graph_id = Some("mdo/Catalog/Товары".to_string());
+        let graph = FakeSource::answering(ProviderId::Graph, vec![node], 1);
+
+        let found = lookup_names(
+            &db,
+            &NameQuery::new("Товары", 20).with_categories(&[NameCategory::MetadataObject]),
+            &[&graph],
+        );
+
+        assert_eq!(found.candidates.len(), 1, "{:?}", displays(&found));
+        let merged = &found.candidates[0];
+        assert!(merged.place.is_some(), "the XML resolved into a place");
+        assert_eq!(merged.graph_id.as_deref(), Some("mdo/Catalog/Товары"));
+    }
+
+    /// A common module named in a subsystem's `<Content>` reaches the graph
+    /// twice: as the module it is, and as the membership edge's endpoint. Both
+    /// land on the file the module is written in, so they fold — and the id the
+    /// answer keeps has to be the callable one, whichever provider order the
+    /// ranker happened to produce.
+    #[test]
+    fn a_common_module_answers_with_its_module_id_not_its_membership_endpoint() {
+        for (first, second) in [
+            ("module/common/Настройки", "mdo/CommonModule/Настройки"),
+            ("mdo/CommonModule/Настройки", "module/common/Настройки"),
+        ] {
+            let db =
+                build(&[common_module("Настройки", "Процедура Ф() Экспорт\nКонецПроцедуры\n")]);
+            let path = "/ws/CommonModules/Настройки/Ext/Module.bsl";
+            let node = |id: &str| {
+                let mut candidate = NameCandidate::new(
+                    "Настройки",
+                    NameCategory::CommonModule,
+                    NameMatchTier::Name,
+                    ProviderId::Graph,
+                )
+                .with_source_path(path);
+                candidate.graph_id = Some(id.to_string());
+                candidate
+            };
+            let graph =
+                FakeSource::answering(ProviderId::Graph, vec![node(first), node(second)], 2);
+
+            let found = lookup_names(
+                &db,
+                &NameQuery::new("Настройки", 20).with_categories(&[NameCategory::CommonModule]),
+                &[&graph],
+            );
+
+            assert_eq!(found.candidates.len(), 1, "{:?}", displays(&found));
+            assert_eq!(
+                found.candidates[0].graph_id.as_deref(),
+                Some("module/common/Настройки"),
+                "delivered as {first} then {second}",
+            );
+        }
     }
 
     /// The graph holds a node for every method; `module_members` publishes only

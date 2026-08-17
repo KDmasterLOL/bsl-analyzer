@@ -101,12 +101,18 @@ const NODE_COLUMNS: &str =
 /// freshly opened build) flips the range arm to a full `nodes` scan + `edges_from` probe,
 /// i.e. O(nodes). The hint makes the O(inbound-edges) plan a guarantee, not a planner guess.
 /// Params: `?1` = the `mdo/…` node id, `?2`/`?3` = the half-open `attribute/…` id range bounds.
+///
+/// The source has to be a node with BSL source, and that is asked of its KIND.
+/// A non-null `file` used to imply it, back when only methods and modules
+/// carried one; an object carries its own file now, and a `contains` edge would
+/// otherwise report an object's XML as a file that references it.
 const REFERENCING_FILES_SQL: &str = "\
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id = ?1 \
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL AND e.to_id = ?1 \
     UNION \
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id >= ?2 AND e.to_id < ?3";
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL \
+       AND e.to_id >= ?2 AND e.to_id < ?3";
 
 fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     Ok(StoredNode {
@@ -188,6 +194,11 @@ fn node_category(kind: &str, id: &str) -> ide::NameCategory {
     match kind {
         "module" if id.starts_with("module/common/") => ide::NameCategory::CommonModule,
         "module" => ide::NameCategory::Module,
+        // A subsystem's `<Content>` lists common modules, so the graph holds an
+        // `mdo` node for one. It is the same entity the resident publishes as a
+        // common module, and answering `metadata_object` here would leave the
+        // two rows unable to meet.
+        "mdo" if id.starts_with("mdo/CommonModule/") => ide::NameCategory::CommonModule,
         "mdo" => ide::NameCategory::MetadataObject,
         "attribute" | "tabular_section" => ide::NameCategory::MetadataMember,
         "form" | "form_item" | "form_attribute" => ide::NameCategory::Form,
@@ -1421,6 +1432,97 @@ mod tests {
 
         // Then: a graph from the prior projection schema is rejected for rebuilding.
         assert!(result.is_err(), "prior projection graphs must be rebuilt");
+    }
+
+    /// A subsystem's `<Content>` puts a common module into the graph as an `mdo`
+    /// node. It is the same entity the resident publishes as a common module, and
+    /// only a shared category lets the two rows meet.
+    #[test]
+    fn a_common_module_reached_through_a_subsystem_keeps_its_own_category() {
+        assert_eq!(
+            node_category("mdo", "mdo/CommonModule/Настройки"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject,);
+    }
+
+    /// `file` says where a node is defined, not that it holds BSL source. An
+    /// object carries one now, and the reverse lookup must still answer with the
+    /// files that REFERENCE the object — never with the object's own XML, which a
+    /// `contains` edge would otherwise hand back.
+    #[test]
+    fn an_objects_own_file_is_not_a_file_that_references_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer
+            .write_nodes(&[
+                ide::graph_index::NodeRow {
+                    id: "method/common/Вызов/Читать".to_string(),
+                    kind: "method",
+                    name: "Читать".to_string(),
+                    qualified: "ОбщийМодуль.Вызов.Читать".to_string(),
+                    module: Some("ОбщийМодуль.Вызов".to_string()),
+                    file: Some("CommonModules/Вызов/Ext/Module.bsl".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: Some(true),
+                    addressable: true,
+                },
+                ide::graph_index::NodeRow {
+                    id: "mdo/Catalog/Товары".to_string(),
+                    kind: "mdo",
+                    name: "Товары".to_string(),
+                    qualified: "Справочник.Товары".to_string(),
+                    module: None,
+                    file: Some("Catalogs/Товары.xml".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: None,
+                    addressable: true,
+                },
+            ])
+            .unwrap();
+        writer
+            .write_edges(&[
+                ide::graph_index::EdgeRow {
+                    from_id: "method/common/Вызов/Читать".to_string(),
+                    to_id: "mdo/Catalog/Товары".to_string(),
+                    kind: "read",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+                // The object contains its own attribute, and the edge points back
+                // at the object exactly as the catalog pass writes it.
+                ide::graph_index::EdgeRow {
+                    from_id: "mdo/Catalog/Товары".to_string(),
+                    to_id: "attribute/Catalog/Товары/Код".to_string(),
+                    kind: "contains",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        let db = GraphDb::open(&path).unwrap();
+        assert_eq!(
+            db.referencing_files("mdo/Catalog/Товары").unwrap(),
+            vec!["CommonModules/Вызов/Ext/Module.bsl".to_string()],
+        );
     }
 
     #[test]

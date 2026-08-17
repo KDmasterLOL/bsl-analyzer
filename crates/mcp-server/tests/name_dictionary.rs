@@ -369,12 +369,25 @@ async fn a_metadata_object_arrives_with_its_xml_and_not_an_excuse() {
     let ws = stage_workspace();
     let client = workspace_client(ws.path(), true).await;
     wait_until_resident_is_ready(&client).await;
+    // Waiting for the resident alone leaves the graph silent — the stand next
+    // door asserts exactly that. Without this wait the count below is taken over
+    // an answer the graph never contributed to, so it can neither see the split
+    // nor confirm the merge.
+    wait_until_graph_is_ready(&client).await;
 
     let body = resolve(&client, "Справочник1").await;
-    let object = candidates(&body)
-        .iter()
-        .find(|c| c["category"] == "metadata_object")
-        .unwrap_or_else(|| panic!("no metadata object in the answer: {body}"));
+    let objects: Vec<_> =
+        candidates(&body).iter().filter(|c| c["category"] == "metadata_object").collect();
+    assert_eq!(
+        objects.len(),
+        1,
+        "one object, one candidate — its place and its durable id belong in the same row: {body}",
+    );
+    let object = objects[0];
+    assert!(
+        object["address"]["graph_id"].is_string(),
+        "the merged row kept the graph id: {object}",
+    );
 
     let address = &object["address"];
     assert!(

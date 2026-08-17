@@ -74,22 +74,48 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
     let discoveries: Vec<RootDiscovery> = config_paths
         .iter()
         .map(|(_, root_path)| {
-            let mut mdos = bsl_metadata::discover_metadata_structure(root_path);
-            mdos.extend(bsl_metadata::discover_register_structure(root_path));
+            let mut mdos =
+                bsl_metadata::discover_metadata_structure(root_path, &bsl_conventions::RealFs);
+            mdos.extend(bsl_metadata::discover_register_structure(
+                root_path,
+                &bsl_conventions::RealFs,
+            ));
             RootDiscovery {
                 root_string: root_path.to_string_lossy().to_string(),
                 mdos,
-                defined_types: bsl_metadata::discover_defined_type_structure(root_path),
-                common_modules: bsl_metadata::discover_common_module_structure(root_path),
-                event_subscriptions: bsl_metadata::discover_event_subscription_structure(root_path),
-                scheduled_jobs: bsl_metadata::discover_scheduled_job_structure(root_path),
-                roles: bsl_metadata::discover_role_structure(root_path),
-                http_services: bsl_metadata::discover_http_service_structure(root_path),
-                web_services: bsl_metadata::discover_web_service_structure(root_path),
+                defined_types: bsl_metadata::discover_defined_type_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
+                common_modules: bsl_metadata::discover_common_module_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
+                event_subscriptions: bsl_metadata::discover_event_subscription_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
+                scheduled_jobs: bsl_metadata::discover_scheduled_job_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
+                roles: bsl_metadata::discover_role_structure(root_path, &bsl_conventions::RealFs),
+                http_services: bsl_metadata::discover_http_service_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
+                web_services: bsl_metadata::discover_web_service_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
                 integration_services: bsl_metadata::discover_integration_service_structure(
                     root_path,
+                    &bsl_conventions::RealFs,
                 ),
-                subsystems: bsl_metadata::discover_subsystem_structure(root_path),
+                subsystems: bsl_metadata::discover_subsystem_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                ),
             }
         })
         .collect();
@@ -421,8 +447,10 @@ pub fn refresh_metadata_substrate(
 
     vfs.with_write(|vfs| {
         for root in &affected {
-            let mut discovered = bsl_metadata::discover_metadata_structure(root);
-            discovered.extend(bsl_metadata::discover_register_structure(root));
+            let mut discovered =
+                bsl_metadata::discover_metadata_structure(root, &bsl_conventions::RealFs);
+            discovered
+                .extend(bsl_metadata::discover_register_structure(root, &bsl_conventions::RealFs));
             let mut entries = Vec::with_capacity(discovered.len());
             for d in discovered {
                 let Some(main) = enroll_refresh(
@@ -448,7 +476,7 @@ pub fn refresh_metadata_substrate(
                 entries.push(MdoEntry { kind: d.mdo_type, name: d.name, main, predefined });
             }
             let mut defined_types = Vec::new();
-            for d in bsl_metadata::discover_defined_type_structure(root) {
+            for d in bsl_metadata::discover_defined_type_structure(root, &bsl_conventions::RealFs) {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -462,7 +490,8 @@ pub fn refresh_metadata_substrate(
                 defined_types.push(DefinedTypeEntry { name: d.name, main });
             }
             let mut common_modules = Vec::new();
-            for d in bsl_metadata::discover_common_module_structure(root) {
+            for d in bsl_metadata::discover_common_module_structure(root, &bsl_conventions::RealFs)
+            {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -496,7 +525,9 @@ pub fn refresh_metadata_substrate(
                 });
             }
             let mut event_subscriptions = Vec::new();
-            for d in bsl_metadata::discover_event_subscription_structure(root) {
+            for d in
+                bsl_metadata::discover_event_subscription_structure(root, &bsl_conventions::RealFs)
+            {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -510,7 +541,8 @@ pub fn refresh_metadata_substrate(
                 event_subscriptions.push(EventSubscriptionEntry { name: d.name, main });
             }
             let mut scheduled_jobs = Vec::new();
-            for d in bsl_metadata::discover_scheduled_job_structure(root) {
+            for d in bsl_metadata::discover_scheduled_job_structure(root, &bsl_conventions::RealFs)
+            {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -524,7 +556,7 @@ pub fn refresh_metadata_substrate(
                 scheduled_jobs.push(ScheduledJobEntry { name: d.name, main });
             }
             let mut roles = Vec::new();
-            for d in bsl_metadata::discover_role_structure(root) {
+            for d in bsl_metadata::discover_role_structure(root, &bsl_conventions::RealFs) {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -548,7 +580,7 @@ pub fn refresh_metadata_substrate(
                 roles.push(RoleEntry { name: d.name, main, rights });
             }
             let mut http_services = Vec::new();
-            for d in bsl_metadata::discover_http_service_structure(root) {
+            for d in bsl_metadata::discover_http_service_structure(root, &bsl_conventions::RealFs) {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -564,7 +596,7 @@ pub fn refresh_metadata_substrate(
                 http_services.push(HTTPServiceEntry { name: d.name, main, module_file });
             }
             let mut web_services = Vec::new();
-            for d in bsl_metadata::discover_web_service_structure(root) {
+            for d in bsl_metadata::discover_web_service_structure(root, &bsl_conventions::RealFs) {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -580,7 +612,9 @@ pub fn refresh_metadata_substrate(
                 web_services.push(WebServiceEntry { name: d.name, main, module_file });
             }
             let mut integration_services = Vec::new();
-            for d in bsl_metadata::discover_integration_service_structure(root) {
+            for d in
+                bsl_metadata::discover_integration_service_structure(root, &bsl_conventions::RealFs)
+            {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,
@@ -600,7 +634,7 @@ pub fn refresh_metadata_substrate(
                 });
             }
             let mut subsystems = Vec::new();
-            for d in bsl_metadata::discover_subsystem_structure(root) {
+            for d in bsl_metadata::discover_subsystem_structure(root, &bsl_conventions::RealFs) {
                 let Some(main) = enroll_refresh(
                     vfs,
                     &d.main,

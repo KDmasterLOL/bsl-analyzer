@@ -2050,7 +2050,10 @@ pub struct NodeRow {
     pub name: String,
     pub qualified: String,
     pub module: Option<String>,
-    /// Workspace path for source-on-demand (method/module nodes only).
+    /// Where the node is defined: a module's `.bsl`, a metadata object's own
+    /// file. Absent for the kinds nothing discovers a file for (attributes,
+    /// forms, an object whose family has no discovery). Never a predicate for
+    /// "this node has BSL source" — ask `kind` for that.
     pub file: Option<String>,
     /// Byte offset of the declaration name token — the start of the signature.
     pub name_offset: Option<u32>,
@@ -2112,7 +2115,10 @@ pub fn call_hierarchy_method_digest(
     paths: &FxHashMap<FileId, String>,
     workspace_root: Option<&Path>,
 ) -> MethodCallDigest {
-    let encoder = GraphRowEncoder::new(graph_index, paths, workspace_root);
+    // Method ids only; this digest never encodes a row, so it has no object to
+    // place.
+    let no_objects = MdoFiles::default();
+    let encoder = GraphRowEncoder::new(graph_index, paths, workspace_root, &no_objects);
     let mut rows = Vec::new();
     for target in graph_index.method_nodes() {
         let target_id = encoder.encode(&GraphNode::Method(target)).0;
@@ -2124,6 +2130,22 @@ pub fn call_hierarchy_method_digest(
     MethodCallDigest::from_rows(rows)
 }
 
+/// Where each metadata object is defined, keyed the way the graph itself keys an
+/// object: by kind and CASE-FOLDED name.
+///
+/// A folded key is not a convenience. An `Mdo` node carries the first spelling
+/// the build saw, and the call/query projections run before the catalog pass —
+/// so for every object mentioned in code that spelling comes from the code, not
+/// from the file tree. An exact-spelling lookup would therefore miss precisely
+/// the objects anyone searches for.
+pub type MdoFiles = FxHashMap<(MdoType, String), String>;
+
+/// The key an object goes under. Both sides — whoever fills the map and whoever
+/// reads it — call this, so the folding cannot drift between them.
+pub fn mdo_files_key(mdo_type: MdoType, object_name: &str) -> (MdoType, String) {
+    (mdo_type, object_name.fold_lower())
+}
+
 /// Encodes durable graph rows from the resident [`GraphIndex`] and file-set paths,
 /// with no database access. It produces the SAME durable ids as `ide::graph`, so ids
 /// an agent holds survive the in-memory → SQLite switch.
@@ -2131,6 +2153,7 @@ pub struct GraphRowEncoder<'a> {
     index: &'a GraphIndex,
     paths: &'a FxHashMap<FileId, String>,
     workspace_root: Option<&'a Path>,
+    mdo_files: &'a MdoFiles,
 }
 
 impl<'a> GraphRowEncoder<'a> {
@@ -2138,8 +2161,16 @@ impl<'a> GraphRowEncoder<'a> {
         index: &'a GraphIndex,
         paths: &'a FxHashMap<FileId, String>,
         workspace_root: Option<&'a Path>,
+        mdo_files: &'a MdoFiles,
     ) -> Self {
-        Self { index, paths, workspace_root }
+        Self { index, paths, workspace_root, mdo_files }
+    }
+
+    /// A metadata object's own file, when the caller's map knows it. A miss is
+    /// ordinary — a kind nothing discovers has no file to give — and leaves the
+    /// node addressable by its durable id, as it has always been.
+    fn mdo_file(&self, mdo_type: MdoType, object_name: &Name) -> Option<String> {
+        self.mdo_files.get(&mdo_files_key(mdo_type, object_name.as_str())).cloned()
     }
 
     fn path_for(&self, file: FileId) -> Option<String> {
@@ -2304,7 +2335,7 @@ impl<'a> GraphRowEncoder<'a> {
                 name: object_name.as_str().to_string(),
                 qualified: format!("{}.{}", mdo_type.russian_name(), object_name.as_str()),
                 module: None,
-                file: None,
+                file: self.mdo_file(*mdo_type, object_name),
                 name_offset: None,
                 sig_end: None,
                 src_start: None,
