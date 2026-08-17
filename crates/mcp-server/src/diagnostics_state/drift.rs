@@ -2581,7 +2581,16 @@ mod tests {
         // Confirm the hub delivered the change (so the diagnostics cursor has it too)...
         assert!(wait_for_delivery(&hub, &mut observer, "Module.bsl"), "hub delivered the edit");
         // ...then simulate a lossy sink dropping it: consume the cursor without applying.
-        state.drain_and_discard_cursor();
+        // Consume to quiet, not once: one write is several raw events, and any the hub
+        // has yet to record would be read as a delivery by the tick — the opposite of
+        // the loss this test sets up.
+        assert!(discard_until_quiet(&state, &hub, 3), "the hub went quiet before the tick");
+        // The sink stays lossy for the whole tick, and that has to be arranged rather
+        // than hoped for. One write is not one event: the watcher may deliver the same
+        // file again while the reconciler scans, and step 3 of the tick then counts the
+        // path as late rather than missed — no degrade, and the assertion below fails
+        // for a reason that has nothing to do with the rule it checks.
+        state.set_post_scan_probe(cursor_discarder(&state));
 
         let gen0 = raw_generation(&state);
         assert_eq!(hub.health(), Health::Healthy, "still healthy before the reconcile");
