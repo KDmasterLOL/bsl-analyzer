@@ -57,7 +57,7 @@ mod tests {
             code_test1,
             DiagnosticCode::FullOuterJoinQuery,
             expect![[r#"
-                FullOuterJoinQuery @ 10:33..12:29
+                FullOuterJoinQuery @ 10:33..11:93
                   message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
                   severity: Warning"#]],
         );
@@ -157,12 +157,12 @@ EndProcedure
             code,
             DiagnosticCode::FullOuterJoinQuery,
             expect![[r#"
-            FullOuterJoinQuery @ 3:31..3:65
-              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
-              severity: Warning
-            FullOuterJoinQuery @ 3:65..3:98
-              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
-              severity: Warning"#]],
+                FullOuterJoinQuery @ 3:31..3:64
+                  message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+                  severity: Warning
+                FullOuterJoinQuery @ 3:65..3:98
+                  message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+                  severity: Warning"#]],
         );
     }
 
@@ -225,9 +225,9 @@ EndProcedure
             code,
             DiagnosticCode::FullOuterJoinQuery,
             expect![[r#"
-            FullOuterJoinQuery @ 9:33..11:29
-              message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
-              severity: Warning"#]],
+                FullOuterJoinQuery @ 9:33..10:93
+                  message: Использование FULL OUTER JOIN значительно снижает производительность запроса. Рассмотрите возможность переписать с использованием UNION и LEFT JOIN
+                  severity: Warning"#]],
         );
     }
 

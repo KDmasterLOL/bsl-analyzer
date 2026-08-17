@@ -12,21 +12,26 @@
 //! case-sensitive filesystems, where a wrong-case construction actually
 //! misses.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::tree::{DirTree, RealFs};
 
 /// Find a child whose name is a WHOLLY conventional spelling (`Ext`,
 /// `Module.bsl`, `Configuration.xml`): the entire name matches
 /// case-insensitively. Never use this for a name built from an object name —
 /// that is [`find_child_stem_exact`]'s contract.
 pub fn find_child_ci(dir: &Path, conventional: &str) -> Option<PathBuf> {
+    find_child_ci_in(&RealFs, dir, conventional)
+}
+
+/// [`find_child_ci`] against a given tree.
+pub fn find_child_ci_in(tree: &dyn DirTree, dir: &Path, conventional: &str) -> Option<PathBuf> {
     let exact = dir.join(conventional);
-    if exact.exists() {
+    if tree.kind_of(&exact).is_some() {
         return Some(exact);
     }
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for entry in tree.entries(dir) {
+        let Some(name) = entry.path.file_name().map(|n| n.to_owned()) else { continue };
         if name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(conventional)) {
             return Some(dir.join(name));
         }
@@ -39,13 +44,22 @@ pub fn find_child_ci(dir: &Path, conventional: &str) -> Option<PathBuf> {
 /// extension is compared case-insensitively. `Alpha.xml` therefore never
 /// matches a neighbour's `alpha.xml`.
 pub fn find_child_stem_exact(dir: &Path, stem: &str, ext: &str) -> Option<PathBuf> {
+    find_child_stem_exact_in(&RealFs, dir, stem, ext)
+}
+
+/// [`find_child_stem_exact`] against a given tree.
+pub fn find_child_stem_exact_in(
+    tree: &dyn DirTree,
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+) -> Option<PathBuf> {
     let exact = dir.join(format!("{stem}.{ext}"));
-    if exact.exists() {
+    if tree.kind_of(&exact).is_some() {
         return Some(exact);
     }
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
+    for entry in tree.entries(dir) {
+        let Some(name) = entry.path.file_name().map(|n| n.to_owned()) else { continue };
         let path: &Path = name.as_ref();
         let stem_matches = path.file_stem().is_some_and(|s| s == std::ffi::OsStr::new(stem));
         let ext_matches =
@@ -62,9 +76,14 @@ pub fn find_child_stem_exact(dir: &Path, stem: &str, ext: &str) -> Option<PathBu
 /// survive `EXT/MODULE.BSL` — when the joined probe misses, every component
 /// may be misspelled, so each is resolved in turn.
 pub fn resolve_chain_ci(dir: &Path, components: &[&str]) -> Option<PathBuf> {
+    resolve_chain_ci_in(&RealFs, dir, components)
+}
+
+/// [`resolve_chain_ci`] against a given tree.
+pub fn resolve_chain_ci_in(tree: &dyn DirTree, dir: &Path, components: &[&str]) -> Option<PathBuf> {
     let mut current = dir.to_path_buf();
     for component in components {
-        current = find_child_ci(&current, component)?;
+        current = find_child_ci_in(tree, &current, component)?;
     }
     Some(current)
 }
@@ -72,6 +91,7 @@ pub fn resolve_chain_ci(dir: &Path, components: &[&str]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();

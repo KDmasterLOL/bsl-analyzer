@@ -1028,16 +1028,7 @@ pub fn handle_document_symbol(
 
     let symbols = ctx.analysis.document_symbols(file_id);
 
-    if symbols.is_empty() {
-        return Ok(None);
-    }
-
-    let lsp_symbols: Vec<lsp_types::DocumentSymbol> = symbols
-        .into_iter()
-        .filter_map(|s| convert_document_symbol(line_index, text, s, ctx.position_encoding))
-        .collect();
-
-    Ok(Some(DocumentSymbolResponse::Nested(lsp_symbols)))
+    document_symbol_response(line_index, text, symbols, ctx.position_encoding, &uri)
 }
 
 pub fn handle_selection_range(
@@ -1095,29 +1086,55 @@ pub fn handle_workspace_symbol(
 ) -> Result<Option<WorkspaceSymbolResponse>> {
     let _p = tracing::info_span!("handle_workspace_symbol", query = %params.query).entered();
 
-    let symbols = ctx.analysis.workspace_symbols(&params.query);
+    let found = ctx.analysis.workspace_symbols(&params.query);
+    if found.truncated {
+        // `workspace/symbol` has no field for an incomplete answer, so the cut
+        // cannot reach the client. It can reach whoever is reading the log.
+        tracing::info!(
+            total = found.total,
+            total_exact = found.total_exact,
+            returned = found.candidates.len(),
+            "workspace/symbol result was capped; the protocol cannot say so to the client",
+        );
+    }
+    let symbols = found.candidates;
     if symbols.is_empty() {
         return Ok(None);
     }
 
-    // Reuse the per-file text/line-index cache; the "source" file is just the
-    // first result's file, fetched the same overlay-or-disk way the converter
-    // itself uses for the rest.
-    let source_file = symbols[0].file_id;
-    let source_uri = ctx.url_for_file_id(source_file)?;
-    let source_text = match ctx.mem_docs.get(&source_uri) {
-        Some(doc) => doc.text().to_string(),
-        None => ctx.analysis.file_text(source_file),
-    };
-    let mut converter = ReferenceLocationConverter::new(&ctx, source_file, &source_text);
+    // No document of its own: this request names no file, and every candidate's
+    // file is read the same overlay-or-disk way.
+    let mut converter = ReferenceLocationConverter::detached(&ctx);
 
     let mut result = Vec::with_capacity(symbols.len());
     for symbol in symbols {
-        let location =
-            converter.convert(IdeLocation { file_id: symbol.file_id, range: symbol.range })?;
+        let Some(place) = symbol.place else { continue };
+        // A module or a metadata object has no declaration node of its own; the
+        // file start is where its card is anchored too.
+        let range = place.range.unwrap_or_else(|| ide::TextRange::empty(0.into()));
+        // Reading a closed file's text panics when it changed under analysis or
+        // became unreadable — a race this answer walks straight into, since a
+        // name search returns files nobody asked about and metadata XML is
+        // rewritten by the configurator and by git alike. One racing file must
+        // not fail the whole request; a `salsa::Cancelled` is a real abort and
+        // keeps unwinding.
+        let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            converter.convert(IdeLocation { file_id: place.file_id, range })
+        }));
+        let location = match converted {
+            Ok(location) => location?,
+            Err(payload) if payload.is::<salsa::Cancelled>() => std::panic::resume_unwind(payload),
+            Err(_) => {
+                tracing::warn!(
+                    file_id = place.file_id.0,
+                    "workspace/symbol: skipping a candidate after a text-read panic"
+                );
+                continue;
+            }
+        };
         result.push(LspWorkspaceSymbol {
-            name: symbol.name,
-            kind: workspace_symbol_kind(symbol.kind),
+            name: symbol.display,
+            kind: workspace_symbol_kind(symbol.category),
             tags: None,
             container_name: None,
             location: OneOf::Left(location),
@@ -1127,11 +1144,24 @@ pub fn handle_workspace_symbol(
     Ok(Some(WorkspaceSymbolResponse::Nested(result)))
 }
 
-fn workspace_symbol_kind(kind: ide::SymbolKind) -> SymbolKind {
-    match kind {
-        ide::SymbolKind::Procedure | ide::SymbolKind::Function => SymbolKind::FUNCTION,
-        ide::SymbolKind::Variable => SymbolKind::VARIABLE,
-        ide::SymbolKind::Region => SymbolKind::NAMESPACE,
+/// The dictionary's category as an LSP kind.
+///
+/// The mapping lives here, at the protocol boundary, because it is a fact about
+/// LSP and not about BSL. It is also lossy in a way the old one already was: a
+/// procedure and a function were distinct in the analyzer and both `FUNCTION`
+/// here, so collapsing them into one category costs the client nothing.
+fn workspace_symbol_kind(category: ide::NameCategory) -> SymbolKind {
+    match category {
+        ide::NameCategory::CommonModule | ide::NameCategory::Module => SymbolKind::MODULE,
+        ide::NameCategory::ModuleMethod => SymbolKind::FUNCTION,
+        ide::NameCategory::ModuleVariable => SymbolKind::VARIABLE,
+        ide::NameCategory::MetadataObject => SymbolKind::CLASS,
+        ide::NameCategory::MetadataMember => SymbolKind::FIELD,
+        ide::NameCategory::Form => SymbolKind::OBJECT,
+        // Unreachable in practice: a platform member has no file, and the
+        // request asks only for candidates that have one. The arm exists
+        // because the vocabulary is closed, not because the case can arrive.
+        ide::NameCategory::PlatformMember => SymbolKind::FUNCTION,
     }
 }
 
@@ -1716,7 +1746,7 @@ fn convert_document_symbol(
     let selection_range =
         crate::lsp::range_with_encoding(line_index, text, sym.selection_range, encoding)?;
 
-    let kind = match sym.kind {
+    let kind = match sym.kind() {
         ide::SymbolKind::Procedure | ide::SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
         ide::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
         ide::SymbolKind::Region => lsp_types::SymbolKind::NAMESPACE,
@@ -1725,16 +1755,7 @@ fn convert_document_symbol(
     let children = if sym.children.is_empty() {
         None
     } else {
-        let converted: Vec<_> = sym
-            .children
-            .into_iter()
-            .filter_map(|c| convert_document_symbol(line_index, text, c, encoding))
-            .collect();
-        if converted.is_empty() {
-            None
-        } else {
-            Some(converted)
-        }
+        Some(convert_document_symbols(line_index, text, sym.children, encoding)?)
     };
 
     #[allow(deprecated)]
@@ -1750,10 +1771,63 @@ fn convert_document_symbol(
     })
 }
 
+/// The whole map or nothing.
+///
+/// A node whose range does not project onto the buffer means the analysis snapshot and the
+/// open document have drifted apart. Dropping just that node — and, since children hang off
+/// it, its whole subtree — leaves a map that reads as the truth about the file: an empty
+/// region looks like an empty region, a missing method looks like a method that is not
+/// there. `documentSymbol` has no field to mark an answer partial, so the only honest
+/// answers are the whole map or a refusal, and a refusal is self-healing: the client asks
+/// again after the next edit.
+fn convert_document_symbols(
+    line_index: &LineIndex,
+    text: &str,
+    symbols: Vec<ide::DocumentSymbol>,
+    encoding: crate::lsp::PositionEncoding,
+) -> Option<Vec<lsp_types::DocumentSymbol>> {
+    symbols
+        .into_iter()
+        .map(|symbol| convert_document_symbol(line_index, text, symbol, encoding))
+        .collect()
+}
+
+/// The `documentSymbol` answer: no symbols, the whole map, or a refusal naming the file.
+///
+/// Split from the handler so the choice between those three is testable without an LSP
+/// context — it is the part with a decision in it, and the handler around it is wiring.
+fn document_symbol_response(
+    line_index: &LineIndex,
+    text: &str,
+    symbols: Vec<ide::DocumentSymbol>,
+    encoding: crate::lsp::PositionEncoding,
+    uri: &lsp_types::Url,
+) -> Result<Option<DocumentSymbolResponse>> {
+    if symbols.is_empty() {
+        return Ok(None);
+    }
+
+    match convert_document_symbols(line_index, text, symbols, encoding) {
+        Some(converted) => Ok(Some(DocumentSymbolResponse::Nested(converted))),
+        None => {
+            tracing::warn!(
+                uri = %uri,
+                "document symbol range does not project onto the open buffer; \
+                 the analysis snapshot and the document have drifted apart",
+            );
+            Err(anyhow::anyhow!(
+                "document symbols for {uri} could not be projected onto the current buffer"
+            ))
+        }
+    }
+}
+
 struct ReferenceLocationConverter<'ctx> {
     ctx: &'ctx LatencyRequestContext,
-    source_file_id: FileId,
-    source_text: String,
+    /// The requested document's text, already in hand and not worth re-reading.
+    /// Absent for a request that has no document of its own — a workspace-wide
+    /// search answers about files the caller never named.
+    source: Option<(FileId, String)>,
     target_files: FxHashMap<FileId, ReferenceTargetFile>,
 }
 
@@ -1767,10 +1841,15 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     fn new(ctx: &'ctx LatencyRequestContext, source_file_id: FileId, source_text: &str) -> Self {
         Self {
             ctx,
-            source_file_id,
-            source_text: source_text.to_string(),
+            source: Some((source_file_id, source_text.to_string())),
             target_files: FxHashMap::default(),
         }
+    }
+
+    /// A converter for a request with no document of its own: every file it
+    /// touches is read through the overlay-or-disk path like any other target.
+    fn detached(ctx: &'ctx LatencyRequestContext) -> Self {
+        Self { ctx, source: None, target_files: FxHashMap::default() }
     }
 
     fn convert(&mut self, ide_loc: IdeLocation) -> Result<Location> {
@@ -1789,8 +1868,10 @@ impl<'ctx> ReferenceLocationConverter<'ctx> {
     fn target_file(&mut self, file_id: FileId) -> Result<&ReferenceTargetFile> {
         if !self.target_files.contains_key(&file_id) {
             let uri = self.ctx.url_for_file_id(file_id)?;
-            let text = if file_id == self.source_file_id {
-                self.source_text.clone()
+            let text = if let Some((_, text)) =
+                self.source.as_ref().filter(|(source_id, _)| *source_id == file_id)
+            {
+                text.clone()
             } else if let Some(doc) = self.ctx.mem_docs.get(&uri) {
                 doc.text().to_string()
             } else {
@@ -2111,6 +2192,84 @@ mod tests {
 
     mod call_hierarchy_trace_tests;
     mod inlay_hint_tests;
+
+    /// A symbol whose range does not project onto the open buffer is the one case where a
+    /// map can lie without looking wrong: the answer stays well-formed while a method — or
+    /// a whole region's contents — silently vanishes from it. These four inputs pin the
+    /// three answers the request may give, and the second one is the case the old
+    /// `filter_map` swallowed.
+    mod document_symbol_response_tests {
+        use super::super::document_symbol_response;
+        use crate::lsp::PositionEncoding;
+        use ide::{DocumentSymbol, MethodDetail, SymbolDetail, TextRange};
+        use line_index::LineIndex;
+
+        const SOURCE: &str = "Процедура П()\nКонецПроцедуры";
+
+        fn method(
+            name: &str,
+            start: u32,
+            end: u32,
+            children: Vec<DocumentSymbol>,
+        ) -> DocumentSymbol {
+            DocumentSymbol {
+                name: name.to_string(),
+                range: TextRange::new(start.into(), end.into()),
+                selection_range: TextRange::new(start.into(), (start + 2).into()),
+                detail: SymbolDetail::Procedure(MethodDetail {
+                    is_export: false,
+                    directives: Vec::new(),
+                    params: Vec::new(),
+                }),
+                children,
+            }
+        }
+
+        fn answer(
+            symbols: Vec<DocumentSymbol>,
+        ) -> anyhow::Result<Option<lsp_types::DocumentSymbolResponse>> {
+            let line_index = LineIndex::new(SOURCE);
+            let uri = lsp_types::Url::parse("file:///ws/Module.bsl").expect("uri");
+            document_symbol_response(&line_index, SOURCE, symbols, PositionEncoding::Utf16, &uri)
+        }
+
+        /// Past the end of the buffer: the offsets belong to a different text than the one
+        /// open, so nothing about this file can be answered.
+        const PAST_END: u32 = 10_000;
+
+        #[test]
+        fn a_root_symbol_that_does_not_project_refuses_instead_of_vanishing() {
+            assert!(answer(vec![method("П", PAST_END, PAST_END + 20, Vec::new())]).is_err());
+        }
+
+        #[test]
+        fn a_child_that_does_not_project_refuses_instead_of_vanishing() {
+            let parent =
+                method("П", 0, 27, vec![method("Внутри", PAST_END, PAST_END + 20, Vec::new())]);
+
+            assert!(
+                answer(vec![parent]).is_err(),
+                "a map missing the child reads as a file without it",
+            );
+        }
+
+        #[test]
+        fn a_map_that_projects_whole_is_served_whole() {
+            let parent = method("П", 0, 27, vec![method("Вложенный", 0, 13, Vec::new())]);
+
+            let served = answer(vec![parent]).expect("projects").expect("not empty");
+            let lsp_types::DocumentSymbolResponse::Nested(roots) = served else {
+                panic!("nested response expected");
+            };
+            assert_eq!(roots.len(), 1);
+            assert_eq!(roots[0].children.as_ref().map(Vec::len), Some(1));
+        }
+
+        #[test]
+        fn an_empty_map_is_an_empty_answer_and_not_a_refusal() {
+            assert!(answer(Vec::new()).expect("no symbols is not a failure").is_none());
+        }
+    }
 
     #[test]
     fn workspace_scope_filters_by_extension_root() {
@@ -3331,6 +3490,90 @@ mod tests {
             "source.fixAll must be filtered out when only quickfix is requested"
         );
         assert!(!actions_of_kind(&result, "quickfix").is_empty(), "quick fixes must remain");
+    }
+
+    /// A name search answers about files nobody named, and one of them can be
+    /// gone by the time its location is built: metadata XML is rewritten by the
+    /// configurator and by git alike, and reading a closed file that changed
+    /// under analysis panics by design.
+    ///
+    /// One racing file must cost its own candidate, not the whole request. The
+    /// readable neighbour in the stand is what keeps this from passing on an
+    /// answer that is simply empty.
+    #[test]
+    fn workspace_symbol_skips_a_candidate_whose_file_is_gone() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let module_path = tmp.path().join("Ровный.bsl");
+        let module_text = "Процедура ДрейфТестМетод() Экспорт\nКонецПроцедуры\n";
+        std::fs::write(&module_path, module_text).expect("write module");
+        let xml_path = tmp.path().join("ДрейфТест.xml");
+        std::fs::write(&xml_path, "<MetaDataObject/>").expect("write xml");
+
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let module_uri = lsp_types::Url::parse(&format!("file://{}", module_path.display()))
+            .expect("module url");
+        let module_id = state.vfs_file_for_url(&module_uri).unwrap();
+        let xml_id = {
+            let mut vfs = state.vfs.write();
+            vfs.alloc_file_id(VfsPath::new(xml_path.clone()))
+        };
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(VfsPath::new(module_path.clone()), Some(Arc::from(module_text)));
+            vfs.set_file_contents(
+                VfsPath::new(xml_path.clone()),
+                Some(Arc::from("<MetaDataObject/>")),
+            );
+        }
+        state.process_changes(false);
+
+        {
+            let db = state.analysis_host.raw_database_mut();
+            db.set_all_config_paths(vec![(None, tmp.path().to_path_buf())]);
+            db.set_metadata_listing(
+                &tmp.path().to_string_lossy(),
+                ide_db::metadata::MetadataListingData {
+                    entries: vec![ide_db::metadata::MdoEntry {
+                        kind: bsl_metadata::MdoType::Catalog,
+                        name: "ДрейфТест".to_string(),
+                        main: xml_id,
+                        predefined: None,
+                    }],
+                    ..Default::default()
+                },
+            );
+        }
+
+        // Both candidates are in the answer before anything goes wrong: without
+        // this the assertion below would hold on a stand that never found the
+        // XML in the first place.
+        {
+            let analysis = state.analysis_host.analysis();
+            let found = analysis.workspace_symbols("ДрейфТест");
+            let files: std::collections::BTreeSet<_> =
+                found.candidates.iter().filter_map(|c| c.place.map(|p| p.file_id)).collect();
+            assert!(files.contains(&xml_id), "the XML is a candidate: {files:?}");
+            assert!(files.contains(&module_id), "the module is a candidate: {files:?}");
+        }
+
+        // The XML goes away between the lookup and the location: exactly the
+        // race, and `file_text` answers it with a panic.
+        std::fs::remove_file(&xml_path).expect("remove xml");
+
+        let ctx = latency_ctx(&state);
+        let response = handle_workspace_symbol(
+            ctx,
+            WorkspaceSymbolParams { query: "ДрейфТест".to_string(), ..Default::default() },
+        )
+        .expect("one unreadable file must not fail the request");
+
+        let Some(WorkspaceSymbolResponse::Nested(symbols)) = response else {
+            panic!("the readable neighbour is still an answer: {response:?}");
+        };
+        assert_eq!(symbols.len(), 1, "{symbols:?}");
+        assert_eq!(symbols[0].name, "ДрейфТестМетод");
     }
 
     #[test]

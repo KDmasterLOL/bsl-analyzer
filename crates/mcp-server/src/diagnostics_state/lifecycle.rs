@@ -48,6 +48,13 @@ pub(super) struct Inner {
     pub(super) stats: HashMap<String, u64>,
     /// Folded fingerprint of the analyzer config files, for config drift.
     pub(super) config_fp: u64,
+    /// The topology hash of the snapshot this resident was built from, published in
+    /// the freshness envelope so an answer names the root set it was computed over.
+    ///
+    /// Remembering it is safe for the whole life of a generation: a topology change
+    /// moves `config_fp` ([`super::drift::config_identity`]) and a moved `config_fp`
+    /// reloads the resident, so the stored value cannot outlive the shape it describes.
+    pub(super) topology: u64,
     pub(super) generation: u64,
     /// Bumped every time `stats` moves, under this same lock.
     ///
@@ -139,6 +146,7 @@ impl DiagnosticsState {
                 resident: None,
                 stats: HashMap::new(),
                 config_fp: 0,
+                topology: 0,
                 generation: 0,
                 baseline_epoch: 0,
                 reload: ReloadState::Idle,
@@ -414,6 +422,7 @@ impl DiagnosticsState {
                     inner.stats = built.stats;
                     inner.baseline_epoch += 1;
                     inner.config_fp = built.config_fp;
+                    inner.topology = built.topology;
                     inner.generation += 1;
                     inner.reload = ReloadState::Idle;
                     inner.loading_since = None;
@@ -497,6 +506,7 @@ impl DiagnosticsState {
                 inner.stats = built.stats;
                 inner.baseline_epoch += 1;
                 inner.config_fp = built.config_fp;
+                inner.topology = built.topology;
                 inner.generation += 1;
                 inner.reload = ReloadState::Idle;
                 inner.status = DiagnosticsStatus::Ready { files };

@@ -151,6 +151,11 @@ fn mode_bool_role_only_on_mode_categories() {
 fn legacy_recognizer_parity() {
     let reg = registry();
 
+    // `МенеджерФайловыхПотоков` / `FileStreamsManager` is missing on purpose:
+    // the legacy list called it constructible, but the platform ships no
+    // constructor for it — the manager is reached through the global property
+    // `ФайловыеПотоки`. The entry could only ever have matched invalid code.
+
     for &name in &[
         "командасистемы",
         "system",
@@ -222,8 +227,6 @@ fn legacy_recognizer_parity() {
         "двоичныеданные",
         "filestream",
         "файловыйпоток",
-        "filestreamsmanager",
-        "менеджерфайловыхпотоков",
         "datawriter",
         "записьданных",
         "datareader",
@@ -529,8 +532,6 @@ fn legacy_recognizer_category_parity() {
         ("двоичныеданные", "is_file_system_type", Category::FileSystem),
         ("filestream", "is_file_system_type", Category::FileSystem),
         ("файловыйпоток", "is_file_system_type", Category::FileSystem),
-        ("filestreamsmanager", "is_file_system_type", Category::FileSystem),
-        ("менеджерфайловыхпотоков", "is_file_system_type", Category::FileSystem),
         ("datawriter", "is_file_system_type", Category::FileSystem),
         ("записьданных", "is_file_system_type", Category::FileSystem),
         ("datareader", "is_file_system_type", Category::FileSystem),

@@ -48,14 +48,14 @@ fn trailing_comma_run(ctx: &DiagnosticsContext, range: TextRange) -> Option<Text
     }
 
     let mut run_start = comma.text_range().start();
-    let mut prev = comma.prev_token();
+    let mut prev = syntax::prev_token_past_empty(&comma);
     while let Some(token) = prev {
         match token.kind() {
             SyntaxKind::COMMA => run_start = token.text_range().start(),
             SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE => {}
             _ => break,
         }
-        prev = token.prev_token();
+        prev = syntax::prev_token_past_empty(&token);
     }
 
     Some(TextRange::new(run_start, comma.text_range().end()))

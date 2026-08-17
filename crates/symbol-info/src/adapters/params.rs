@@ -22,7 +22,7 @@ pub(super) fn build_user_params(
                 name: SmolStr::new(name_str),
                 types,
                 is_optional: p.has_default,
-                default_value: p.default_value.clone(),
+                default_value: printable_default(p.default_value.clone()),
                 description: doc.and_then(joined_descriptions),
                 is_val: p.is_val,
             }
@@ -80,7 +80,9 @@ fn build_from_param_docs(
                 name: p.name.clone(),
                 types,
                 is_optional: p.is_optional,
-                default_value: pdoc.and_then(|d| d.default_value.as_deref().map(SmolStr::new)),
+                default_value: printable_default(
+                    pdoc.and_then(|d| d.default_value.as_deref().map(SmolStr::new)),
+                ),
                 description: if clean_desc.is_empty() { None } else { Some(clean_desc) },
                 is_val: false,
             }
@@ -112,6 +114,18 @@ fn find_param_doc<'a>(name: &str, docs: Option<&'a UserMethodDocs>) -> Option<&'
     docs?.parameters.iter().find(|pd| pd.name.to_lowercase() == target)
 }
 
+/// The default-value text a declaration can actually be rendered with.
+///
+/// An optional parameter whose default expression could not be read carries an EMPTY text,
+/// not an absent one: the parser builds an expression node after every `=`, so the node is
+/// there and holds nothing. Printed as-is that becomes `Имя = ` with a dangling equals sign,
+/// so the empty text is dropped here, once, rather than guarded in every presenter that
+/// renders a parameter. Optionality is untouched — it is `has_default`'s answer, not this
+/// field's.
+fn printable_default(text: Option<SmolStr>) -> Option<SmolStr> {
+    text.filter(|value| !value.trim().is_empty())
+}
+
 fn joined_descriptions(doc: &ParameterDoc) -> Option<String> {
     let descs: Vec<&str> = doc.types.iter().filter_map(|t| t.description.as_deref()).collect();
     if descs.is_empty() {
@@ -127,5 +141,31 @@ pub(super) fn user_type_to_ref(t: &TypeDoc) -> TypeRef {
         english: None,
         description: t.description.clone(),
         is_hyperlink: t.is_hyperlink,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_user_params;
+    use hir::Param;
+
+    /// The parser builds an expression node after every `=`, so a default it could not read
+    /// arrives as EMPTY text rather than as no text. Carried through as-is, that empty text
+    /// renders as `Имя = ` — a declaration with a dangling equals sign, which is not what the
+    /// file says. The parameter stays optional; only the unreadable text is dropped.
+    #[test]
+    fn an_unreadable_default_leaves_the_parameter_optional_without_a_text() {
+        let param = Param {
+            name: hir::Name::new("А"),
+            is_val: true,
+            has_default: true,
+            default_value: Some(smol_str::SmolStr::new("")),
+            name_range: syntax::TextRange::new(0.into(), 1.into()),
+        };
+
+        let built = build_user_params(std::slice::from_ref(&param), None);
+
+        assert!(built[0].is_optional, "`=` in the declaration makes it optional");
+        assert_eq!(built[0].default_value, None, "no text is better than an empty one");
     }
 }

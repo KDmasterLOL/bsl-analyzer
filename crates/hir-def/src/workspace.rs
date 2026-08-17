@@ -4,7 +4,7 @@ use stdx::case::CaseExt;
 use tracing::debug;
 use vfs::{FileId, FileSet};
 
-use crate::{DefDatabase, MethodSymbol, ModuleId, Name};
+use crate::{DefDatabase, MethodSymbol, ModuleId, Name, VariableSymbol};
 
 pub fn is_bsl_source(file_set: &FileSet, file_id: FileId) -> bool {
     let Some(vfs_path) = file_set.path_for_file(&file_id) else {
@@ -13,35 +13,47 @@ pub fn is_bsl_source(file_set: &FileSet, file_id: FileId) -> bool {
     project_model::is_bsl_source_path(vfs_path.as_path())
 }
 
+/// One module's externally addressable surface.
+///
+/// Only exported members are kept: a non-exported method cannot be called from
+/// outside its module, `symbol_info` refuses to resolve it, and offering it as a
+/// search hit would produce a candidate nothing accepts back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommonModuleInfo {
+pub struct ModuleMembers {
     pub file_id: FileId,
 
     pub module_id: ModuleId,
 
+    /// Path-derived module name. Ambiguous by construction — every object
+    /// module of every metadata object is spelled `ObjectModule.bsl` — so it is
+    /// carried as a field and never used as a table key.
+    pub module_name: Name,
+
     pub methods: Vec<MethodSymbol>,
+
+    pub variables: Vec<VariableSymbol>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct WorkspaceSymbols {
-    pub common_modules: FxHashMap<Name, CommonModuleInfo>,
+pub struct WorkspaceMembers {
+    pub modules: FxHashMap<FileId, ModuleMembers>,
 }
 
-/// Approximate live heap bytes for Salsa's `memory_usage` report: the
-/// `common_modules` table, each module name's `Name` payload, and each
-/// module's `Vec<MethodSymbol>` — summing each method's name, params, and
-/// annotations. `docs`/`return_type_ref`/param `type_ref` payloads are not
-/// followed (mirrors `symbol_tree_heap`'s convention), a mild undercount.
+/// Approximate live heap bytes for Salsa's `memory_usage` report: the `modules`
+/// table, each module's name, and its member vectors — summing each method's
+/// name, params, and annotations, and each variable's name and annotations.
+/// `docs`/`return_type_ref`/param `type_ref` payloads are not followed (mirrors
+/// `symbol_tree_heap`'s convention), a mild undercount.
 /// New heap-owning fields must be added here too.
-pub(crate) fn workspace_symbols_heap(v: &Arc<WorkspaceSymbols>) -> usize {
+pub(crate) fn module_members_heap(v: &Arc<WorkspaceMembers>) -> usize {
     use crate::heap_estimate::{map_table_bytes, name_bytes, vec_bytes};
     use crate::item_tree::Annotation;
     use crate::ParamSymbol;
 
     let s = &**v;
-    let mut bytes = map_table_bytes::<Name, CommonModuleInfo>(s.common_modules.len());
-    for (name, info) in &s.common_modules {
-        bytes += name_bytes(name);
+    let mut bytes = map_table_bytes::<FileId, ModuleMembers>(s.modules.len());
+    for info in s.modules.values() {
+        bytes += name_bytes(&info.module_name);
         bytes += vec_bytes::<MethodSymbol>(info.methods.len());
         for method in &info.methods {
             bytes += name_bytes(&method.name);
@@ -51,43 +63,53 @@ pub(crate) fn workspace_symbols_heap(v: &Arc<WorkspaceSymbols>) -> usize {
             }
             bytes += vec_bytes::<Annotation>(method.annotations.len());
         }
+        bytes += vec_bytes::<VariableSymbol>(info.variables.len());
+        for variable in &info.variables {
+            bytes += name_bytes(&variable.name);
+            bytes += vec_bytes::<Annotation>(variable.annotations.len());
+        }
     }
     bytes
 }
 
-pub fn workspace_symbols(db: &dyn DefDatabase, files: &[FileId]) -> WorkspaceSymbols {
-    let mut common_modules = FxHashMap::default();
+pub fn module_members(db: &dyn DefDatabase, files: &[FileId]) -> WorkspaceMembers {
+    let mut modules = FxHashMap::default();
 
-    debug!(file_count = files.len(), "Building workspace symbol index");
+    debug!(file_count = files.len(), "Building module member index");
 
     for &file_id in files {
         let module_id = ModuleId::new(file_id);
         let symbol_tree = db.symbol_tree(module_id);
 
-        let methods: Vec<_> = symbol_tree.methods().cloned().collect();
-        if !methods.is_empty() {
-            let module_name = extract_module_name_from_file(db, file_id).unwrap_or_else(|| {
-                debug!(
-                    file_id = ?file_id,
-                    "Could not extract module name, using FileId"
-                );
-                Name::new(&format!("Module{}", file_id.0))
-            });
+        let methods: Vec<_> = symbol_tree.exported_methods().cloned().collect();
+        let variables: Vec<_> = symbol_tree.exported_variables().cloned().collect();
+        if methods.is_empty() && variables.is_empty() {
+            continue;
+        }
 
+        let module_name = extract_module_name_from_file(db, file_id).unwrap_or_else(|| {
             debug!(
                 file_id = ?file_id,
-                module_name = %module_name,
-                method_count = methods.len(),
-                "Indexed module"
+                "Could not extract module name, using FileId"
             );
+            Name::new(&format!("Module{}", file_id.0))
+        });
 
-            common_modules.insert(module_name, CommonModuleInfo { file_id, module_id, methods });
-        }
+        debug!(
+            file_id = ?file_id,
+            module_name = %module_name,
+            method_count = methods.len(),
+            variable_count = variables.len(),
+            "Indexed module"
+        );
+
+        modules
+            .insert(file_id, ModuleMembers { file_id, module_id, module_name, methods, variables });
     }
 
-    debug!(common_module_count = common_modules.len(), "Workspace symbol index built");
+    debug!(module_count = modules.len(), "Module member index built");
 
-    WorkspaceSymbols { common_modules }
+    WorkspaceMembers { modules }
 }
 
 fn extract_module_name_from_file(db: &dyn DefDatabase, file_id: FileId) -> Option<Name> {
@@ -144,16 +166,22 @@ mod tests {
     use vfs::{FileSet, VfsPath};
 
     #[test]
-    fn test_common_module_info_creation() {
+    fn test_module_members_creation() {
         let file_id = FileId(0);
         let module_id = ModuleId::new(file_id);
-        let methods = vec![];
 
-        let info = CommonModuleInfo { file_id, module_id, methods };
+        let info = ModuleMembers {
+            file_id,
+            module_id,
+            module_name: Name::new("Товары"),
+            methods: vec![],
+            variables: vec![],
+        };
 
         assert_eq!(info.file_id, file_id);
         assert_eq!(info.module_id, module_id);
         assert_eq!(info.methods.len(), 0);
+        assert_eq!(info.variables.len(), 0);
     }
 
     fn make_file_set(entries: &[(u32, &str)]) -> FileSet {

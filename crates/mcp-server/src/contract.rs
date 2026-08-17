@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.5";
+pub const CONTRACT_VERSION: &str = "1.9";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -144,6 +144,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         output_schema_version: None,
     },
     tool("diagnostics", DIAGNOSTICS_ACTIONS),
+    tool("outline", &[]),
 ];
 
 const REFERENCE_TOOLS: &[ToolDecl] = &[
@@ -184,15 +185,21 @@ pub fn document() -> Value {
     doc.insert("contract_version".into(), json!(CONTRACT_VERSION));
     doc.insert("build_version".into(), json!(env!("CARGO_PKG_VERSION")));
     doc.insert("mcp".into(), mcp_surface());
+    // `platforms` is the same list for every build, not the running one: a consumer picks a
+    // transport while deciding what to deploy where, so the declaration has to name the whole
+    // supported set rather than the host that happened to answer. It is the very list the CLI
+    // gate reads, so the declaration cannot outlive the gate's truth.
     doc.insert(
         "transports".into(),
         json!({
             "workspace": {
                 "broker-required": {
                     "backend_pid_required": true,
+                    "backend_pid_source": "supervisor launching bsl-analyzer-app directly",
                     "auto_launch": false,
                     "stdio_fallback": false,
-                    "peer_identity": "supervised-pid+platform-trust"
+                    "peer_identity": "supervised-pid+platform-trust",
+                    "platforms": crate::broker::SUPERVISED_PID_PLATFORMS
                 }
             }
         }),
@@ -443,6 +450,63 @@ mod tests {
         }
     }
 
+    /// A published schema is what a machine consumer validates against, so a field the schema
+    /// requires and the card omits is not an edge case: it fails every ordinary response of that
+    /// shape. Each of the four card kinds is checked, root fields and the kind's own branch.
+    #[test]
+    fn syntax_help_cards_carry_every_field_the_schema_requires() {
+        let schema = output_schema(McpProfile::Reference, "syntax_help").expect("outputSchema");
+        let platform = bsl_platform::PlatformDataInner::instance();
+        let method = platform.all_methods()[0].clone();
+        let lookups: [(&str, Option<&str>); 4] = [
+            ("Массив", None),
+            (method.name.as_str(), Some(method.type_name.as_str())),
+            ("Сообщить", None),
+            ("Если", None),
+        ];
+
+        for (name, type_name) in lookups {
+            let result = crate::tools::platform::bsl_syntax_help(name, type_name, 6000).unwrap();
+            let card = result.structured_content.expect("structuredContent");
+            for key in required_keys(&schema) {
+                assert!(card.get(&key).is_some(), "{name}: card omits required `{key}`");
+            }
+            let branch = schema["oneOf"]
+                .as_array()
+                .expect("the card is a tagged union")
+                .iter()
+                .find(|variant| variant["properties"]["kind"]["const"] == card["kind"])
+                .unwrap_or_else(|| panic!("{name}: no schema branch for kind {}", card["kind"]));
+            for key in required_keys(branch) {
+                assert!(card.get(&key).is_some(), "{name}: card omits required `{key}`");
+            }
+        }
+    }
+
+    fn required_keys(schema: &Value) -> Vec<String> {
+        schema["required"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The declaration tells a consumer where the supervised transport can be deployed; the same
+    /// list decides where the CLI accepts it. Published as a copy it would drift for every target
+    /// nobody runs the suite on, so what is asserted here is that it is not a copy.
+    #[test]
+    fn declared_transport_platforms_are_the_supervised_pid_gate() {
+        let doc = document();
+        let platforms = doc["transports"]["workspace"]["broker-required"]["platforms"]
+            .as_array()
+            .expect("the supervised transport declares its platforms")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert_eq!(platforms, crate::broker::SUPERVISED_PID_PLATFORMS);
+        assert_eq!(platforms.contains(&std::env::consts::OS), crate::broker::peer_pid_available());
+    }
+
     #[test]
     fn unknown_action_lists_the_declared_actions() {
         let err = unknown_action(McpProfile::Workspace, "query", "validte");
@@ -481,7 +545,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.5",
+              "contract_version": "1.9",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -535,7 +599,7 @@ mod tests {
                       {
                         "actions": [],
                         "name": "syntax_help",
-                        "output_schema_fingerprint": "blake3:77ab89c5868110d089b431d81c0ec5c3f1cbb4d755e1396f963ab4bbff72fa8e",
+                        "output_schema_fingerprint": "blake3:6cab7da33f83233f74680c7f276749f8625af0a67f00758449f3032c873af0ba",
                         "output_schema_version": "1",
                         "params": [
                           {
@@ -1295,6 +1359,35 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "integer"
+                          },
+                          {
+                            "name": "root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "outline",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "mode",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "path",
+                            "required": true,
+                            "type": "string"
                           },
                           {
                             "name": "root_id",

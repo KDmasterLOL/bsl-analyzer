@@ -44,22 +44,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     diagnostics
 }
 
+/// Диапазон узла вместе с его точкой с запятой.
+///
+/// Конец берётся покрытием самой найденной `;`, а не сдвигом конца узла на
+/// байт: между узлом и его точкой с запятой стоит тривия, и арифметика от
+/// конца узла оборвала бы диапазон внутри пробела.
 fn range_with_semicolon(node: &SyntaxNode) -> ide_db::TextRange {
-    use syntax::{SyntaxToken, TextSize};
-
     let base_range = node.text_range();
 
-    let has_semicolon = node
-        .next_sibling_or_token()
-        .and_then(|t| t.into_token())
-        .map(|token: SyntaxToken| token.kind() == SyntaxKind::SEMICOLON)
-        .unwrap_or(false);
-
-    if has_semicolon {
-        ide_db::TextRange::new(base_range.start(), base_range.end() + TextSize::from(1))
-    } else {
-        base_range
-    }
+    syntax::trailing_semicolon(node)
+        .map_or(base_range, |token| base_range.cover(token.text_range()))
 }
 
 fn check_node(

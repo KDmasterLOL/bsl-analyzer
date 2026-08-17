@@ -28,13 +28,10 @@ pub mod expressions;
 pub mod select;
 
 use crate::event::NodeKind;
+use crate::parser::token_set::TokenSet;
 use crate::parser::Parser;
-use crate::token_set::TokenSet;
-use lexer::TokenKind;
-use parser_error::{ParseError, RecoveryKind};
 
-pub(super) const LIST_RECOVERY: TokenSet =
-    TokenSet::new(&[TokenKind::RParen, TokenKind::Semicolon]);
+pub(super) const LIST_RECOVERY: TokenSet = TokenSet::new(&[T![RParen], T![Semicolon]]);
 
 // =====================================================================
 // CLEAN-ROOM Slice 12 — the entry point's treatment of leftover input
@@ -58,8 +55,6 @@ pub fn query_package(p: &mut Parser) {
     let mut a_query_is_due = true;
     let mut member_has_tokens = false;
 
-    p.skip_trivia();
-
     // A group cannot span a separator, so each member starts with none open
     // and "is this position inside a group" is simply "is anything open".
     // The parser keeps the count as tokens go by — the single place that
@@ -69,9 +64,8 @@ pub fn query_package(p: &mut Parser) {
 
     while !p.at_end() {
         p.check_iteration_limit();
-        p.skip_trivia();
 
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             complain_about_a_missing_member(p, a_query_is_due, member_has_tokens);
             p.bump();
             a_query_is_due = true;
@@ -156,25 +150,16 @@ fn complain_about_a_missing_member(p: &mut Parser, a_query_is_due: bool, had_tok
 /// keyword is the name of a field and does end one.
 fn ends_a_name(p: &Parser, is_property: bool) -> bool {
     match p.current() {
-        Some(TokenKind::Ident) => is_property || !select::is_clause_keyword(p),
-        Some(TokenKind::Ampersand) => p.current_text().chars().count() > 1,
+        Some(T![Ident]) => is_property || !select::is_clause_keyword(p),
+        Some(T![Ampersand]) => p.current_text().chars().count() > 1,
         // A cast has something in it, and its closing paren is the end of
         // the name only then: `()` closes a group and names nothing.
-        Some(TokenKind::RParen) => {
-            p.open_group_count() > 0 && p.prev_significant() != Some(TokenKind::LParen)
-        }
+        Some(T![RParen]) => p.open_group_count() > 0 && p.prev_significant() != Some(T![LParen]),
         // A few words carry a kind of their own and are still names after a
         // dot; the expression layer names that set, and the leftover reads a
         // chain the same way or it will cut one in half.
         _ => is_property && expressions::at_property_name(p),
     }
-}
-
-fn at_trivia(p: &Parser) -> bool {
-    matches!(
-        p.current(),
-        Some(TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom)
-    )
 }
 
 /// The start of a query is a boundary for the whole grammar: no rule may
@@ -195,7 +180,7 @@ fn at_query_start(p: &Parser) -> bool {
 /// next query as a table, an alias or a type — and the package then loses
 /// that query. Rules that read a bare name ask this instead.
 pub(super) fn at_name(p: &Parser) -> bool {
-    p.at(TokenKind::Ident) && !at_query_start(p)
+    p.at(T![Ident]) && !at_query_start(p)
 }
 
 /// Steps over the dot joining two parts of a qualified name, wherever the
@@ -215,7 +200,7 @@ pub(super) fn at_name(p: &Parser) -> bool {
 /// missing alias is a gap, and consuming the comma or paren that revealed
 /// the gap costs the enclosing list everything after it.
 pub(super) fn eat_name_here(p: &mut Parser, expected: &'static str) {
-    if p.at(TokenKind::Ident) || expressions::at_property_name(p) {
+    if p.at(T![Ident]) || expressions::at_property_name(p) {
         p.bump();
         return;
     }
@@ -290,17 +275,11 @@ pub(super) fn at_table_name_component(p: &Parser) -> bool {
 }
 
 pub(super) fn at_a_qualifying_dot(p: &Parser) -> bool {
-    p.at(TokenKind::Dot) || (at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot))
+    p.at(T![Dot])
 }
 
 pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
-    if p.at(TokenKind::Dot) {
-        p.bump();
-        return true;
-    }
-
-    if at_trivia(p) && p.nth_non_trivia(0) == Some(TokenKind::Dot) {
-        p.skip_trivia();
+    if p.at(T![Dot]) {
         p.bump();
         return true;
     }
@@ -324,9 +303,7 @@ pub(super) fn eat_qualifying_dot(p: &mut Parser) -> bool {
 /// owed, a clause keyword is a boundary too: it is where an incomplete query
 /// begins, and swallowing it would cost that query the node it is promised.
 fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
-    p.skip_trivia();
-
-    if p.at_end() || p.at(TokenKind::Semicolon) {
+    if p.at_end() || p.at(T![Semicolon]) {
         return false;
     }
 
@@ -335,44 +312,40 @@ fn drain_to_boundary(p: &mut Parser, member_is_due: bool) -> bool {
     let mut after_a_dot = false;
     let mut after_a_receiver = false;
 
-    while !p.at_end() && !p.at(TokenKind::Semicolon) {
+    while !p.at_end() && !p.at(T![Semicolon]) {
         p.check_iteration_limit();
 
-        // After a dot the word is a property name, whatever it spells. `T.ИЗ`
-        // is one fragment being skipped, not a fragment and then a query.
+        // The dot reaches across a space but not across a line break, which
+        // is how the expression layer reads a qualified name: `Т . ИЗ` is one
+        // property access, `Т.\nИЗ` is a name and then a clause. The reach is
+        // masked where it is read rather than cleared when the line ends,
+        // because it feeds two decisions — whether a member may begin here,
+        // and whether this word is a property — and clearing only one of them
+        // would change where the leftover ends.
+        let reaches_here = after_a_dot && !p.a_line_break_precedes();
+
+        // After a dot the word is a property name, whatever it spells.
+        // `T.ИЗ` is one fragment being skipped, not a fragment and then a
+        // query.
         let could_begin_a_member =
-            !after_a_dot && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
+            !reaches_here && (at_query_start(p) || (member_is_due && select::is_clause_keyword(p)));
 
         if took_anything && could_begin_a_member && p.open_group_count() == 0 {
             break;
         }
 
-        // The dot reaches across a space but not across a line break, which
-        // is how the expression layer reads a qualified name: `Т . ИЗ` is one
-        // property access, `Т.\nИЗ` is a name and then a clause.
-        if p.at(TokenKind::Newline) {
-            after_a_dot = false;
-        } else if !at_trivia(p) {
-            // A dot qualifies the name in front of it. A dot with no name
-            // there — a second dot, an operator, the start of the leftover —
-            // is junk of its own and must not shield what follows.
-            let is_property = after_a_dot;
-            after_a_dot = p.at(TokenKind::Dot) && after_a_receiver;
-            after_a_receiver = ends_a_name(p, is_property);
-        }
+        // A dot qualifies the name in front of it. A dot with no name
+        // there — a second dot, an operator, the start of the leftover —
+        // is junk of its own and must not shield what follows.
+        after_a_dot = p.at(T![Dot]) && after_a_receiver;
+        after_a_receiver = ends_a_name(p, reaches_here);
 
         p.bump();
         took_anything = true;
     }
 
     if took_anything {
-        p.emit_error_at_marker(
-            leftover,
-            ParseError::Custom {
-                message: "не разобран остаток текста запроса",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(leftover, "не разобран остаток текста запроса");
     } else {
         leftover.abandon(p);
     }
@@ -391,13 +364,12 @@ fn queries(p: &mut Parser) {
 fn drop_table_query(p: &mut Parser) {
     let m = p.start();
     select::eat_sdbl_keyword(p, "DROP", "УНИЧТОЖИТЬ");
-    p.skip_trivia();
     // Every keyword reaches the parser as an `Ident`, so a bare kind check
     // would take the next query's `ВЫБРАТЬ` for the name of the table being
     // dropped — and the package would then lose that query entirely.
     if at_field_name(p) {
         p.bump();
-    } else if p.at(TokenKind::Ident) {
+    } else if p.at(T![Ident]) {
         // A keyword here belongs to whatever comes next — the following
         // query, the following clause — so report without taking it, or the
         // package loses what that word begins.

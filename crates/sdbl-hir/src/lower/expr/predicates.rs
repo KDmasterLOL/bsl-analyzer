@@ -66,8 +66,10 @@ impl LoweringContext<'_> {
             .map(|n| self.lower_expr(&n))
             .unwrap_or_else(|| ExprHir::Missing { range: node.text_range() });
 
-        let text = node.text().to_string().to_uppercase();
-        let negated = text.contains(" NOT ") || text.contains(" НЕ ");
+        let negated = node
+            .children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .any(|token| token.kind() == syntax::SyntaxKind::KW_NOT);
 
         self.record_keyword_by_text(
             node,

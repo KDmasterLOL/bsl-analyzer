@@ -347,6 +347,13 @@ mod tests {
             self.files.source_root(source_root_id)
         }
 
+        fn try_source_root_input(
+            &self,
+            source_root_id: base_db::SourceRootId,
+        ) -> Option<base_db::SourceRootInput> {
+            self.files.try_source_root(source_root_id)
+        }
+
         fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
             self.files.file_source_root(file_id)
         }

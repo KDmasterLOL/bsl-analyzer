@@ -8,6 +8,8 @@ In most form-module scenarios, `FormAttributeToValue()` should be preferred over
 `FormAttributeToValue()` has simpler syntax because it does not require an explicit type argument. This makes the code shorter and reduces the chance of mistakes.
 
 The current implementation reports `FormDataToValue()` calls only in methods that have form context. Methods marked `&AtServerNoContext` and `&AtClientAtServerNoContext` are not reported.
+
+Only a call without a receiver is reported: `FormDataToValue` belongs to the global context and no platform type declares such a method, so `Receiver.FormDataToValue(...)` is a different method that merely shares the spelling.
 ## Examples
 <!-- В данном разделе приводятся примеры, на которые диагностика срабатывает, а также можно привести пример, как можно исправить ситуацию -->
 ```bsl

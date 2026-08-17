@@ -17,9 +17,11 @@ use ide::{
     GraphOverview, NeighborsParams, NeighborsResult, NodeRef, NodeResult, SourceItem, SourceResult,
     MAX_DROPPED_SAMPLE,
 };
+use line_index::TextRange;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use crate::graph_db::SCHEMA_VERSION;
+use crate::tools::location as loc;
 
 /// A node as stored, before projection to a [`NodeRef`].
 struct StoredNode {
@@ -38,6 +40,56 @@ struct StoredNode {
     addressable: bool,
 }
 
+/// The full declaration signature, from the keyword line containing `name_offset` through
+/// the header end `sig_end` (the closing `)` or export keyword). Internal runs of
+/// whitespace — including the newlines of a wrapped parameter list — are collapsed to
+/// single spaces so a multi-line declaration reads as one line.
+fn signature_in(text: &str, name_offset: u32, sig_end: u32) -> Option<String> {
+    let name = (name_offset as usize).min(text.len());
+    let end = (sig_end as usize).min(text.len());
+    if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
+        return None;
+    }
+    let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
+    let slice = text.get(start..end)?;
+    Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// Line endings are normalized to LF before redaction and budget clamping: consumers read
+/// the source, they do not need byte-exact CRLF, and the CR would only inflate the JSON
+/// escaping.
+fn slice_in(text: &str, start: u32, end: u32) -> Option<String> {
+    text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
+}
+
+/// One node's file text, read AT THE POINT OF USE and at most once.
+///
+/// Which consumer needs the bytes is decided by that consumer: the place needs them only
+/// after the pair is built and the row turns out to carry offsets, the signature and the
+/// body only for a method at `signatures`/`bodies`. A predicate deciding this up front
+/// restates those conditions and then drifts away from them — `usages` walks up to 200
+/// callers at `names` with no root table and cannot use a single byte, yet a
+/// detail-and-offsets predicate had it read every caller's file in full.
+///
+/// Memoized per node and NEVER across nodes: a handle is pooled and outlives edits to the
+/// files, so a text remembered across nodes would make the staleness check in
+/// [`GraphDb::node_location`] compare the artefact against itself.
+struct NodeText<'a> {
+    file: Option<&'a str>,
+    read: Option<Option<String>>,
+}
+
+impl<'a> NodeText<'a> {
+    fn new(file: Option<&'a str>) -> Self {
+        Self { file, read: None }
+    }
+
+    fn get(&mut self) -> Option<&str> {
+        let file = self.file?;
+        self.read.get_or_insert_with(|| std::fs::read_to_string(file).ok()).as_deref()
+    }
+}
+
 const NODE_COLUMNS: &str =
     "id, kind, name, qualified, module, file, name_offset, sig_end, src_start, src_end, dispatch, is_export, addressable";
 
@@ -49,12 +101,18 @@ const NODE_COLUMNS: &str =
 /// freshly opened build) flips the range arm to a full `nodes` scan + `edges_from` probe,
 /// i.e. O(nodes). The hint makes the O(inbound-edges) plan a guarantee, not a planner guess.
 /// Params: `?1` = the `mdo/…` node id, `?2`/`?3` = the half-open `attribute/…` id range bounds.
+///
+/// The source has to be a node with BSL source, and that is asked of its KIND.
+/// A non-null `file` used to imply it, back when only methods and modules
+/// carried one; an object carries its own file now, and a `contains` edge would
+/// otherwise report an object's XML as a file that references it.
 const REFERENCING_FILES_SQL: &str = "\
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id = ?1 \
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL AND e.to_id = ?1 \
     UNION \
     SELECT n.file FROM edges e INDEXED BY edges_to JOIN nodes n ON e.from_id = n.id \
-     WHERE n.file IS NOT NULL AND e.to_id >= ?2 AND e.to_id < ?3";
+     WHERE n.kind IN ('method','module') AND n.file IS NOT NULL \
+       AND e.to_id >= ?2 AND e.to_id < ?3";
 
 fn row_to_stored(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredNode> {
     Ok(StoredNode {
@@ -90,6 +148,126 @@ fn method_id_range(module_id: &str) -> Option<(String, String)> {
     let last = upper.pop()?; // ASCII '/' or ':'
     upper.push(((last as u8) + 1) as char);
     Some((prefix, upper))
+}
+
+/// The graph, as a name provider for [`ide::lookup_names`].
+///
+/// It selects and counts; ranking, folding and the limit belong to the merge.
+/// Whether the graph is built, still building or failed is the host's fact, not
+/// the store's, so the caller states it — an absent graph still gets a named
+/// verdict rather than silently contributing nothing.
+pub struct GraphNameSource<'a> {
+    graph: Option<&'a GraphDb>,
+    state: ide::ProviderState,
+}
+
+impl<'a> GraphNameSource<'a> {
+    pub fn answering(graph: &'a GraphDb) -> Self {
+        Self { graph: Some(graph), state: ide::ProviderState::Answered }
+    }
+
+    /// The graph cannot answer, and the reason travels into the report.
+    pub fn absent(state: ide::ProviderState) -> Self {
+        debug_assert_ne!(
+            state,
+            ide::ProviderState::Answered,
+            "an absent graph cannot be reported as having answered",
+        );
+        Self { graph: None, state }
+    }
+}
+
+/// Everything the graph holds. A durable id is matched whatever it names, so a
+/// narrowed question must not silently skip the store that owns the id.
+const GRAPH_CATEGORIES: &[ide::NameCategory] = &[
+    ide::NameCategory::CommonModule,
+    ide::NameCategory::Module,
+    ide::NameCategory::ModuleMethod,
+    ide::NameCategory::MetadataObject,
+    ide::NameCategory::MetadataMember,
+    ide::NameCategory::Form,
+];
+
+/// Which category a stored node belongs to. The kind alone does not settle a
+/// module node: only a `common/` scope is callable by name.
+fn node_category(kind: &str, id: &str) -> ide::NameCategory {
+    match kind {
+        "module" if id.starts_with("module/common/") => ide::NameCategory::CommonModule,
+        "module" => ide::NameCategory::Module,
+        // A subsystem's `<Content>` lists common modules, so the graph holds an
+        // `mdo` node for one. It is the same entity the resident publishes as a
+        // common module, and answering `metadata_object` here would leave the
+        // two rows unable to meet.
+        "mdo" if id.starts_with("mdo/CommonModule/") => ide::NameCategory::CommonModule,
+        "mdo" => ide::NameCategory::MetadataObject,
+        "attribute" | "tabular_section" => ide::NameCategory::MetadataMember,
+        "form" | "form_item" | "form_attribute" => ide::NameCategory::Form,
+        _ => ide::NameCategory::ModuleMethod,
+    }
+}
+
+impl ide::ExternalNameSource for GraphNameSource<'_> {
+    fn provider(&self) -> ide::ProviderId {
+        ide::ProviderId::Graph
+    }
+
+    fn state(&self) -> ide::ProviderState {
+        self.state
+    }
+
+    fn categories(&self) -> &'static [ide::NameCategory] {
+        GRAPH_CATEGORIES
+    }
+
+    /// A stored node knows the file it is written in, and handing it over is
+    /// what lets the dictionary recognise the graph's row and the resident's row
+    /// as ONE thing instead of guessing at it from the name. The ranges stay
+    /// with `graph action=node`: two answers about a node's exact span would be
+    /// two answers to one question, while the file is the identity itself.
+    fn supplies_location(&self) -> bool {
+        true
+    }
+
+    fn candidates(&self, query: &str, limit: usize) -> Result<ide::ProviderHits, String> {
+        let Some(graph) = self.graph else {
+            return Ok(ide::ProviderHits::new(Vec::new(), 0));
+        };
+        let result = graph.resolve(query, limit).map_err(|e| e.to_string())?;
+        let candidates = result
+            .candidates
+            .iter()
+            .map(|c| {
+                // The tier is the ranker's own verdict, carried across rather
+                // than recomputed: recomputing it here would be a second
+                // opinion on the same question, free to disagree.
+                let tier = ide::NameMatchTier::from_code(c.match_kind)
+                    .unwrap_or(ide::NameMatchTier::Substring);
+                let candidate = ide::NameCandidate::new(
+                    ide::resolve_name_segment(&c.id),
+                    node_category(c.kind, &c.id),
+                    tier,
+                    ide::ProviderId::Graph,
+                )
+                .with_graph_id(&c.id);
+                // Looked up per DELIVERED candidate, never per match: the ranker
+                // has already cut the list to `limit`, and the file of a node
+                // nobody will see is a query for nothing.
+                match graph.node_file(&c.id) {
+                    Ok(Some(file)) => candidate.with_source_path(file),
+                    // A node whose file the store does not know is still an
+                    // answer, addressed by its id alone.
+                    Ok(None) => candidate,
+                    Err(error) => {
+                        tracing::warn!(id = %c.id, %error, "graph node file lookup failed");
+                        candidate
+                    }
+                }
+            })
+            .collect();
+        // `total` is the ranker's pre-cap count, so a name matching thousands of
+        // nodes is not handed over as if twenty were all of them.
+        Ok(ide::ProviderHits::new(candidates, result.total))
+    }
 }
 
 /// Map a stored node kind to the agent-facing static label `NodeRef` expects.
@@ -171,7 +349,7 @@ impl GraphDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening graph database at {}", path.display()))?;
-        let db = Self { conn };
+        let db = Self::from_connection(conn);
         db.validate_meta()?;
         Ok(db)
     }
@@ -495,6 +673,18 @@ impl GraphDb {
         Ok(ide::ResolveResult::new(query, candidates, total))
     }
 
+    /// The file a node is written in, for the name dictionary's identity.
+    ///
+    /// A module node is usually absent from the table — it is persisted only
+    /// when it happens to be an edge endpoint — so the synthesized form answers
+    /// for it, deriving the file from the module's own method rows.
+    pub(crate) fn node_file(&self, id: &str) -> anyhow::Result<Option<String>> {
+        if let Some(node) = self.fetch_node(id)? {
+            return Ok(node.file);
+        }
+        Ok(self.synthesize_module_node(id)?.and_then(|node| node.file))
+    }
+
     /// Usage summary for a durable node id: the inbound-edge count plus the top calling
     /// modules. Enrichment for the `symbol_info` tool — a resident-resolved symbol is bridged
     /// to the graph by id, and this returns its fan-in and where it is called from. `top_modules`
@@ -520,7 +710,9 @@ impl GraphDb {
         let mut by_module: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         let mut sampled = false;
-        if let Ok(result) = self.neighbors(&params)? {
+        // The usages summary counts calling MODULES; the nodes themselves never leave this
+        // function, so no root table is needed to place them.
+        if let Ok(result) = self.neighbors(&params, None)? {
             sampled = result.dropped_count > 0;
             for node in &result.nodes {
                 if let Some(module) = &node.module {
@@ -543,32 +735,24 @@ impl GraphDb {
         Ok(d.unwrap_or(0) as usize)
     }
 
-    /// The full declaration signature, from the keyword line containing `name_offset`
-    /// through the header end `sig_end` (the closing `)` or export keyword). Internal
-    /// runs of whitespace — including the newlines of a wrapped parameter list — are
-    /// collapsed to single spaces so a multi-line declaration reads as one line.
-    fn signature_at(&self, file: &str, name_offset: u32, sig_end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        let name = (name_offset as usize).min(text.len());
-        let end = (sig_end as usize).min(text.len());
-        if name > end || !text.is_char_boundary(name) || !text.is_char_boundary(end) {
-            return None;
-        }
-        let start = text[..name].rfind('\n').map_or(0, |i| i + 1);
-        let slice = text.get(start..end)?;
-        Some(slice.split_whitespace().collect::<Vec<_>>().join(" "))
-    }
-
+    /// A source slice read from `file`, for the callers that hold a path rather than text.
+    /// The node projection reads its file once and calls [`slice_in`] directly.
     fn slice(&self, file: &str, start: u32, end: u32) -> Option<String> {
-        let text = std::fs::read_to_string(file).ok()?;
-        // Line endings are normalized to LF before redaction and budget clamping:
-        // consumers read the source, they do not need byte-exact CRLF, and the CR
-        // would only inflate the JSON escaping.
-        text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
+        slice_in(&std::fs::read_to_string(file).ok()?, start, end)
     }
 
     /// Project a stored node to its agent-facing [`NodeRef`] at `detail`.
-    fn node_ref(&self, n: &StoredNode, detail: GraphDetail) -> NodeRef {
+    ///
+    /// `roots` is the answering snapshot's root table, passed down rather than owned: the
+    /// table belongs to the publication, and a `GraphDb` outlives any one of them. `None`
+    /// is a real serving state (a cached graph published before the project loaded), and
+    /// the node then names `roots_unavailable` instead of quietly dropping its place.
+    fn node_ref(
+        &self,
+        n: &StoredNode,
+        detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> NodeRef {
         let kind = node_kind(&n.kind);
         let mut node = NodeRef {
             id: n.id.clone(),
@@ -587,23 +771,135 @@ impl GraphDb {
             // query, so it is not done in this projection helper.
             methods: None,
             addressable: n.addressable,
+            location: None,
+            location_unavailable: None,
         };
+        // The file is read at most once per node and only where a consumer actually reaches
+        // for it: the place, the signature and the body all describe the same bytes, and
+        // reading them twice invites two answers.
+        let mut text = NodeText::new(n.file.as_deref());
+
+        match self.node_location(n, roots, &mut text) {
+            Ok(location) => node.location = Some(location),
+            Err(reason) => node.location_unavailable = Some(reason),
+        }
         if n.kind == "method" && matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
-            if let (Some(file), Some(off), Some(end)) = (&n.file, n.name_offset, n.sig_end) {
-                node.signature = self.signature_at(file, off, end);
+            if let (Some(off), Some(end)) = (n.name_offset, n.sig_end) {
+                node.signature = text.get().and_then(|text| signature_in(text, off, end));
             }
             if detail == GraphDetail::Bodies {
-                if let (Some(file), Some(s), Some(e)) = (&n.file, n.src_start, n.src_end) {
-                    node.source = self.slice(file, s, e);
+                if let (Some(s), Some(e)) = (n.src_start, n.src_end) {
+                    node.source = text.get().and_then(|text| slice_in(text, s, e));
                 }
             }
         }
         node
     }
 
+    /// A stored node's place under the location contract, or the machine reason there is
+    /// none.
+    ///
+    /// The name range is VERIFIED by slicing rather than trusted: the database stores where
+    /// a name starts and where the HEADER ends (`sig_end` — the closing `)` or the export
+    /// keyword), not where the name ends. Publishing the header end as the name's would put
+    /// the parameter list inside a field the contract says is the name, so the range is
+    /// built from the name's own length and dropped unless the text there really is that
+    /// name.
+    fn node_location(
+        &self,
+        n: &StoredNode,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+        text: &mut NodeText<'_>,
+    ) -> Result<serde_json::Value, &'static str> {
+        if !matches!(n.kind.as_str(), "method" | "module") {
+            return Err(loc::LocationUnavailable::NoSourceLocation.code());
+        }
+        let (Some(file), Some(roots)) = (n.file.as_deref(), roots) else {
+            // A method whose row has no file is a path-fallback node seen only as an edge
+            // endpoint; a missing table is the boot window. Neither may answer "no place".
+            // Two different facts, two different codes: a method whose row carries no path
+            // HAS a file (it is a path-fallback node seen only as an edge endpoint) — its
+            // address was lost, not absent. `no_source_location` is reserved for entities
+            // that have no file at all, and saying it here would send a consumer looking in
+            // the wrong direction.
+            return Err(if n.file.is_none() {
+                loc::LocationUnavailable::SourcePathUnavailable.code()
+            } else {
+                loc::LocationUnavailable::RootsUnavailable.code()
+            });
+        };
+        let location = loc::Location::from_path(roots, std::path::Path::new(file))
+            .map_err(|reason| reason.code())?;
+
+        // The pair costs no I/O; only the ranges do, and everything above this line is
+        // decided without touching the disk. A node with no offsets — a synthesized `module`
+        // row — leaves here, so `overview` does not read a module's file for a signature it
+        // will never build out of it.
+        let (Some(name_offset), Some(src_start), Some(src_end)) =
+            (n.name_offset, n.src_start, n.src_end)
+        else {
+            return Ok(location.to_value());
+        };
+        let Some(text) = text.get() else {
+            // The row's offsets describe a file we cannot read now; the pair is still true.
+            return Ok(location.to_value());
+        };
+
+        // Offsets come from the artefact, the text from disk NOW. Between a build and its
+        // catch-up reload those disagree, and an offset that stayed inside the file yields a
+        // plausible but wrong span. The name is the one span we can verify by slicing, so it
+        // gates BOTH ranges: an unverifiable place is published as the file alone rather than
+        // as a range a consumer would happily cut text with.
+        let name_end = name_offset as usize + n.name.len();
+        let named = text
+            .get(name_offset as usize..name_end)
+            .is_some_and(|slice| slice.to_lowercase() == n.name.to_lowercase());
+        if !named {
+            return Ok(location.to_value());
+        }
+
+        // The name alone is not enough. An edit INSIDE the body leaves the name where it
+        // was and still moves `src_end`, so a range built from it would end at the wrong
+        // bytes — plausible, and wrong exactly where a consumer cuts text. A declaration
+        // ends with its closing keyword, so that is what the stored end must land on.
+        let declared_end = text
+            .get(src_start as usize..src_end as usize)
+            .map(|slice| slice.trim_end().to_lowercase())
+            .is_some_and(|slice| {
+                ["конецпроцедуры", "конецфункции", "endprocedure", "endfunction"]
+                    .iter()
+                    .any(|keyword| slice.ends_with(keyword))
+            });
+
+        let index = line_index::LineIndex::new(text);
+        let name = index
+            .utf16_line_col_range(
+                text,
+                TextRange::new(name_offset.into(), (name_end as u32).into()),
+            )
+            .map(loc::PositionRange::from);
+        let enclosing = declared_end
+            .then(|| {
+                index.utf16_line_col_range(text, TextRange::new(src_start.into(), src_end.into()))
+            })
+            .flatten()
+            .map(loc::PositionRange::from);
+
+        Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
+    }
+
+    /// Wrap an open connection.
+    fn from_connection(conn: Connection) -> Self {
+        Self { conn }
+    }
+
     /// Cold-start overview: node/edge tallies, the most-called nodes, and the
     /// provenance/dispatch profile.
-    pub fn overview(&self, top_n: usize) -> anyhow::Result<GraphOverview> {
+    pub fn overview(
+        &self,
+        top_n: usize,
+        roots: Option<&bsl_search::WorkspaceRoots>,
+    ) -> anyhow::Result<GraphOverview> {
         let nodes = self.count("SELECT COUNT(*) FROM nodes")?;
         let methods = self.count("SELECT COUNT(*) FROM nodes WHERE kind='method'")?;
         let modules = self.count_modules()?;
@@ -640,7 +936,7 @@ impl GraphDb {
         let mut top_by_centrality = Vec::with_capacity(top_ids.len());
         for id in top_ids {
             if let Some(n) = self.fetch_node(&id)? {
-                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures));
+                top_by_centrality.push(self.node_ref(&n, GraphDetail::Signatures, roots));
             }
         }
 
@@ -667,12 +963,13 @@ impl GraphDb {
         &self,
         id: &str,
         detail: GraphDetail,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NodeResult, GraphError>> {
         let stored = match self.resolve_stored(id)? {
             Ok(n) => n,
             Err(e) => return Ok(Err(e)),
         };
-        let mut node = self.node_ref(&stored, detail);
+        let mut node = self.node_ref(&stored, detail, roots);
         // A `module` node lists its members so an agent discovers them from `node(module/…)`
         // directly, without a traversal.
         if stored.kind == "module" {
@@ -736,6 +1033,7 @@ impl GraphDb {
     pub fn neighbors(
         &self,
         params: &NeighborsParams<'_>,
+        roots: Option<&bsl_search::WorkspaceRoots>,
     ) -> anyhow::Result<Result<NeighborsResult, GraphError>> {
         let root = match self.resolve_stored(params.id)? {
             Ok(n) => n,
@@ -806,7 +1104,7 @@ impl GraphDb {
         let mut nodes = Vec::with_capacity(ranked.len());
         for (_, id) in &ranked {
             if let Some(n) = self.fetch_node(id)? {
-                nodes.push(self.node_ref(&n, params.detail));
+                nodes.push(self.node_ref(&n, params.detail, roots));
             }
         }
 
@@ -857,7 +1155,7 @@ impl GraphDb {
         let returned = nodes.len();
         let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
         Ok(Ok(NeighborsResult {
-            root: self.node_ref(&root, params.detail),
+            root: self.node_ref(&root, params.detail, roots),
             nodes,
             edges,
             total,
@@ -884,7 +1182,9 @@ impl GraphDb {
             Some(n) if n.kind == "method" => n,
             _ => return Ok(None),
         };
-        let nref = self.node_ref(&node, GraphDetail::Signatures);
+        // Not serialized as a node: this projection feeds a text renderer for embedding
+        // enrichment, so it needs no place and takes no table.
+        let nref = self.node_ref(&node, GraphDetail::Signatures, None);
 
         // Mirror the in-memory renderer's facts exactly by EDGE kind, not just target
         // kind: calls come only from `call` edges, reads only from a method's
@@ -1104,7 +1404,7 @@ fn clamp_source(src: String, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{edge_kind, method_id_range, provenance, GraphDb};
+    use super::{edge_kind, method_id_range, node_category, provenance, GraphDb, GraphNameSource};
     use crate::graph_db::{GraphDbWriter, GraphMeta};
     use rusqlite::{params, Connection};
 
@@ -1134,6 +1434,97 @@ mod tests {
         assert!(result.is_err(), "prior projection graphs must be rebuilt");
     }
 
+    /// A subsystem's `<Content>` puts a common module into the graph as an `mdo`
+    /// node. It is the same entity the resident publishes as a common module, and
+    /// only a shared category lets the two rows meet.
+    #[test]
+    fn a_common_module_reached_through_a_subsystem_keeps_its_own_category() {
+        assert_eq!(
+            node_category("mdo", "mdo/CommonModule/Настройки"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject,);
+    }
+
+    /// `file` says where a node is defined, not that it holds BSL source. An
+    /// object carries one now, and the reverse lookup must still answer with the
+    /// files that REFERENCE the object — never with the object's own XML, which a
+    /// `contains` edge would otherwise hand back.
+    #[test]
+    fn an_objects_own_file_is_not_a_file_that_references_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bsl-graph.db");
+        let mut writer = GraphDbWriter::create(&path).unwrap();
+        writer
+            .write_nodes(&[
+                ide::graph_index::NodeRow {
+                    id: "method/common/Вызов/Читать".to_string(),
+                    kind: "method",
+                    name: "Читать".to_string(),
+                    qualified: "ОбщийМодуль.Вызов.Читать".to_string(),
+                    module: Some("ОбщийМодуль.Вызов".to_string()),
+                    file: Some("CommonModules/Вызов/Ext/Module.bsl".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: Some(true),
+                    addressable: true,
+                },
+                ide::graph_index::NodeRow {
+                    id: "mdo/Catalog/Товары".to_string(),
+                    kind: "mdo",
+                    name: "Товары".to_string(),
+                    qualified: "Справочник.Товары".to_string(),
+                    module: None,
+                    file: Some("Catalogs/Товары.xml".to_string()),
+                    name_offset: None,
+                    sig_end: None,
+                    src_start: None,
+                    src_end: None,
+                    dispatch: Vec::new(),
+                    is_export: None,
+                    addressable: true,
+                },
+            ])
+            .unwrap();
+        writer
+            .write_edges(&[
+                ide::graph_index::EdgeRow {
+                    from_id: "method/common/Вызов/Читать".to_string(),
+                    to_id: "mdo/Catalog/Товары".to_string(),
+                    kind: "read",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+                // The object contains its own attribute, and the edge points back
+                // at the object exactly as the catalog pass writes it.
+                ide::graph_index::EdgeRow {
+                    from_id: "mdo/Catalog/Товары".to_string(),
+                    to_id: "attribute/Catalog/Товары/Код".to_string(),
+                    kind: "contains",
+                    provenance: "resolved",
+                    crosses: false,
+                },
+            ])
+            .unwrap();
+        writer
+            .finalize(&GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            })
+            .unwrap();
+
+        let db = GraphDb::open(&path).unwrap();
+        assert_eq!(
+            db.referencing_files("mdo/Catalog/Товары").unwrap(),
+            vec!["CommonModules/Вызов/Ext/Module.bsl".to_string()],
+        );
+    }
+
     #[test]
     fn stored_callback_edge_kinds_round_trip_not_collapsed_to_call() {
         // Regression: the normalizers fell through to "call"/"resolved" for unknown
@@ -1155,7 +1546,7 @@ mod tests {
             conn.execute("INSERT INTO nodes (id, kind) VALUES (?1, ?2)", params![id, kind])
                 .unwrap();
         }
-        GraphDb { conn }
+        GraphDb::from_connection(conn)
     }
 
     /// The reverse lookup must ride the `edges_to` index (equality + half-open range on
@@ -1172,7 +1563,7 @@ mod tests {
              CREATE INDEX edges_from ON edges(from_id);",
         )
         .unwrap();
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let plan: Vec<String> = db
             .conn
             .prepare(&format!("EXPLAIN QUERY PLAN {}", super::REFERENCING_FILES_SQL))
@@ -1235,7 +1626,7 @@ mod tests {
         edge("method/common/Г/Ч", "attribute/Catalog/Товары/Код", "query_ref");
         edge("method/common/В/Н", "mdo/Catalog/Другой", "manager_access");
 
-        let db = GraphDb { conn };
+        let db = GraphDb::from_connection(conn);
         let mut files = db.referencing_files("mdo/Catalog/Товары").unwrap();
         files.sort();
         assert_eq!(
@@ -1284,6 +1675,95 @@ mod tests {
             res.candidates.iter().filter(|c| c.id == "module/common/Сервер").collect();
         assert_eq!(modules.len(), 1);
         assert_eq!(modules[0].match_kind, "exact");
+    }
+
+    /// The dictionary must not narrow what `resolve` accepts: all four id tiers
+    /// keep working when the graph answers through the merge instead of
+    /// serialising its own result.
+    #[test]
+    fn every_id_tier_survives_the_trip_through_the_name_source() {
+        use ide::ExternalNameSource;
+
+        let db = graph_db_with_nodes(&[(
+            "method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку",
+            "method",
+        )]);
+        let source = GraphNameSource::answering(&db);
+
+        let tier_of = |query: &str| {
+            source
+                .candidates(query, 10)
+                .unwrap()
+                .candidates
+                .first()
+                .map(|c| c.match_tier)
+                .unwrap_or_else(|| panic!("`{query}` found nothing"))
+        };
+
+        assert_eq!(
+            tier_of("method/common/СтроковыеФункцииКлиентСервер/ПодставитьПараметрыВСтроку"),
+            ide::NameMatchTier::Exact,
+        );
+        assert_eq!(
+            tier_of("method/common/строковыефункцииклиентсервер/подставитьпараметрывстроку"),
+            ide::NameMatchTier::CaseInsensitive,
+        );
+        assert_eq!(tier_of("ПодставитьПараметрыВСтроку"), ide::NameMatchTier::Name);
+        assert_eq!(tier_of("ПараметрыВСтр"), ide::NameMatchTier::Substring);
+    }
+
+    /// A module node is a common module only when its scope says so; calling an
+    /// object module "callable by name" would publish a category its consumer
+    /// would act on.
+    #[test]
+    fn a_module_node_is_categorised_by_its_scope_not_its_kind() {
+        assert_eq!(
+            node_category("module", "module/common/Сервер"),
+            ide::NameCategory::CommonModule,
+        );
+        assert_eq!(
+            node_category("module", "module/object/Catalog/Товары"),
+            ide::NameCategory::Module,
+        );
+        assert_eq!(node_category("mdo", "mdo/Catalog/Товары"), ide::NameCategory::MetadataObject);
+        assert_eq!(
+            node_category("attribute", "attribute/Catalog/Товары/Код"),
+            ide::NameCategory::MetadataMember,
+        );
+        assert_eq!(
+            node_category("form_item", "form_item/Catalog/Товары/Форма/Кнопка"),
+            ide::NameCategory::Form,
+        );
+    }
+
+    /// The count the merge relies on: what the graph withheld has to be visible,
+    /// or an answer capped at the limit reads as exhaustive.
+    #[test]
+    fn the_source_reports_what_it_did_not_hand_over() {
+        use ide::ExternalNameSource;
+
+        let rows: Vec<(String, &str)> = (0..8)
+            .map(|i| (format!("method/common/М{i}/ПриСозданииНаСервере"), "method"))
+            .collect();
+        let borrowed: Vec<(&str, &str)> =
+            rows.iter().map(|(id, kind)| (id.as_str(), *kind)).collect();
+        let db = graph_db_with_nodes(&borrowed);
+        let source = GraphNameSource::answering(&db);
+
+        let hits = source.candidates("ПриСозданииНаСервере", 3).unwrap();
+        assert_eq!(hits.candidates.len(), 3);
+        assert_eq!(hits.total, 8, "the pre-cap count, not the delivered count");
+    }
+
+    /// An absent graph reports its reason instead of an empty answer that would
+    /// read as a proven zero.
+    #[test]
+    fn an_absent_graph_names_its_state() {
+        use ide::ExternalNameSource;
+
+        let source = GraphNameSource::absent(ide::ProviderState::NotReady);
+        assert_eq!(source.state(), ide::ProviderState::NotReady);
+        assert_eq!(source.provider(), ide::ProviderId::Graph);
     }
 
     #[test]

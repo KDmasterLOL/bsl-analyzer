@@ -96,13 +96,7 @@ fn form_data_to_value_membership_skips_no_context_methods() {
         FormDataToValue line 2 `ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));`
           message: Обнаружено использование метода ДанныеФормыВЗначение
           severity: Hint
-        FormDataToValue line 3 `Форма.ДанныеФормыВЗначение(Объект, Тип("ТаблицаЗначений"));`
-          message: Обнаружено использование метода ДанныеФормыВЗначение
-          severity: Hint
         FormDataToValue line 4 `FormDataToValue(Object, Type("ValueTable"));`
-          message: Обнаружено использование метода ДанныеФормыВЗначение
-          severity: Hint
-        FormDataToValue line 5 `Form.FormDataToValue(Object, Type("ValueTable"));`
           message: Обнаружено использование метода ДанныеФормыВЗначение
           severity: Hint"#]]
     .assert_eq(&format_filtered(source, DiagnosticCode::FormDataToValue));

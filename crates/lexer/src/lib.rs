@@ -315,6 +315,129 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
+    /// Все виды по порядку объявления.
+    ///
+    /// Нужен перебору: свойство, проверенное на выборке видов, зелено и у
+    /// таблицы, разошедшейся на не вошедшем в выборку. Полнота списка сама
+    /// под тестом — `the_list_of_kinds_covers_every_variant`, — потому что
+    /// список, отставший от перечисления, ослабляет перебор молча.
+    pub const ALL: &'static [TokenKind] = &[
+        TokenKind::KwProcedure,
+        TokenKind::KwEndProcedure,
+        TokenKind::KwFunction,
+        TokenKind::KwEndFunction,
+        TokenKind::KwExport,
+        TokenKind::KwVal,
+        TokenKind::KwIf,
+        TokenKind::KwThen,
+        TokenKind::KwElsIf,
+        TokenKind::KwElse,
+        TokenKind::KwEndIf,
+        TokenKind::KwFor,
+        TokenKind::KwEach,
+        TokenKind::KwIn,
+        TokenKind::KwTo,
+        TokenKind::KwWhile,
+        TokenKind::KwDo,
+        TokenKind::KwEndDo,
+        TokenKind::KwReturn,
+        TokenKind::KwContinue,
+        TokenKind::KwBreak,
+        TokenKind::KwGoto,
+        TokenKind::KwTry,
+        TokenKind::KwExcept,
+        TokenKind::KwEndTry,
+        TokenKind::KwRaise,
+        TokenKind::KwVar,
+        TokenKind::KwNew,
+        TokenKind::KwExecute,
+        TokenKind::KwAddHandler,
+        TokenKind::KwRemoveHandler,
+        TokenKind::KwAsync,
+        TokenKind::KwAwait,
+        TokenKind::KwAnd,
+        TokenKind::KwOr,
+        TokenKind::KwNot,
+        TokenKind::KwTrue,
+        TokenKind::KwFalse,
+        TokenKind::KwUndefined,
+        TokenKind::KwNull,
+        TokenKind::PreIf,
+        TokenKind::PreElsIf,
+        TokenKind::PreElse,
+        TokenKind::PreEndIf,
+        TokenKind::PreRegion,
+        TokenKind::PreEndRegion,
+        TokenKind::PreUse,
+        TokenKind::PreInsert,
+        TokenKind::PreEndInsert,
+        TokenKind::PreDelete,
+        TokenKind::PreEndDelete,
+        TokenKind::AnnAtClient,
+        TokenKind::AnnAtServer,
+        TokenKind::AnnAtServerNoContext,
+        TokenKind::AnnAtClientAtServerNoContext,
+        TokenKind::AnnAtClientAtServer,
+        TokenKind::AnnBefore,
+        TokenKind::AnnAfter,
+        TokenKind::AnnAround,
+        TokenKind::AnnChangeAndValidate,
+        TokenKind::AnnCustom,
+        TokenKind::Eq,
+        TokenKind::Neq,
+        TokenKind::Le,
+        TokenKind::Lt,
+        TokenKind::Ge,
+        TokenKind::Gt,
+        TokenKind::Plus,
+        TokenKind::Minus,
+        TokenKind::Star,
+        TokenKind::Slash,
+        TokenKind::Percent,
+        TokenKind::LParen,
+        TokenKind::RParen,
+        TokenKind::LBrace,
+        TokenKind::RBrace,
+        TokenKind::LBracket,
+        TokenKind::RBracket,
+        TokenKind::Dot,
+        TokenKind::Comma,
+        TokenKind::Semicolon,
+        TokenKind::Colon,
+        TokenKind::Question,
+        TokenKind::Tilde,
+        TokenKind::Bar,
+        TokenKind::Hash,
+        TokenKind::Ampersand,
+        TokenKind::Exclamation,
+        TokenKind::Float,
+        TokenKind::Decimal,
+        TokenKind::String,
+        TokenKind::StringStart,
+        TokenKind::StringTail,
+        TokenKind::StringPart,
+        TokenKind::Date,
+        TokenKind::Ident,
+        TokenKind::Comment,
+        TokenKind::Newline,
+        TokenKind::Whitespace,
+        TokenKind::Bom,
+        TokenKind::Error,
+    ];
+
+    /// Лексема, которую грамматика не разбирает: пробелы, переводы строки,
+    /// комментарии, BOM.
+    ///
+    /// Определение живёт здесь, потому что вид лексемы принадлежит лексеру.
+    /// Слою дерева отвечает `SyntaxKind::is_trivia`, и согласие двух
+    /// предикатов держится перебором всех видов.
+    pub const fn is_trivia(self) -> bool {
+        matches!(
+            self,
+            TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom
+        )
+    }
+
     pub fn is_keyword(self) -> bool {
         matches!(
             self,
@@ -796,5 +919,27 @@ mod tests {
         assert_eq!(tokens[0].kind, TokenKind::Bom, "First token should be BOM");
         assert_eq!(tokens[0].text.as_str(), "\u{FEFF}");
         assert_eq!(tokens[1].kind, TokenKind::KwProcedure);
+    }
+}
+
+#[cfg(test)]
+mod kind_list_tests {
+    use super::TokenKind;
+
+    /// Список видов покрывает перечисление целиком и в порядке объявления.
+    ///
+    /// Проверяется через дискриминанты, а не через длину: вид, вставленный в
+    /// середину, длину бы не изменил, если заодно удалить другой, — а порядок
+    /// сдвинул бы. `Error` объявлен последним, и на этом держится счёт.
+    #[test]
+    fn the_list_of_kinds_covers_every_variant() {
+        for (index, kind) in TokenKind::ALL.iter().enumerate() {
+            assert_eq!(*kind as usize, index, "список видов разошёлся с перечислением на {kind:?}");
+        }
+        assert_eq!(
+            TokenKind::ALL.len(),
+            TokenKind::Error as usize + 1,
+            "в перечислении появились виды, не попавшие в список"
+        );
     }
 }

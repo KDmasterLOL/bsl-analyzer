@@ -52,6 +52,8 @@ crates/ide-diagnostics/src/runner.rs	ExecuteExternalCodeInCommonModule	1	вне-
 crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: код диагностики
 crates/ide/src/goto_definition.rs	{name}.xml	1	конструкция: кандидат разрешается регистронезависимо
 crates/ide/src/goto_definition.rs	{}.xml	1	конструкция: кандидат разрешается регистронезависимо
+crates/ide/src/name_lookup.rs	form	1	вне-класса: код словаря категорий
+crates/ide/src/name_lookup.rs	module	1	вне-класса: код словаря категорий
 crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»
 crates/bsl-analyzer/src/bench/discover.rs	form	2	вне-класса: метка категории бенча
 crates/bsl-analyzer/src/bin/cli/contract.rs	commands	1	вне-класса: имя раздела контракта CLI
@@ -62,7 +64,7 @@ crates/ide-db/src/metadata.rs	commands	1	вне-класса: свод колл�
 crates/ide/src/graph.rs	form	2	вне-класса: вид узла графа
 crates/ide/src/symbol_info/form/card.rs	form	1	вне-класса: вид символа
 crates/mcp-server/src/contract.rs	form	1	вне-класса: вид узла графа
-crates/mcp-server/src/graph_query.rs	form	4	вне-класса: вид узла графа
+crates/mcp-server/src/graph_query.rs	form	5	вне-класса: вид узла графа
 crates/mcp-server/src/lib.rs	form	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/graph.rs	form	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/metadata.rs	commonmodule	1	вне-класса: двуязычное имя вида MDO
@@ -70,7 +72,8 @@ crates/hir-def/src/graph_index.rs	module	1	вне-класса: вид узла 
 crates/ide/src/graph.rs	module	3	вне-класса: вид узла графа
 crates/ide/src/symbol_info.rs	module	1	вне-класса: вид символа
 crates/mcp-server/src/contract.rs	module	2	вне-класса: вид узла графа
-crates/mcp-server/src/graph_query.rs	module	7	вне-класса: вид узла графа
+crates/mcp-server/src/graph_query.rs	module	10	вне-класса: вид узла графа
 crates/mcp-server/src/lib.rs	module	2	вне-класса: вид узла графа
 crates/mcp-server/src/tools/graph.rs	module	2	вне-класса: вид узла графа
+crates/mcp-server/src/tools/location.rs	module	1	вне-класса: вид узла графа
 crates/mcp-server/src/tools/symbol_info.rs	module	1	вне-класса: вид символа

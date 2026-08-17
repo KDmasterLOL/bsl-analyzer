@@ -1,8 +1,5 @@
 use crate::event::NodeKind;
 use crate::parser::Parser;
-use lexer::TokenKind;
-use parser_error::{ParseError, RecoveryKind};
-use smallvec::smallvec;
 
 use super::expressions;
 
@@ -40,14 +37,14 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         // An extension region is opaque: the words inside it are not this
         // query's, and a boundary read from one is a boundary that is not
         // there.
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             brace_depth += 1;
             p.bump();
             consumed_any = true;
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             brace_depth = brace_depth.saturating_sub(1);
             p.bump();
             consumed_any = true;
@@ -55,7 +52,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         }
 
         if brace_depth > 0 {
-            if p.at_end() || p.at(TokenKind::Semicolon) {
+            if p.at_end() || p.at(T![Semicolon]) {
                 break;
             }
             p.bump();
@@ -77,18 +74,17 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             continue;
         }
 
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
-            p.skip_trivia();
             if is_query_starter_or_combiner_keyword(p) {
                 nested_query_starts.push(paren_depth);
             }
             continue;
         }
 
-        if p.at(TokenKind::RParen) && paren_depth > 0 {
+        if p.at(T![RParen]) && paren_depth > 0 {
             if let Some(&d) = nested_query_starts.last() {
                 if d == paren_depth {
                     nested_query_starts.pop();
@@ -115,7 +111,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
         // rest of the query, and half-written `ВЫБОР` is what an editor
         // buffer holds. Stopping early costs a closed `ВЫБОР` its skip;
         // stopping late costs every unclosed one its whole query.
-        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(T![Dot]) {
             let stop = if at_top_level {
                 true
             } else if inside_nested_query {
@@ -127,7 +123,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
                 break;
             }
         }
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
         if p.at_end() {
@@ -138,10 +134,10 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
             if at_sdbl_keyword(p, "AS", "КАК") {
                 break;
             }
-            if p.at(TokenKind::Comma) {
+            if p.at(T![Comma]) {
                 break;
             }
-            if p.at(TokenKind::RParen) {
+            if p.at(T![RParen]) {
                 break;
             }
         }
@@ -151,13 +147,7 @@ fn recover_field_to_alias_or_delimiter(p: &mut Parser) {
     }
 
     if consumed_any {
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "пропуск некорректного фрагмента",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "пропуск некорректного фрагмента");
     } else {
         err.abandon(p);
     }
@@ -181,9 +171,7 @@ pub(super) fn subquery(p: &mut Parser) {
     query(p);
 
     loop {
-        p.skip_trivia();
-
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
@@ -202,10 +190,8 @@ fn union_clause(p: &mut Parser) {
 
     eat_sdbl_keyword(p, "UNION", "ОБЪЕДИНИТЬ");
 
-    p.skip_trivia();
     eat_sdbl_keyword(p, "ALL", "ВСЕ");
 
-    p.skip_trivia();
     query(p);
 
     m.complete(p, NodeKind::SdblUnionClause);
@@ -253,10 +239,8 @@ fn query_content(p: &mut Parser) {
     // belongs — `КАК Итоги` names a source — and that is why this is stated
     // here rather than as a word the whole parse treats as a boundary.
     p.within_boundary(is_clause_keyword, |p| {
-        p.skip_trivia();
         if is_limitation_keyword(p) {
             limitations(p);
-            p.skip_trivia();
         }
 
         selected_fields(p);
@@ -285,9 +269,9 @@ pub(super) fn selected_fields(p: &mut Parser) {
     // a list with something wrong inside it, and the list parser's own
     // recovery handles that better than giving up here would.
     let list_is_absent = is_clause_keyword(p)
-        || p.at(TokenKind::Semicolon)
-        || p.at(TokenKind::RParen)
-        || p.at(TokenKind::LBrace)
+        || p.at(T![Semicolon])
+        || p.at(T![RParen])
+        || p.at(T![LBrace])
         || p.at_end();
 
     if !list_is_absent {
@@ -296,7 +280,7 @@ pub(super) fn selected_fields(p: &mut Parser) {
         p.within_field_names(|p| {
             super::expressions::parse_delimited_list(
                 p,
-                TokenKind::Comma,
+                T![Comma],
                 &super::LIST_RECOVERY,
                 is_field_start,
                 selected_field,
@@ -321,23 +305,20 @@ fn selected_field(p: &mut Parser) {
         asterisk_field(p);
     } else {
         expressions::expression(p);
-        p.skip_trivia();
 
         let at_expected_position = at_sdbl_keyword(p, "AS", "КАК")
             || (is_identifier_token(p) && !is_clause_keyword(p))
-            || p.at(TokenKind::Comma)
-            || p.at(TokenKind::Semicolon)
-            || p.at(TokenKind::LBrace)
+            || p.at(T![Comma])
+            || p.at(T![Semicolon])
+            || p.at(T![LBrace])
             || is_clause_keyword(p)
             || p.at_end();
 
         if !at_expected_position {
             recover_field_to_alias_or_delimiter(p);
-            p.skip_trivia();
         }
     }
 
-    p.skip_trivia();
     if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
         selected_field_alias(p);
     }
@@ -353,13 +334,13 @@ fn is_field_start(p: &Parser) -> bool {
 }
 
 fn is_asterisk_start(p: &Parser) -> bool {
-    if p.at(TokenKind::Star) {
+    if p.at(T![Star]) {
         return true;
     }
 
-    if p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
-            if let Some(TokenKind::Star) = p.nth_non_trivia(1) {
+    if p.at(T![Ident]) {
+        if let Some(T![Dot]) = p.nth(1) {
+            if let Some(T![Star]) = p.nth(2) {
                 return true;
             }
         }
@@ -371,18 +352,16 @@ fn is_asterisk_start(p: &Parser) -> bool {
 fn asterisk_field(p: &mut Parser) {
     let m = p.start();
 
-    while p.at(TokenKind::Ident) {
-        if let Some(TokenKind::Dot) = p.nth_non_trivia(0) {
+    while p.at(T![Ident]) {
+        if let Some(T![Dot]) = p.nth(1) {
             p.bump();
-            p.skip_trivia();
             p.bump();
-            p.skip_trivia();
         } else {
             break;
         }
     }
 
-    p.expect(TokenKind::Star);
+    p.expect(T![Star]);
 
     m.complete(p, NodeKind::SdblAsteriskField);
 }
@@ -391,19 +370,12 @@ fn selected_field_alias(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "AS", "КАК");
-    p.skip_trivia();
 
     // SDBL keywords are not reserved as alias names: `КАК Итоги`, `AS Inner` are
     // valid field aliases. See `source_alias` for the rationale.
     if is_body_clause_keyword(p) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидался алиас, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "ожидался алиас, встречено ключевое слово");
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -417,7 +389,6 @@ fn into_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "INTO", "ПОМЕСТИТЬ");
-    p.skip_trivia();
 
     if super::at_field_name(p) {
         let table_m = p.start();
@@ -432,9 +403,9 @@ fn into_clause(p: &mut Parser) {
 
 fn is_data_source_start(p: &Parser) -> bool {
     match p.current() {
-        Some(TokenKind::LParen) => true,
-        Some(TokenKind::Ampersand) => true,
-        Some(TokenKind::Ident) => !is_clause_keyword(p),
+        Some(T![LParen]) => true,
+        Some(T![Ampersand]) => true,
+        Some(T![Ident]) => !is_clause_keyword(p),
         _ => false,
     }
 }
@@ -443,11 +414,10 @@ fn from_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "FROM", "ИЗ");
-    p.skip_trivia();
 
     super::expressions::parse_delimited_list(
         p,
-        TokenKind::Comma,
+        T![Comma],
         &super::LIST_RECOVERY,
         is_data_source_start,
         data_source,
@@ -459,16 +429,14 @@ fn from_clause(p: &mut Parser) {
 fn data_source(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::LParen) {
+    if p.at(T![LParen]) {
         p.bump();
-        p.skip_trivia();
         subquery(p);
-        p.expect(TokenKind::RParen);
+        p.expect(T![RParen]);
     } else {
         table_ref(p);
     }
 
-    p.skip_trivia();
     if (at_sdbl_keyword(p, "AS", "КАК") || is_identifier_token(p)) && !is_clause_keyword(p) {
         source_alias(p);
     }
@@ -485,12 +453,12 @@ fn data_source(p: &mut Parser) {
 fn table_ref(p: &mut Parser) {
     let m = p.start();
 
-    if p.at(TokenKind::Ampersand) {
+    if p.at(T![Ampersand]) {
         let pm = p.start();
+        // Имя параметра приходит внутри самого токена, отдельного `Ident` за
+        // амперсандом не бывает. Взять его значило бы отобрать у запроса
+        // следующее слово — `AS` у псевдонима, `ПО` у соединения.
         p.bump();
-        if p.at(TokenKind::Ident) {
-            p.bump();
-        }
         pm.complete(p, NodeKind::SdblParameter);
         m.complete(p, NodeKind::SdblTableRef);
         return;
@@ -501,13 +469,13 @@ fn table_ref(p: &mut Parser) {
     // and the filter behind it existed nowhere. The first source of a list is
     // reached without the list's own start check, which is why this belongs at
     // the reference itself.
-    if p.at(TokenKind::Ident) && !super::at_field_name(p) {
+    if p.at(T![Ident]) && !super::at_field_name(p) {
         p.error_custom_no_bump("ожидалось имя таблицы");
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
 
-    if !p.expect(TokenKind::Ident) {
+    if !p.expect(T![Ident]) {
         m.complete(p, NodeKind::SdblTableRef);
         return;
     }
@@ -515,13 +483,11 @@ fn table_ref(p: &mut Parser) {
     // The dot reaches across the space before it as well as the space after
     // it: `Справочник . Товары` is one name, and the expression layer already
     // reads it as one.
-    while p.nth_non_trivia(0) == Some(TokenKind::Dot) || p.at(TokenKind::Dot) {
-        p.skip_trivia();
-        if !p.eat(TokenKind::Dot) {
+    while p.nth(1) == Some(T![Dot]) || p.at(T![Dot]) {
+        if !p.eat(T![Dot]) {
             break;
         }
         p.check_iteration_limit();
-        p.skip_trivia();
 
         if !super::at_table_name_component(p) {
             report_the_component_the_dot_promised(p);
@@ -531,7 +497,6 @@ fn table_ref(p: &mut Parser) {
         p.bump();
     }
 
-    p.skip_trivia();
     virtual_table_args(p);
 
     m.complete(p, NodeKind::SdblTableRef);
@@ -541,7 +506,6 @@ fn source_alias(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "AS", "КАК");
-    p.skip_trivia();
 
     // SDBL keywords are not reserved as alias names: `КАК Итоги`, `AS Inner` are
     // valid source aliases, recognised here because clause keywords are matched by
@@ -549,13 +513,7 @@ fn source_alias(p: &mut Parser) {
     // alias and is left for its clause parser.
     if is_body_clause_keyword(p) {
         let err = p.start();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидался алиас источника, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(err, "ожидался алиас источника, встречено ключевое слово");
         m.complete(p, NodeKind::SdblAlias);
         return;
     }
@@ -591,12 +549,10 @@ fn join_clause(p: &mut Parser) {
         || p.at_keyword("ВНУТРЕННЕЕ");
     if has_type {
         p.bump();
-        p.skip_trivia();
     }
 
     if p.at_keyword("OUTER") || p.at_keyword("ВНЕШНЕЕ") {
         p.bump();
-        p.skip_trivia();
     }
 
     if !p.at_keyword("JOIN") && !p.at_keyword("СОЕДИНЕНИЕ") {
@@ -605,15 +561,12 @@ fn join_clause(p: &mut Parser) {
         return;
     }
     p.bump();
-    p.skip_trivia();
 
     data_source(p);
-    p.skip_trivia();
 
     if !eat_sdbl_keyword(p, "ON", "ПО") {
         p.error_custom("ожидалось 'ПО' / 'ON' в соединении");
     }
-    p.skip_trivia();
 
     p.within_field_names(expressions::logical_expression);
 
@@ -626,9 +579,7 @@ fn select_tail_clauses(p: &mut Parser) {
     let mut parsed_totals_by = false;
 
     loop {
-        p.skip_trivia();
-
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             query_extension(p);
             continue;
         }
@@ -703,10 +654,8 @@ fn query_body_clauses(p: &mut Parser) {
 /// surrounding query parses and keeps its diagnostics whichever element
 /// appears.
 pub(super) fn eat_query_extensions(p: &mut Parser) {
-    p.skip_trivia();
-    while p.at(TokenKind::LBrace) {
+    while p.at(T![LBrace]) {
         query_extension(p);
-        p.skip_trivia();
     }
 }
 
@@ -725,17 +674,17 @@ fn query_extension(p: &mut Parser) {
         // An unclosed `{` is tolerated, but tolerating it must not cost the
         // rest of the package: a separator ends the region whether or not
         // its brace was ever closed.
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             depth += 1;
             p.bump();
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             depth -= 1;
             p.bump();
             if depth == 0 {
@@ -758,7 +707,6 @@ fn where_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "WHERE", "ГДЕ");
-    p.skip_trivia();
 
     p.within_field_names(expressions::logical_expression);
 
@@ -827,20 +775,17 @@ fn group_by_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "GROUP", "СГРУППИРОВАТЬ");
-    p.skip_trivia();
 
     if !at_sdbl_keyword(p, "BY", "ПО") {
         m.complete(p, NodeKind::SdblGroupClause);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
-    p.skip_trivia();
 
     super::expressions::expression(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
-        p.skip_trivia();
         super::expressions::expression(p);
     }
 
@@ -851,20 +796,17 @@ fn order_by_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "ORDER", "УПОРЯДОЧИТЬ");
-    p.skip_trivia();
 
     if !at_sdbl_keyword(p, "BY", "ПО") {
         m.complete(p, NodeKind::SdblOrderClause);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
-    p.skip_trivia();
 
     order_by_item(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
-        p.skip_trivia();
         order_by_item(p);
     }
 
@@ -886,7 +828,6 @@ fn order_by_clause(p: &mut Parser) {
 
 fn order_by_item(p: &mut Parser) {
     super::expressions::expression(p);
-    p.skip_trivia();
 
     // Of the four documented orderings, `ИЕРАРХИЯ` may be preceded by
     // nothing and followed by `УБЫВ`. The reverse, `УБЫВ ИЕРАРХИЯ`, is not
@@ -901,18 +842,15 @@ fn order_by_item(p: &mut Parser) {
         }
 
         p.bump();
-        p.skip_trivia();
 
         if !direction_came_first {
             if at_sdbl_keyword(p, "DESC", "УБЫВ") {
                 p.bump();
-                p.skip_trivia();
             } else if at_sdbl_keyword(p, "ASC", "ВОЗР") {
                 p.error_custom_no_bump(
                     "'ИЕРАРХИЯ' / 'HIERARCHY' сочетается только с 'УБЫВ' / 'DESC'",
                 );
                 p.bump();
-                p.skip_trivia();
             }
         }
     }
@@ -921,7 +859,6 @@ fn order_by_item(p: &mut Parser) {
 fn eat_order_direction(p: &mut Parser) -> bool {
     if at_sdbl_keyword(p, "ASC", "ВОЗР") || at_sdbl_keyword(p, "DESC", "УБЫВ") {
         p.bump();
-        p.skip_trivia();
         true
     } else {
         false
@@ -932,7 +869,6 @@ fn having_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "HAVING", "ИМЕЮЩИЕ");
-    p.skip_trivia();
 
     p.within_field_names(super::expressions::expression);
 
@@ -943,16 +879,13 @@ fn for_update_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "FOR", "ДЛЯ");
-    p.skip_trivia();
 
     eat_sdbl_keyword(p, "UPDATE", "ИЗМЕНЕНИЯ");
-    p.skip_trivia();
 
     if super::at_field_name(p) {
         p.bump();
         while super::eat_qualifying_dot(p) {
             p.check_iteration_limit();
-            p.skip_trivia();
             if !super::at_table_name_component(p) {
                 // The list of targets is optional, so this rule said nothing
                 // here before. It says something now — the dot proves a name
@@ -962,7 +895,7 @@ fn for_update_clause(p: &mut Parser) {
                 // rejected belongs to a text already reported as unreadable:
                 // the inputs that reach here that way are Russian prose whose
                 // `для` reads as `ДЛЯ` and whose full stop reads as a dot.
-                if p.current().is_some_and(|kind| kind != TokenKind::Error) {
+                if !p.at_end() && !p.at_error() {
                     report_the_component_the_dot_promised(p);
                 }
                 break;
@@ -986,48 +919,30 @@ fn for_update_clause(p: &mut Parser) {
 /// opens a clause of its own, so `ДЛЯ ИЗМЕНЕНИЯ Catalog.УПОРЯДОЧИТЬ ПО А`
 /// parsed as a whole clean query with a broken name inside it.
 fn report_the_component_the_dot_promised(p: &mut Parser) {
-    let err = p.start();
-
     if super::expressions::at_property_name(p) {
-        p.emit_error_at_marker(
-            err,
-            ParseError::Custom {
-                message: "ожидалось имя объекта, встречено ключевое слово",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        let err = p.start();
+        p.error_custom_at_marker(err, "ожидалось имя объекта, встречено ключевое слово");
         return;
     }
 
-    let found = p.current();
-    p.emit_error_at_marker(
-        err,
-        ParseError::Expected {
-            expected: smallvec![TokenKind::Ident],
-            found,
-            recovery: RecoveryKind::RecoverySpan,
-        },
-    );
+    p.error_expected(T![Ident]);
 }
 
 fn index_by_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "INDEX", "ИНДЕКСИРОВАТЬ");
-    p.skip_trivia();
 
     if !at_sdbl_keyword(p, "BY", "ПО") {
         m.complete(p, NodeKind::SdblIndexBy);
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
-    p.skip_trivia();
 
     super::expressions::expression(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
-        p.skip_trivia();
         super::expressions::expression(p);
     }
 
@@ -1046,11 +961,9 @@ fn totals_by_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "TOTALS", "ИТОГИ");
-    p.skip_trivia();
 
     while !p.at_end() {
         p.check_iteration_limit();
-        p.skip_trivia();
 
         if at_sdbl_keyword(p, "BY", "ПО") {
             break;
@@ -1063,8 +976,7 @@ fn totals_by_clause(p: &mut Parser) {
         if super::expressions::is_expression_start(p) {
             super::expressions::expression(p);
 
-            p.skip_trivia();
-            if !p.at(TokenKind::Comma) {
+            if !p.at(T![Comma]) {
                 continue;
             }
             p.bump();
@@ -1078,13 +990,11 @@ fn totals_by_clause(p: &mut Parser) {
         return;
     }
     eat_sdbl_keyword(p, "BY", "ПО");
-    p.skip_trivia();
 
     totals_group_item(p);
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
-        p.skip_trivia();
         totals_group_item(p);
     }
 
@@ -1127,10 +1037,9 @@ fn at_period_name(p: &Parser) -> bool {
 fn at_period_boundary(p: &Parser) -> bool {
     // A parameter arrives as one token, name included, so `Ampersand` here
     // means a whole `&Имя` rather than the sigil alone.
-    p.at(TokenKind::Ampersand)
-        || p.at(TokenKind::Date)
-        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ")
-            && p.nth_non_trivia(0) == Some(TokenKind::LParen))
+    p.at(T![Ampersand])
+        || p.at(T![Date])
+        || (at_sdbl_keyword(p, "DATETIME", "ДАТАВРЕМЯ") && p.nth(1) == Some(T![LParen]))
 }
 
 fn at_periods_keyword(p: &Parser) -> bool {
@@ -1139,7 +1048,6 @@ fn at_periods_keyword(p: &Parser) -> bool {
 
 fn totals_group_item(p: &mut Parser) {
     super::expressions::expression(p);
-    p.skip_trivia();
 
     totals_group_modifier(p);
     totals_group_alias(p);
@@ -1154,11 +1062,9 @@ fn totals_group_item(p: &mut Parser) {
 fn totals_group_modifier(p: &mut Parser) {
     let took_hierarchy = if at_sdbl_keyword(p, "ONLY", "ТОЛЬКО") {
         p.bump();
-        p.skip_trivia();
 
         if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
             p.bump();
-            p.skip_trivia();
             true
         } else {
             p.error_custom_no_bump("ожидалось 'ИЕРАРХИЯ' / 'HIERARCHY' после 'ТОЛЬКО' / 'ONLY'");
@@ -1169,7 +1075,6 @@ fn totals_group_modifier(p: &mut Parser) {
         }
     } else if at_sdbl_keyword(p, "HIERARCHY", "ИЕРАРХИЯ") {
         p.bump();
-        p.skip_trivia();
         true
     } else {
         false
@@ -1194,51 +1099,44 @@ fn totals_group_modifier(p: &mut Parser) {
 /// that their structure survives for the semantic layer.
 fn totals_periods_modifier(p: &mut Parser) {
     p.bump();
-    p.skip_trivia();
 
-    if !p.at(TokenKind::LParen) {
+    if !p.at(T![LParen]) {
         if !p.at_end() {
             p.error_custom_no_bump("ожидалась '(' после 'ПЕРИОДАМИ' / 'PERIODS'");
         }
         return;
     }
     p.bump();
-    p.skip_trivia();
 
     if at_period_name(p) {
         p.bump();
-        p.skip_trivia();
     } else if super::at_name(p) && !is_clause_keyword(p) {
         // A word in the right place that is not one of the ten. Take it,
         // so the modifier still has a shape, and say what is wrong with it.
         p.error_custom_no_bump("неизвестный вид периода");
         p.bump();
-        p.skip_trivia();
     } else {
         p.error_custom_no_bump("ожидался вид периода");
     }
 
     // The rule allows two boundaries. A third is a mistake the user can
     // see; counting them here would only cost the rest of the clause.
-    while p.at(TokenKind::Comma) {
+    while p.at(T![Comma]) {
         p.check_iteration_limit();
         p.bump();
-        p.skip_trivia();
 
         if super::expressions::is_expression_start(p) {
             if !at_period_boundary(p) {
                 p.error_custom_no_bump("границей периода может быть литерал даты или параметр");
             }
             super::expressions::expression(p);
-            p.skip_trivia();
         } else {
             p.error_custom_no_bump("ожидалась граница периода после запятой");
         }
     }
 
-    if p.at(TokenKind::RParen) {
+    if p.at(T![RParen]) {
         p.bump();
-        p.skip_trivia();
     } else if !p.at_end() {
         // At end of input this is a query being typed and says nothing;
         // with a clause still to come the paren is simply unclosed.
@@ -1256,7 +1154,6 @@ fn totals_periods_modifier(p: &mut Parser) {
 fn totals_group_alias(p: &mut Parser) {
     if at_sdbl_keyword(p, "AS", "КАК") {
         eat_sdbl_keyword(p, "AS", "КАК");
-        p.skip_trivia();
 
         // After an explicit `КАК` nothing but a name can stand, so the
         // boundary's guess from the word alone does not apply here — the
@@ -1265,14 +1162,12 @@ fn totals_group_alias(p: &mut Parser) {
             p.error_custom_no_bump("ожидался псевдоним после 'КАК' / 'AS'");
         } else {
             super::eat_name_here(p, "ожидался псевдоним после 'КАК' / 'AS'");
-            p.skip_trivia();
         }
         return;
     }
 
     if super::at_name(p) && !is_clause_keyword(p) {
         p.bump();
-        p.skip_trivia();
     }
 }
 
@@ -1297,7 +1192,6 @@ fn limitations(p: &mut Parser) {
         } else if at_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ") {
             eat_sdbl_keyword(p, "ALLOWED", "РАЗРЕШЕННЫЕ");
         }
-        p.skip_trivia();
     }
 
     m.complete(p, NodeKind::SdblLimitations);
@@ -1307,15 +1201,14 @@ fn top_clause(p: &mut Parser) {
     let m = p.start();
 
     eat_sdbl_keyword(p, "TOP", "ПЕРВЫЕ");
-    p.skip_trivia();
 
     // `expect` reports by bumping the offending token, which would eat the
     // next clause's keyword and cost that clause its parse. Say the same
     // thing without moving when the count is simply not there.
-    if is_clause_keyword(p) || p.at(TokenKind::Semicolon) || p.at(TokenKind::RParen) || p.at_end() {
+    if is_clause_keyword(p) || p.at(T![Semicolon]) || p.at(T![RParen]) || p.at_end() {
         p.error_custom_no_bump("ожидалось количество после 'ПЕРВЫЕ' / 'TOP'");
     } else {
-        p.expect(TokenKind::Decimal);
+        p.expect(T![Decimal]);
     }
 
     m.complete(p, NodeKind::SdblTopClause);
@@ -1344,14 +1237,14 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         // An extension region is opaque text: the words in it are not this
         // query's, and neither are its parens.
-        if p.at(TokenKind::LBrace) {
+        if p.at(T![LBrace]) {
             brace_depth += 1;
             p.bump();
             consumed_any = true;
             continue;
         }
 
-        if p.at(TokenKind::RBrace) {
+        if p.at(T![RBrace]) {
             brace_depth = brace_depth.saturating_sub(1);
             p.bump();
             consumed_any = true;
@@ -1359,7 +1252,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
         }
 
         if brace_depth > 0 {
-            if p.at_end() || p.at(TokenKind::Semicolon) {
+            if p.at_end() || p.at(T![Semicolon]) {
                 break;
             }
             p.bump();
@@ -1367,17 +1260,16 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             continue;
         }
 
-        if p.at(TokenKind::LParen) {
+        if p.at(T![LParen]) {
             paren_depth += 1;
             p.bump();
             consumed_any = true;
-            p.skip_trivia();
             if is_query_starter_or_combiner_keyword(p) {
                 nested_query_starts.push(paren_depth);
             }
             continue;
         }
-        if p.at(TokenKind::RParen) {
+        if p.at(T![RParen]) {
             if paren_depth == 0 {
                 break;
             }
@@ -1394,7 +1286,7 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
 
         let inside_nested_query = !nested_query_starts.is_empty();
 
-        if is_clause_keyword(p) && p.prev_significant() != Some(TokenKind::Dot) {
+        if is_clause_keyword(p) && p.prev_significant() != Some(T![Dot]) {
             let stop = if paren_depth == 0 {
                 true
             } else if inside_nested_query {
@@ -1407,11 +1299,11 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
             }
         }
 
-        if p.at(TokenKind::Semicolon) {
+        if p.at(T![Semicolon]) {
             break;
         }
 
-        if paren_depth == 0 && p.at(TokenKind::Comma) {
+        if paren_depth == 0 && p.at(T![Comma]) {
             break;
         }
 
@@ -1424,34 +1316,28 @@ fn recover_to_delimiter_vt(p: &mut Parser) {
     }
 
     if consumed_any {
-        p.emit_error_at_marker(
-            recovery,
-            ParseError::Custom {
-                message: "пропуск некорректного фрагмента",
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_custom_at_marker(recovery, "пропуск некорректного фрагмента");
     } else {
         recovery.abandon(p);
     }
 }
 
 fn virtual_table_args(p: &mut Parser) {
-    if !p.at(TokenKind::LParen) {
+    if !p.at(T![LParen]) {
         return;
     }
     p.bump();
     eat_query_extensions(p);
 
-    if p.at(TokenKind::RParen) {
-        p.expect(TokenKind::RParen);
+    if p.at(T![RParen]) {
+        p.expect(T![RParen]);
         return;
     }
 
-    if super::expressions::is_expression_start(p) && !p.at(TokenKind::Comma) {
+    if super::expressions::is_expression_start(p) && !p.at(T![Comma]) {
         super::expressions::expression(p);
         eat_query_extensions(p);
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+        if !p.at(T![Comma]) && !p.at(T![RParen]) {
             recover_to_delimiter_vt(p);
         }
     } else {
@@ -1459,17 +1345,16 @@ fn virtual_table_args(p: &mut Parser) {
         m.complete(p, NodeKind::SdblMissingArg);
     }
 
-    while p.eat(TokenKind::Comma) {
+    while p.eat(T![Comma]) {
         p.check_iteration_limit();
         eat_query_extensions(p);
 
-        let empty_slot = p.at(TokenKind::Comma)
-            || p.at(TokenKind::RParen)
-            || !super::expressions::is_expression_start(p);
+        let empty_slot =
+            p.at(T![Comma]) || p.at(T![RParen]) || !super::expressions::is_expression_start(p);
         if empty_slot {
             let m = p.start();
             m.complete(p, NodeKind::SdblMissingArg);
-            if !p.at(TokenKind::Comma) {
+            if !p.at(T![Comma]) {
                 break;
             }
             continue;
@@ -1477,27 +1362,17 @@ fn virtual_table_args(p: &mut Parser) {
 
         super::expressions::expression(p);
         eat_query_extensions(p);
-        if !p.at(TokenKind::Comma) && !p.at(TokenKind::RParen) {
+        if !p.at(T![Comma]) && !p.at(T![RParen]) {
             recover_to_delimiter_vt(p);
         }
     }
 
-    p.skip_trivia();
-    if p.at(TokenKind::RParen) {
+    if p.at(T![RParen]) {
         p.bump();
     } else if is_clause_keyword(p) {
-        let err = p.start();
-        let found = p.current();
-        p.emit_error_at_marker(
-            err,
-            ParseError::Expected {
-                expected: smallvec![TokenKind::RParen],
-                found,
-                recovery: RecoveryKind::RecoverySpan,
-            },
-        );
+        p.error_expected(T![RParen]);
     } else {
-        p.expect(TokenKind::RParen);
+        p.expect(T![RParen]);
     }
 }
 

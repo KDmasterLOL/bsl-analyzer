@@ -68,16 +68,16 @@ pub use sdbl_cache::{all_sdbl_in_file_query, sdbl_hir_for_file_query, SdblHirEnt
 pub use symbol_tree::{MethodSymbol, ParamSymbol, SymbolTree, VariableSymbol};
 pub use ty::FunctionSignature;
 pub use type_ref::{BuiltinTypeRef, TypeRef};
-pub use workspace::{is_bsl_source, CommonModuleInfo, WorkspaceSymbols};
+pub use workspace::{is_bsl_source, ModuleMembers, WorkspaceMembers};
 pub use workspace_index::{SymbolInfo, SymbolKind, WorkspaceIndex};
 
 pub use method_body::{method_body_query, method_body_with_source_map_query};
 pub use queries::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query, item_tree_query,
     method_outbound_facts, module_bodies_query, module_call_summary_query, module_data_query,
-    module_index_query, region_tree_query, resolved_module_summary_query,
+    module_index_query, module_members_query, region_tree_query, resolved_module_summary_query,
     set_module_bodies_lru_sweep_mode, symbol_tree_query, workspace_call_graph_query,
-    workspace_index_query, workspace_symbols_query, ManagerRef, MethodOutboundFacts,
+    workspace_index_query, ManagerRef, MethodOutboundFacts,
 };
 
 #[salsa::db]
@@ -130,7 +130,7 @@ pub trait DefDatabase: base_db::RootQueryDb {
 
     fn variable_docs(&self, variable: VariableId) -> Option<Arc<crate::docs::VariableDocs>>;
 
-    fn workspace_symbols(&self, source_root_id: SourceRootId) -> Arc<WorkspaceSymbols>;
+    fn module_members(&self, source_root_id: SourceRootId) -> Arc<WorkspaceMembers>;
 
     fn workspace_index(
         &self,

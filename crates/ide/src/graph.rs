@@ -64,7 +64,10 @@ pub enum Direction {
 
 /// A node, projected for the agent. `dispatch` is surfaced top-level (not nested
 /// under a type) because client/server is a first-order BSL concern.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// `Eq` is deliberately absent: `location` holds a `serde_json::Value`, which does not
+/// implement it. Nothing keys a set or a map by a node — the id string does that — so
+/// `PartialEq` is all this type has ever needed.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct NodeRef {
     pub id: String,
     pub kind: &'static str,
@@ -100,7 +103,30 @@ pub struct NodeRef {
     /// `false` (the informative case); absent means addressable.
     #[serde(skip_serializing_if = "is_true")]
     pub addressable: bool,
+    /// Where this node lives, under the MCP location contract. Carried as an opaque
+    /// value because the contract's types live in the serving layer: giving this crate a
+    /// typed twin would mean a second serializer for one published shape.
+    ///
+    /// Exactly one of this and `location_unavailable` is set on every node a tool serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<serde_json::Value>,
+    /// Why there is no location: the node has no source file by construction, or the
+    /// answering snapshot had no root table. Never both absent and `location` absent on a
+    /// served node — silence would read as "no place exists" for a method that has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_unavailable: Option<&'static str>,
 }
+
+/// The location contract's reason for a node that has no source file at all — a metadata
+/// object, a form, an attribute. Spelled here as a literal rather than imported from the
+/// serving layer, which sits above this crate; the serving layer asserts the two agree.
+pub const NO_SOURCE_LOCATION: &str = "no_source_location";
+
+/// The reason a node that DOES have a file still carries no location: the answering
+/// snapshot had no root table, so no `(root_id, path)` pair could be formed. The in-memory
+/// projection never has one, which is also what keeps it byte-identical to the SQLite
+/// projection serving without roots.
+pub const ROOTS_UNAVAILABLE: &str = "roots_unavailable";
 
 /// `skip_serializing_if` helper: the field is emitted only when `false`.
 fn is_true(v: &bool) -> bool {
@@ -801,6 +827,7 @@ pub fn build_workspace_graph_rows(
     modules: &[ModuleId],
     paths: &FxHashMap<FileId, String>,
     workspace_root: Option<&Path>,
+    mdo_files: &hir::graph_index::MdoFiles,
     batch_size: usize,
     open_batch: &mut BatchDbOpener<'_>,
     sink: &mut GraphRowSink<'_>,
@@ -848,7 +875,7 @@ pub fn build_workspace_graph_rows(
     let module_sig_hashes: FxHashMap<ModuleId, u64> =
         modules.iter().filter_map(|&m| index.module_sig_hash(m).map(|h| (m, h))).collect();
 
-    let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
+    let encoder = GraphRowEncoder::new(&index, paths, workspace_root, mdo_files);
     let mut summary =
         GraphBuildSummary { modules: modules.len(), module_sig_hashes, ..Default::default() };
 
@@ -1103,11 +1130,17 @@ pub struct ReprojectedRows {
 /// `changed` MUST be a subset of `all_modules` in the same (file-id) order, so a
 /// brand-new aux object introduced by an edit gets the same first-seen spelling a
 /// full build would give it.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same distinct borrowed channels as the full build it mirrors; \
+              the two signatures are read side by side and are kept alike"
+)]
 pub fn reproject_changed_modules(
     all_modules: &[ModuleId],
     changed: &[ModuleId],
     paths: &FxHashMap<FileId, String>,
     workspace_root: Option<&Path>,
+    mdo_files: &hir::graph_index::MdoFiles,
     batch_size: usize,
     open_batch: &mut BatchDbOpener<'_>,
     ticker: Option<&GraphBuildTicker>,
@@ -1135,7 +1168,7 @@ pub fn reproject_changed_modules(
         clear_node_caches(&pool);
     }
 
-    let encoder = GraphRowEncoder::new(&index, paths, workspace_root);
+    let encoder = GraphRowEncoder::new(&index, paths, workspace_root, mdo_files);
     let changed_set: FxHashSet<ModuleId> = changed.iter().copied().collect();
 
     // Phase A — method nodes for the changed modules only.
@@ -1576,6 +1609,8 @@ impl<'a> GraphCtx<'a> {
                     is_export: None,
                     methods: None,
                     addressable,
+                    location: None,
+                    location_unavailable: Some(NO_SOURCE_LOCATION),
                 }
             }
             GraphNode::Form { owner, form_name } => NodeRef {
@@ -1595,6 +1630,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::FormItem { owner, form_name, item_name } => NodeRef {
                 qualified: Some(format!(
@@ -1614,6 +1651,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::FormAttribute { owner, form_name, attr_name } => NodeRef {
                 qualified: Some(format!(
@@ -1633,6 +1672,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::TabularSection { mdo_type, object_name, section_name } => NodeRef {
                 qualified: Some(format!(
@@ -1652,6 +1693,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
             GraphNode::TabularSectionAttribute {
                 mdo_type,
@@ -1677,6 +1720,8 @@ impl<'a> GraphCtx<'a> {
                 is_export: None,
                 methods: None,
                 addressable,
+                location: None,
+                location_unavailable: Some(NO_SOURCE_LOCATION),
             },
         }
     }
@@ -1703,6 +1748,8 @@ impl<'a> GraphCtx<'a> {
             is_export: None,
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(NO_SOURCE_LOCATION),
         }
     }
 
@@ -1735,6 +1782,8 @@ impl<'a> GraphCtx<'a> {
             is_export: Some(m.is_export()),
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(ROOTS_UNAVAILABLE),
         };
 
         if matches!(detail, GraphDetail::Signatures | GraphDetail::Bodies) {
@@ -1776,6 +1825,8 @@ impl<'a> GraphCtx<'a> {
             // not enumerate members here.
             methods: None,
             addressable,
+            location: None,
+            location_unavailable: Some(ROOTS_UNAVAILABLE),
         }
     }
 
@@ -2228,7 +2279,7 @@ pub fn module_id_of_method(method_id: &str) -> Option<String> {
 /// The trailing name segment of a durable id: the part after the last `::` (a file
 /// module's member separator) or, failing that, the last `/`. Used by
 /// [`rank_resolve_candidates`] to match a bare method/object name against full ids.
-fn resolve_name_segment(id: &str) -> &str {
+pub fn resolve_name_segment(id: &str) -> &str {
     if let Some(pos) = id.rfind("::") {
         return &id[pos + 2..];
     }
@@ -2678,9 +2729,9 @@ mod tests {
     use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
     use vfs::{file_set::FileSet, FileId, VfsPath};
 
-    const ROOT: SourceRootId = SourceRootId(0);
+    pub(super) const ROOT: SourceRootId = SourceRootId(0);
 
-    fn workspace(files: &[(&str, &str)]) -> Analysis {
+    pub(super) fn workspace(files: &[(&str, &str)]) -> Analysis {
         let mut db = RootDatabaseImpl::new();
         let mut file_set = FileSet::new();
         for (i, (path, _)) in files.iter().enumerate() {
@@ -3210,7 +3261,8 @@ mod tests {
             }
         }
         let paths: rustc_hash::FxHashMap<FileId, String> = paths.into_iter().collect();
-        let encoder = GraphRowEncoder::new(&index, &paths, None);
+        let no_objects = hir::graph_index::MdoFiles::default();
+        let encoder = GraphRowEncoder::new(&index, &paths, None, &no_objects);
 
         let ctx = GraphCtx::new(db, ROOT, None);
 
@@ -3285,7 +3337,8 @@ mod tests {
         // With a workspace root → rel_path form (addressable); without → basename
         // fallback (not addressable). Both must match the serve-time encoder.
         for workspace_root in [Some(Path::new("/ws/proj")), None] {
-            let encoder = GraphRowEncoder::new(&index, &paths, workspace_root);
+            let no_objects = hir::graph_index::MdoFiles::default();
+            let encoder = GraphRowEncoder::new(&index, &paths, workspace_root, &no_objects);
             let ctx = GraphCtx::new(db, ROOT, workspace_root);
             let mut seen = 0;
             for node in graph.nodes() {
@@ -3515,7 +3568,8 @@ mod tests {
             .collect();
         let index = GraphIndex::build(db, &modules);
         let paths: rustc_hash::FxHashMap<FileId, String> = FxHashMap::default();
-        let encoder = GraphRowEncoder::new(&index, &paths, None);
+        let no_objects = hir::graph_index::MdoFiles::default();
+        let encoder = GraphRowEncoder::new(&index, &paths, None, &no_objects);
         let ctx = GraphCtx::new(db, ROOT, None);
 
         let owner = Some((MdoType::Catalog, Name::new("Контрагенты")));
@@ -3605,5 +3659,80 @@ mod tests {
         assert_eq!(row.from_id, ctx.encode_node(&edge.from).0);
         assert_eq!(row.to_id, ctx.encode_node(&edge.to).0);
         assert_eq!(row.provenance, "resolved");
+    }
+}
+
+#[cfg(test)]
+mod mdo_row_tests {
+    //! Where an object's row gets its file.
+
+    use super::tests::{workspace, ROOT};
+    use bsl_metadata::MdoType;
+    use hir::graph_index::{mdo_files_key, GraphIndex, GraphRowEncoder, MdoFiles};
+    use hir::{ConfigsDatabase, GraphNode};
+    use ide_db::base_db::SourceDatabase;
+    use rustc_hash::FxHashMap;
+    use vfs::FileId;
+
+    const CATALOG_XML: &str = "/src/Catalogs/Контрагенты.xml";
+
+    fn row_for_the_catalog(mdo_files: &MdoFiles) -> hir::graph_index::NodeRow {
+        // The code names the catalog, so the build sees THAT spelling first and
+        // the node carries it — not the file tree's.
+        let a = workspace(&[(
+            "/src/CommonModules/Вызов/Ext/Module.bsl",
+            "Процедура Создать() Экспорт\n\
+             Справочники.Контрагенты.СоздатьЭлемент();\n\
+             КонецПроцедуры",
+        )]);
+        let db = a.database();
+        let graph = db.workspace_call_graph(ROOT);
+
+        let source_root = db.source_root_input(ROOT).root(db);
+        let file_set = source_root.file_set();
+        let modules: Vec<hir::ModuleId> = source_root
+            .iter()
+            .filter(|&f| hir::is_bsl_source(file_set, f))
+            .map(hir::ModuleId::new)
+            .collect();
+        let index = GraphIndex::build(db, &modules);
+
+        let paths: FxHashMap<FileId, String> = source_root
+            .iter()
+            .filter_map(|f| {
+                let path = file_set.path_for_file(&f)?;
+                Some((f, path.as_path().to_str()?.to_string()))
+            })
+            .collect();
+
+        let encoder = GraphRowEncoder::new(&index, &paths, None, mdo_files);
+        let node = graph
+            .nodes()
+            .find(|node| matches!(node, GraphNode::Mdo { mdo_type, .. } if *mdo_type == MdoType::Catalog))
+            .expect("the call names a catalog, so the graph holds a node for it");
+        encoder.node_row(&node)
+    }
+
+    /// The map is keyed off the file tree; the node carries the first spelling
+    /// the build saw, which is the code's whenever code mentions the object.
+    /// They meet on the folded key alone — an exact-spelling lookup would place
+    /// only the objects nobody refers to.
+    #[test]
+    fn an_object_is_placed_through_a_differently_cased_key() {
+        let mut mdo_files = MdoFiles::default();
+        mdo_files.insert(mdo_files_key(MdoType::Catalog, "КОНТРАГЕНТЫ"), CATALOG_XML.to_string());
+
+        let row = row_for_the_catalog(&mdo_files);
+        assert_eq!(row.name, "Контрагенты", "the node carries the code's spelling");
+        assert_eq!(row.file.as_deref(), Some(CATALOG_XML));
+    }
+
+    /// A kind nothing discovers has no file to give, and the row stays
+    /// addressable by its durable id all the same.
+    #[test]
+    fn an_object_the_map_does_not_know_keeps_no_file_and_stays_addressable() {
+        let row = row_for_the_catalog(&MdoFiles::default());
+        assert_eq!(row.file, None);
+        assert!(row.addressable, "an object without a file is still a node one can open");
     }
 }

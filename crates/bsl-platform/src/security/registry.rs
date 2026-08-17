@@ -26,7 +26,6 @@ pub const ENTRIES: &[SecurityEntry] = &[
     fs_ctor("ИзвлечениеТекста", "TextExtraction"),
     fs_ctor("ДвоичныеДанные", "BinaryData"),
     fs_ctor("ФайловыйПоток", "FileStream"),
-    fs_ctor("МенеджерФайловыхПотоков", "FileStreamsManager"),
     fs_ctor("ЗаписьДанных", "DataWriter"),
     fs_ctor("ЧтениеДанных", "DataReader"),
     fs_method_path("ЗначениеВФайл", "ValueToFile"),

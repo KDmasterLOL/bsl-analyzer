@@ -228,6 +228,46 @@ mod tests {
     }
 
     #[test]
+    fn negative_comment_line_at_the_end_of_the_query() {
+        // Комментарий внутри текста запроса — законная конструкция: им
+        // отключают условия и помечают правки в типовых.
+        check_with_designer(
+            "ВЫБРАТЬ\n    |\tТ.Реквизит1 КАК Реквизит1\n    |ИЗ\n    |\tСправочник.Справочник1 КАК Т\n    |ГДЕ\n    |\tНЕ Т.ПометкаУдаления\n    |// комментарий последней строкой",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn negative_comment_line_in_the_middle_of_the_query() {
+        check_with_designer(
+            "ВЫБРАТЬ\n    |\tТ.Реквизит1 КАК Реквизит1\n    |ИЗ\n    |\tСправочник.Справочник1 КАК Т\n    |ГДЕ\n    |\tНЕ Т.ПометкаУдаления\n    |// комментарий в середине\n    |\tИ Т.Реквизит1 <> \"\"\"\"",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn negative_trailing_comment_with_a_dot_after_a_field() {
+        // Точка в комментарии не разделяет части составного имени: иначе
+        // двухчастная ссылка выглядела бы трёхчастной.
+        check_with_designer(
+            "ВЫБРАТЬ\n    |\tТ.Реквизит1 КАК Реквизит1\n    |ИЗ\n    |\tСправочник.Справочник1 КАК Т\n    |ГДЕ\n    |\tНЕ Т.ПометкаУдаления // см. задачу 15",
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn positive_unknown_field_keeps_its_range_next_to_a_comment() {
+        // Комментарий не должен ни попадать в имя, ни растягивать диапазон.
+        check_with_designer(
+            "ВЫБРАТЬ\n    |\tТ.НетТакогоПоля КАК Поле\n    |ИЗ\n    |\tСправочник.Справочник1 КАК Т // комментарий",
+            expect![[r#"
+                UnknownFieldInQuery @ 4:9..4:22
+                  message: Поле "НетТакогоПоля" не найдено в таблице "Справочник.Справочник1" запроса
+                  severity: Blocker"#]],
+        );
+    }
+
+    #[test]
     fn bilingual_unknown_field_english_table() {
         check_with_designer(
             "SELECT T.NoSuchField FROM Catalog.Справочник1 AS T",

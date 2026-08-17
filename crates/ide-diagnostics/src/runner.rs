@@ -29,6 +29,7 @@ pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
 const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CodeBlockBeforeSub,
     DiagnosticCode::CodeOutOfRegion,
+    DiagnosticCode::MultilinePreprocessorInstruction,
     DiagnosticCode::DuplicateRegion,
     DiagnosticCode::DuplicateStringLiteral,
     DiagnosticCode::EmptyRegion,
@@ -202,6 +203,11 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::code_block_before_sub::check,
     ));
     diagnostics.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
+    diagnostics.extend(run_diagnostic(
+        "MultilinePreprocessorInstruction",
+        ctx,
+        handlers::multiline_preprocessor_instruction::check,
+    ));
     diagnostics.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
     diagnostics.extend(run_diagnostic(
         "DuplicateStringLiteral",
@@ -630,6 +636,10 @@ mod tests {
             DiagnosticCode::RedundantAccessToObject,
             DiagnosticCode::MissedRequiredParameter,
             DiagnosticCode::DeprecatedPlatformApi,
+            // Two emitters by design: the constructor is a syntactic fact and
+            // stays in lowering, the bare call needs the shadowing guard and is
+            // judged in inference.
+            DiagnosticCode::FileSystemAccess,
         ];
 
         let mut duplicates = Vec::new();

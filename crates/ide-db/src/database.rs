@@ -2068,6 +2068,13 @@ impl SourceDatabase for RootDatabaseImpl {
         self.files.source_root(source_root_id)
     }
 
+    fn try_source_root_input(
+        &self,
+        source_root_id: SourceRootId,
+    ) -> Option<base_db::SourceRootInput> {
+        self.files.try_source_root(source_root_id)
+    }
+
     fn file_source_root_input(&self, file_id: FileId) -> base_db::FileSourceRootInput {
         self.files.file_source_root(file_id)
     }
@@ -2212,12 +2219,9 @@ impl DefDatabase for RootDatabaseImpl {
         variable_symbol.docs.clone()
     }
 
-    fn workspace_symbols(
-        &self,
-        source_root_id: base_db::SourceRootId,
-    ) -> Arc<hir::WorkspaceSymbols> {
+    fn module_members(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceMembers> {
         let source_root_input = self.source_root_input(source_root_id);
-        hir::workspace_symbols_query(self, source_root_input)
+        hir::module_members_query(self, source_root_input)
     }
 
     fn workspace_index(&self, source_root_id: base_db::SourceRootId) -> Arc<hir::WorkspaceIndex> {

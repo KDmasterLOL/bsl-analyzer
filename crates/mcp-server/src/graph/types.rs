@@ -78,6 +78,9 @@ pub(crate) struct Freshness {
     pub stale: bool,
     /// Reload state: `"none"`, `"running"`, or `"failed"`.
     pub reload: &'static str,
+    /// The extension topology the serving snapshot was built for, published so an answer
+    /// names the root set it describes.
+    pub topology: u64,
 }
 
 /// The graph's lifecycle snapshot for the `status` action — the parallel of the

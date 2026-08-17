@@ -5,6 +5,7 @@ pub enum DiagnosticCode {
     ParseError,
     CanonicalSpellingKeywords,
     ConsecutiveEmptyLines,
+    MultilinePreprocessorInstruction,
     LineLength,
     MissingSpace,
     OneStatementPerLine,

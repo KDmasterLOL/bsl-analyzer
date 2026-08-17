@@ -301,6 +301,61 @@ EndProcedure
         check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
     }
 
+    /// Имя, объявленное в самой конфигурации, принадлежит ей: вызывают свою
+    /// процедуру, а не глобальный контекст.
+    #[test]
+    fn test_shadowed_global_method_not_detected() {
+        let code = r#"
+Процедура КопироватьФайл(Источник, Приёмник)
+КонецПроцедуры
+
+Процедура Тест()
+    КопироватьФайл("src", "dest");
+КонецПроцедуры
+"#;
+        check_diagnostics_snapshot_for(code, DiagnosticCode::FileSystemAccess, expect![[r#""#]]);
+    }
+
+    /// Идиома БСП: локаль называется как платформенная функция и получает её же
+    /// значение. Платформа различает переменные и методы по пространствам имён,
+    /// поэтому `Имя()` в правой части — вызов, а не обращение к переменной, и
+    /// замечание обязано остаться. На proit_crm таких мест 17.
+    #[test]
+    fn test_local_named_after_the_global_keeps_the_call() {
+        let code = r#"Процедура Тест()
+    КаталогПрограммы = КаталогПрограммы();
+КонецПроцедуры"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::FileSystemAccess,
+            expect![[r#"
+                FileSystemAccess @ 2:24..2:40
+                  message: File system access detected (security review required)
+                  severity: Major"#]],
+        );
+    }
+
+    /// Сбор фактов инференса отсекается списком включённых кодов раньше
+    /// диспетчера, поэтому одного отображения категории в код мало. Прочие
+    /// тесты идут со всеми включёнными кодами и пропуск в списке не замечают.
+    #[test]
+    fn test_bare_call_survives_only_enabled_config() {
+        let code = r#"
+Процедура Тест()
+    КопироватьФайл("src", "dest");
+КонецПроцедуры
+"#;
+        let mut config = crate::DiagnosticsConfig::all_enabled();
+        config.only_enabled = Some(vec![DiagnosticCode::FileSystemAccess]);
+        let diagnostics =
+            crate::test_utils::check_hir_diagnostic_with_config(code, config, crate::diagnostics);
+        assert!(
+            diagnostics.iter().any(|d| d.code == DiagnosticCode::FileSystemAccess),
+            "bare guarded call must survive a config that enables only this code, got {:?}",
+            diagnostics.iter().map(|d| d.code).collect::<Vec<_>>()
+        );
+    }
+
     /// Справка 8.3.27 переименовала английский синоним `КопироватьФайл`
     /// в `CopyFile`; прежнее написание остаётся вызываемым.
     #[test]

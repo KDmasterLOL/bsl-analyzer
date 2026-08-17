@@ -1,5 +1,5 @@
 use super::lexical::lexical_code_hits;
-use super::render::{format_code_hits, hits_response, no_hits_response};
+use super::render::{format_code_hits, hits_response, no_hits_response, Envelope};
 use super::semantic::semantic_code_hits;
 use super::status::search_not_ready;
 use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
@@ -16,13 +16,15 @@ use std::sync::{Arc, Mutex};
 const MODALITY_LEGEND: &str = "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n";
 
 /// What the hits may spend, once this profile's own wrapping is set aside: the legend above
-/// them and the degradation note, which is carried twice — as the trailing text line and as the
-/// envelope's `degraded`. (The envelope's keys are charged by the renderer itself.) Sizing the
-/// hits against the full budget and only then wrapping them in all this is how a response ends
-/// up over its ceiling while reporting `budget_exhausted: false`.
+/// them and the degradation note, which is carried THREE times — as the trailing text line, as
+/// the envelope's `degraded`, and as the `modality_degraded` reason's `detail` in the
+/// freshness block. (The envelope's fixed keys are charged by the renderer itself; only the
+/// note grows with its own length, so it is charged here, where that length is known.) Sizing
+/// the hits against the full budget and only then wrapping them in all this is how a response
+/// ends up over its ceiling while reporting `budget_exhausted: false`.
 fn hits_budget(max_output_tokens: usize, note: Option<&str>) -> usize {
     let reserved =
-        MODALITY_LEGEND.len() + note.map_or(0, |note| note.len() * 2 + "-- {} --\n".len());
+        MODALITY_LEGEND.len() + note.map_or(0, |note| note.len() * 3 + "-- {} --\n".len());
     max_output_tokens.saturating_sub(reserved.div_ceil(4))
 }
 
@@ -104,34 +106,53 @@ pub fn hybrid_code(
         // The text stays the bare sentence it has always been; the degradation reaches a
         // machine consumer through the envelope, where an empty list plus `degraded` reads as
         // "half the search was down" rather than "there is nothing".
-        return Ok(no_hits_response(note.as_deref()));
+        return Ok(no_hits_response(note.as_deref(), Envelope::Yes));
     }
 
-    // Explain the per-hit modality tag once, up front — a leading line does not shift the
-    // per-hit `graph_id:` parsing (which is relative to each `#N` line).
-    let mut out = String::from(MODALITY_LEGEND);
-    let rendered = format_code_hits(
+    Ok(assemble_code_response(
         &hits,
         roots.as_ref(),
         graph_root,
-        hits_budget(max_output_tokens, note.as_deref()),
-    );
+        note.as_deref(),
+        max_output_tokens,
+    ))
+}
+
+/// The served response: the legend, the hits sized against what the wrapping will spend, the
+/// degradation note, the envelope.
+///
+/// Split out from [`hybrid_code`] so a test can choose the note's LENGTH: in production the
+/// note is picked by whichever subsystem was down, and the longest of them — the
+/// embedding-identity mismatch, some 230 characters — needs a live baseline with a
+/// conflicting model to provoke. Since the note is charged to the budget by its length, a
+/// ceiling checked only against the short notes is a ceiling checked at one point.
+fn assemble_code_response(
+    hits: &[FusedHit],
+    roots: Option<&bsl_search::WorkspaceRoots>,
+    graph_root: Option<&Path>,
+    note: Option<&str>,
+    max_output_tokens: usize,
+) -> CallToolResult {
+    // Explain the per-hit modality tag once, up front — a leading line does not shift the
+    // per-hit `graph_id:` parsing (which is relative to each `#N` line).
+    let mut out = String::from(MODALITY_LEGEND);
+    let rendered = format_code_hits(hits, roots, graph_root, hits_budget(max_output_tokens, note));
     out.push_str(&rendered.text);
-    if let Some(note) = &note {
+    if let Some(note) = note {
         // Append AFTER the hit lines — never before — so a client parsing `graph_id:` lines
         // positionally is not shifted.
         let _ = writeln!(out, "-- {note} --");
     }
-    Ok(hits_response(out, rendered, note.as_deref()))
+    hits_response(out, rendered, note, Envelope::Yes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::retryable_postgres_source;
-    use super::hybrid_code;
+    use super::super::test_support::{code_hit, retryable_postgres_source};
+    use super::{assemble_code_response, hybrid_code};
     use crate::baseline::ConfiguredBaselineStatus;
     use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
-    use bsl_search::{IndexProgress, SearchEngine};
+    use bsl_search::{FusedHit, IndexProgress, Modality, SearchEngine};
     use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
     use rmcp::model::ErrorCode;
     use std::fs;
@@ -253,6 +274,51 @@ mod tests {
         assert_eq!(empty_body["degraded"], "semantic skipped: runtime initialization failed");
     }
 
+    /// The same ceiling, measured where it depends on a value that GROWS: the degradation
+    /// note rides the response three times — the trailing text line, the envelope's
+    /// `degraded`, and the `modality_degraded` reason's `detail` — so a charge that does not
+    /// scale with its length lets a long note push the answer past the ceiling while it still
+    /// reports `budget_exhausted: false`. Production notes run from 44 characters (a runtime
+    /// that failed to start) to some 230 (the embedding-identity mismatch), and a ceiling
+    /// checked only at the short end is a ceiling checked at one point.
+    #[test]
+    fn a_long_degradation_note_is_charged_to_the_budget_that_carries_it() {
+        let hits: Vec<FusedHit> = (1..=6)
+            .map(|i| FusedHit {
+                hit: code_hit(
+                    &format!("CommonModules/Модуль{i}/Ext/Module.bsl"),
+                    "ПроверитьИНН",
+                    "procedure",
+                ),
+                modality: Modality::Lexical,
+            })
+            .collect();
+
+        let mut saw_complete_answer = false;
+        for note_length in [44usize, 230, 800] {
+            let note = "с".repeat(note_length);
+            for budget in (50usize..=2000).step_by(25) {
+                let result = assemble_code_response(&hits, None, None, Some(&note), budget);
+                let text = result.content[0].raw.as_text().expect("text").text.as_str();
+                let body = result.structured_content.as_ref().expect("structured");
+                let size = text.len() + serde_json::to_string(body).unwrap().len();
+
+                if body.get("budget_exhausted").is_none() {
+                    saw_complete_answer = true;
+                    assert!(
+                        size <= budget * 4,
+                        "note of {note_length} chars, budget {budget}: {size} chars shipped \
+                         as a complete answer",
+                    );
+                }
+            }
+        }
+        assert!(
+            saw_complete_answer,
+            "the sweep must include answers that fit, or it proves nothing"
+        );
+    }
+
     #[test]
     fn the_whole_response_stays_within_the_budget_it_was_given() {
         let dir = tempdir().unwrap();
@@ -341,7 +407,7 @@ mod tests {
         assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
-        assert_eq!(body["schema_version"], "2");
+        assert_eq!(body["schema_version"], "3");
         let hits = body["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), body["shown"].as_u64().unwrap() as usize);
         assert_eq!(body["total"], serde_json::json!(hits.len()));

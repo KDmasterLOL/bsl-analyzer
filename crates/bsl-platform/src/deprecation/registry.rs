@@ -256,33 +256,36 @@ pub const ENTRIES: &[DeprecationEntry] = &[
         ),
         CompatibilityMode8_3_10
     ),
+    // The error-processing manager is reachable only through the global
+    // property that holds it: `МенеджерОбработкиОшибок` is a type name, and code
+    // written against it does not compile.
     deprecated_method!(
         "КраткоеПредставлениеОшибки",
-        "BriefErrorRepresentation",
+        "BriefErrorDescription",
         ErrorProcessing,
         replacement!(
-            "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки",
-            "ErrorProcessingManager.BriefErrorRepresentation"
+            "ОбработкаОшибок.КраткоеПредставлениеОшибки",
+            "ErrorProcessing.BriefErrorDescription"
         ),
         CompatibilityMode8_3_17
     ),
     deprecated_method!(
         "ПодробноеПредставлениеОшибки",
-        "DetailedErrorRepresentation",
+        "DetailErrorDescription",
         ErrorProcessing,
         replacement!(
-            "МенеджерОбработкиОшибок.ПодробноеПредставлениеОшибки",
-            "ErrorProcessingManager.DetailedErrorRepresentation"
+            "ОбработкаОшибок.ПодробноеПредставлениеОшибки",
+            "ErrorProcessing.DetailErrorDescription"
         ),
         CompatibilityMode8_3_17
     ),
     deprecated_method!(
         "ПоказатьИнформациюОбОшибке",
-        "ShowErrorInformation",
+        "ShowErrorInfo",
         ErrorProcessing,
         replacement!(
-            "МенеджерОбработкиОшибок.ПоказатьИнформациюОбОшибке",
-            "ErrorProcessingManager.ShowErrorInformation"
+            "ОбработкаОшибок.ПоказатьИнформациюОбОшибке",
+            "ErrorProcessing.ShowErrorInfo"
         ),
         CompatibilityMode8_3_17
     ),

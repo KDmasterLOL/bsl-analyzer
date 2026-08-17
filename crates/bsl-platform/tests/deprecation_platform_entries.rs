@@ -110,15 +110,15 @@ fn deprecation_registry_covers_8310_application_interface_methods() {
 
 #[test]
 fn deprecation_registry_covers_8317_error_processing_and_get_form_methods() {
-    let brief_error = lookup(Lookup::global_method("BriefErrorRepresentation"));
+    let brief_error = lookup(Lookup::global_method("BriefErrorDescription"));
     let get_form = lookup(Lookup::global_method("ПолучитьФорму"));
 
     assert_eq!(brief_error.group, LifecycleGroup::ErrorProcessing);
     assert_eq!(
         brief_error.replacement,
         Some(replacement(
-            "МенеджерОбработкиОшибок.КраткоеПредставлениеОшибки",
-            "ErrorProcessingManager.BriefErrorRepresentation",
+            "ОбработкаОшибок.КраткоеПредставлениеОшибки",
+            "ErrorProcessing.BriefErrorDescription",
         ))
     );
     assert_eq!(brief_error.compatibility, CompatibilityBucket::CompatibilityMode8_3_17);

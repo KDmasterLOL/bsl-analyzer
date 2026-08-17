@@ -21,7 +21,8 @@ fn bounded_builder_method_digest_matches_salsa_fold() {
     // When: the real bounded builder emits its compact reverse index.
     let (built, _, _) = build(1);
     let compact = hir::call_hierarchy_method_digest(&built.index, &graph_index, &paths, None);
-    let encoder = GraphRowEncoder::new(&graph_index, &paths, None);
+    let no_objects = hir::graph_index::MdoFiles::default();
+    let encoder = GraphRowEncoder::new(&graph_index, &paths, None, &no_objects);
     let salsa = db.workspace_call_graph(ROOT);
     let folded = MethodCallDigest::from_rows(salsa.edges().filter_map(|edge| {
         let (GraphNode::Method(caller), GraphNode::Method(target)) = (&edge.from, &edge.to) else {

@@ -1,13 +1,25 @@
 mod event;
-pub mod grammar;
+// Объявлен ДО грамматики и с `macro_use`: макрос `T![…]` порождается другим
+// макросом, а такой `macro_export` внутри своего крейта по пути `crate::T`
+// недоступен — язык это прямо запрещает. Остаётся текстовая область
+// видимости, а она идёт по порядку объявления модулей.
+#[macro_use]
 mod parser;
+pub mod grammar;
 mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
-pub mod token_set;
 
 use lexer::tokenize;
 
+/// Алфавит грамматики выходит наружу вынужденно, а не по широте API: макрос
+/// `T![…]` разворачивается в коде вызывающего, и путь к типу обязан
+/// разрешаться снаружи крейта — в том числе в `compile_fail`-доктестах,
+/// которые собираются как отдельный крейт.
+pub use crate::parser::input::Sig;
+/// Путь `parser::token_set::TokenSet` сохраняется после переезда модуля внутрь
+/// `parser`: переезд нужен видимости `Sig::kind`, а не поверхности крейта.
+pub use crate::parser::token_set;
 pub use crate::parser::Parser;
 
 pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
@@ -234,6 +246,46 @@ mod tests {
             "Events must be balanced! Start: {}, Finish: {}",
             start_count, finish_count
         );
+    }
+
+    /// Событий ровно столько, сколько значимых лексем в области разбора.
+    ///
+    /// Промежутки событий не имеют: их проматывает сток. Считается по обеим
+    /// фикстурам и по обоим языкам, потому что счётчик, сверенный с самим
+    /// собой на одном входе, ничего не сторожит.
+    #[test]
+    fn one_token_event_per_significant_lexeme() {
+        use crate::event::Event;
+
+        let bsl = include_str!("../tests/fixtures/Module.bsl");
+        let sdbl = include_str!("../tests/fixtures/user_query_with_highlighting_issue.sdbl");
+
+        let tokens = tokenize(bsl);
+        let mut p = Parser::new(&tokens);
+        grammar::source_file(&mut p);
+        let bsl_events = p.finish();
+
+        let sdbl_tokens =
+            sdbl_token_converter::convert_sdbl_tokens(&lexer::sdbl::tokenize_sdbl(sdbl));
+        let mut p = Parser::new(&sdbl_tokens);
+        p.set_grammar_boundary(grammar::sdbl::at_query_boundary);
+        grammar::sdbl::query_package(&mut p);
+        let sdbl_events = p.finish();
+
+        for (name, tokens, events) in
+            [("BSL", &tokens, &bsl_events), ("SDBL", &sdbl_tokens, &sdbl_events)]
+        {
+            let significant = tokens.iter().filter(|t| !t.kind.is_trivia()).count();
+            let emitted = events.iter().filter(|e| matches!(e, Event::Token { .. })).count();
+            assert_eq!(
+                emitted, significant,
+                "{name}: событий {emitted}, значимых лексем {significant}"
+            );
+            assert!(
+                tokens.len() > significant,
+                "{name}: во входе нет тривии, и счёт совпал бы при любой реализации"
+            );
+        }
     }
 
     #[test]

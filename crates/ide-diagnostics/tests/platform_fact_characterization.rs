@@ -13,7 +13,7 @@ fn deprecated_platform_diagnostic_families_match_current_replacements() {
     Позиция = Find("abcdef", "cd");
     Message("legacy user notification");
     Представление = GetShortApplicationCaption();
-    Описание = BriefErrorRepresentation(ИнформацияОбОшибке());
+    Описание = BriefErrorDescription(ИнформацияОбОшибке());
     Форма = GetForm("Форма");
     Если TypeOf(Форма) = Type("ManagedForm") Тогда
     КонецЕсли;
@@ -36,8 +36,8 @@ fn deprecated_platform_diagnostic_families_match_current_replacements() {
             DeprecatedPlatformApi @ 5:21..5:49
               message: Method "GetShortApplicationCaption" is deprecated. You should use "ClientApplication.GetShortCaption".
               severity: Warning
-            DeprecatedPlatformApi @ 6:16..6:62
-              message: Method "BriefErrorRepresentation" is deprecated. You should use "ErrorProcessingManager.BriefErrorRepresentation".
+            DeprecatedPlatformApi @ 6:16..6:59
+              message: Method "BriefErrorDescription" is deprecated. You should use "ErrorProcessing.BriefErrorDescription".
               severity: Warning
             DeprecatedPlatformApi @ 7:13..7:29
               message: Method "GetForm" is deprecated. You should use "OpenForm".

@@ -2,14 +2,20 @@ use lexer::{Token, TokenKind};
 use parser_error::{ParseError, RecoveryKind};
 use smallvec::smallvec;
 
+#[macro_use]
+pub(crate) mod input;
+pub mod token_set;
+
 use crate::event::{Event, NodeKind};
+use crate::parser::input::{Input, Sig};
 
 const MAX_ITERATIONS: usize = 1_000_000;
 
 const POSITION_HISTORY_SIZE: usize = 100;
 
 pub struct Parser<'a> {
-    tokens: &'a [Token],
+    input: Input<'a>,
+    /// Позиция среди ЗНАЧИМЫХ токенов, а не среди лексем.
     pos: usize,
     events: Vec<Event>,
     iteration_count: usize,
@@ -24,7 +30,7 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
         Self {
-            tokens,
+            input: Input::new(tokens),
             pos: 0,
             events: Vec::new(),
             iteration_count: 0,
@@ -41,62 +47,42 @@ impl<'a> Parser<'a> {
         self.events
     }
 
-    pub fn current(&self) -> Option<TokenKind> {
+    pub fn current(&self) -> Option<Sig> {
         self.nth(0)
     }
 
-    pub fn nth(&self, n: usize) -> Option<TokenKind> {
-        self.tokens.get(self.pos + n).map(|t| t.kind)
+    /// Вид `n`-го значимого токена, считая от текущего.
+    pub fn nth(&self, n: usize) -> Option<Sig> {
+        self.input.kind(self.pos + n)
     }
 
-    pub fn nth_non_trivia(&self, n: usize) -> Option<TokenKind> {
-        let mut count = 0;
-        let mut offset = 1;
-        while let Some(t) = self.tokens.get(self.pos + offset) {
-            match t.kind {
-                TokenKind::Whitespace
-                | TokenKind::Comment
-                | TokenKind::Newline
-                | TokenKind::Bom => {
-                    offset += 1;
-                }
-                _ => {
-                    if count == n {
-                        return Some(t.kind);
-                    }
-                    count += 1;
-                    offset += 1;
-                }
-            }
-        }
-        None
-    }
-
-    pub fn at(&self, kind: TokenKind) -> bool {
+    pub fn at(&self, kind: Sig) -> bool {
         self.current() == Some(kind)
     }
 
-    pub fn at_ts(&self, set: crate::token_set::TokenSet) -> bool {
+    pub fn at_ts(&self, set: crate::parser::token_set::TokenSet) -> bool {
         self.current().is_some_and(|k| set.contains(k))
     }
 
     pub fn current_text(&self) -> &str {
-        self.tokens.get(self.pos).map_or("", |t| t.text.as_str())
+        self.input.text(self.pos)
     }
 
     pub fn at_keyword(&self, text: &str) -> bool {
-        if let Some(token) = self.tokens.get(self.pos) {
-            token.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&token.text, text)
-        } else {
-            false
-        }
+        self.input.token(self.pos).is_some_and(|t| {
+            t.kind == TokenKind::Ident && stdx::case::eq_ignore_case(&t.text, text)
+        })
     }
 
+    /// Значимых токенов больше не осталось.
+    ///
+    /// Хвост промежутков за последним словом сюда не входит: грамматике там
+    /// делать нечего, а до дерева его доводит сток.
     pub fn at_end(&self) -> bool {
-        self.pos >= self.tokens.len()
+        self.pos >= self.input.len()
     }
 
-    pub fn eat(&mut self, kind: TokenKind) -> bool {
+    pub fn eat(&mut self, kind: Sig) -> bool {
         if self.at(kind) {
             self.bump();
             true
@@ -106,11 +92,13 @@ impl<'a> Parser<'a> {
     }
 
     pub fn bump(&mut self) {
-        if let Some(kind) = self.current() {
-            self.track_group(kind);
-            self.events.push(Event::Token { kind });
-            self.pos += 1;
-        }
+        let Some(kind) = self.current() else {
+            return;
+        };
+        self.track_group(kind.kind());
+
+        self.events.push(Event::Token { kind: kind.kind() });
+        self.pos += 1;
     }
 
     /// Maintains the open-group count as tokens go by.
@@ -167,7 +155,7 @@ impl<'a> Parser<'a> {
         self.brace_depth = 0;
     }
 
-    pub fn expect(&mut self, kind: TokenKind) -> bool {
+    pub fn expect(&mut self, kind: Sig) -> bool {
         // A grammar boundary belongs to a rule further out, and no rule may
         // require it here. It matters because kinds are coarser than words:
         // every keyword of a language whose keywords are not reserved
@@ -184,7 +172,11 @@ impl<'a> Parser<'a> {
         } else {
             RecoveryKind::BumpToken
         };
-        let err = ParseError::Expected { expected: smallvec![kind], found, recovery };
+        let err = ParseError::Expected {
+            expected: smallvec![kind.kind()],
+            found: found.map(Sig::kind),
+            recovery,
+        };
 
         if recovery == RecoveryKind::MissingToken {
             self.emit_missing(err);
@@ -240,14 +232,14 @@ impl<'a> Parser<'a> {
     /// of the construct holding it — and plain `expect` would take it as its
     /// recovery, which costs the caller exactly what the caller was about to
     /// parse.
-    pub fn expect_no_bump(&mut self, kind: TokenKind) -> bool {
+    pub fn expect_no_bump(&mut self, kind: Sig) -> bool {
         if !self.at_declared_boundary() && self.eat(kind) {
             return true;
         }
 
         let err = ParseError::Expected {
-            expected: smallvec![kind],
-            found: self.current(),
+            expected: smallvec![kind.kind()],
+            found: self.current().map(Sig::kind),
             recovery: RecoveryKind::MissingToken,
         };
         self.emit_missing(err);
@@ -260,15 +252,36 @@ impl<'a> Parser<'a> {
     /// made the word here a field name, say — would otherwise walk the
     /// token list itself, and every rule that walked it got a different
     /// part of it wrong.
-    pub fn prev_significant(&self) -> Option<TokenKind> {
-        self.tokens[..self.pos].iter().rev().find(|t| !Self::is_trivia_kind(t.kind)).map(|t| t.kind)
+    pub fn prev_significant(&self) -> Option<Sig> {
+        self.pos.checked_sub(1).and_then(|prev| self.input.kind(prev))
     }
 
-    fn is_trivia_kind(kind: TokenKind) -> bool {
-        matches!(
-            kind,
-            TokenKind::Whitespace | TokenKind::Comment | TokenKind::Newline | TokenKind::Bom
-        )
+    /// Whether a line break stands between the previous significant token and
+    /// the next one.
+    ///
+    /// This is the whole of what the grammar is told about lines. The kind of
+    /// a token is not that channel: a rule that reads one gets the norm from
+    /// nowhere, and the next rule to need the same decision writes it a fourth
+    /// way. Which constructs may cross a line, and on what grounds, is
+    /// declared in `docs/architecture/adr/ADR-02-line-sensitivity.md`.
+    ///
+    /// A comment in the gap counts as a line break: it runs to the end of its
+    /// line, so behind it stands either a newline or the end of the file.
+    ///
+    /// Nothing is consumed. Where no significant token precedes the gap —
+    /// the prologue of a file — there is no pair of tokens to stand between,
+    /// and the answer is `false`.
+    pub fn a_line_break_precedes(&self) -> bool {
+        self.input.a_line_break_precedes(self.pos)
+    }
+
+    /// Соприкасается ли токен под курсором с предыдущим.
+    ///
+    /// Нужен там, где лексер режет одно слово языка на несколько токенов
+    /// вплотную: склеить обратно надо ровно их, а соседнее слово, отделённое
+    /// хоть пробелом, — уже другое слово.
+    pub fn a_gap_precedes(&self) -> bool {
+        self.input.a_gap_precedes(self.pos)
     }
 
     pub fn eat_keyword(&mut self, text: &str) -> bool {
@@ -282,13 +295,16 @@ impl<'a> Parser<'a> {
 
     pub fn start(&mut self) -> Marker {
         let pos = self.events.len();
-        let start_token_pos = self.pos;
+        // Индекс СЫРОЙ: сток считает диапазоны по потоку лексем, а `self.pos`
+        // считает слова. Позиция за последним словом штатна — ошибка о
+        // пропущенном токене на конце входа ставит маркер именно там.
+        let start_token_pos = self.input.raw_at(self.pos);
         self.events.push(Event::Placeholder);
         Marker { pos, start_token_pos }
     }
 
     pub fn error(&mut self) {
-        let found = self.current();
+        let found = self.current().map(Sig::kind);
         let recovery = if found.is_none() || self.at_statement_separator() {
             RecoveryKind::MissingToken
         } else {
@@ -326,7 +342,52 @@ impl<'a> Parser<'a> {
         self.emit_missing(err);
     }
 
-    pub(crate) fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
+    /// Сообщает, что на месте курсора ожидался `kind`, и подчёркивает место.
+    ///
+    /// Правило, собирающее `ParseError` руками, обходит выбор `RecoveryKind` и
+    /// разметку диапазона — решения уровня парсера, а не грамматики, — и
+    /// каждое такое место обходит их по-своему. Здесь они приняты один раз:
+    /// диапазон открывается маркером и закрывается узлом ошибки, то есть это
+    /// [`RecoveryKind::RecoverySpan`], и норма привязки из
+    /// `docs/architecture/adr/ADR-03-error-range-attribution.md` выполняется
+    /// по построению.
+    pub fn error_expected(&mut self, kind: Sig) {
+        let m = self.start();
+        let found = self.current().map(Sig::kind);
+        self.emit_error_at_marker(
+            m,
+            ParseError::Expected {
+                expected: smallvec![kind.kind()],
+                found,
+                recovery: RecoveryKind::RecoverySpan,
+            },
+        );
+    }
+
+    /// Стоит ли под курсором то, что лексер прочесть не смог.
+    ///
+    /// Правилу это нужно, чтобы промолчать: текст, который лексер уже отверг,
+    /// о своём содержимом ничего не обещает, и вторая жалоба на него говорит о
+    /// нём не больше первой.
+    pub fn at_error(&self) -> bool {
+        self.current() == Some(T![Error])
+    }
+
+    /// Подчёркивает уже открытый маркером участок и называет причину.
+    ///
+    /// Единственный путь грамматики к ошибке с диапазоном. Собирать `ParseError`
+    /// руками правило не может: тип ошибки хранит СЫРОЙ вид токена, и открытая
+    /// грамматике дверь с таким параметром обошла бы алфавит `Sig` мимо всех
+    /// десяти переведённых дверей — то есть вернула бы ровно ту дыру, ради
+    /// которой алфавит и заведён.
+    pub fn error_custom_at_marker(&mut self, m: Marker, message: &'static str) {
+        self.emit_error_at_marker(
+            m,
+            ParseError::Custom { message, recovery: RecoveryKind::RecoverySpan },
+        );
+    }
+
+    fn emit_error_at_marker(&mut self, m: Marker, err: ParseError) {
         debug_assert!(err.recovery() == RecoveryKind::RecoverySpan);
         self.events.push(Event::ErrorWithSpan { start_token: m.start_token_pos, err });
         m.complete(self, NodeKind::Error);
@@ -384,7 +445,7 @@ impl<'a> Parser<'a> {
     /// where the missing element should have been, and the token stays for
     /// the caller.
     fn at_statement_separator(&self) -> bool {
-        self.at(TokenKind::Semicolon) || self.at_declared_boundary() || self.at_enclosing_boundary()
+        self.at(T![Semicolon]) || self.at_declared_boundary() || self.at_enclosing_boundary()
     }
 
     /// The part of the boundary that holds for the whole parse, without the
@@ -414,48 +475,9 @@ impl<'a> Parser<'a> {
         m.complete(self, NodeKind::Error);
     }
 
-    pub fn skip_trivia(&mut self) {
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Whitespace
-                | TokenKind::Comment
-                | TokenKind::Newline
-                | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-    }
-
-    /// Skips trivia that cannot end a line. Unlike [`Parser::skip_trivia`], this
-    /// stops at a newline and at a comment (which runs to the end of its line),
-    /// so a caller stays on the line it started on.
-    pub fn skip_blanks(&mut self) {
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Whitespace | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-    }
-
-    pub fn skip_trivia_crossing_newline(&mut self) -> bool {
-        let mut crossed_newline = false;
-        while let Some(kind) = self.current() {
-            match kind {
-                TokenKind::Newline => {
-                    crossed_newline = true;
-                    self.bump();
-                }
-                TokenKind::Whitespace | TokenKind::Comment | TokenKind::Bom => self.bump(),
-                _ => break,
-            }
-        }
-        crossed_newline
-    }
-
     pub fn at_declaration_start(&self) -> bool {
-        matches!(self.current(), Some(TokenKind::KwFunction | TokenKind::KwProcedure))
-            && self.nth_non_trivia(0) == Some(TokenKind::Ident)
+        matches!(self.current(), Some(T![KwFunction] | T![KwProcedure]))
+            && self.nth(1) == Some(T![Ident])
     }
 
     pub fn check_iteration_limit(&mut self) {

@@ -189,7 +189,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if let Some(token) = element.into_token() {
             if matches!(
                 token.kind(),
-                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+                kind if kind.is_trivia()
             ) {
                 continue;
             }

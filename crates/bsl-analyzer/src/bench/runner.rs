@@ -1117,8 +1117,8 @@ pub(crate) fn execute_once(
             let t = Instant::now();
             let r = a.workspace_symbols(query);
             let ns = t.elapsed().as_nanos() as u64;
-            let lines = r.iter().map(|s| format!("{s:?}")).collect();
-            Ok((ns, Observation::from_lines(r.len(), lines)))
+            let lines = r.candidates.iter().map(|s| format!("{s:?}")).collect();
+            Ok((ns, Observation::from_lines(r.candidates.len(), lines)))
         }
         FeatureSpec::DiagnosticsPush => {
             let config = env.state.diagnostics_config.clone();

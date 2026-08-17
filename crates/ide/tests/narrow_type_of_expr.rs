@@ -492,7 +492,7 @@ fn narrowed_type_at_after_terminating_undefined_guard_keeps_complement() {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 1);
     let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
@@ -531,7 +531,7 @@ fn narrowed_type_at_after_non_terminating_undefined_guard_drops() {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 1);
     let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");
@@ -570,7 +570,7 @@ fn narrowed_type_at_after_terminating_raise_guard_keeps_complement() {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
 
-    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 0);
+    let after_guard = nth_ident_expr_at_distinct_position(&root, "Х", 1);
     let expr_id = expr_id_at_range(&db, file_id, after_guard.text_range());
 
     let result = narrow_query(&db, file_id, owner).expect("narrow_query must converge");

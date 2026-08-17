@@ -146,15 +146,29 @@ pub(crate) fn workspace_with_a_nested_configuration() -> (tempfile::TempDir, Pat
     (dir, workspace)
 }
 
+/// Ждёт готовности базы, а исчерпав ожидание — говорит, чего именно дождался.
+///
+/// Голое «не стало готовым» о превышении бюджета и о зависшей загрузке
+/// сообщает одинаково, и падение под полным прогоном приходится
+/// расследовать заново. Поэтому в сообщении стоит последний наблюдённый
+/// статус и потраченное время: по ним видно, упёрлись ли мы в бюджет на
+/// загруженной машине или загрузка не двигалась вовсе.
 pub(crate) fn wait_ready(state: &DiagnosticsState) {
+    let started = std::time::Instant::now();
+    let mut last = state.status();
+
     for _ in 0..300 {
         match state.status() {
             DiagnosticsStatus::Ready { .. } => return,
             DiagnosticsStatus::Failed(msg) => panic!("diagnostics load failed: {msg}"),
-            _ => std::thread::sleep(Duration::from_millis(10)),
+            other => {
+                last = other;
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
     }
-    panic!("diagnostics db did not become ready");
+
+    panic!("diagnostics db did not become ready in {:?}, last status {last:?}", started.elapsed());
 }
 
 pub(super) fn write_catalog(root: &Path, name: &str, code_length: u32) {

@@ -179,14 +179,55 @@ pub(crate) fn verify_pipe_server_trusted(conn: &TokioStream) -> bool {
     }
 }
 
+/// Platforms whose peer credentials carry the peer's PID, which is the identity the supervised
+/// broker pins to.
+///
+/// Taken from what `interprocess` actually returns from `PeerCreds::pid()`, not from its prose:
+/// the implementation reads Windows pipe credentials, `ucred` on Linux/Android/OpenBSD and their
+/// shape-alikes, `cr_pid` on FreeBSD and `unp_pid` on NetBSD. Darwin's `xucred` and DragonFly's
+/// carry no PID at all, so pinning there cannot be verified and the mode is refused up front
+/// instead of failing every connection as an identity mismatch.
+///
+/// This list is the single source: [`peer_pid_available`] answers the CLI gate from it, and the
+/// contract publishes it. A platform added to one and forgotten in the other is not possible.
+pub const SUPERVISED_PID_PLATFORMS: &[&str] =
+    &["android", "freebsd", "fuchsia", "linux", "netbsd", "openbsd", "redox", "windows"];
+
+/// Whether the running platform's peer credentials carry the peer's PID.
+pub fn peer_pid_available() -> bool {
+    SUPERVISED_PID_PLATFORMS.contains(&std::env::consts::OS)
+}
+
+/// Why a supervised connection was refused, carrying what the socket actually answered with.
+///
+/// A caller reports this to whoever passed the PID, so it names the owner it found: "not the
+/// process you named" and "no process at all" send a supervisor to different places, and so does
+/// learning that the workspace already had a backend of its own.
+#[cfg(any(unix, windows))]
+pub(crate) enum SupervisedMismatch {
+    /// The socket is owned by this other process — typically a backend that was already running
+    /// when the supervised daemon started, which then lost the bind and exited.
+    OtherPid(u32),
+    /// The peer's identity could not be established at all.
+    Unknown,
+}
+
 /// Verify that a broker connection terminates at the exact backend process a
 /// supervisor launched.
 ///
 /// The PID check is the supervised-mode identity. The ordinary transport trust
 /// checks still apply as defense in depth: same effective user on Unix and the
 /// existing image/owner check on Windows.
+///
+/// A PID names a process only while that process lives: the OS reuses the number afterwards, and
+/// nothing in the credentials carries a start time or generation to tell the reuse apart. What
+/// this proves is that the socket is answered by the process holding that number now, run by the
+/// same user, from the same image — not that it is the very process the supervisor spawned.
 #[cfg(any(unix, windows))]
-pub(crate) fn verify_supervised_backend(conn: &TokioStream, expected_pid: u32) -> bool {
+pub(crate) fn verify_supervised_backend(
+    conn: &TokioStream,
+    expected_pid: u32,
+) -> Result<(), SupervisedMismatch> {
     let actual_pid = conn
         .peer_creds()
         .ok()
@@ -198,19 +239,24 @@ pub(crate) fn verify_supervised_backend(conn: &TokioStream, expected_pid: u32) -
             actual_pid,
             "broker backend PID does not match the supervised process"
         );
-        return false;
+        return Err(match actual_pid {
+            Some(pid) => SupervisedMismatch::OtherPid(pid),
+            None => SupervisedMismatch::Unknown,
+        });
     }
 
     #[cfg(unix)]
-    {
-        match conn.peer_creds() {
-            Ok(creds) => creds.euid().is_some_and(|uid| uid == crate::broker::name::current_euid()),
-            Err(_) => false,
-        }
-    }
+    let trusted = match conn.peer_creds() {
+        Ok(creds) => creds.euid().is_some_and(|uid| uid == crate::broker::name::current_euid()),
+        Err(_) => false,
+    };
     #[cfg(windows)]
-    {
-        verify_pipe_server_trusted(conn)
+    let trusted = verify_pipe_server_trusted(conn);
+
+    if trusted {
+        Ok(())
+    } else {
+        Err(SupervisedMismatch::Unknown)
     }
 }
 
@@ -392,5 +438,21 @@ mod tests {
         let actual = peer_identity_from_raw(Some(&exe), Some("S-1-5-21-1-2-3-1001"));
 
         assert!(peer_identity_trusted(&expected, &actual));
+    }
+
+    /// The list is what the CLI refuses the supervised mode by, so it has to answer for the
+    /// platform actually running. Darwin is the case that matters: `xucred` carries no PID, and
+    /// claiming otherwise turns every connection there into an identity mismatch.
+    #[test]
+    fn peer_pid_availability_answers_for_the_running_platform() {
+        let carries_pid =
+            !matches!(std::env::consts::OS, "macos" | "ios" | "tvos" | "watchos" | "dragonfly");
+
+        assert_eq!(
+            super::peer_pid_available(),
+            carries_pid,
+            "peer credentials on {} carry a PID: {carries_pid}",
+            std::env::consts::OS
+        );
     }
 }

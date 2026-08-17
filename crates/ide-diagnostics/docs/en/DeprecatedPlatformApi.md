@@ -16,6 +16,7 @@ Incorrect:
 OperationDate = CurrentDate();
 Position = Find("abcdef", "cd");
 Form = GetForm("Form");
+Description = DetailErrorDescription(ErrorInfo());
 ```
 
 Correct:
@@ -24,7 +25,12 @@ Correct:
 OperationDate = CurrentSessionDate();
 Position = StrFind("abcdef", "cd");
 OpenForm("Form");
+Description = ErrorProcessing.DetailErrorDescription(ErrorInfo());
 ```
+
+The error-processing manager is reached through the `ErrorProcessing` global
+property. `ErrorProcessingManager` is the type of that property and cannot be
+written in code.
 
 ## Sources
 

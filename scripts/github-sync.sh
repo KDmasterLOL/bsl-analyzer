@@ -12,15 +12,17 @@ GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
 GITHUB_REPO_SLUG="itrous/bsl-analyzer"
 GITHUB_BRANCH="develop"
 
+# Только ОТСЛЕЖИВАЕМЫЕ пути, которым не место в публичном зеркале: дерево берётся
+# из HEAD, поэтому неотслеживаемое в зеркало не попадает по построению и
+# перечислять его здесь не нужно.
 EXCLUDE_PATTERNS=(
     ".gitlab-ci.yml"
     ".cargo/config.toml"
+    ".claude/"
     "scripts/ci-status.sh"
     "scripts/*sonar-triage*"
     "docs/diagnostics-audit/"
     "docs/legal/"
-    ".omc/"
-    ".claude/"
     "crates/bsl-launcher/release-source.github.json"
 )
 
@@ -39,6 +41,8 @@ SSH_KEY_FILE=""
 NOTES_FILE=""
 SKIP_SUMMARY=false
 LAST_GH_TAG=""
+SOURCE_COMMIT=""
+ARCHIVE_PATHSPECS=()
 
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
@@ -263,16 +267,22 @@ publish_release_notes() {
     persist_notes_for_manual_publish "$tag" "$body_file"
 }
 
-build_rsync_excludes() {
-    local excludes=()
+build_archive_pathspecs() {
+    ARCHIVE_PATHSPECS=(".")
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        excludes+=(--exclude "$pattern")
+        # Завершающий слэш git в pathspec не понимает: каталог задаётся своим именем.
+        ARCHIVE_PATHSPECS+=(":(exclude)${pattern%/}")
     done
-    excludes+=(--exclude ".git")
-    excludes+=(--exclude ".git/")
-    excludes+=(--exclude "target/")
-    excludes+=(--exclude "target-*/")
-    echo "${excludes[@]}"
+}
+
+assert_tree_committed() {
+    # Тем же набором путей, что и архив: правка в исключённом файле состав зеркала
+    # не меняет ни в каком состоянии коммита, и блокировать из-за неё нечего.
+    if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain --untracked-files=no -- "${ARCHIVE_PATHSPECS[@]}")" ]]; then
+        log_error "В рабочем дереве есть незакоммиченные изменения файлов, попадающих в зеркало."
+        log_error "Зеркало собирается из коммита, и эти правки в него не войдут — закоммитьте или откатите их."
+        exit 1
+    fi
 }
 
 sync_files() {
@@ -283,10 +293,9 @@ sync_files() {
 
     find "$dst" -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
 
-    local excludes
-    excludes=$(build_rsync_excludes)
-    # shellcheck disable=SC2086
-    rsync -a $excludes "$src/" "$dst/"
+    # Дерево коммита, а не файловая система: копирование с диска утаскивало в публичное
+    # зеркало любой локальный каталог, не попавший в список исключений.
+    git -C "$src" archive "$SOURCE_COMMIT" -- "${ARCHIVE_PATHSPECS[@]}" | tar -x -C "$dst"
 }
 
 
@@ -321,6 +330,14 @@ log_info "Версия: $VERSION"
 log_info "Тег: $COMMIT_TAG"
 log_info "GitHub: $GITHUB_REPO"
 
+# HEAD разрешается ОДИН раз: дальше идут сетевые вызовы и генерация release notes, а
+# ветка тем временем может уехать под чужим коммитом — зеркало обязано соответствовать
+# тому дереву, которое названо здесь.
+SOURCE_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+log_info "Источник дерева: $(git -C "$PROJECT_ROOT" rev-parse --short "$SOURCE_COMMIT")"
+
+build_archive_pathspecs
+assert_tree_committed
 fetch_last_github_tag
 generate_release_notes "$COMMIT_TAG" "$LAST_GH_TAG"
 
@@ -332,10 +349,15 @@ compose_release_body "$COMMIT_TAG" "$LAST_GH_TAG" "$RELEASE_BODY_FILE"
 if $DRY_RUN; then
     log_warn "DRY RUN — изменения не будут отправлены"
     echo ""
-    log_info "Исключаемые файлы:"
+    log_info "Исключаемые отслеживаемые пути:"
     for pattern in "${EXCLUDE_PATTERNS[@]}"; do
         echo "  - $pattern"
     done
+    echo ""
+    # Отдельным шагом, чтобы сбой git archive или tar ронял превью, а не выдавал ноль:
+    # законный ненулевой статус здесь один — grep -c при пустом счёте.
+    DRY_LIST=$(git -C "$PROJECT_ROOT" archive "$SOURCE_COMMIT" -- "${ARCHIVE_PATHSPECS[@]}" | tar -t)
+    log_info "Файлов уедет в зеркало: $(printf '%s\n' "$DRY_LIST" | grep -cv '/$' || true)"
     echo ""
     log_info "Будет создан коммит: \"Release $COMMIT_TAG\""
     if [[ -s "$RELEASE_BODY_FILE" ]]; then

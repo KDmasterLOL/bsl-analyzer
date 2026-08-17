@@ -44,6 +44,7 @@ coverage/
 # Local planning / env
 .env
 .codex
+.pi-subagents/
 /opencode.json
 AGENTS.md
 plans/

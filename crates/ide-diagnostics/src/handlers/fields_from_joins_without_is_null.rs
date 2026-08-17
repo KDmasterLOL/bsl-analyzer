@@ -88,7 +88,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 4:14..5:6
+                FieldsFromJoinsWithoutIsNull @ 4:14..4:31
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -133,7 +133,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 8:10..9:6
+                FieldsFromJoinsWithoutIsNull @ 8:10..8:26
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -245,7 +245,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 4:14..5:6
+                FieldsFromJoinsWithoutIsNull @ 4:14..4:33
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -455,7 +455,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                FieldsFromJoinsWithoutIsNull @ 7:16..7:33
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -480,7 +480,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                FieldsFromJoinsWithoutIsNull @ 7:16..7:33
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -505,7 +505,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                FieldsFromJoinsWithoutIsNull @ 6:20..6:37
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -533,7 +533,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                FieldsFromJoinsWithoutIsNull @ 6:20..6:37
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -560,7 +560,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                FieldsFromJoinsWithoutIsNull @ 6:20..6:37
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -587,7 +587,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 7:16..8:6
+                FieldsFromJoinsWithoutIsNull @ 7:16..7:33
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -614,7 +614,7 @@ mod tests {
             code,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 6:20..7:10
+                FieldsFromJoinsWithoutIsNull @ 6:20..6:37
                   message: Для полей из ЛЕВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -634,10 +634,10 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 4:17..4:31
+                FieldsFromJoinsWithoutIsNull @ 4:17..4:30
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning
-                FieldsFromJoinsWithoutIsNull @ 5:17..5:32
+                FieldsFromJoinsWithoutIsNull @ 5:17..5:31
                   message: Для полей из ПОЛНОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );
@@ -676,7 +676,7 @@ mod tests {
 КонецПроцедуры"#,
             DiagnosticCode::FieldsFromJoinsWithoutIsNull,
             expect![[r#"
-                FieldsFromJoinsWithoutIsNull @ 5:13..5:27
+                FieldsFromJoinsWithoutIsNull @ 5:13..5:26
                   message: Для полей из ПРАВОГО СОЕДИНЕНИЯ добавьте проверку через ЕСТЬ NULL или используйте функцию ЕСТЬNULL, либо замените на ВНУТРЕННЕЕ СОЕДИНЕНИЕ
                   severity: Warning"#]],
         );

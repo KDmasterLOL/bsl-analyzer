@@ -91,6 +91,15 @@ mod tests {
         check_diagnostics_snapshot_for(code, DiagnosticCode::SemicolonPresence, expect![[r#""#]]);
     }
 
+    /// Точка с запятой отделена от оператора комментарием: тривия
+    /// принадлежит предку, поэтому непосредственным соседом она не будет
+    /// никогда, а поиск обязан шагать через тривию любого вида.
+    #[test]
+    fn test_comment_between_statement_and_semicolon() {
+        let code = "Процедура П()\n    А = 1 // комментарий\n    ;\nКонецПроцедуры\n";
+        check_diagnostics_snapshot_for(code, DiagnosticCode::SemicolonPresence, expect![[r#""#]]);
+    }
+
     #[test]
     fn test_label_no_semicolon_required() {
         let code = r#"

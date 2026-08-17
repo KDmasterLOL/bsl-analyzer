@@ -359,16 +359,16 @@ fn simple_selected_output_ref<'a>(
     if column_refs.next().is_some() {
         return None;
     }
-    if node.text().to_string().trim() != column_ref.text().to_string().trim() {
+    // Выражение обязано состоять из одной ссылки и ничего больше. Сравнение
+    // по тексту считало бы комментарий за ссылкой лишней частью выражения и
+    // молча выключало бы проверку.
+    if !syntax::ast_utils::same_significant_tokens(node, &column_ref) {
         return None;
     }
 
-    let mut idents = column_ref.children_with_tokens().filter_map(|it| match it {
-        syntax::NodeOrToken::Token(token) if token.kind().is_name_token() => {
-            Some(token.text().to_string())
-        }
-        _ => None,
-    });
+    let idents: Vec<String> =
+        syntax::ast_utils::direct_name_tokens(&column_ref).map(|t| t.text().to_string()).collect();
+    let mut idents = idents.into_iter();
 
     let name = idents.next()?;
     if idents.next().is_some() {

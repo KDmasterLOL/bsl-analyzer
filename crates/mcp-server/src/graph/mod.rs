@@ -13,6 +13,7 @@
 
 mod build;
 pub(crate) mod input;
+pub(crate) mod mdo_files;
 pub(crate) mod scan;
 mod snapshot;
 mod state;

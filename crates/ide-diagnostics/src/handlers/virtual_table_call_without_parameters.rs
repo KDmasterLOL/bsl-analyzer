@@ -139,7 +139,7 @@ mod tests {
             code,
             DiagnosticCode::VirtualTableCallWithoutParameters,
             expect![[r#"
-                VirtualTableCallWithoutParameters @ 6:9..6:45
+                VirtualTableCallWithoutParameters @ 6:9..6:44
                   message: Не следует использовать виртуальные таблицы без параметров
                   severity: Major
                 VirtualTableCallWithoutParameters @ 49:9..49:43

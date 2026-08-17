@@ -340,7 +340,7 @@ pub(super) fn lower_stmt_list_with_unreachable(
                 && !should_skip_semicolon_check(&child)
                 && !has_trailing_semicolon(&child)
             {
-                let range = get_last_meaningful_token_range(&child);
+                let range = last_token_range(&child);
                 ctx.emit(BodyDiagnostic::MissingSemicolon { range });
             }
         }
@@ -1078,23 +1078,8 @@ pub(super) fn should_skip_semicolon_check(node: &SyntaxNode) -> bool {
 }
 
 pub(super) fn has_trailing_semicolon(node: &SyntaxNode) -> bool {
-    use syntax::NodeOrToken;
-    let mut next = node.next_sibling_or_token();
-    while let Some(element) = next {
-        match element {
-            NodeOrToken::Token(ref token) => {
-                if token.kind() == SyntaxKind::SEMICOLON {
-                    return true;
-                }
-                if !matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
-                    break;
-                }
-            }
-            NodeOrToken::Node(_) => {
-                break;
-            }
-        }
-        next = element.next_sibling_or_token();
+    if syntax::trailing_semicolon(node).is_some() {
+        return true;
     }
 
     node.children_with_tokens()
@@ -1102,12 +1087,15 @@ pub(super) fn has_trailing_semicolon(node: &SyntaxNode) -> bool {
         .any(|t| t.kind() == SyntaxKind::SEMICOLON)
 }
 
-pub(super) fn get_last_meaningful_token_range(node: &SyntaxNode) -> TextRange {
+/// Диапазон последнего токена узла — места, где не хватает точки с запятой.
+///
+/// Отбора по тривии здесь нет: последний токен узла значим по норме привязки.
+/// Обход идёт по всем токенам поддерева, а не через `last_token`, потому что
+/// последним ребёнком узла обычно оказывается пустой `ERROR`, а он обрывает
+/// спуск rowan за краевым токеном.
+pub(super) fn last_token_range(node: &SyntaxNode) -> TextRange {
     node.descendants_with_tokens()
         .filter_map(|el| el.into_token())
-        .filter(|t| {
-            !matches!(t.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT)
-        })
         .last()
         .map(|t| t.text_range())
         .unwrap_or_else(|| node.text_range())

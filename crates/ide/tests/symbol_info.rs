@@ -569,6 +569,16 @@ fn positional_local_or_parameter_resolves() {
     .expect("positional resolution");
     assert_eq!(card.symbol, "Парам");
     assert!(matches!(card.kind, "parameter" | "local variable"), "unexpected kind {:?}", card.kind);
+
+    // The position is how the caller got here, so the contract location must carry it. A
+    // location without ranges means "the whole file", which would be strictly less than the
+    // legacy `line` beside it.
+    let def = card.definition.expect("definition site");
+    assert_eq!(def.line, 2, "the legacy 1-based line stays as it was");
+    let name = def.name_range.expect("a local names its own position");
+    assert_eq!(name.start_line, 1, "0-based line of the same declaration");
+    assert_eq!(name.start_character, 8);
+    assert_eq!(name.end_character, 8 + "Парам".chars().count() as u32);
 }
 
 #[test]
