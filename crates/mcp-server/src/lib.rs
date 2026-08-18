@@ -45,6 +45,8 @@ where
 }
 
 use crate::graph::GraphStatus;
+use std::collections::BTreeSet;
+
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -518,6 +520,41 @@ fn resident_provider_state(
     }
 }
 
+/// Which of a profile's tools this process serves.
+///
+/// Composition is decided once, at construction, and the router is never mutated
+/// afterwards: a session's `tools/list` cannot change under the client, and no
+/// `notifications/tools/list_changed` is ever sent. A hidden tool is hidden by rmcp's own
+/// mechanism, so calling it fails with the error an unknown name gets — the build does not
+/// leak that it could have served it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolGate {
+    hidden: BTreeSet<String>,
+}
+
+impl ToolGate {
+    /// Hide exactly these names. This is the primitive; launch policy is
+    /// [`ToolGate::for_launch`].
+    pub fn hiding(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self { hidden: names.into_iter().map(Into::into).collect() }
+    }
+
+    /// The gate one launch asks for: `opt_in_tools(profile) \ enabled`.
+    ///
+    /// The difference is taken over the opt-in set, never over everything the profile
+    /// declares. Hiding "everything not named" would empty the surface on a plain launch
+    /// and would make naming an already-served tool a destructive act, while both the
+    /// contract and the backend identity treat it as an identity operation.
+    pub fn for_launch(profile: McpProfile, enabled: &[String]) -> Self {
+        Self {
+            hidden: contract::opt_in_tools(profile)
+                .filter(|name| !enabled.iter().any(|enabled| enabled == name))
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct McpServer {
     profile: McpProfile,
@@ -527,12 +564,27 @@ pub struct McpServer {
 
 #[tool_router(router = workspace_tool_router)]
 impl McpServer {
+    /// A server serving the profile's default surface.
     pub fn new(profile: McpProfile, state: SharedState) -> Self {
-        let tool_router = match profile {
+        Self::with_gate(profile, state, &ToolGate::for_launch(profile, &[]))
+    }
+
+    /// A server serving what `gate` leaves visible.
+    pub fn with_gate(profile: McpProfile, state: SharedState, gate: &ToolGate) -> Self {
+        Self { profile, state, tool_router: Self::gated_router(profile, gate) }
+    }
+
+    /// The router a profile serves under `gate`. Exposed without state so the declaration
+    /// can be compared against the composition a launch actually produces.
+    pub fn gated_router(profile: McpProfile, gate: &ToolGate) -> ToolRouter<Self> {
+        let mut router = match profile {
             McpProfile::Workspace => Self::workspace_tool_router(),
             McpProfile::Reference => Self::reference_tool_router(),
         };
-        Self { profile, state, tool_router }
+        for name in &gate.hidden {
+            router.disable_route(name.clone());
+        }
+        router
     }
 
     pub fn shutdown(&self) {
@@ -1901,43 +1953,48 @@ impl McpServer {
     }
 }
 
+/// The routing prose a client is handed at `initialize`. It names the tools of the
+/// profile's default surface; an opt-in tool must never appear here, or a client would be
+/// told to reach for something this process does not serve.
+fn profile_instructions(profile: McpProfile) -> &'static str {
+    match profile {
+        McpProfile::Workspace => {
+            "BSL Analyzer workspace MCP server for a 1C:Enterprise (BSL) configuration. \
+             Route by task (each tool's own description carries the full contract):\n\
+             - find code by meaning or unknown name → `search`;\n\
+             - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
+             - one symbol's kind/signature/type/doc/definition/usages by name → `symbol_info`;\n\
+             - one file's map (regions, declarations, parameters) → `outline`;\n\
+             - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
+             (start at catalog to learn the codes);\n\
+             - metadata objects / structure / forms → `metadata`;\n\
+             - SDBL query validate/run → `query`; run/check BSL code → `execute`;\n\
+             - live infobase runtime events → `event_log`; live debugger session → `debug`.\n\
+             Tools whose data is built lazily (metadata, graph, diagnostics, search) return a \
+             retry envelope while indexing rather than an error; every response is bounded \
+             by `max_output_tokens` (and, where one exists, the action's own count cap) — \
+             JSON tools (graph, diagnostics, event_log) flag `budget_exhausted` with a \
+             `budget_hint`, text tools (search, metadata, query, execute, debug) append a \
+             truncation note. When a count cap fired too, the hint says so: raising \
+             `max_output_tokens` alone will not return more."
+        }
+        McpProfile::Reference => {
+            "BSL Analyzer reference MCP server for the 1C platform (no project code). \
+             Route by task (each tool's own description carries the full contract):\n\
+             - one platform member's signature by name → `syntax_help`;\n\
+             - platform docs by keyword or meaning → `search`;\n\
+             - conceptual how/why question on the platform or standards → `its_help`.\n\
+             Tools: search, syntax_help, its_help. Every response is bounded by \
+             `max_output_tokens`; a truncated one appends a continuation note."
+        }
+    }
+}
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
-        info.instructions = Some(match self.profile {
-            McpProfile::Workspace => {
-                "BSL Analyzer workspace MCP server for a 1C:Enterprise (BSL) configuration. \
-                 Route by task (each tool's own description carries the full contract):\n\
-                 - find code by meaning or unknown name → `search`;\n\
-                 - who-calls-whom / change impact → `graph` (durable ids; start at overview);\n\
-                 - one symbol's kind/signature/type/doc/definition/usages by name → `symbol_info`;\n\
-                 - one file's map (regions, declarations, parameters) → `outline`;\n\
-                 - analyzer findings (unreachable, type mismatch, unresolved) → `diagnostics` \
-                 (start at catalog to learn the codes);\n\
-                 - metadata objects / structure / forms → `metadata`;\n\
-                 - SDBL query validate/run → `query`; run/check BSL code → `execute`;\n\
-                 - live infobase runtime events → `event_log`; live debugger session → `debug`.\n\
-                 Tools whose data is built lazily (metadata, graph, diagnostics, search) return a \
-                 retry envelope while indexing rather than an error; every response is bounded \
-                 by `max_output_tokens` (and, where one exists, the action's own count cap) — \
-                 JSON tools (graph, diagnostics, event_log) flag `budget_exhausted` with a \
-                 `budget_hint`, text tools (search, metadata, query, execute, debug) append a \
-                 truncation note. When a count cap fired too, the hint says so: raising \
-                 `max_output_tokens` alone will not return more."
-                    .into()
-            }
-            McpProfile::Reference => {
-                "BSL Analyzer reference MCP server for the 1C platform (no project code). \
-                 Route by task (each tool's own description carries the full contract):\n\
-                 - one platform member's signature by name → `syntax_help`;\n\
-                 - platform docs by keyword or meaning → `search`;\n\
-                 - conceptual how/why question on the platform or standards → `its_help`.\n\
-                 Tools: search, syntax_help, its_help. Every response is bounded by \
-                 `max_output_tokens`; a truncated one appends a continuation note."
-                    .into()
-            }
-        });
+        info.instructions = Some(profile_instructions(self.profile).into());
         info.capabilities = ServerCapabilities::builder().enable_tools().enable_resources().build();
         // NOT `Implementation::from_build_env()`: that macro expands inside rmcp, so it
         // reports rmcp's own name and version — a consumer reading `serverInfo` to learn
@@ -1983,6 +2040,31 @@ impl ServerHandler for McpServer {
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(body, contract::CONTRACT_URI).with_mime_type("application/json")
         ]))
+    }
+}
+
+#[cfg(test)]
+mod surface_guards {
+    use super::*;
+
+    /// The routing prose must not send a client to a tool this process may not be serving.
+    ///
+    /// Forward guard: the build declares no opt-in tool yet, so the loop body does not run
+    /// and this cannot fail today. It gains teeth with the first opt-in tool, whose author
+    /// would otherwise have to remember that the reference profile's prose ends with a
+    /// literal `Tools: search, syntax_help, its_help`.
+    #[test]
+    fn instructions_do_not_advertise_opt_in_tools() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let prose = profile_instructions(profile);
+            for name in contract::opt_in_tools(profile) {
+                assert!(
+                    !prose.contains(name),
+                    "{}: instructions name the opt-in tool `{name}`",
+                    profile.as_str()
+                );
+            }
+        }
     }
 }
 

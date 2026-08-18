@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.9";
+pub const CONTRACT_VERSION: &str = "1.10";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -51,6 +51,10 @@ pub struct ToolDecl {
     pub note: Option<&'static str>,
     /// Version carried by this tool's `structuredContent`, when it has a stable output schema.
     pub output_schema_version: Option<&'static str>,
+    /// Whether the profile serves this tool without being asked. A `false` here is the
+    /// only thing that makes a tool opt-in: it is declared, the build can serve it, and
+    /// `tools/list` omits it until a launch names it.
+    pub default_enabled: bool,
 }
 
 /// One action of a tool, with the parameters it needs beyond the schema-level required ones.
@@ -66,7 +70,7 @@ const fn action(name: &'static str, required: &'static [&'static str]) -> Action
 }
 
 const fn tool(name: &'static str, actions: &'static [ActionDecl]) -> ToolDecl {
-    ToolDecl { name, actions, note: None, output_schema_version: None }
+    ToolDecl { name, actions, note: None, output_schema_version: None, default_enabled: true }
 }
 
 const METADATA_ACTIONS: &[ActionDecl] = &[
@@ -142,6 +146,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         actions: &[],
         note: Some("one of `symbol` or `path`+`line` is required"),
         output_schema_version: None,
+        default_enabled: true,
     },
     tool("diagnostics", DIAGNOSTICS_ACTIONS),
     tool("outline", &[]),
@@ -149,7 +154,13 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
 
 const REFERENCE_TOOLS: &[ToolDecl] = &[
     tool("search", REFERENCE_SEARCH_ACTIONS),
-    ToolDecl { name: "syntax_help", actions: &[], note: None, output_schema_version: Some("1") },
+    ToolDecl {
+        name: "syntax_help",
+        actions: &[],
+        note: None,
+        output_schema_version: Some("1"),
+        default_enabled: true,
+    },
     tool("its_help", &[]),
 ];
 
@@ -162,6 +173,50 @@ fn tools_of(profile: McpProfile) -> &'static [ToolDecl] {
 
 fn decl_of(profile: McpProfile, tool: &str) -> Option<&'static ToolDecl> {
     tools_of(profile).iter().find(|d| d.name == tool)
+}
+
+/// Every tool name the profile declares, in declaration order — both default and opt-in.
+///
+/// This is the set `--enable-tool` accepts, and it is wider than [`opt_in_tools`] on
+/// purpose: naming a tool that is already served is an identity operation, so a client
+/// config carrying the flag keeps starting after that tool graduates to the default
+/// surface. Rejecting it would break every installed config on such a release.
+pub fn declared_tools(profile: McpProfile) -> impl Iterator<Item = &'static str> {
+    tools_of(profile).iter().map(|decl| decl.name)
+}
+
+/// Tools this profile can serve but does not serve unless a launch asks for them.
+pub fn opt_in_tools(profile: McpProfile) -> impl Iterator<Item = &'static str> {
+    tools_of(profile).iter().filter(|decl| !decl.default_enabled).map(|decl| decl.name)
+}
+
+/// The requested names that actually change the served surface: `requested ∩ opt_in`.
+///
+/// Names outside the opt-in set change nothing, so they must not reach the backend
+/// identity: hashing raw flags would give a client that passes `--enable-tool <default>`
+/// a different daemon than one that does not, though both are served the same tools.
+pub fn effective_opt_in(profile: McpProfile, requested: &[String]) -> BTreeSet<String> {
+    let opt_in: BTreeSet<&str> = opt_in_tools(profile).collect();
+    requested.iter().filter(|name| opt_in.contains(name.as_str())).cloned().collect()
+}
+
+/// Reject a name this profile does not declare, naming the ones it does.
+///
+/// The accepted list comes from the same declaration the contract publishes, so a build
+/// cannot advertise one set and accept another. It is never empty: every profile declares
+/// at least one tool, whether or not the build has any opt-in tools yet.
+pub fn validate_enabled_tools(profile: McpProfile, requested: &[String]) -> Result<(), String> {
+    let known: Vec<&str> = declared_tools(profile).collect();
+    for name in requested {
+        if !known.contains(&name.as_str()) {
+            return Err(format!(
+                "unknown tool '{name}' for profile '{}'. Known tools: {}",
+                profile.as_str(),
+                known.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The `Unknown action` error every action-dispatching tool returns, generated from the
@@ -221,46 +276,53 @@ pub fn mcp_surface() -> Value {
     })
 }
 
+/// Both halves of a profile's surface: `tools` is what `tools/list` serves by default,
+/// `opt_in_tools` is what the same build can serve once a launch enables it. The split is
+/// additive on purpose — folding opt-in tools into `tools` with a flag would change the
+/// meaning of a field consumers already read as "what I will get", which is a major bump.
 fn profile_surface(profile: McpProfile) -> Value {
     let router = match profile {
         McpProfile::Workspace => McpServer::workspace_tool_router(),
         McpProfile::Reference => McpServer::reference_tool_router(),
     };
     let listed = router.list_all();
-    let tools: Vec<Value> = tools_of(profile)
-        .iter()
-        .map(|decl| {
-            let listed_tool = listed.iter().find(|t| t.name == decl.name);
-            let schema = listed_tool.map(|t| &*t.input_schema);
-            let mut entry = Map::new();
-            entry.insert("name".into(), json!(decl.name));
-            if let Some(note) = decl.note {
-                entry.insert("note".into(), json!(note));
-            }
-            if let Some(version) = decl.output_schema_version {
-                entry.insert("output_schema_version".into(), json!(version));
-                let output = listed_tool
-                    .and_then(|tool| tool.output_schema.as_deref())
-                    .expect("declared structured output must publish outputSchema");
-                let encoded =
-                    serde_json::to_vec(output).expect("outputSchema must be serializable");
+    let entries = |default_enabled: bool| -> Vec<Value> {
+        tools_of(profile)
+            .iter()
+            .filter(|decl| decl.default_enabled == default_enabled)
+            .map(|decl| {
+                let listed_tool = listed.iter().find(|t| t.name == decl.name);
+                let schema = listed_tool.map(|t| &*t.input_schema);
+                let mut entry = Map::new();
+                entry.insert("name".into(), json!(decl.name));
+                if let Some(note) = decl.note {
+                    entry.insert("note".into(), json!(note));
+                }
+                if let Some(version) = decl.output_schema_version {
+                    entry.insert("output_schema_version".into(), json!(version));
+                    let output = listed_tool
+                        .and_then(|tool| tool.output_schema.as_deref())
+                        .expect("declared structured output must publish outputSchema");
+                    let encoded =
+                        serde_json::to_vec(output).expect("outputSchema must be serializable");
+                    entry.insert(
+                        "output_schema_fingerprint".into(),
+                        json!(format!("blake3:{}", blake3::hash(&encoded).to_hex())),
+                    );
+                }
                 entry.insert(
-                    "output_schema_fingerprint".into(),
-                    json!(format!("blake3:{}", blake3::hash(&encoded).to_hex())),
+                    "actions".into(),
+                    Value::Array(decl.actions.iter().map(action_surface).collect()),
                 );
-            }
-            entry.insert(
-                "actions".into(),
-                Value::Array(decl.actions.iter().map(action_surface).collect()),
-            );
-            entry.insert(
-                "params".into(),
-                schema.map(params_surface).unwrap_or_else(|| Value::Array(Vec::new())),
-            );
-            Value::Object(entry)
-        })
-        .collect();
-    json!({ "tools": tools })
+                entry.insert(
+                    "params".into(),
+                    schema.map(params_surface).unwrap_or_else(|| Value::Array(Vec::new())),
+                );
+                Value::Object(entry)
+            })
+            .collect()
+    };
+    json!({ "tools": entries(true), "opt_in_tools": entries(false) })
 }
 
 fn action_surface(decl: &ActionDecl) -> Value {
@@ -353,6 +415,7 @@ pub fn register_cli_surface(surface: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolGate;
     use expect_test::expect;
 
     fn schema_props(profile: McpProfile, tool: &str) -> Map<String, Value> {
@@ -407,6 +470,97 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// The `tools` half of the declaration says what a plain launch serves — the meaning
+    /// consumers already read it with. Comparing it against the router a default gate
+    /// actually produces keeps that promise from drifting, and catches a gate that hides
+    /// more than the opt-in set: an over-wide difference empties the served list here.
+    #[test]
+    fn declared_default_tools_match_default_router() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let router = McpServer::gated_router(profile, &ToolGate::for_launch(profile, &[]));
+            let mut served: Vec<String> =
+                router.list_all().iter().map(|t| t.name.to_string()).collect();
+            served.sort();
+            let mut declared: Vec<String> = tools_of(profile)
+                .iter()
+                .filter(|decl| decl.default_enabled)
+                .map(|decl| decl.name.to_string())
+                .collect();
+            declared.sort();
+            assert_eq!(served, declared, "profile {}", profile.as_str());
+        }
+    }
+
+    /// The two halves partition the declaration: a tool is served by default or it is
+    /// opt-in, never both and never neither. A consumer reads "what the build can do" as
+    /// their union, so an overlap would double-count and a gap would hide a tool from
+    /// feature detection entirely.
+    #[test]
+    fn opt_in_and_default_partition_the_declaration() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let declared: BTreeSet<&str> = declared_tools(profile).collect();
+            let opt_in: BTreeSet<&str> = opt_in_tools(profile).collect();
+            let default: BTreeSet<&str> = tools_of(profile)
+                .iter()
+                .filter(|decl| decl.default_enabled)
+                .map(|decl| decl.name)
+                .collect();
+            assert!(
+                default.is_disjoint(&opt_in),
+                "{}: a tool is both default and opt-in",
+                profile.as_str()
+            );
+            assert_eq!(
+                declared,
+                default.union(&opt_in).copied().collect::<BTreeSet<_>>(),
+                "profile {}",
+                profile.as_str()
+            );
+        }
+    }
+
+    /// Only names that change the served surface reach the backend identity. Asking for a
+    /// tool the profile already serves is an identity operation, so it must project to the
+    /// empty set — otherwise one client passing the flag and one omitting it would rendezvous
+    /// at different daemons while being served exactly the same tools.
+    #[test]
+    fn effective_opt_in_drops_default_names() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let every_default: Vec<String> = tools_of(profile)
+                .iter()
+                .filter(|decl| decl.default_enabled)
+                .map(|decl| decl.name.to_owned())
+                .collect();
+            assert!(
+                !every_default.is_empty(),
+                "profile {} declares no default tool",
+                profile.as_str()
+            );
+            assert_eq!(
+                effective_opt_in(profile, &every_default),
+                BTreeSet::new(),
+                "profile {}",
+                profile.as_str()
+            );
+        }
+    }
+
+    /// The accepted list is generated from the declaration, so it cannot advertise a name
+    /// the build does not serve, and it is non-empty even in a build without a single
+    /// opt-in tool — an error that named nothing would leave the caller no way forward.
+    #[test]
+    fn validation_accepts_every_declared_name_and_names_them_on_refusal() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let declared: Vec<String> = declared_tools(profile).map(str::to_owned).collect();
+            assert_eq!(validate_enabled_tools(profile, &declared), Ok(()));
+            let refusal = validate_enabled_tools(profile, &["no_such_tool".to_owned()])
+                .expect_err("an undeclared name must be refused");
+            for name in &declared {
+                assert!(refusal.contains(name), "refusal omits '{name}': {refusal}");
             }
         }
     }
@@ -545,10 +699,11 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.9",
+              "contract_version": "1.10",
               "mcp": {
                 "profiles": {
                   "reference": {
+                    "opt_in_tools": [],
                     "tools": [
                       {
                         "actions": [
@@ -641,6 +796,7 @@ mod tests {
                     ]
                   },
                   "workspace": {
+                    "opt_in_tools": [],
                     "tools": [
                       {
                         "actions": [
