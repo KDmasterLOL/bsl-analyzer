@@ -1,7 +1,7 @@
 use hir::{
     normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics,
 };
-use ide_db::base_db::{RootQueryDb, SourceDatabase};
+use ide_db::base_db::RootQueryDb;
 use ide_db::{RootDatabase, RootDatabaseImpl};
 use rustc_hash::FxHashSet;
 use salsa::Database;
@@ -461,41 +461,13 @@ fn resolve_by_position(
     column: u32,
     req: &ReferencesRequest,
 ) -> ReferencesResult {
-    let Some(offset) = offset_for_line_col(db, file_id, line, column) else {
+    let Some(offset) = crate::name_lookup::offset_for_line_col(db, file_id, line, column) else {
         return ReferencesResult::outcome_only(ReferencesOutcome::NotFound, BodySource::Resident);
     };
     let Some(symbol) = symbol_at(db, file_id, offset) else {
         return ReferencesResult::outcome_only(ReferencesOutcome::NotFound, BodySource::Resident);
     };
     collect_references(db, file_id, &symbol, req)
-}
-
-/// `column` is a 0-based CHARACTER offset within the line, as the surface
-/// spells it; line-index columns are byte offsets, so the conversion walks
-/// characters — the identifiers are Cyrillic.
-fn offset_for_line_col(
-    db: &RootDatabaseImpl,
-    file_id: FileId,
-    line: u32,
-    column: u32,
-) -> Option<TextSize> {
-    let text = db.file_text(file_id);
-    let line_index = line_index::LineIndex::new(&text);
-    let line_start = line_index.try_line_start(line)?;
-    let line_str = text[u32::from(line_start) as usize..].split('\n').next().unwrap_or("");
-    let byte_in_line =
-        line_str.char_indices().nth(column as usize).map_or(line_str.len(), |(i, _)| i);
-    let offset = line_start + TextSize::from(byte_in_line as u32);
-
-    let parse = db.parse(file_id);
-    let root = parse.syntax_node();
-    let token = root.token_at_offset(offset).right_biased()?;
-    // At a line end `right_biased` selects the next line's first token, which
-    // would answer for a symbol the caller never pointed at.
-    if line_index.line_col(token.text_range().start()).line != line {
-        return None;
-    }
-    Some(offset)
 }
 
 fn symbol_at(db: &RootDatabaseImpl, file_id: FileId, offset: TextSize) -> Option<SemanticSymbol> {

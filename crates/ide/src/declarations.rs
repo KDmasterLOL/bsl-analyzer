@@ -91,36 +91,61 @@ pub fn resolve_declarations(db: &RootDatabaseImpl, name: &str) -> Vec<Declaratio
     let file_set = source_root.file_set();
     let member_name = Name::new(member);
 
-    let mut out = Vec::new();
+    // Ranked per object, not merged and not ranked across the workspace: every root
+    // that repeats a module contributes its declaration (that multiplicity is the
+    // point of the return type), while inside ONE object a manager module answers
+    // only when the object module has nothing — the order `symbol_info` reads the
+    // same string in.
+    let mut found: Vec<(String, OwnerRank, Declaration)> = Vec::new();
     for module in members.modules.values() {
         let Some(path) = file_set.path_for_file(&module.file_id) else { continue };
-        let Some(key) = module_key_for_path(&path.as_path().to_string_lossy()) else { continue };
-        if !owner.matches(&key) {
-            continue;
-        }
+        let path = path.as_path().to_string_lossy().replace('\\', "/");
+        let Some(key) = module_key_for_path(&path) else { continue };
+        let Some(module_rank) = owner.rank_of(&key) else { continue };
+        let object = object_of_module_path(&path).to_string();
 
         for method in &module.methods {
             if method.name.eq_ignore_case(&member_name) {
-                out.push(Declaration {
-                    file_id: module.file_id,
-                    name_range: method.name_range,
-                    enclosing_range: Some(method.source_range),
-                    kind: DeclarationKind::Method,
-                });
+                found.push((
+                    object.clone(),
+                    OwnerRank { member: MemberRank::Method, module: module_rank },
+                    Declaration {
+                        file_id: module.file_id,
+                        name_range: method.name_range,
+                        enclosing_range: Some(method.source_range),
+                        kind: DeclarationKind::Method,
+                    },
+                ));
             }
         }
         for variable in &module.variables {
             if variable.name.eq_ignore_case(&member_name) {
-                out.push(Declaration {
-                    file_id: module.file_id,
-                    name_range: variable.name_range,
-                    enclosing_range: Some(variable.source_range),
-                    kind: DeclarationKind::Variable,
-                });
+                found.push((
+                    object.clone(),
+                    OwnerRank { member: MemberRank::Variable, module: module_rank },
+                    Declaration {
+                        file_id: module.file_id,
+                        name_range: variable.name_range,
+                        enclosing_range: Some(variable.source_range),
+                        kind: DeclarationKind::Variable,
+                    },
+                ));
             }
         }
     }
 
+    let mut best: rustc_hash::FxHashMap<&str, OwnerRank> = rustc_hash::FxHashMap::default();
+    for (object, rank, _) in &found {
+        let slot = best.entry(object.as_str()).or_insert(*rank);
+        if rank < slot {
+            *slot = *rank;
+        }
+    }
+    let mut out: Vec<Declaration> = found
+        .iter()
+        .filter(|(object, rank, _)| best.get(object.as_str()) == Some(rank))
+        .map(|(_, _, declaration)| *declaration)
+        .collect();
     out.sort_by_key(|decl| (decl.file_id.0, decl.name_range.start()));
     out
 }
@@ -308,23 +333,72 @@ enum Owner {
     Object { mdo_type: bsl_metadata::MdoType, name: String },
 }
 
+/// Which of the modules a `Тип.Объект.Метод` name can reach answered first.
+///
+/// `symbol_info` reads the same spelling with a priority — a method before a
+/// variable, and the object or record-set module before the manager module —
+/// returning on the first hit. Merging them into one bucket made a name it
+/// resolves cleanly come back `ambiguous` here, with no way to get at the
+/// object module's own method by name at all.
+///
+/// The member kind ranks ABOVE the module kind because that is the order the
+/// card surface reads: a variable exported by the object module does not hide
+/// a manager-module method of the same name, since the card route never looks
+/// for a variable on a triple at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct OwnerRank {
+    member: MemberRank,
+    module: ModuleRank,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MemberRank {
+    Method,
+    Variable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ModuleRank {
+    OwnObject,
+    Manager,
+}
+
 impl Owner {
     /// Object, manager and record-set modules share the `Тип.Объект.Метод`
     /// spelling — the same one `symbol_info` accepts and the name dictionary
-    /// prints — so all three match one owner.
-    fn matches(&self, key: &ModuleKey) -> bool {
+    /// prints — so all three match one owner, ranked apart.
+    fn rank_of(&self, key: &ModuleKey) -> Option<ModuleRank> {
         match (self, key) {
             (Owner::Common { name }, ModuleKey::Common { name: key_name }) => {
-                *name == key_name.fold_lower()
+                (*name == key_name.fold_lower()).then_some(ModuleRank::OwnObject)
             }
             (
                 Owner::Object { mdo_type, name },
-                ModuleKey::Manager { mdo_type: key_type, name: key_name }
-                | ModuleKey::Object { mdo_type: key_type, name: key_name }
+                ModuleKey::Object { mdo_type: key_type, name: key_name }
                 | ModuleKey::RecordSet { mdo_type: key_type, name: key_name },
-            ) => mdo_type == key_type && *name == key_name.fold_lower(),
-            _ => false,
+            ) => (mdo_type == key_type && *name == key_name.fold_lower())
+                .then_some(ModuleRank::OwnObject),
+            (
+                Owner::Object { mdo_type, name },
+                ModuleKey::Manager { mdo_type: key_type, name: key_name },
+            ) => (mdo_type == key_type && *name == key_name.fold_lower())
+                .then_some(ModuleRank::Manager),
+            _ => None,
         }
+    }
+}
+
+/// The object the modules belong to, taken from the path: a module file lives at
+/// `<object>/Ext/<Kind>.bsl`, so dropping the last two segments names the object
+/// itself. The priority above holds INSIDE one such object and nowhere else — a
+/// configuration and an extension each hold their own, and ranking across them
+/// would let one root's object module delete another root's manager module, which
+/// is the multiplicity this whole return type exists to keep.
+fn object_of_module_path(path: &str) -> &str {
+    let normalized = path.trim_end_matches('/');
+    match normalized.rmatch_indices('/').nth(1) {
+        Some((at, _)) => &normalized[..at],
+        None => normalized,
     }
 }
 

@@ -642,14 +642,17 @@ pub(crate) struct ReferencesResponse {
     /// How to turn an `ambiguous` answer into a resolved one.
     resolution_hint: Option<String>,
     /// `unsupported_symbol` only: what the name turned out to be — `category` from
-    /// the closed vocabulary `common_module` | `module` | `metadata_object` |
+    /// the closed vocabulary `common_module` | `metadata_object` |
     /// `metadata_member` | `form` | `platform_member` | `unknown_scope`, and why
     /// there is no list.
     unsupported: Option<Value>,
     /// `ambiguous`/`not_found` by name: the name dictionary's answer —
     /// `candidates`, its own `total`/`total_exact`/`truncated` over THEM, and the
     /// `providers` it could and could not consult. Nested because its `total`
-    /// counts candidates while this tool's counts occurrences.
+    /// counts candidates while this tool's counts occurrences. The anchor is
+    /// looked for in the resident's own sources, so `providers` names those; the
+    /// call graph is not among them, and `symbol_info` is where a graph-known name
+    /// is resolved.
     lookup: Option<Value>,
     /// Who answered, at which revision and topology, and whether the answer is whole.
     freshness: Value,
@@ -705,6 +708,39 @@ mod tests {
             assert!(
                 section.contains(&format!("`{code}`")),
                 "category `{code}` is served but the tool's section does not name it",
+            );
+        }
+
+        // The other direction, which the loops above cannot see: a code the schema or the
+        // document still names after the surface stopped serving it. A closed vocabulary
+        // with an unreachable value teaches a state a client will wait for forever, and it
+        // travels in the published `output_schema_fingerprint` as part of the contract.
+        let served: Vec<&str> =
+            ide::UnsupportedCategory::ALL.iter().map(|category| category.as_str()).collect();
+        let schema = rmcp::handler::server::tool::schema_for_type::<ReferencesResponse>();
+        let published = serde_json::to_string(&schema).expect("the schema serializes");
+        for code in [
+            "common_module",
+            "module",
+            "metadata_object",
+            "metadata_member",
+            "form",
+            "platform_member",
+            "unknown_scope",
+            "module_method",
+            "module_variable",
+        ] {
+            if served.contains(&code) {
+                continue;
+            }
+            assert!(
+                !published.contains(&format!("`{code}`")),
+                "the published schema names `{code}`, which no input can produce",
+            );
+            assert!(
+                !section.contains(&format!("`{code}` | "))
+                    && !section.contains(&format!("| `{code}`")),
+                "the tool's section lists `{code}` in a closed vocabulary that cannot yield it",
             );
         }
 

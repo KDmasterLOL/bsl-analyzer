@@ -814,7 +814,7 @@ mod tests {
                         "actions": [],
                         "name": "references",
                         "note": "one of `symbol` or `path`+`line` is required; opt-in — a launch has to name it with `--enable-tool references`",
-                        "output_schema_fingerprint": "blake3:d98e07e4cc72b1bda2f933fd5137b8f82f317fc27c011c0e10996c9428edc5b7",
+                        "output_schema_fingerprint": "blake3:8bd9b8c89f499607b5be2540567f9fb8bb159aeea4ea479d06bcb0284ee2ce0e",
                         "output_schema_version": "1",
                         "params": [
                           {

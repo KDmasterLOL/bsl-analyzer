@@ -1030,3 +1030,106 @@ fn an_anchor_chosen_from_a_capped_candidate_list_says_so() {
         "control: the two declarations are what the flag would be hiding",
     );
 }
+
+/// One string, one meaning — for the three modules a `Тип.Объект.Метод` name can reach.
+/// `symbol_info` reads the object module first and returns on the first hit, so a manager
+/// module that happens to declare the same name does not make the string ambiguous. Merging
+/// the three into one owner reported both and left the object module's own method
+/// unreachable by name. The control is the same stand without the object module, where the
+/// manager module answers.
+#[test]
+fn an_object_module_outranks_a_manager_module_of_the_same_object() {
+    let method = "Процедура Пересчитать() Экспорт\nКонецПроцедуры\n";
+    let (both, files) = db_with(&[
+        ("/ws/src/cf/Catalogs/Товары/Ext/ObjectModule.bsl", method),
+        ("/ws/src/cf/Catalogs/Товары/Ext/ManagerModule.bsl", method),
+    ]);
+
+    let declarations = resolve_declarations(&both, "Справочник.Товары.Пересчитать");
+    assert_eq!(declarations.len(), 1, "the object module answers alone: {declarations:?}",);
+    assert_eq!(declarations[0].file_id, files[0], "and it is the object module's method");
+    assert_eq!(
+        by_name(&both, "Справочник.Товары.Пересчитать").outcome,
+        ReferencesOutcome::Resolved
+    );
+
+    let (manager_only, manager_files) =
+        db_with(&[("/ws/src/cf/Catalogs/Товары/Ext/ManagerModule.bsl", method)]);
+    let fallback = resolve_declarations(&manager_only, "Справочник.Товары.Пересчитать");
+    assert_eq!(
+        fallback.first().map(|declaration| declaration.file_id),
+        Some(manager_files[0]),
+        "control: with no object module the manager module is what the name reaches",
+    );
+}
+
+/// The priority between an object module and a manager module holds INSIDE one object and
+/// nowhere else. Ranking across the workspace let one root's object module delete another
+/// root's manager module — the copy an `anchor_root_id` was meant to reach then vanished
+/// into `not_found`. The control is the single-root stand next door, where the priority
+/// does apply.
+#[test]
+fn the_module_priority_does_not_reach_across_roots() {
+    let method = "Процедура Пересчитать() Экспорт\nКонецПроцедуры\n";
+    let (db, files) = db_with(&[
+        ("/ws/src/cf/Catalogs/Товары/Ext/ManagerModule.bsl", method),
+        ("/ws/src/cfe/Catalogs/Товары/Ext/ObjectModule.bsl", method),
+    ]);
+
+    let declarations = resolve_declarations(&db, "Справочник.Товары.Пересчитать");
+    assert_eq!(
+        declarations.len(),
+        2,
+        "each root holds its own object, and both answer the name: {declarations:?}",
+    );
+
+    let narrowed = find_references_by_name(
+        &db,
+        &ReferencesRequest {
+            anchor_files: Some(FxHashSet::from_iter([files[0]])),
+            ..request(ReferenceAnchor::Name("Справочник.Товары.Пересчитать".to_string()))
+        },
+    );
+    assert_eq!(
+        narrowed.outcome,
+        ReferencesOutcome::Resolved,
+        "the manager module IS the declaration of that root, so narrowing to it resolves",
+    );
+}
+
+/// `symbol_info` reads a triple as a METHOD — it never looks for a variable there — so a
+/// variable exported by the object module must not hide a manager-module method of the same
+/// name. The control is the same pair with the object module declaring a method, where the
+/// object module wins.
+#[test]
+fn an_exported_variable_does_not_hide_a_manager_method_of_the_same_name() {
+    let (db, files) = db_with(&[
+        ("/ws/src/cf/Catalogs/Товары/Ext/ObjectModule.bsl", "Перем Флаг Экспорт;\n"),
+        (
+            "/ws/src/cf/Catalogs/Товары/Ext/ManagerModule.bsl",
+            "Процедура Флаг() Экспорт\nКонецПроцедуры\n",
+        ),
+    ]);
+
+    let declarations = resolve_declarations(&db, "Справочник.Товары.Флаг");
+    assert_eq!(declarations.len(), 1, "the method answers alone: {declarations:?}");
+    assert_eq!(declarations[0].file_id, files[1], "and it is the manager module's method");
+    assert_eq!(declarations[0].kind, ide::DeclarationKind::Method);
+
+    let (methods, method_files) = db_with(&[
+        (
+            "/ws/src/cf/Catalogs/Товары/Ext/ObjectModule.bsl",
+            "Процедура Флаг() Экспорт\nКонецПроцедуры\n",
+        ),
+        (
+            "/ws/src/cf/Catalogs/Товары/Ext/ManagerModule.bsl",
+            "Процедура Флаг() Экспорт\nКонецПроцедуры\n",
+        ),
+    ]);
+    let control = resolve_declarations(&methods, "Справочник.Товары.Флаг");
+    assert_eq!(
+        control.first().map(|declaration| declaration.file_id),
+        Some(method_files[0]),
+        "control: between two methods the object module is the one the card surface reads",
+    );
+}

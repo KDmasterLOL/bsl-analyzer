@@ -520,22 +520,36 @@ async fn narrowing_survives_a_root_declared_through_a_symlink() {
 /// Two declarations in ONE root cannot be told apart by a root filter, and the answer must
 /// not send an agent down that road. The control is the two-root case, where the root
 /// filter is exactly the right advice.
+///
+/// Staging it needs a case-sensitive filesystem: the two spellings are the same directory on
+/// APFS or NTFS, and the stand would quietly become a single module answering `resolved` —
+/// a gate that cannot fail. Declared with `cfg(unix)` rather than left to degrade, and the
+/// stand asserts its own precondition before it asserts anything about the hint.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_resolution_hint_names_an_axis_that_can_separate_these_declarations() {
     let ws = stage_workspace();
-    // One catalog whose object module and manager module both export the same name: two
-    // declarations, one root, and `anchor_root_id` powerless between them.
-    let object = ws.path().join("Catalogs/Справочник1/Ext/ObjectModule.bsl");
-    let manager = ws.path().join("Catalogs/Справочник1/Ext/ManagerModule.bsl");
-    for path in [&object, &manager] {
-        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir");
-        std::fs::write(path, "Процедура ОбщийМетод() Экспорт\nКонецПроцедуры\n")
-            .expect("write module");
+    // One root, two directories whose names differ only in case: a module path is folded to
+    // its key, so both files answer to `Стенд.ОбщийМетод`, and no root filter stands between
+    // them. This is the spelling divergence a case-sensitive filesystem makes real, not an
+    // invented stand.
+    for spelling in ["Стенд", "СТЕНД"] {
+        write_module(ws.path(), spelling, "Процедура ОбщийМетод() Экспорт\nКонецПроцедуры\n");
     }
+    let staged = std::fs::read_dir(ws.path().join("CommonModules"))
+        .expect("the stand's modules")
+        .filter_map(Result::ok)
+        // Cyrillic, so `eq_ignore_ascii_case` would fold nothing and count zero.
+        .filter(|entry| entry.file_name().to_string_lossy().to_lowercase() == "стенд")
+        .count();
+    assert_eq!(
+        staged, 2,
+        "this filesystem folded the two spellings into one directory, so the ambiguity this \
+         gate is about was never staged",
+    );
 
     let client = client_with_references(ws.path()).await;
-    let answer =
-        references(&client, &[("symbol", Value::from("Справочник.Справочник1.ОбщийМетод"))]).await;
+    let answer = references(&client, &[("symbol", Value::from("Стенд.ОбщийМетод"))]).await;
 
     assert_eq!(answer["outcome"], "ambiguous", "{answer}");
     let declarations = answer["declarations"].as_array().expect("declarations");

@@ -267,7 +267,11 @@ struct SymbolInfoParams {
 struct ReferencesParams {
     /// Qualified name of the symbol whose references you want: a common-module method
     /// (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), an object/manager module method
-    /// (`Справочник.Товары.ПередЗаписью`), or a short unique name. Case-insensitive.
+    /// (`Справочник.Товары.ОбновитьКэш`), a form-module method
+    /// (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
+    /// handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
+    /// declared without `Экспорт` has no qualified name — `symbol_info` reads the same
+    /// spelling the same way — so reach it by `path`+`line`.
     symbol: Option<String>,
     /// `symbol`: which root to look for the DECLARATION in. The way out of
     /// `outcome: "ambiguous"`, when a configuration and an extension declare the same name.
@@ -1575,10 +1579,12 @@ impl McpServer {
     /// at its site (`declaration` | `call` | `write` | `read`). Use to answer "who uses X",
     /// "is this method called anywhere", "where is this variable written" before renaming or
     /// deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
-    /// `Справочник.Товары.ПередЗаписью` — or a short unique one); for a local or a parameter
-    /// pass `path`+`line` instead. The answer always says which of four things happened in
+    /// `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
+    /// `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
+    /// local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
     /// `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
-    /// `total_is_lower_bound` says the walk was cut short),
+    /// `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
+    /// could not read everything),
     /// `ambiguous` (several declarations answer to that name — the answer's
     /// `resolution_hint` names the axis that separates THESE ones: a root, a qualified
     /// `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
@@ -2506,10 +2512,12 @@ mod tool_descriptions {
             at its site (`declaration` | `call` | `write` | `read`). Use to answer "who uses X",
             "is this method called anywhere", "where is this variable written" before renaming or
             deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
-            `Справочник.Товары.ПередЗаписью` — or a short unique one); for a local or a parameter
-            pass `path`+`line` instead. The answer always says which of four things happened in
+            `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
+            `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
+            local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
             `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
-            `total_is_lower_bound` says the walk was cut short),
+            `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
+            could not read everything),
             `ambiguous` (several declarations answer to that name — the answer's
             `resolution_hint` names the axis that separates THESE ones: a root, a qualified
             `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
@@ -2545,7 +2553,11 @@ mod tool_descriptions {
             configuration.
               - symbol: Qualified name of the symbol whose references you want: a common-module method
             (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), an object/manager module method
-            (`Справочник.Товары.ПередЗаписью`), or a short unique name. Case-insensitive.
+            (`Справочник.Товары.ОбновитьКэш`), a form-module method
+            (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
+            handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
+            declared without `Экспорт` has no qualified name — `symbol_info` reads the same
+            spelling the same way — so reach it by `path`+`line`.
 
             ## search
             Hybrid lexical + semantic code search across the project source. Use when you need to
