@@ -30,7 +30,7 @@ uri: bsl-analyzer://contract
 
 ```jsonc
 {
-  "contract_version": "1.10",
+  "contract_version": "1.11",
   "build_version": "0.2.62",
   "mcp": {
     "profiles": {
@@ -48,7 +48,14 @@ uri: bsl-analyzer://contract
             ]
           }
         ],
-        "opt_in_tools": []
+        "opt_in_tools": [
+          {
+            "name": "references",
+            "actions": [],
+            "output_schema_version": "1",
+            "params": [{ "name": "symbol", "type": "string", "required": false }]
+          }
+        ]
       },
       "reference": { "tools": [], "opt_in_tools": [] }
     }

@@ -52,6 +52,7 @@ crates/ide-diagnostics/src/runner.rs	ExecuteExternalCodeInCommonModule	1	вне-
 crates/ide-diagnostics/src/runner.rs	ProtectedModule	1	вне-класса: код диагностики
 crates/ide/src/goto_definition.rs	{name}.xml	1	конструкция: кандидат разрешается регистронезависимо
 crates/ide/src/goto_definition.rs	{}.xml	1	конструкция: кандидат разрешается регистронезависимо
+crates/ide/src/declarations.rs	form	2	вне-класса: метка вида карточки symbol_info и код словаря категорий
 crates/ide/src/name_lookup.rs	form	1	вне-класса: код словаря категорий
 crates/ide/src/name_lookup.rs	module	1	вне-класса: код словаря категорий
 crates/ide/src/symbol_info/form.rs	Form	1	вне-класса: английское имя идентификатора BSL «Форма»

@@ -7,7 +7,7 @@
 //! applies the output budget, and serializes. Resolution is resident-led: the card is servable
 //! whenever the resident host is `Ready`, independent of the call graph.
 
-mod form;
+pub(crate) mod form;
 
 use bsl_metadata::MdoType;
 use hir::{

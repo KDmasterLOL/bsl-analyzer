@@ -1,9 +1,9 @@
 use hir::Semantics;
 use ide_db::RootDatabase;
-use syntax::ast_utils::field_tail_name_token;
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange, TextSize};
+use syntax::{SyntaxNode, SyntaxToken, TextRange, TextSize};
 use vfs::FileId;
 
+use crate::reference_kind::{classify_reference_token, ReferenceKind};
 use crate::references;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,64 +56,13 @@ fn token_for_range(root: &SyntaxNode, range: TextRange) -> Option<SyntaxToken> {
         .find(|token| token.text_range() == range)
 }
 
+/// The LSP vocabulary has no slot for a call, so a call is a read — exactly what
+/// the classifier answered before it learned to name calls apart.
 fn classify_highlight_token(token: &SyntaxToken) -> DocumentHighlightKind {
-    if is_declaration_name_token(token) {
-        return DocumentHighlightKind::Text;
-    }
-
-    if is_assignment_write_target(token) {
-        DocumentHighlightKind::Write
-    } else {
-        DocumentHighlightKind::Read
-    }
-}
-
-fn is_declaration_name_token(token: &SyntaxToken) -> bool {
-    token.parent_ancestors().any(|node| match node.kind() {
-        SyntaxKind::VAR_DEF => node
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .any(|candidate| candidate.kind() == SyntaxKind::IDENT && candidate == *token),
-        SyntaxKind::PARAM | SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF => node
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|candidate| candidate.kind() == SyntaxKind::IDENT)
-            .map(|candidate| candidate == *token)
-            .unwrap_or(false),
-        _ => false,
-    })
-}
-
-fn is_assignment_write_target(token: &SyntaxToken) -> bool {
-    let Some(assign_stmt) =
-        token.parent_ancestors().find(|node| node.kind() == SyntaxKind::ASSIGN_STMT)
-    else {
-        return false;
-    };
-
-    assigned_target_name_token(&assign_stmt)
-        .map(|target_token| target_token == *token)
-        .unwrap_or(false)
-}
-
-fn assigned_target_name_token(assign_stmt: &SyntaxNode) -> Option<SyntaxToken> {
-    let eq_start = assign_stmt
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .find(|token| token.kind() == SyntaxKind::EQ)?
-        .text_range()
-        .start();
-
-    let lhs_node =
-        assign_stmt.children().take_while(|node| node.text_range().end() <= eq_start).last()?;
-
-    match lhs_node.kind() {
-        SyntaxKind::IDENT => lhs_node
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|token| token.kind().is_name_token()),
-        SyntaxKind::FIELD_EXPR => field_tail_name_token(&lhs_node),
-        _ => None,
+    match classify_reference_token(token) {
+        ReferenceKind::Declaration => DocumentHighlightKind::Text,
+        ReferenceKind::Write => DocumentHighlightKind::Write,
+        ReferenceKind::Call | ReferenceKind::Read => DocumentHighlightKind::Read,
     }
 }
 
@@ -275,6 +224,25 @@ mod tests {
 
         assert_eq!(classify_first_token(&db, file_id, "Объект"), DocumentHighlightKind::Read);
         assert_eq!(classify_first_token(&db, file_id, "Поле"), DocumentHighlightKind::Write);
+    }
+
+    #[test]
+    fn call_projects_onto_read() {
+        let source = r#"
+Процедура Тест()
+    Помощник();
+КонецПроцедуры
+
+Процедура Помощник()
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(source);
+
+        let root = db.parse(file_id).syntax_node();
+        let call_offset = TextSize::from(source.find("Помощник();").unwrap() as u32);
+        let call_token = root.token_at_offset(call_offset).right_biased().unwrap();
+        assert_eq!(classify_reference_token(&call_token), ReferenceKind::Call);
+        assert_eq!(classify_highlight_token(&call_token), DocumentHighlightKind::Read);
     }
 
     #[test]

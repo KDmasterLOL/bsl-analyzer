@@ -208,14 +208,36 @@ pub struct ResolvedPlace {
 }
 
 pub fn resolve_place(db: &RootDatabaseImpl, place: &NamePlace) -> ResolvedPlace {
-    let text = db.file_text(place.file_id);
+    resolve_file_range(db, place.file_id, place.range, place.enclosing_range)
+}
+
+/// The same conversion for a place held as loose parts — a reference hit, which
+/// is not a declaration and so is not a [`NamePlace`]. One implementation, so
+/// two surfaces cannot end up counting columns differently.
+pub fn resolve_file_range(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    range: Option<TextRange>,
+    enclosing_range: Option<TextRange>,
+) -> ResolvedPlace {
+    // A place that names only its file needs no line index, and building one
+    // means reading the whole file: a per-file histogram over a thousand files
+    // would walk every byte of every one of them for an answer already in hand.
+    if range.is_none() && enclosing_range.is_none() {
+        return ResolvedPlace {
+            path: workspace_path(db, file_id),
+            range: None,
+            enclosing_range: None,
+        };
+    }
+    let text = db.file_text(file_id);
     let index = line_index::LineIndex::new(&text);
     let to_line_col =
         |range: Option<TextRange>| range.and_then(|r| index.utf16_line_col_range(&text, r));
     ResolvedPlace {
-        path: workspace_path(db, place.file_id),
-        range: to_line_col(place.range),
-        enclosing_range: to_line_col(place.enclosing_range),
+        path: workspace_path(db, file_id),
+        range: to_line_col(range),
+        enclosing_range: to_line_col(enclosing_range),
     }
 }
 
