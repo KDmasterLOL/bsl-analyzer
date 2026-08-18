@@ -526,6 +526,7 @@ mod contract_surface {
                   source-dir (-s)
                 install
                   dry-run
+                  enable-tool
                   env
                   force
                   name

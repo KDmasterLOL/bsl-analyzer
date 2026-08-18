@@ -218,6 +218,12 @@ pub struct McpInstallArgs {
     #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
     preset: InstallPresetCli,
 
+    /// Write `--enable-tool <name>` into the generated client config, repeatable. The
+    /// name is validated against the preset's profile, so an installed config cannot
+    /// be one that refuses to start.
+    #[arg(long = "enable-tool")]
+    enable_tools: Vec<String>,
+
     #[arg(long)]
     name: Option<String>,
 
@@ -897,6 +903,29 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
         InstallTargetCli::All => InstallTargetSelector::All,
     };
 
+    if !args.enable_tools.is_empty() {
+        if matches!(args.preset, InstallPresetCli::Recommended) {
+            // The recommended set is what a build vouches for unattended; an opt-in tool
+            // is a decision of whoever installs, and it has to be made against a named
+            // profile rather than spread over both servers this preset writes.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--enable-tool is not used with '--preset recommended'; install \
+                 '--preset workspace' or '--preset reference' to enable a tool",
+            )
+            .into());
+        }
+        let profile = match args.preset {
+            InstallPresetCli::Workspace | InstallPresetCli::Recommended => {
+                mcp_server::McpProfile::Workspace
+            }
+            InstallPresetCli::Reference => mcp_server::McpProfile::Reference,
+        };
+        mcp_server::contract::validate_enabled_tools(profile, &args.enable_tools)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    }
+    let enable_tools = args.enable_tools;
+
     let requests = match args.preset {
         InstallPresetCli::Workspace => vec![InstallRequest {
             target,
@@ -909,6 +938,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             onec_user: args.onec_user,
             onec_password: password,
             env,
+            enable_tools,
             force: args.force,
             dry_run: args.dry_run,
         }],
@@ -923,6 +953,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             onec_user: args.onec_user,
             onec_password: password,
             env,
+            enable_tools,
             force: args.force,
             dry_run: args.dry_run,
         }],
@@ -949,6 +980,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                     onec_user: args.onec_user.clone(),
                     onec_password: password.clone(),
                     env: env.clone(),
+                    enable_tools: Vec::new(),
                     force: args.force,
                     dry_run: args.dry_run,
                 },
@@ -963,6 +995,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                     onec_user: args.onec_user,
                     onec_password: password,
                     env,
+                    enable_tools: Vec::new(),
                     force: args.force,
                     dry_run: args.dry_run,
                 },
