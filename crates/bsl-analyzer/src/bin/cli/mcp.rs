@@ -668,6 +668,12 @@ fn daemon_command(
     // The daemon must resolve the same project this proxy keyed on, and its own
     // config file cannot tell it about a source set that came from argv.
     cmd.args(args.source_set.to_args());
+    // Every requested name, not just the effective ones: the daemon projects them through
+    // the same declaration and so arrives at the identity the proxy keyed on. Dropping one
+    // here would leave the proxy's key promising a surface the daemon does not serve.
+    for tool in &args.enable_tools {
+        cmd.arg("--enable-tool").arg(tool);
+    }
     if let Some(url) = &args.onec_url {
         cmd.arg("--onec-url").arg(url);
     }
@@ -700,6 +706,7 @@ fn run_mcp_broker(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         topology_fp,
+        mcp_server::contract::effective_opt_in(profile, &args.enable_tools),
     );
 
     // Credentials travel via env rather than argv, while source/cache and the frozen
@@ -762,6 +769,7 @@ fn run_mcp_broker_required(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         mcp_server::broker::workspace_topology_fingerprint(&source_dir),
+        mcp_server::contract::effective_opt_in(profile, &args.enable_tools),
     );
 
     tracing::info!(?source_dir, expected_pid, "Starting required MCP broker proxy");
@@ -795,6 +803,7 @@ fn run_mcp_daemon(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         topology_fp,
+        mcp_server::contract::effective_opt_in(profile, &inputs.enable_tools),
     );
 
     // Build only after the daemon wins the bind, so a race loser never starts a
@@ -1893,6 +1902,36 @@ mod tests {
 
         assert!(argv.iter().all(|arg| arg != "--cache-dir"), "argv: {argv:?}");
         assert!(!canonical_source.join(".build").exists(), "the default stays lazy");
+    }
+
+    /// The daemon derives the backend identity from its own argv, so every name the proxy
+    /// was given has to reach it. A dropped name would leave proxy and daemon keying on
+    /// different surfaces: the proxy would hand clients a socket whose server serves
+    /// something else, and the default-off promise would depend on who started first.
+    #[test]
+    fn broker_child_receives_every_enable_tool() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical_source = source.path().canonicalize().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&canonical_source);
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.enable_tools = vec!["graph".to_owned(), "outline".to_owned()];
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &canonical_source,
+            &cache,
+            &args,
+            42,
+        );
+        let argv: Vec<String> =
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        for tool in &args.enable_tools {
+            assert!(
+                argv.windows(2).any(|pair| pair[0] == "--enable-tool" && pair[1] == *tool),
+                "argv does not carry --enable-tool {tool}: {argv:?}"
+            );
+        }
     }
 
     #[test]
