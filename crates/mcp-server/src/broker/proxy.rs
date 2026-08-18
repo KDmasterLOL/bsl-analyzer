@@ -357,6 +357,7 @@ mod tests {
             McpProfile::Workspace,
             0,
             0,
+            std::collections::BTreeSet::new(),
         )
     }
 

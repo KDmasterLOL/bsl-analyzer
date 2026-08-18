@@ -77,6 +77,100 @@ impl TestHarness {
     }
 }
 
+/// End of the chain: what the installer writes is what the client will run, so the flag
+/// has to survive all the way into the argv handed to the target's own CLI.
+#[test]
+fn enable_tool_reaches_the_argv_written_into_the_client_config() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--scope",
+            "user",
+            "--preset",
+            "reference",
+            "--enable-tool",
+            "syntax_help",
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let argv = harness
+        .invocations()
+        .into_iter()
+        .find(|call| call.args.iter().any(|arg| arg == "serve"))
+        .expect("an install writes a serve command")
+        .args;
+    assert!(
+        argv.windows(2).any(|pair| pair[0] == "--enable-tool" && pair[1] == "syntax_help"),
+        "argv: {argv:?}"
+    );
+}
+
+/// The recommended preset must never enable an opt-in tool, and it says so rather than
+/// dropping the flag: silently installing something other than what was asked for is how
+/// an operator ends up believing a tool is on.
+#[test]
+fn recommended_preset_refuses_to_enable_a_tool() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--preset",
+            "recommended",
+            "--enable-tool",
+            "syntax_help",
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(!output.status.success(), "recommended must refuse --enable-tool");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--enable-tool"), "stderr: {stderr}");
+    assert!(harness.invocations().is_empty(), "nothing must be installed on refusal");
+}
+
+/// A name the preset's profile does not declare is refused before anything is written:
+/// an installed config that cannot start is worse than a failed install.
+#[test]
+fn install_refuses_a_tool_the_preset_profile_does_not_declare() {
+    let harness = TestHarness::new();
+    harness.install_stub("codex", &codex_stub());
+
+    let output = harness
+        .command()
+        .args([
+            "mcp",
+            "install",
+            "--target",
+            "codex",
+            "--scope",
+            "user",
+            "--preset",
+            "reference",
+            "--enable-tool",
+            "graph",
+        ])
+        .output()
+        .expect("run binary");
+
+    assert!(!output.status.success(), "graph is not a reference tool");
+    assert!(harness.invocations().is_empty(), "nothing must be installed on refusal");
+}
+
 #[test]
 fn codex_user_reference_force_uses_cli_and_passes_env() {
     let harness = TestHarness::new();

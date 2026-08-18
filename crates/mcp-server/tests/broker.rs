@@ -32,6 +32,7 @@ fn key_for(src: &TempDir) -> BackendKey {
         McpProfile::Workspace,
         0,
         0,
+        std::collections::BTreeSet::new(),
     )
 }
 

@@ -512,6 +512,7 @@ mod contract_surface {
                   backend-pid
                   cache-dir
                   configuration-root
+                  enable-tool
                   extension !no-extensions
                   extension-depends-on
                   host
@@ -525,6 +526,7 @@ mod contract_surface {
                   source-dir (-s)
                 install
                   dry-run
+                  enable-tool
                   env
                   force
                   name

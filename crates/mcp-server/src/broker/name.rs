@@ -4,9 +4,10 @@
 //! deterministic name from its own launch parameters. Two clients that resolve to
 //! the same [`BackendKey`] therefore meet at the same socket; anything that should
 //! fork a separate backend (different project, cache directory, profile, binary
-//! version, embedding config, or extension topology) lands on a different name
-//! by construction.
+//! version, embedding config, extension topology, or served tool surface) lands
+//! on a different name by construction.
 
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -34,6 +35,16 @@ pub struct BackendKey {
     /// changed dependency graph would rendezvous with (and silently reuse) a daemon
     /// whose caches were built for the old graph.
     topology_fp: u64,
+    /// Opt-in tools this launch actually adds to the served surface. A backend serves
+    /// every session from one router, so a client that enabled nothing must not land on a
+    /// daemon that enabled something: it would be handed a tool it never asked for, and
+    /// the default-off promise would hold only for whoever started the daemon first.
+    ///
+    /// This is the *effective* set (`requested ∩ opt_in`), not the raw flags. Naming a
+    /// tool that is already served changes no surface, so it must not fork a daemon —
+    /// otherwise, on the release where an opt-in tool becomes a default, configs carrying
+    /// the flag and configs without it would never share a backend again.
+    enabled_tools: BTreeSet<String>,
 }
 
 impl BackendKey {
@@ -48,6 +59,7 @@ impl BackendKey {
         profile: McpProfile,
         config_fp: u64,
         topology_fp: u64,
+        enabled_tools: BTreeSet<String>,
     ) -> Self {
         let source_dir = source_dir.into();
         let source_dir = std::fs::canonicalize(&source_dir).unwrap_or(source_dir);
@@ -60,6 +72,7 @@ impl BackendKey {
             version: env!("CARGO_PKG_VERSION"),
             config_fp,
             topology_fp,
+            enabled_tools,
         }
     }
 
@@ -78,6 +91,12 @@ impl BackendKey {
         hasher.update(&self.config_fp.to_le_bytes());
         hasher.update(b"\0");
         hasher.update(&self.topology_fp.to_le_bytes());
+        // A `BTreeSet` feeds the names in one order whatever order or repeats the flags
+        // arrived in, so two launches asking for the same surface hash the same.
+        for name in &self.enabled_tools {
+            hasher.update(b"\0");
+            hasher.update(name.as_bytes());
+        }
         let hex = hasher.finalize().to_hex();
         hex[..32].to_owned()
     }
@@ -335,6 +354,15 @@ mod tests {
     use super::*;
 
     fn key(dir: &str, profile: McpProfile, fp: u64) -> BackendKey {
+        keyed(dir, profile, fp, BTreeSet::new())
+    }
+
+    fn keyed(
+        dir: &str,
+        profile: McpProfile,
+        fp: u64,
+        enabled_tools: BTreeSet<String>,
+    ) -> BackendKey {
         // Bypass `new`'s canonicalize (the path need not exist in unit tests).
         BackendKey {
             source_dir: PathBuf::from(dir),
@@ -343,6 +371,7 @@ mod tests {
             version: "test",
             config_fp: fp,
             topology_fp: 0,
+            enabled_tools,
         }
     }
 
@@ -377,6 +406,57 @@ mod tests {
             retopologized.digest(),
             "same dir with a different dependency graph must land on a different socket"
         );
+
+        assert_ne!(
+            base,
+            keyed("/srv/erp", McpProfile::Workspace, 7, set(&["references"])).digest(),
+            "a launch serving an extra tool must not share a backend with one that does not"
+        );
+    }
+
+    fn set(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// The identity must follow the served surface, not the spelling of the flags. Two
+    /// launches asking for the same tools in different order, or with a repeat, are the
+    /// same backend — otherwise clients would fork daemons over argv cosmetics.
+    #[test]
+    fn tool_set_is_order_and_duplicate_insensitive() {
+        let one = keyed("/srv/erp", McpProfile::Workspace, 7, set(&["references", "outline"]));
+        let other =
+            keyed("/srv/erp", McpProfile::Workspace, 7, set(&["outline", "references", "outline"]));
+        assert_eq!(one.digest(), other.digest());
+    }
+
+    /// Asking for a tool the profile already serves changes no surface, so it must not
+    /// change the rendezvous either. This is what keeps configs carrying the flag and
+    /// configs without it on one daemon after an opt-in tool becomes a default; hashing
+    /// the raw flags instead of the effective set would split them forever.
+    #[test]
+    fn enabling_a_default_tool_does_not_fork_the_backend() {
+        let default_tool = crate::contract::declared_tools(McpProfile::Workspace)
+            .next()
+            .expect("the workspace profile declares tools")
+            .to_owned();
+        let asked_for_it = crate::contract::effective_opt_in(
+            McpProfile::Workspace,
+            std::slice::from_ref(&default_tool),
+        );
+        assert_eq!(
+            key("/srv/erp", McpProfile::Workspace, 7).digest(),
+            keyed("/srv/erp", McpProfile::Workspace, 7, asked_for_it).digest(),
+            "--enable-tool {default_tool} serves the same surface and must reuse the backend"
+        );
+    }
+
+    /// A different set of tools is a different surface, and the digest must say so even
+    /// when one set contains the other.
+    #[test]
+    fn a_wider_tool_set_forks_the_digest() {
+        let narrow = keyed("/srv/erp", McpProfile::Workspace, 7, set(&["references"]));
+        let wide = keyed("/srv/erp", McpProfile::Workspace, 7, set(&["references", "outline"]));
+        assert_ne!(narrow.digest(), wide.digest());
     }
 
     #[test]

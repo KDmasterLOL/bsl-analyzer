@@ -89,6 +89,9 @@ pub struct InstallRequest {
     pub onec_user: String,
     pub onec_password: String,
     pub env: BTreeMap<String, String>,
+    /// Opt-in tools the installed server is told to serve. Empty unless the caller asked:
+    /// enabling one is a decision of whoever installs, never of a preset.
+    pub enable_tools: Vec<String>,
     pub force: bool,
     pub dry_run: bool,
 }

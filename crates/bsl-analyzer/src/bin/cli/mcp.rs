@@ -45,6 +45,15 @@ pub struct McpServeArgs {
     #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
+    /// Serve an opt-in tool of this profile, repeatable. Names come from the
+    /// contract declaration (`opt_in_tools`), not from `tools/list` — an opt-in tool
+    /// is absent from the served list until a launch asks for it. A name this profile
+    /// does not declare stops the start and lists the ones it does; naming a tool that
+    /// is already served changes nothing, so a config keeps working after an opt-in
+    /// tool becomes a default.
+    #[arg(long = "enable-tool")]
+    enable_tools: Vec<String>,
+
     /// Directory for workspace-derived graph, search and lease files. Relative
     /// paths are resolved from the process working directory.
     #[arg(long = "cache-dir")]
@@ -210,6 +219,12 @@ pub struct McpInstallArgs {
     #[arg(long, value_enum, default_value_t = InstallPresetCli::Workspace)]
     preset: InstallPresetCli,
 
+    /// Write `--enable-tool <name>` into the generated client config, repeatable. The
+    /// name is validated against the preset's profile, so an installed config cannot
+    /// be one that refuses to start.
+    #[arg(long = "enable-tool")]
+    enable_tools: Vec<String>,
+
     #[arg(long)]
     name: Option<String>,
 
@@ -277,10 +292,7 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     let raw_password =
         resolve_onec_password(&args.onec_password, env::var("BSL_ONEC_PASSWORD").ok());
     let password = decode_password(&raw_password);
-    let profile = match args.runtime_profile {
-        McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
-        McpProfileCli::Reference => mcp_server::McpProfile::Reference,
-    };
+    let profile = profile_of(args.runtime_profile);
     let (source_dir, workspace_cache) =
         resolve_workspace_inputs(profile, args.source_dir.clone(), args.cache_dir.as_deref())?;
 
@@ -298,11 +310,14 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
     match resolve_serve_mode(args.mode, profile)? {
         McpServeMode::Stdio => run_mcp_server(
             profile,
-            source_dir,
-            workspace_cache,
-            args.onec_url,
-            &args.onec_user,
-            &password,
+            ServerInputs {
+                source_dir,
+                workspace_cache,
+                onec_url: args.onec_url,
+                onec_user: args.onec_user,
+                onec_password: password,
+                enable_tools: args.enable_tools,
+            },
         ),
         McpServeMode::Broker => {
             run_mcp_broker(profile, &args, source_dir, workspace_cache, &password)
@@ -312,22 +327,28 @@ fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>>
         }
         McpServeMode::Daemon => run_mcp_daemon(
             profile,
-            source_dir,
-            workspace_cache,
-            args.onec_url,
-            &args.onec_user,
-            &password,
+            ServerInputs {
+                source_dir,
+                workspace_cache,
+                onec_url: args.onec_url,
+                onec_user: args.onec_user,
+                onec_password: password,
+                enable_tools: args.enable_tools,
+            },
         ),
         McpServeMode::Http => {
             let options =
                 http_options.expect("validated HTTP mode must contain HTTP serve options");
             run_mcp_http(
                 profile,
-                source_dir,
-                workspace_cache,
-                args.onec_url,
-                &args.onec_user,
-                &password,
+                ServerInputs {
+                    source_dir,
+                    workspace_cache,
+                    onec_url: args.onec_url,
+                    onec_user: args.onec_user,
+                    onec_password: password,
+                    enable_tools: args.enable_tools,
+                },
                 options,
             )
         }
@@ -407,7 +428,22 @@ fn validate_backend_pid(
     Ok(())
 }
 
+fn profile_of(profile: McpProfileCli) -> mcp_server::McpProfile {
+    match profile {
+        McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
+        McpProfileCli::Reference => mcp_server::McpProfile::Reference,
+    }
+}
+
 fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, io::Error> {
+    // Before anything is built: an unknown name is a typo in a client config, and ignoring
+    // it silently would leave the caller believing they had enabled something.
+    mcp_server::contract::validate_enabled_tools(
+        profile_of(args.runtime_profile),
+        &args.enable_tools,
+    )
+    .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+
     if matches!(args.runtime_profile, McpProfileCli::Reference) && args.cache_dir.is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -639,6 +675,12 @@ fn daemon_command(
     // The daemon must resolve the same project this proxy keyed on, and its own
     // config file cannot tell it about a source set that came from argv.
     cmd.args(args.source_set.to_args());
+    // Every requested name, not just the effective ones: the daemon projects them through
+    // the same declaration and so arrives at the identity the proxy keyed on. Dropping one
+    // here would leave the proxy's key promising a surface the daemon does not serve.
+    for tool in &args.enable_tools {
+        cmd.arg("--enable-tool").arg(tool);
+    }
     if let Some(url) = &args.onec_url {
         cmd.arg("--onec-url").arg(url);
     }
@@ -671,6 +713,7 @@ fn run_mcp_broker(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         topology_fp,
+        mcp_server::contract::effective_opt_in(profile, &args.enable_tools),
     );
 
     // Credentials travel via env rather than argv, while source/cache and the frozen
@@ -694,11 +737,16 @@ fn run_mcp_broker(
             tracing::warn!(error = %e, "broker backend unavailable; serving directly over stdio");
             run_mcp_server(
                 profile,
-                Some(source_dir),
-                Some(workspace_cache),
-                args.onec_url.clone(),
-                &args.onec_user,
-                onec_password,
+                ServerInputs {
+                    source_dir: Some(source_dir),
+                    workspace_cache: Some(workspace_cache),
+                    onec_url: args.onec_url.clone(),
+                    onec_user: args.onec_user.clone(),
+                    onec_password: onec_password.to_owned(),
+                    // The same set the proxy validated: a client that failed to reach the
+                    // daemon must not be served a different surface than one that did.
+                    enable_tools: args.enable_tools.clone(),
+                },
             )
         }
     }
@@ -728,6 +776,7 @@ fn run_mcp_broker_required(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         mcp_server::broker::workspace_topology_fingerprint(&source_dir),
+        mcp_server::contract::effective_opt_in(profile, &args.enable_tools),
     );
 
     tracing::info!(?source_dir, expected_pid, "Starting required MCP broker proxy");
@@ -742,14 +791,10 @@ fn run_mcp_broker_required(
 /// proxy from it until idle.
 fn run_mcp_daemon(
     profile: mcp_server::McpProfile,
-    source_dir: Option<PathBuf>,
-    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
-    onec_url: Option<String>,
-    onec_user: &str,
-    onec_password: &str,
+    inputs: ServerInputs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let source_dir = require_workspace_broker(profile, source_dir)?;
-    let workspace_cache = workspace_cache.ok_or_else(|| {
+    let source_dir = require_workspace_broker(profile, inputs.source_dir.clone())?;
+    let workspace_cache = inputs.workspace_cache.clone().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "workspace daemon requires a cache layout")
     })?;
 
@@ -765,20 +810,19 @@ fn run_mcp_daemon(
         profile,
         mcp_server::broker::embedding_config_fingerprint(),
         topology_fp,
+        mcp_server::contract::effective_opt_in(profile, &inputs.enable_tools),
     );
 
     // Build only after the daemon wins the bind, so a race loser never starts a
     // competing workspace build against the same per-project databases.
-    let onec_user = onec_user.to_owned();
-    let onec_password = onec_password.to_owned();
     let build = move || {
         build_server(
             profile,
-            Some(source_dir),
-            Some(workspace_cache),
-            onec_url,
-            &onec_user,
-            &onec_password,
+            ServerInputs {
+                source_dir: Some(source_dir),
+                workspace_cache: Some(workspace_cache),
+                ..inputs
+            },
         )
         .map_err(|e| anyhow::anyhow!("{e}"))
     };
@@ -860,6 +904,29 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
         InstallTargetCli::All => InstallTargetSelector::All,
     };
 
+    if !args.enable_tools.is_empty() {
+        if matches!(args.preset, InstallPresetCli::Recommended) {
+            // The recommended set is what a build vouches for unattended; an opt-in tool
+            // is a decision of whoever installs, and it has to be made against a named
+            // profile rather than spread over both servers this preset writes.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--enable-tool is not used with '--preset recommended'; install \
+                 '--preset workspace' or '--preset reference' to enable a tool",
+            )
+            .into());
+        }
+        let profile = match args.preset {
+            InstallPresetCli::Workspace | InstallPresetCli::Recommended => {
+                mcp_server::McpProfile::Workspace
+            }
+            InstallPresetCli::Reference => mcp_server::McpProfile::Reference,
+        };
+        mcp_server::contract::validate_enabled_tools(profile, &args.enable_tools)
+            .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    }
+    let enable_tools = args.enable_tools;
+
     let requests = match args.preset {
         InstallPresetCli::Workspace => vec![InstallRequest {
             target,
@@ -872,6 +939,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             onec_user: args.onec_user,
             onec_password: password,
             env,
+            enable_tools,
             force: args.force,
             dry_run: args.dry_run,
         }],
@@ -886,6 +954,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
             onec_user: args.onec_user,
             onec_password: password,
             env,
+            enable_tools,
             force: args.force,
             dry_run: args.dry_run,
         }],
@@ -912,6 +981,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                     onec_user: args.onec_user.clone(),
                     onec_password: password.clone(),
                     env: env.clone(),
+                    enable_tools: Vec::new(),
                     force: args.force,
                     dry_run: args.dry_run,
                 },
@@ -926,6 +996,7 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
                     onec_user: args.onec_user,
                     onec_password: password,
                     env,
+                    enable_tools: Vec::new(),
                     force: args.force,
                     dry_run: args.dry_run,
                 },
@@ -959,16 +1030,16 @@ fn run_mcp_install(args: McpInstallArgs) -> Result<(), Box<dyn Error + Send + Sy
 
 fn run_mcp_server(
     profile: mcp_server::McpProfile,
-    source_dir: Option<PathBuf>,
-    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
-    onec_url: Option<String>,
-    onec_user: &str,
-    onec_password: &str,
+    inputs: ServerInputs,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    tracing::info!(?profile, ?source_dir, ?onec_url, "Starting MCP server (stdio)");
+    tracing::info!(
+        ?profile,
+        source_dir = ?inputs.source_dir,
+        onec_url = ?inputs.onec_url,
+        "Starting MCP server (stdio)"
+    );
 
-    let server =
-        build_server(profile, source_dir, workspace_cache, onec_url, onec_user, onec_password)?;
+    let server = build_server(profile, inputs)?;
     let shutdown_guard = server.clone();
 
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -984,14 +1055,12 @@ fn run_mcp_server(
 
 fn run_mcp_http(
     profile: mcp_server::McpProfile,
-    source_dir: Option<PathBuf>,
-    workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
-    onec_url: Option<String>,
-    onec_user: &str,
-    onec_password: &str,
+    inputs: ServerInputs,
     options: HttpServeOptions,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let source_dir = source_dir
+    let mut inputs = inputs;
+    inputs.source_dir = inputs
+        .source_dir
         .map(|path| {
             path.canonicalize().map_err(|error| {
                 io::Error::new(
@@ -1001,6 +1070,7 @@ fn run_mcp_http(
             })
         })
         .transpose()?;
+    let source_dir = inputs.source_dir.clone();
     let requested_address = SocketAddr::new(options.host, options.port);
     let mut process_record =
         ProcessRecordGuard::acquire(profile, source_dir.clone(), requested_address)?;
@@ -1016,8 +1086,7 @@ fn run_mcp_http(
     let actual_address = listener.local_addr()?;
     process_record.write_bound_process(actual_address)?;
 
-    let server =
-        build_server(profile, source_dir, workspace_cache, onec_url, onec_user, onec_password)?;
+    let server = build_server(profile, inputs)?;
     let shutdown_guard = server.clone();
     let serve_result = match process_record.mark_running() {
         Ok(()) => {
@@ -1111,14 +1180,30 @@ async fn shutdown_signal() -> io::Result<()> {
 
 /// Build the MCP server (resident state + tool router) for a profile. Shared by the
 /// stdio path and the broker backend so both construct identical state.
-fn build_server(
-    profile: mcp_server::McpProfile,
+/// Everything a server is built from. These travel together through every serve mode, and
+/// a mode that dropped one of them on the way would serve a surface or a connection the
+/// launch did not ask for.
+struct ServerInputs {
     source_dir: Option<PathBuf>,
     workspace_cache: Option<mcp_server::WorkspaceCacheLayout>,
     onec_url: Option<String>,
-    onec_user: &str,
-    onec_password: &str,
+    onec_user: String,
+    onec_password: String,
+    enable_tools: Vec<String>,
+}
+
+fn build_server(
+    profile: mcp_server::McpProfile,
+    inputs: ServerInputs,
 ) -> Result<mcp_server::McpServer, Box<dyn Error + Send + Sync>> {
+    let ServerInputs {
+        source_dir,
+        workspace_cache,
+        onec_url,
+        onec_user,
+        onec_password,
+        enable_tools,
+    } = inputs;
     let state = match profile {
         mcp_server::McpProfile::Workspace => {
             let source_dir = source_dir.ok_or_else(|| {
@@ -1135,7 +1220,7 @@ fn build_server(
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
             if let Some(ref url) = onec_url {
                 tracing::info!(%url, "Configuring 1C HTTP client");
-                state.set_onec_client(onec_client::Client::new(url, onec_user, onec_password));
+                state.set_onec_client(onec_client::Client::new(url, &onec_user, &onec_password));
             }
             configure_named_onec_connections(&mut state)?;
             state.warm_start();
@@ -1144,7 +1229,11 @@ fn build_server(
         mcp_server::McpProfile::Reference => mcp_server::SharedState::reference(source_dir),
     };
 
-    Ok(mcp_server::McpServer::new(profile, state))
+    Ok(mcp_server::McpServer::with_gate(
+        profile,
+        state,
+        &mcp_server::ToolGate::for_launch(profile, &enable_tools),
+    ))
 }
 
 fn configure_named_onec_connections(
@@ -1706,6 +1795,60 @@ mod tests {
         assert_eq!(cli.args.cache_dir, Some(PathBuf::from("../кеш с пробелом")));
     }
 
+    /// A name no profile declares stops the start rather than being dropped: a typo in a
+    /// client config would otherwise look like a working launch that silently serves less.
+    #[test]
+    fn enable_tool_rejects_unknown_name_with_nonempty_list() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.enable_tools = vec!["symbol_inf0".to_owned()];
+
+        let err = validate_serve_args(&args).expect_err("an undeclared tool name must not start");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let message = err.to_string();
+        assert!(message.contains("symbol_inf0"), "refusal does not name the input: {message}");
+        // The list is generated from the declaration, so it can never be empty — an error
+        // that named nothing would leave the caller no way to correct the config.
+        for name in mcp_server::contract::declared_tools(mcp_server::McpProfile::Workspace) {
+            assert!(message.contains(name), "refusal omits '{name}': {message}");
+        }
+    }
+
+    /// A tool this profile declares is accepted whether or not it is opt-in today. That is
+    /// what keeps an installed config starting after an opt-in tool becomes a default: the
+    /// flag stays valid and simply stops changing anything.
+    #[test]
+    fn enable_tool_accepts_every_declared_name() {
+        for (cli_profile, profile) in [
+            (McpProfileCli::Workspace, mcp_server::McpProfile::Workspace),
+            (McpProfileCli::Reference, mcp_server::McpProfile::Reference),
+        ] {
+            let declared: Vec<String> =
+                mcp_server::contract::declared_tools(profile).map(str::to_owned).collect();
+            let mut args = serve_args(McpServeMode::Stdio, None);
+            args.runtime_profile = cli_profile;
+            if matches!(cli_profile, McpProfileCli::Reference) {
+                args.source_dir = None;
+            }
+            args.enable_tools = declared;
+
+            validate_serve_args(&args)
+                .unwrap_or_else(|e| panic!("{} rejected its own tools: {e}", profile.as_str()));
+        }
+    }
+
+    /// A name belonging to the other profile is refused rather than ignored: accepting it
+    /// would report success for a tool this launch will never serve.
+    #[test]
+    fn enable_tool_rejects_a_name_from_the_other_profile() {
+        let mut args = serve_args(McpServeMode::Stdio, None);
+        args.enable_tools = vec!["syntax_help".to_owned()];
+
+        let err = validate_serve_args(&args).expect_err("syntax_help is not a workspace tool");
+
+        assert!(err.to_string().contains("syntax_help"), "{err}");
+    }
+
     #[test]
     fn reference_profile_rejects_cache_dir() {
         let mut args = serve_args(McpServeMode::Stdio, None);
@@ -1795,6 +1938,36 @@ mod tests {
         assert!(!canonical_source.join(".build").exists(), "the default stays lazy");
     }
 
+    /// The daemon derives the backend identity from its own argv, so every name the proxy
+    /// was given has to reach it. A dropped name would leave proxy and daemon keying on
+    /// different surfaces: the proxy would hand clients a socket whose server serves
+    /// something else, and the default-off promise would depend on who started first.
+    #[test]
+    fn broker_child_receives_every_enable_tool() {
+        let source = tempfile::tempdir().unwrap();
+        let canonical_source = source.path().canonicalize().unwrap();
+        let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&canonical_source);
+        let mut args = serve_args(McpServeMode::Broker, None);
+        args.enable_tools = vec!["graph".to_owned(), "outline".to_owned()];
+
+        let command = daemon_command(
+            PathBuf::from("bsl-analyzer").as_path(),
+            &canonical_source,
+            &cache,
+            &args,
+            42,
+        );
+        let argv: Vec<String> =
+            command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+
+        for tool in &args.enable_tools {
+            assert!(
+                argv.windows(2).any(|pair| pair[0] == "--enable-tool" && pair[1] == *tool),
+                "argv does not carry --enable-tool {tool}: {argv:?}"
+            );
+        }
+    }
+
     #[test]
     fn reference_profile_still_rejects_onec_options() {
         let mut args = serve_args(McpServeMode::Stdio, None);
@@ -1823,6 +1996,7 @@ mod tests {
         McpServeArgs {
             runtime_profile: McpProfileCli::Workspace,
             source_dir: Some(std::path::PathBuf::from(".")),
+            enable_tools: Vec::new(),
             cache_dir: None,
             mode,
             backend_pid: None,

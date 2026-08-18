@@ -68,6 +68,8 @@ fn build_workspace_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
         args.push(request.onec_password.clone());
     }
 
+    args.extend(enable_tool_args(request));
+
     ServerSpec {
         name: request.name.clone(),
         command: binary.to_owned(),
@@ -77,17 +79,26 @@ fn build_workspace_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
 }
 
 fn build_reference_spec(request: &InstallRequest, binary: &str) -> ServerSpec {
+    let mut args =
+        vec!["mcp".to_owned(), "serve".to_owned(), "--profile".to_owned(), "reference".to_owned()];
+    args.extend(enable_tool_args(request));
+
     ServerSpec {
         name: request.name.clone(),
         command: binary.to_owned(),
-        args: vec![
-            "mcp".to_owned(),
-            "serve".to_owned(),
-            "--profile".to_owned(),
-            "reference".to_owned(),
-        ],
+        args,
         env: request.env.clone(),
     }
+}
+
+/// The flags that make the installed config self-describing: reading it shows which
+/// opt-in tools this server was set up to serve, without knowing the build's defaults.
+fn enable_tool_args(request: &InstallRequest) -> Vec<String> {
+    request
+        .enable_tools
+        .iter()
+        .flat_map(|tool| ["--enable-tool".to_owned(), tool.clone()])
+        .collect()
 }
 
 #[cfg(test)]
@@ -112,9 +123,41 @@ mod tests {
             onec_user: "admin".to_owned(),
             onec_password: "secret".to_owned(),
             env: BTreeMap::from([("NAPARNIK_TOKEN".to_owned(), "test".to_owned())]),
+            enable_tools: Vec::new(),
             force: false,
             dry_run: false,
         }
+    }
+
+    /// The installed config carries the flag, so reading it shows which opt-in tools this
+    /// server was set up to serve without knowing the build's defaults — and the server
+    /// the client launches serves them, since it is that argv the client runs.
+    #[test]
+    fn enabled_tools_reach_the_installed_argv_in_both_presets() {
+        for preset in [InstallPreset::Workspace, InstallPreset::Reference] {
+            let mut request = request();
+            request.preset = preset;
+            request.enable_tools = vec!["references".to_owned(), "call_hierarchy".to_owned()];
+
+            let spec = build_server_spec(&request, "bsl-analyzer");
+
+            for tool in &request.enable_tools {
+                assert!(
+                    spec.args.windows(2).any(|pair| pair[0] == "--enable-tool" && pair[1] == *tool),
+                    "{preset:?} argv does not carry --enable-tool {tool}: {:?}",
+                    spec.args
+                );
+            }
+        }
+    }
+
+    /// Nothing asked for, nothing written: an install that did not name a tool must produce
+    /// the same command line it produced before the flag existed.
+    #[test]
+    fn no_enable_tool_flag_appears_when_none_was_asked_for() {
+        let spec = build_server_spec(&request(), "bsl-analyzer");
+
+        assert!(spec.args.iter().all(|arg| arg != "--enable-tool"), "argv: {:?}", spec.args);
     }
 
     #[test]
