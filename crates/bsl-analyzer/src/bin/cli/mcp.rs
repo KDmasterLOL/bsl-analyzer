@@ -45,11 +45,12 @@ pub struct McpServeArgs {
     #[arg(short = 's', long = "source-dir", required_if_eq("runtime_profile", "workspace"))]
     source_dir: Option<PathBuf>,
 
-    /// Serve an opt-in tool of this profile, repeatable. Names are the ones in
-    /// `tools/list`; an opt-in tool is absent from the surface until a launch asks
-    /// for it. A name this profile does not declare stops the start and lists the
-    /// ones it does; naming a tool that is already served changes nothing, so a
-    /// config keeps working after an opt-in tool becomes a default.
+    /// Serve an opt-in tool of this profile, repeatable. Names come from the
+    /// contract declaration (`opt_in_tools`), not from `tools/list` — an opt-in tool
+    /// is absent from the served list until a launch asks for it. A name this profile
+    /// does not declare stops the start and lists the ones it does; naming a tool that
+    /// is already served changes nothing, so a config keeps working after an opt-in
+    /// tool becomes a default.
     #[arg(long = "enable-tool")]
     enable_tools: Vec<String>,
 
