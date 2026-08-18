@@ -512,6 +512,7 @@ mod contract_surface {
                   backend-pid
                   cache-dir
                   configuration-root
+                  enable-tool
                   extension !no-extensions
                   extension-depends-on
                   host
