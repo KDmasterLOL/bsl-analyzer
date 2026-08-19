@@ -48,6 +48,8 @@ pub(crate) struct Params<'a> {
     pub path: Option<&'a str>,
     pub line: Option<u32>,
     pub column: Option<u32>,
+    /// The text of the line the caller read, which certifies the anchor.
+    pub line_content: Option<&'a str>,
     /// Narrows the REFERENCES shown, not the anchor.
     pub area_root_id: Option<&'a str>,
     pub area_path_prefix: Option<&'a str>,
@@ -55,6 +57,7 @@ pub(crate) struct Params<'a> {
     pub include_declaration: Option<bool>,
     pub limit: Option<usize>,
     pub max_files: Option<usize>,
+    pub include_preview: Option<bool>,
 }
 
 /// What the tool answered, before it is stamped with the resident's identity.
@@ -63,18 +66,39 @@ pub(crate) struct Answer {
     /// Whose data composes the body — decided in `ide`, echoed here.
     source: BodySource,
     completeness: loc::Completeness,
-    /// Nothing matched by name. Held so the caller can retry once against a
-    /// rescanned resident, the way `symbol_info` does with a card miss.
-    miss: bool,
 }
 
-impl Answer {
-    /// Whether the answer found nothing at all — a miss that a symbol added since the
-    /// last throttled drift scan would produce just as well as an absent one.
-    pub(crate) fn is_miss(&self) -> bool {
-        self.miss
+/// Whether this answer is worth one forced rescan and a retry.
+///
+/// The decision is read off the ANSWER — its outcome, and for a miss whether a name was
+/// echoed — and nowhere else. Keeping it in the handler put it where nothing can observe
+/// it: `read()` polls for drift before it computes anything, a live change hub applies a
+/// disk edit into the resident on the way, and the first answer of an end-to-end test may
+/// already be `resolved` without any rescan at all.
+///
+/// A stale text anchor and a name that matched nothing both carry evidence a second look
+/// can check: text the caller quoted, or a name something declares somewhere. A positional
+/// miss carries none — it says only "no name stands at these coordinates", and re-reading
+/// the same coordinates says it again. So it stays out, and `path`+`line` answers exactly
+/// as it did before the text anchor existed.
+pub(crate) fn warrants_rescan(answer: &Answer) -> bool {
+    match answer.body.get("outcome").and_then(Value::as_str) {
+        Some("anchor_stale") => true,
+        Some("not_found") => answer.body.contains_key("symbol"),
+        _ => false,
     }
 }
+
+/// What the tool says when nothing addresses a symbol at all. Quoted in two places —
+/// the handler bails before it touches a resident, the anchor builder after — and one
+/// string so the two cannot drift into two different refusals for one mistake.
+pub(crate) const NO_ANCHOR: &str =
+    "one of 'symbol' or 'path' with 'line_content' and/or 'line' is required";
+
+/// A quote certifies a line of ONE file, and without that file it names nothing.
+pub(crate) const CONTENT_NEEDS_PATH: &str =
+    "'line_content' quotes a line of one file, so it goes with 'path'; to look for text \
+     across the workspace use `search`";
 
 /// How many files a `(root_id, path_prefix)` selection matched, published so a
 /// mistyped prefix reads as "nothing is there" rather than "no references".
@@ -97,11 +121,16 @@ pub(crate) fn answer(
     // in a root — and a parameter that is validated against the root table and
     // then dropped is worse than one that was refused: the caller is told its
     // root is wrong, never that its narrowing did nothing.
-    if params.anchor_root_id.is_some() && matches!(anchor, ReferenceAnchor::Position { .. }) {
+    // Written against the class and not one member of it: every anchor by `path` already
+    // names its file, so there is no declaration left for a root to narrow. Spelling the
+    // condition as `matches!(anchor, Position { .. })` would let the next anchor by file
+    // through, and a root validated against the root table and then dropped is worse than
+    // one refused — the caller is told its narrowing was understood while nothing narrowed.
+    if params.anchor_root_id.is_some() && !matches!(anchor, ReferenceAnchor::Name(_)) {
         return Err(McpError::invalid_params(
             "'anchor_root_id' picks which root the DECLARATION is looked for in, so it goes \
-             with 'symbol'; a 'path'+'line' anchor already names one file. Use \
-             'area_root_id' to narrow which references are shown",
+             with 'symbol'; an anchor by 'path' already names one file. Use 'area_root_id' \
+             to narrow which references are shown",
             None,
         ));
     }
@@ -130,6 +159,7 @@ pub(crate) fn answer(
         resident.workspace_roots(),
         &result,
         params,
+        &request.anchor,
         area_selection,
         limit,
         max_output_tokens,
@@ -139,7 +169,7 @@ pub(crate) fn answer(
 
 /// Publish the answer with the identity of whoever composed its body.
 pub(crate) fn finish(answer: Answer, revision: u64, topology: u64, stale: bool) -> CallToolResult {
-    let Answer { mut body, source, completeness, miss: _ } = answer;
+    let Answer { mut body, source, completeness } = answer;
     let freshness = match source {
         // A body of reference hits, or of a symbol the resident resolved, is the
         // resident's own answer at one revision — even when it was the name
@@ -164,8 +194,8 @@ fn build_anchor(
     if let Some(symbol) = params.symbol.map(str::trim).filter(|s| !s.is_empty()) {
         if params.path.is_some() {
             return Err(McpError::invalid_params(
-                "pass either 'symbol' or 'path'+'line', not both: they anchor on different \
-                 things and the answer would not say which one it followed",
+                "pass either 'symbol' or an anchor on 'path', not both: they anchor on \
+                 different things and the answer would not say which one it followed",
                 None,
             ));
         }
@@ -177,6 +207,13 @@ fn build_anchor(
             return Err(McpError::invalid_params(
                 "'line'/'column' belong to a 'path' anchor; a 'symbol' is resolved by name \
                  and has no position to start from",
+                None,
+            ));
+        }
+        if params.line_content.is_some() {
+            return Err(McpError::invalid_params(
+                "'line_content' certifies a line of the file named by 'path'; a 'symbol' is \
+                 resolved by name and quotes nothing",
                 None,
             ));
         }
@@ -192,7 +229,10 @@ fn build_anchor(
     }
 
     let path = params.path.ok_or_else(|| {
-        McpError::invalid_params("one of 'symbol' or 'path'+'line' is required", None)
+        McpError::invalid_params(
+            if params.line_content.is_some() { CONTENT_NEEDS_PATH } else { NO_ANCHOR },
+            None,
+        )
     })?;
     let resolved = resident
         .resolve_rooted_path(params.root_id, Path::new(path))
@@ -214,10 +254,32 @@ fn build_anchor(
             )
         }
     })?;
-    let line = params
-        .line
-        .ok_or_else(|| McpError::invalid_params("'line' is required with 'path'", None))?;
-    Ok(ReferenceAnchor::Position { file_id, line, column: params.column.unwrap_or(0) })
+    // A quoted line makes `line` a narrowing rather than an address, so the requirement is
+    // lifted exactly there. This is the main input of the promise: a caller that read the
+    // file and does not trust its own line numbers has the text and nothing else.
+    let Some(content) = params.line_content else {
+        let line = params.line.ok_or_else(|| {
+            McpError::invalid_params(
+                "'line' is required with 'path' unless 'line_content' quotes the line",
+                None,
+            )
+        })?;
+        return Ok(ReferenceAnchor::Position { file_id, line, column: params.column.unwrap_or(0) });
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return Err(McpError::invalid_params(
+            "'line_content' is empty once its surrounding whitespace is dropped, so it \
+             certifies nothing; quote the text of the line you read",
+            None,
+        ));
+    }
+    Ok(ReferenceAnchor::Text {
+        file_id,
+        line: params.line,
+        column: params.column,
+        content: content.to_owned(),
+    })
 }
 
 /// Translate a `(root_id, path_prefix)` selection into the set of files it
@@ -305,6 +367,7 @@ fn outcome_str(outcome: &ReferencesOutcome) -> &'static str {
         ReferencesOutcome::Ambiguous => "ambiguous",
         ReferencesOutcome::NotFound => "not_found",
         ReferencesOutcome::UnsupportedSymbol { .. } => "unsupported_symbol",
+        ReferencesOutcome::AnchorStale { .. } => "anchor_stale",
     }
 }
 
@@ -319,6 +382,8 @@ fn render(
     roots: &WorkspaceRoots,
     result: &ReferencesResult,
     params: &Params<'_>,
+    // Which anchor the walk actually ran on, after trimming and validation.
+    anchor: &ReferenceAnchor,
     area: Option<Selection>,
     limit: usize,
     max_output_tokens: usize,
@@ -336,6 +401,7 @@ fn render(
     if let Some(symbol) = params.symbol.map(str::trim).filter(|s| !s.is_empty()) {
         body.insert("symbol".into(), json!(symbol));
     }
+    body.insert("anchor".into(), anchor_value(anchor, result));
     if let Some(area) = &area {
         body.insert(
             "area".into(),
@@ -355,7 +421,20 @@ fn render(
     match &result.outcome {
         ReferencesOutcome::Resolved => {
             let shown: Vec<&ReferenceHit> = result.hits.iter().take(limit).collect();
-            let mut items: Vec<Value> = shown.iter().map(|hit| hit_value(db, roots, hit)).collect();
+            // Resolved once and kept: the preview needs the very line and column the
+            // location publishes, and resolving a second time would be a second reading of
+            // where the occurrence is.
+            let places: Vec<ide::ResolvedPlace> = shown
+                .iter()
+                .map(|hit| {
+                    ide::resolve_file_range(db, hit.file_id, Some(hit.range), hit.enclosing_range)
+                })
+                .collect();
+            let mut items: Vec<Value> = places
+                .iter()
+                .zip(&shown)
+                .map(|(place, hit)| hit_value(place, roots, hit))
+                .collect();
             let budget_cut = trim_items_to_budget(&mut items, max_output_tokens);
             let capped = total > shown.len();
 
@@ -398,27 +477,81 @@ fn render(
             // apart from the body's.
             body.insert("histogram_truncated".into(), json!(histogram_cut));
 
+            // Last, and only out of what the answer left. `include_preview` decorates; it
+            // never changes what the answer contains, and the histogram is the only way
+            // past `limit` in a tool with no cursor — paying for an optional caption with
+            // it would let a decoration shorten the answer.
+            // The completeness is finished BEFORE previews are measured, and it has to be:
+            // the reserve below is only an upper bound on the envelope if it is built from
+            // the reasons that envelope will actually carry. Computing it from an empty
+            // completeness and then adding four reasons underneath would understate it by a
+            // hundred bytes apiece — and previews would spend budget the envelope has to.
             completeness = completeness
-                .when(
-                    capped,
-                    loc::ReasonCode::ResultCap,
-                    "more references than `limit`; narrow with `area_root_id`/\
-                     `area_path_prefix`/`kinds`, or walk `files`",
-                )
-                .when(
-                    result.files_capped,
-                    loc::ReasonCode::ResultCap,
-                    "the walk stopped at `max_files`, so `total` is a lower bound; raise \
-                     `max_files` or narrow the area before the walk",
-                )
-                .when(
-                    budget_cut || histogram_over_budget,
-                    loc::ReasonCode::OutputBudget,
-                    "trimmed to fit `max_output_tokens`",
-                );
+                .when(capped, loc::ReasonCode::ResultCap, RESULT_CAP_LIMIT)
+                .when(result.files_capped, loc::ReasonCode::ResultCap, RESULT_CAP_FILES)
+                .when(budget_cut || histogram_over_budget, loc::ReasonCode::OutputBudget, TRIMMED);
+
+            let previews_omitted = if params.include_preview.unwrap_or(false) {
+                // The budget previews are spent from is the one the CALLER receives, and this
+                // layer has not written the freshness envelope yet — `finish` adds it once
+                // the resident's identity is known. Reserving for it is what keeps a
+                // decoration from being the thing that carries an otherwise fitting answer
+                // past its own ceiling. The basis carries every reason still to come,
+                // including the one previews themselves may add, so the reserve is never
+                // smaller than the envelope written against it.
+                let basis = completeness
+                    .clone()
+                    .when(true, loc::ReasonCode::OutputBudget, PREVIEWS_OMITTED)
+                    .when(
+                        result.anchor_candidates_capped,
+                        loc::ReasonCode::ResultCap,
+                        anchor_cap_detail(anchor),
+                    )
+                    .when(unread_files > 0, loc::ReasonCode::UnreadableFiles, UNREADABLE);
+                let reserved = max_output_tokens.saturating_sub(envelope_tokens(&basis));
+                attach_previews(db, &mut body, &places, &shown, reserved)
+            } else {
+                0
+            };
+            if previews_omitted > 0 {
+                body.insert("previews_omitted".into(), json!(previews_omitted));
+            }
+
+            completeness = completeness.when(
+                previews_omitted > 0,
+                loc::ReasonCode::OutputBudget,
+                PREVIEWS_OMITTED,
+            );
         }
         ReferencesOutcome::Ambiguous | ReferencesOutcome::NotFound => {
             let mut budget_cut = false;
+            if !result.anchor_sites.is_empty() {
+                let mut sites: Vec<Value> = result
+                    .anchor_sites
+                    .iter()
+                    .map(|site| anchor_site_value(db, roots, site))
+                    .collect();
+                budget_cut |=
+                    trim_items_to_budget(&mut sites, remaining_budget(&body, max_output_tokens));
+                body.insert("anchor_sites".into(), Value::Array(sites));
+                // The axes named are the ones that still work. A `line` beside a quote is
+                // NOT among them: it stopped choosing when the pin was dropped — it marks the
+                // place it stood at and nothing more — so advertising it would send the
+                // caller round a trip that cannot arrive. What does work is a narrower quote,
+                // or dropping the quote and taking a place by the coordinates this very
+                // answer just published, which are of this revision by construction.
+                body.insert(
+                    "resolution_hint".into(),
+                    json!(
+                        "narrow `line_content` to text that names only the symbol you mean; \
+                         a `line` beside a quote marks a place (`pointed_by_line`) but never \
+                         chooses one. To take a place as it stands here, drop `line_content` \
+                         and anchor on its `location` with the PAIR `root_id`+`path` plus \
+                         `line`+`column` — a path without its root is spelled against the \
+                         workspace, not against the root the place belongs to"
+                    ),
+                );
+            }
             if !result.declarations.is_empty() {
                 let candidates: Vec<Value> = result
                     .declarations
@@ -459,7 +592,7 @@ fn render(
                     json!(if roots_differ {
                         "pass `anchor_root_id` to pick one declaration"
                     } else {
-                        "these declarations share a root: anchor positionally with the `path` and `line` of the one you want"
+                        "these declarations share a root: anchor on the one you want with its `root_id`+`path` pair and `line_content`, the text of the line it is declared on"
                     }),
                 );
             }
@@ -488,6 +621,25 @@ fn render(
                 loc::ReasonCode::OutputBudget,
                 "candidate list trimmed to fit `max_output_tokens`",
             );
+        }
+        ReferencesOutcome::AnchorStale { reason, line_matches } => {
+            let mut stale = Map::new();
+            stale.insert("reason".into(), json!(reason.as_str()));
+            stale.insert("line_content_matches".into(), json!(line_matches));
+            // What stands at the coordinate the caller sent, so it can see which of the two
+            // pictures moved without a second call.
+            if let ReferenceAnchor::Text { file_id, line: Some(line), .. } = anchor {
+                if let Some(evidence) = evidence_line(db, *file_id, *line) {
+                    stale.insert("actual_line".into(), json!(evidence.snippet));
+                    if evidence.truncated {
+                        stale.insert("actual_line_truncated".into(), json!(true));
+                    }
+                    if evidence.redacted {
+                        stale.insert("actual_line_redacted".into(), json!(true));
+                    }
+                }
+            }
+            body.insert("anchor_stale".into(), Value::Object(stale));
         }
         ReferencesOutcome::UnsupportedSymbol { category } => {
             body.insert(
@@ -524,16 +676,336 @@ fn render(
             .when(
                 result.anchor_candidates_capped,
                 loc::ReasonCode::ResultCap,
-                "the anchor was chosen from a capped candidate list, so the outcome itself \
-                 may miss a declaration; pass a qualified `symbol` to decide it exactly",
+                // The axis named is the one this anchor HAS. Telling a caller that quoted a
+                // line to pass a qualified `symbol` sends it down a road it did not come by:
+                // the thing it holds is text, and text is what narrows it.
+                anchor_cap_detail(anchor),
             )
-            .when(
-                unread_files > 0,
-                loc::ReasonCode::UnreadableFiles,
-                "some workspace files could not be read and were left out of the walk",
-            ),
-        miss: matches!(result.outcome, ReferencesOutcome::NotFound),
+            .when(unread_files > 0, loc::ReasonCode::UnreadableFiles, UNREADABLE),
     }
+}
+
+/// Which anchor the answer followed, and — for the two that stand somewhere — where it
+/// actually stood.
+///
+/// There is no `verified` flag beside it on purpose: a name has nothing to verify, and
+/// `verified: false` would teach a caller that its `symbol` request was somehow the lesser
+/// one. The distinction the caller needs is which anchor answered, and `mode` carries it.
+fn anchor_value(anchor: &ReferenceAnchor, result: &ReferencesResult) -> Value {
+    let mut block = Map::new();
+    match anchor {
+        ReferenceAnchor::Name(_) => {
+            block.insert("mode".into(), json!("symbol"));
+        }
+        ReferenceAnchor::Position { line, .. } => {
+            block.insert("mode".into(), json!("position"));
+            block.insert("line".into(), json!(line));
+        }
+        ReferenceAnchor::Text { line, .. } => {
+            block.insert("mode".into(), json!("line_content"));
+            if let Some(landed) = result.anchor_line {
+                block.insert("line".into(), json!(landed));
+                // Where "any occurrence will do" stops being silent: the answer is still
+                // resolved, and it says it stood somewhere other than where it was sent.
+                if line.is_some_and(|asked| asked != landed) {
+                    block.insert("relocated_from_line".into(), json!(line));
+                }
+            }
+        }
+    }
+    Value::Object(block)
+}
+
+/// One place a quoted line could have meant: where it is, what it is called when it has a
+/// name that works, and the line itself as evidence.
+fn anchor_site_value(
+    db: &ide::RootDatabaseImpl,
+    roots: &WorkspaceRoots,
+    site: &ide::AnchorSite,
+) -> Value {
+    let mut entry = Map::new();
+    let place = ide::resolve_file_range(db, site.file_id, Some(site.range), site.enclosing_range);
+    if let Some(range) = place.range.as_ref() {
+        if let Some(preview) =
+            preview_of(db, site.file_id, range, statement_floor(site.enclosing_range))
+        {
+            preview.insert_into(&mut entry);
+        }
+    }
+    insert_resolved_location(&place, Some(roots), &mut entry);
+    if let Some(symbol) = &site.symbol {
+        entry.insert("symbol".into(), json!(symbol));
+    }
+    // Only where it is true: a flag that is present and false on every other place is a
+    // field a reader stops looking at.
+    if site.pointed_by_line {
+        entry.insert("pointed_by_line".into(), json!(true));
+    }
+    Value::Object(entry)
+}
+
+/// Hang a preview on every reference the leftover budget still pays for, and report how
+/// many went without.
+///
+/// Runs after the list and the histogram are both final, so the count of references, the
+/// histogram and every location are exactly what the same request answers with previews
+/// switched off.
+fn attach_previews(
+    db: &ide::RootDatabaseImpl,
+    body: &mut Map<String, Value>,
+    places: &[ide::ResolvedPlace],
+    shown: &[&ReferenceHit],
+    max_output_tokens: usize,
+) -> usize {
+    let Some(Value::Array(mut items)) = body.remove("references") else { return 0 };
+
+    // The line that reports what did not fit is body too, and it is written once this loop
+    // ends. Its widest form is known already — the count cannot exceed the records in hand —
+    // so it comes out of the budget rather than landing on top of it.
+    let max_output_tokens = max_output_tokens
+        .saturating_sub(format!(r#","previews_omitted":{}"#, items.len()).len().div_ceil(4));
+
+    // The body without any preview, measured once. Everything after this is a per-record
+    // delta, so the accounting stays linear in the number of records shown.
+    let base = body_bytes(body, &items);
+    let mut spent = 0usize;
+    let mut omitted = 0usize;
+    let mut exhausted = false;
+    for (index, item) in items.iter_mut().enumerate() {
+        let (Some(place), Some(hit)) = (places.get(index), shown.get(index)) else { continue };
+        let Some(range) = place.range.as_ref() else { continue };
+        let Some(preview) =
+            preview_of(db, hit.file_id, range, statement_floor(hit.enclosing_range))
+        else {
+            continue;
+        };
+        if exhausted {
+            omitted += 1;
+            continue;
+        }
+        let Some(entry) = item.as_object_mut() else { continue };
+        // Measured, not estimated — and measured on THIS record, which is the only thing that
+        // changed. An estimate misses two deterministic terms (the conditional flag keys, and
+        // every quote or backslash a snippet escapes into two bytes); re-serializing the whole
+        // body instead would be exact and quadratic, and `max_output_tokens` has no ceiling to
+        // keep the record count small. A record's own delta is exact because a JSON array's
+        // length is the sum of its elements' plus separators, and no separator moves here.
+        let before = entry_bytes(entry);
+        preview.insert_into(entry);
+        spent += entry_bytes(entry) - before;
+        // Once one preview does not fit, the rest go too: previews are of a size, and letting
+        // a short one slip past a long one would publish a set whose membership depends on
+        // how long the lines happen to be.
+        if (base + spent).div_ceil(4) > max_output_tokens {
+            exhausted = true;
+            omitted += 1;
+            let before = entry_bytes(entry);
+            for key in PREVIEW_KEYS {
+                entry.remove(key);
+            }
+            spent -= before - entry_bytes(entry);
+        }
+    }
+    body.insert("references".into(), Value::Array(items));
+    omitted
+}
+
+/// What the body costs in bytes with its reference list held apart.
+fn body_bytes(body: &Map<String, Value>, items: &[Value]) -> usize {
+    let rest = serde_json::to_string(body).map(|text| text.len()).unwrap_or(0);
+    let list = serde_json::to_string(items).map(|text| text.len()).unwrap_or(0);
+    rest + list + r#","references":"#.len()
+}
+
+/// What one record costs in bytes.
+fn entry_bytes(entry: &Map<String, Value>) -> usize {
+    serde_json::to_string(entry).map(|text| text.len()).unwrap_or(0)
+}
+
+/// How wide a preview may be, in the UTF-16 units the location contract counts columns in.
+///
+/// The number is `outline`'s; the UNIT is not. `cap_chars` there cuts Unicode scalars, and a
+/// preview whose caller indexes it by `range.start_character` has to be cut in the unit that
+/// column is published in — on the BMP the two agree, on a surrogate pair they part.
+const PREVIEW_CAP: u32 = 200;
+
+/// How much of the line before the occurrence a window keeps, so the name arrives with the
+/// context that says what the line does.
+const PREVIEW_LEAD: u32 = 40;
+
+/// One line of source, ready to travel beside the occurrence it describes.
+struct Preview {
+    snippet: String,
+    /// The UTF-16 column the snippet STARTS at, so the occurrence's own column indexes it.
+    start_character: u32,
+    truncated: bool,
+    redacted: bool,
+}
+
+impl Preview {
+    fn insert_into(&self, entry: &mut Map<String, Value>) {
+        entry.insert("snippet".into(), json!(self.snippet));
+        entry.insert("snippet_start_character".into(), json!(self.start_character));
+        // Written only when true, the way `search` writes its own truncation counters: a
+        // field that is always there and almost always false is a field a reader stops
+        // looking at.
+        if self.truncated {
+            entry.insert("snippet_truncated".into(), json!(true));
+        }
+        if self.redacted {
+            entry.insert("snippet_redacted".into(), json!(true));
+        }
+    }
+}
+
+/// The line an occurrence sits on, windowed around it and sanitized.
+///
+/// Read out of the resident's own text through `ide::line_text`, never off disk: the disk
+/// may already be ahead of the revision this answer is signed with, and a preview from it
+/// would describe a file the ranges beside it do not.
+fn preview_of(
+    db: &ide::RootDatabaseImpl,
+    file_id: vfs::FileId,
+    range: &line_index::LineColRange,
+    // The earliest byte a statement covering this line can begin at — the enclosing method,
+    // or the file. Redaction is armed by a marker standing before its literal in the same
+    // statement, and BSL wraps long assignments freely: handed one physical line, the filter
+    // never sees a `Пароль =` that ended up on the line above, and the secret goes out in
+    // clear text. It is the caller's business to say where the statement can start, because
+    // only the caller knows which method the occurrence sits in.
+    context: u32,
+) -> Option<Preview> {
+    let (source, line_at) = ide::line_with_context(db, file_id, range.start_line, context)?;
+
+    // Masked BEFORE the line is cut out of it, for the reason above and for one more: the
+    // marker may also stand earlier on the same line, outside any window drawn around the
+    // occurrence. What masking costs is the byte correspondence between the published columns
+    // and the snippet, and `snippet_redacted` withdraws exactly that.
+    //
+    // Where the line and the occurrence END UP is asked of the masker, not guessed. Masking
+    // moves them either way — left when the secret was longer than `***`, right when it was
+    // shorter — and any search for the name near its old column settles on a namesake
+    // whenever one stands closer than the shift, publishing a window around a different place
+    // that reads as if it were the right one.
+    let occurrence_at = line_at + byte_of_utf16_col(&source[line_at..], range.start_character);
+    let (sanitized, moved) = crate::tools::redact::redact_secrets_tracking(
+        &source,
+        &[line_at, occurrence_at.min(source.len())],
+    );
+    let (text, line_from, occurrence_from) = (&sanitized, moved[0], moved[1]);
+
+    // Trailing whitespace and the `\r` a CRLF line keeps go; leading whitespace never does,
+    // because the published columns are counted from the start of the line.
+    let line = text.get(line_from..)?.trim_end();
+    // The flag describes THIS line, not the context it was masked in. A secret two lines
+    // above changes the slice and not the caption, and a record marked redacted for that
+    // would withdraw a byte correspondence its own line still keeps.
+    let redacted = line != source.get(line_at..)?.trim_end();
+    let start = utf16_len(&text[line_from..occurrence_from.clamp(line_from, text.len())]);
+
+    // The occurrence's own text, so a window has something to aim at. Taken after masking,
+    // because that is the text the snippet is cut from.
+    let name_width = if range.end_line == range.start_line {
+        range.end_character.saturating_sub(range.start_character)
+    } else {
+        utf16_len(line).saturating_sub(start)
+    };
+
+    let width = utf16_len(line);
+    let window_start = if width <= PREVIEW_CAP {
+        0
+    } else {
+        let lead = start.saturating_sub(PREVIEW_LEAD).min(width - PREVIEW_CAP);
+        // A name wider than the window would be pushed off the end by its own lead, and a
+        // preview without the occurrence in it is the plausible-looking wrong answer this
+        // tool exists to end.
+        if start.saturating_sub(lead) + name_width > PREVIEW_CAP {
+            start.min(width)
+        } else {
+            lead
+        }
+    };
+    let window_end = window_start.saturating_add(PREVIEW_CAP).min(width);
+
+    let (start_character, snippet) = utf16_window(line, window_start, window_end);
+    Some(Preview {
+        snippet,
+        start_character,
+        truncated: window_start > 0 || window_end < width,
+        redacted,
+    })
+}
+
+/// The earliest byte a statement covering an occurrence can begin at.
+///
+/// A statement cannot cross a method boundary, so the method's own start is a tight and safe
+/// floor; module-level code has none, and the file is the floor there.
+fn statement_floor(enclosing: Option<syntax::TextRange>) -> u32 {
+    enclosing.map_or(0, |range| u32::from(range.start()))
+}
+
+/// The byte offset a UTF-16 column names, clamped to the end of the text.
+fn byte_of_utf16_col(text: &str, column: u32) -> usize {
+    let mut units = 0u32;
+    for (at, ch) in text.char_indices() {
+        if units >= column {
+            return at;
+        }
+        units += ch.len_utf16() as u32;
+    }
+    text.len()
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.encode_utf16().count() as u32
+}
+
+/// The `[from, to)` slice of a line in UTF-16 units, with the column it actually starts at.
+///
+/// A boundary inside a surrogate pair snaps outward to the character that holds it, and the
+/// column is reported as the snapped one: a start column that does not name where the text
+/// begins would make the published offset index the wrong character.
+fn utf16_window(line: &str, from: u32, to: u32) -> (u32, String) {
+    let mut column = 0u32;
+    let mut start_byte = line.len();
+    let mut end_byte = line.len();
+    let mut start_column = from;
+    for (byte, ch) in line.char_indices() {
+        if column >= from && start_byte == line.len() {
+            start_byte = byte;
+            start_column = column;
+        }
+        if column >= to {
+            end_byte = byte;
+            break;
+        }
+        column += ch.len_utf16() as u32;
+    }
+    if start_byte == line.len() {
+        start_column = column;
+    }
+    (start_column, line[start_byte..end_byte.max(start_byte)].to_owned())
+}
+
+/// A line quoted as evidence rather than as a caption: what stands where the caller aimed.
+/// Unconditional — evidence is not decoration and is not paid for out of the preview budget.
+///
+/// It carries the same two flags a preview does, and it has to. The field exists so a caller
+/// can hold this line against its own buffer and see WHICH of the two pictures moved; a line
+/// silently capped or silently masked turns that comparison into a false difference — a tail
+/// that never existed, or `***` where the file has a literal.
+fn evidence_line(db: &ide::RootDatabaseImpl, file_id: vfs::FileId, line: u32) -> Option<Preview> {
+    // The file is the context here: this line is named by a coordinate and not by an
+    // occurrence, so there is no method around it to bound the statement by. One such line is
+    // quoted per refusal, so the cost is paid once.
+    let (source, line_at) = ide::line_with_context(db, file_id, line, 0)?;
+    let (sanitized, moved) = crate::tools::redact::redact_secrets_tracking(&source, &[line_at]);
+    let line = sanitized.get(moved[0]..)?.trim_end();
+    // As above: the flag is about this line, not about the statement it was masked within.
+    let redacted = line != source.get(line_at..)?.trim_end();
+    let width = utf16_len(line);
+    let (start_character, snippet) = utf16_window(line, 0, PREVIEW_CAP);
+    Some(Preview { snippet, start_character, truncated: width > PREVIEW_CAP, redacted })
 }
 
 /// The dictionary's own answer, under its own key: this tool's `total` counts
@@ -577,17 +1049,62 @@ fn distinct_roots(declarations: &[Value]) -> usize {
     seen.len()
 }
 
+/// The completeness details this tool writes. Named once because the preview reserve has to
+/// measure the very strings the answer will carry: a reserve built from one spelling and an
+/// envelope written with another is a bound that holds only by luck.
+const RESULT_CAP_LIMIT: &str = "more references than `limit`; narrow with `area_root_id`/\
+                                `area_path_prefix`/`kinds`, or walk `files`";
+const RESULT_CAP_FILES: &str = "the walk stopped at `max_files`, so `total` is a lower bound; \
+                                raise `max_files` or narrow the area before the walk";
+const TRIMMED: &str = "trimmed to fit `max_output_tokens`";
+const PREVIEWS_OMITTED: &str = "`max_output_tokens` left no room for some previews; the \
+                                references themselves are all here";
+const ANCHOR_CAP: &str = "the anchor was chosen from a capped candidate list, so the outcome \
+                          itself may miss a declaration; pass a qualified `symbol` to decide \
+                          it exactly";
+const ANCHOR_CAP_TEXT: &str = "the anchor was chosen from a capped candidate list, so the \
+                               outcome itself may miss a symbol; narrow `line_content` to \
+                               text that names only what you mean";
+const UNREADABLE: &str = "some workspace files could not be read and were left out of the walk";
+
+/// Which capped-anchor detail this answer will carry. One function, because the preview
+/// reserve has to weigh the very string the envelope will hold, and the two differ in length.
+fn anchor_cap_detail(anchor: &ReferenceAnchor) -> &'static str {
+    match anchor {
+        ReferenceAnchor::Text { .. } => ANCHOR_CAP_TEXT,
+        _ => ANCHOR_CAP,
+    }
+}
+
+/// An upper bound on what `finish` still has to add to this body.
+///
+/// Built, not guessed: the widest revision and topology a `u64` can spell, a stale mark, and
+/// exactly the completeness it is handed — which the caller has already filled with every
+/// reason still to come. Counting one of those reasons again here would reserve for a line
+/// written once, and the previews would pay for it.
+fn envelope_tokens(completeness: &loc::Completeness) -> usize {
+    let freshness = loc::Freshness::new(loc::FreshnessSource::Resident, completeness.clone())
+        .with_revision(u64::MAX)
+        .with_topology(u64::MAX)
+        // `false` is the LONGER spelling of the two, and the bound has to be the widest form.
+        .with_stale(false)
+        .to_value();
+    let key = r#","freshness":"#.len();
+    serde_json::to_string(&freshness).map(|text| text.len() + key).unwrap_or(0).div_ceil(4)
+}
+
+/// Every key a preview writes, so one that did not fit can be taken back off the record it
+/// was measured on.
+const PREVIEW_KEYS: [&str; 4] =
+    ["snippet", "snippet_start_character", "snippet_truncated", "snippet_redacted"];
+
 fn items_tokens(body: &Map<String, Value>) -> usize {
     serde_json::to_string(body).map(|text| text.len()).unwrap_or(0).div_ceil(4)
 }
 
-fn hit_value(db: &ide::RootDatabaseImpl, roots: &WorkspaceRoots, hit: &ReferenceHit) -> Value {
+fn hit_value(place: &ide::ResolvedPlace, roots: &WorkspaceRoots, hit: &ReferenceHit) -> Value {
     let mut entry = Map::new();
-    insert_resolved_location(
-        &ide::resolve_file_range(db, hit.file_id, Some(hit.range), hit.enclosing_range),
-        Some(roots),
-        &mut entry,
-    );
+    insert_resolved_location(place, Some(roots), &mut entry);
     entry.insert("kind".into(), json!(hit.kind.as_str()));
     Value::Object(entry)
 }
@@ -611,14 +1128,39 @@ pub(crate) const DEFAULT_BUDGET: usize = DEFAULT_OUTPUT_BUDGET_TOKENS;
 pub(crate) struct ReferencesResponse {
     /// Version of this response shape. Always `"1"`.
     schema_version: String,
-    /// `resolved` | `ambiguous` | `not_found` | `unsupported_symbol`.
+    /// What happened, from the closed vocabulary `resolved` | `ambiguous` | `not_found` |
+    /// `unsupported_symbol` | `anchor_stale`.
     outcome: String,
     /// The `symbol` the request anchored on, echoed back.
     symbol: Option<String>,
+    /// Which anchor the answer followed: `mode` from the closed vocabulary `symbol` |
+    /// `position` | `line_content`; the `line` it stood on, whenever it stood anywhere — always
+    /// for `position`, which stands where it was told to, and for `line_content` once the quote
+    /// picked out one symbol; and `relocated_from_line` when the quoted text was found
+    /// somewhere other than the line the request named. An `ambiguous` or `anchor_stale` answer
+    /// by quote carries no `line`, because the anchor landed on nothing — which is what those
+    /// two outcomes say.
+    anchor: Option<Value>,
+    /// `anchor_stale` only: why the quoted line anchors nothing any more — `reason` from the
+    /// closed vocabulary `not_in_file` | `column_outside_quoted_text` |
+    /// `no_name_in_quoted_text` | `name_not_resolved` — with `line_content_matches`, how many
+    /// lines still carry the quote, and `actual_line`, what stands at the line that was asked
+    /// for, flagged `actual_line_truncated`/`actual_line_redacted` when it was capped or
+    /// masked, so holding it against your own buffer cannot show a difference the file does
+    /// not have.
+    anchor_stale: Option<Value>,
+    /// `ambiguous` by quoted line: the places that line could have meant, each with a
+    /// `location`, the line itself as evidence, a `symbol` when a qualified name addresses
+    /// it, and `pointed_by_line` on the place the request's own `line` stood at. What
+    /// `declarations` are to an ambiguity by name.
+    anchor_sites: Option<Vec<Value>>,
     /// The area filter as it was applied, with how many files it selected.
     area: Option<Value>,
     /// `resolved` only: the occurrences, each with a `location` (or
-    /// `location_unavailable`) and a `kind`.
+    /// `location_unavailable`) and a `kind`. With `include_preview`, each also carries
+    /// `snippet` and the `snippet_start_character` it begins at, plus `snippet_truncated`
+    /// when the line was windowed and `snippet_redacted` when a literal was masked — after
+    /// which the columns no longer index the snippet byte for byte.
     references: Option<Vec<Value>>,
     /// `resolved` only: how many occurrences passed the area and kind filters,
     /// counted before `limit`.
@@ -637,6 +1179,10 @@ pub(crate) struct ReferencesResponse {
     /// `resolved` only: the histogram itself was cut by the output budget, so
     /// whole files are missing from it.
     histogram_truncated: Option<bool>,
+    /// `include_preview` only: how many references went without a preview because the budget
+    /// left after the answer itself ran out. The references are all there — a preview is a
+    /// caption, and it is never paid for with the answer.
+    previews_omitted: Option<usize>,
     /// `ambiguous` by qualified name: the declarations to choose between.
     declarations: Option<Vec<Value>>,
     /// How to turn an `ambiguous` answer into a resolved one.
@@ -680,21 +1226,33 @@ mod tests {
         }
     }
 
-    /// The category codes a closed-vocabulary sentence lists, read out of the text that
+    /// Every field of this tool whose values are published as a closed vocabulary.
+    ///
+    /// The list is what makes the reading unambiguous: a vocabulary belongs to the field
+    /// named NEAREST before the phrase that introduces it, so two vocabularies in one
+    /// paragraph cannot be read into each other. A new field added without a row here
+    /// publishes a vocabulary nothing checks — which is why the rows are named, not sniffed.
+    const VOCABULARY_FIELDS: [&str; 4] = ["outcome", "category", "mode", "reason"];
+
+    /// The codes a closed-vocabulary sentence lists for one field, read out of the text that
     /// publishes it.
     ///
-    /// Found by the phrase that INTRODUCES the vocabulary, not by one of its values: an
-    /// anchor on a live code cannot see a dead one written to the left of it, which is the
-    /// same hard-wired knowledge of one value that the list of dead codes was. Both texts
-    /// name the field before the phrase, so the field decides which vocabulary is read —
-    /// the outcome and kind vocabularies live in the same paragraphs.
-    fn closed_vocabulary_of(text: &str) -> Vec<String> {
+    /// Found by the phrase that INTRODUCES the vocabulary and by the field standing closest
+    /// before it — never by one of the values: an anchor on a live code cannot see a dead one
+    /// written to the left of it, which is the same hard-wired knowledge of one value that a
+    /// list of dead codes was.
+    fn closed_vocabulary_of(text: &str, field: &str) -> Vec<String> {
         let mut codes = Vec::new();
         for phrase in ["closed vocabulary", "закрытый словарь"] {
             for at in text.match_indices(phrase).map(|(at, _)| at) {
                 let lead_start =
                     text[..at].char_indices().rev().nth(120).map_or(0, |(index, _)| index);
-                if !text[lead_start..at].contains("category") {
+                let lead = &text[lead_start..at];
+                let nearest = VOCABULARY_FIELDS
+                    .iter()
+                    .filter_map(|candidate| lead.rfind(candidate).map(|at| (at, *candidate)))
+                    .max_by_key(|(at, _)| *at);
+                if nearest.map(|(_, name)| name) != Some(field) {
                     continue;
                 }
                 let mut rest = text[at + phrase.len()..].trim_start_matches(SEPARATORS);
@@ -719,61 +1277,99 @@ mod tests {
     /// doc comment carries into it.
     const SEPARATORS: [char; 6] = [' ', '\n', '\r', '\\', 'n', '/'];
 
-    /// Two closed vocabularies leave this tool on the wire, and their only worth over
-    /// free-form strings is that a consumer may match on them. That holds while the document
-    /// a consumer reads carries every value.
+    /// A `ReferencesResult` that carries no answer — enough to read an anchor block out of
+    /// `anchor_value`, which is the only place the anchor modes are spelled.
+    fn no_answer() -> ReferencesResult {
+        ReferencesResult {
+            outcome: ReferencesOutcome::NotFound,
+            body_source: BodySource::Resident,
+            hits: Vec::new(),
+            per_file: Vec::new(),
+            declarations: Vec::new(),
+            candidates: None,
+            files_scanned: 0,
+            files_capped: false,
+            anchor_candidates_capped: false,
+            anchor_line: None,
+            anchor_sites: Vec::new(),
+        }
+    }
+
+    /// Four closed vocabularies leave this tool on the wire, and their only worth over
+    /// free-form strings is that a consumer may match on them. That holds exactly while the
+    /// two texts a consumer reads — the section of the tools document and the published
+    /// `outputSchema` — carry every value the surface serves and no value it does not.
+    ///
+    /// Set equality, not one inclusion: the forward half catches a value added to the code
+    /// and forgotten in the text, and the backward half catches one left in the text (or in
+    /// a doc comment that becomes the schema, and through it the published
+    /// `output_schema_fingerprint`) after the surface stopped serving it. A closed
+    /// vocabulary with an unreachable value teaches a state a client waits for forever.
     #[test]
     fn every_published_value_is_named_where_the_tool_is_described() {
         let section = references_section();
+        let schema = rmcp::handler::server::tool::schema_for_type::<ReferencesResponse>();
+        let published = serde_json::to_string(&schema).expect("the schema serializes");
 
-        let outcomes = [
+        let outcomes: Vec<String> = [
             ReferencesOutcome::Resolved,
             ReferencesOutcome::Ambiguous,
             ReferencesOutcome::NotFound,
             ReferencesOutcome::UnsupportedSymbol {
                 category: ide::UnsupportedCategory::UnknownScope,
             },
-        ];
-        for outcome in &outcomes {
-            let code = outcome_str(outcome);
-            assert!(
-                section.contains(&format!("`{code}`")),
-                "outcome `{code}` is served but the tool's section does not name it",
-            );
-        }
+            ReferencesOutcome::AnchorStale {
+                reason: ide::AnchorStaleReason::NotInFile,
+                line_matches: 0,
+            },
+        ]
+        .iter()
+        .map(|outcome| outcome_str(outcome).to_owned())
+        .collect();
 
-        for category in ide::UnsupportedCategory::ALL {
-            let code = category.as_str();
-            assert!(
-                section.contains(&format!("`{code}`")),
-                "category `{code}` is served but the tool's section does not name it",
-            );
-        }
+        let categories: Vec<String> =
+            ide::UnsupportedCategory::ALL.iter().map(|c| c.as_str().to_owned()).collect();
+        let reasons: Vec<String> =
+            ide::AnchorStaleReason::ALL.iter().map(|r| r.as_str().to_owned()).collect();
 
-        // The other direction, which the loops above cannot see: a code the schema or the
-        // document still names after the surface stopped serving it. A closed vocabulary
-        // with an unreachable value teaches a state a client will wait for forever, and it
-        // travels in the published `output_schema_fingerprint` as part of the contract.
-        //
-        // Read out of the published text, not compared against a list of codes known to be
-        // dead: such a list only ever catches the value that put it there, and the next
-        // stale one walks past the gate that exists to stop it.
-        let served: Vec<&str> =
-            ide::UnsupportedCategory::ALL.iter().map(|category| category.as_str()).collect();
-        let schema = rmcp::handler::server::tool::schema_for_type::<ReferencesResponse>();
-        let published = serde_json::to_string(&schema).expect("the schema serializes");
-        for source in [published.as_str(), section] {
-            let listed = closed_vocabulary_of(source);
-            assert!(
-                !listed.is_empty(),
-                "the category vocabulary was not found in the published text, so this gate \
-                 read nothing",
-            );
-            for code in listed {
+        // Read back out of the projection that spells them, not copied here: a mode this
+        // test knows and `anchor_value` does not would be a vocabulary the gate invented.
+        let modes: Vec<String> = [
+            ReferenceAnchor::Name("Модуль.Метод".to_owned()),
+            ReferenceAnchor::Position { file_id: vfs::FileId(0), line: 0, column: 0 },
+            ReferenceAnchor::Text {
+                file_id: vfs::FileId(0),
+                line: None,
+                column: None,
+                content: "Метод".to_owned(),
+            },
+        ]
+        .iter()
+        .map(|anchor| {
+            anchor_value(anchor, &no_answer())["mode"].as_str().expect("a mode").to_owned()
+        })
+        .collect();
+
+        for (field, served) in
+            [("outcome", outcomes), ("category", categories), ("reason", reasons), ("mode", modes)]
+        {
+            let mut served: Vec<String> = served;
+            served.sort();
+            served.dedup();
+            for (origin, source) in
+                [("the tool's section", section), ("the published schema", published.as_str())]
+            {
+                let mut listed = closed_vocabulary_of(source, field);
+                listed.sort();
+                listed.dedup();
                 assert!(
-                    served.contains(&code.as_str()),
-                    "`{code}` is published in the `category` vocabulary, but no input can \
-                     produce it (served: {served:?})",
+                    !listed.is_empty(),
+                    "the `{field}` vocabulary was not found in {origin}, so this gate read \
+                     nothing there",
+                );
+                assert_eq!(
+                    listed, served,
+                    "the `{field}` vocabulary in {origin} is not the one the surface serves",
                 );
             }
         }
@@ -792,6 +1388,91 @@ mod tests {
             assert!(
                 KIND_VOCABULARY.contains(code),
                 "kind `{code}` is served but the published vocabulary omits it",
+            );
+        }
+    }
+
+    /// A window whose edge lands inside a surrogate pair snaps outward, and the column it
+    /// reports is the one it actually starts at.
+    ///
+    /// The input is a line with an astral character in it, because that is the only input on
+    /// which a UTF-16 window and a character window differ at all: over the BMP — every BSL
+    /// identifier, Cyrillic included — the two agree, and a gate written on Cyrillic alone
+    /// would pass on an implementation that counted the wrong unit.
+    #[test]
+    fn a_window_edge_inside_a_surrogate_pair_snaps_to_the_character() {
+        // `𝕏` is one character and TWO UTF-16 units, so unit 1 falls in the middle of it.
+        let line = "аб𝕏вг";
+        assert_eq!(utf16_len(line), 6, "two ordinary characters, one pair, two more");
+
+        let (start, text) = utf16_window(line, 3, 6);
+        assert_eq!(start, 4, "the edge inside the pair moved past it, and said so");
+        assert_eq!(text, "вг");
+
+        let (start, text) = utf16_window(line, 2, 4);
+        assert_eq!(start, 2, "an edge on a boundary stays put");
+        assert_eq!(text, "𝕏");
+
+        // The control: the same reading over a line with no pair in it, where a character
+        // window and a UTF-16 window cannot disagree.
+        let plain = "абвгд";
+        assert_eq!(utf16_window(plain, 2, 4), (2, "вг".to_owned()));
+
+        // The whole contract in one line: whatever comes back is the slice of the ORIGINAL
+        // line starting at the column reported, in the units the column is counted in.
+        for from in 0..=utf16_len(line) {
+            for to in from..=utf16_len(line) {
+                let (start, text) = utf16_window(line, from, to);
+                let units: Vec<u16> = line.encode_utf16().collect();
+                let taken: Vec<u16> = text.encode_utf16().collect();
+                assert_eq!(
+                    &units[start as usize..start as usize + taken.len()],
+                    &taken[..],
+                    "window {from}..{to} does not sit at the column it published",
+                );
+            }
+        }
+    }
+
+    /// Gate I11 — which answers earn one forced rescan is decided by the ANSWER, and the
+    /// list is exhaustive over the outcomes this surface serves.
+    ///
+    /// The cell that matters is the last one. `NotFound` is common to all three anchor
+    /// forms, so a predicate written as "any miss" would switch a rescan on for
+    /// `path`+`line`, where it has never been on — and a rescan can turn that miss into a
+    /// hit, which changes an answer this stage promised not to touch.
+    #[test]
+    fn a_rescan_is_earned_by_the_outcome_and_not_by_the_shape_of_the_anchor() {
+        let answer = |outcome: &str, symbol: Option<&str>| {
+            let mut body = Map::new();
+            body.insert("outcome".into(), json!(outcome));
+            if let Some(symbol) = symbol {
+                body.insert("symbol".into(), json!(symbol));
+            }
+            Answer {
+                body,
+                source: BodySource::Resident,
+                completeness: loc::Completeness::complete(),
+            }
+        };
+
+        assert!(
+            warrants_rescan(&answer("anchor_stale", None)),
+            "a quote the resident does not carry may be a resident that fell behind",
+        );
+        assert!(
+            warrants_rescan(&answer("not_found", Some("Продажи.Расчёт"))),
+            "a name nothing declares may be a name declared since the last scan",
+        );
+        assert!(
+            !warrants_rescan(&answer("not_found", None)),
+            "a positional miss says only that no name stands at those coordinates, and a \
+             second look at the same coordinates says it again",
+        );
+        for settled in ["resolved", "ambiguous", "unsupported_symbol"] {
+            assert!(
+                !warrants_rescan(&answer(settled, Some("Продажи.Расчёт"))),
+                "`{settled}` is an answer, not a miss",
             );
         }
     }
@@ -852,14 +1533,17 @@ mod tests {
             column: None,
             area_root_id: None,
             area_path_prefix: None,
+            line_content: None,
             kinds: &[],
             include_declaration: None,
             limit: None,
             max_files: None,
+            include_preview: None,
         };
 
+        let anchor = ide::ReferenceAnchor::Name("Продажи.Расчёт".to_owned());
         let read_whole =
-            render(&db, &roots, &result, &params, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 0);
+            render(&db, &roots, &result, &params, &anchor, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 0);
         assert!(
             read_whole.completeness.is_complete(),
             "control: nothing was held out of service: {:?}",
@@ -867,7 +1551,7 @@ mod tests {
         );
 
         let with_a_hole =
-            render(&db, &roots, &result, &params, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 1);
+            render(&db, &roots, &result, &params, &anchor, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 1);
         let reasons = with_a_hole.completeness.to_value();
         assert!(
             reasons["reasons"]

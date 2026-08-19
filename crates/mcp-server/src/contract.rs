@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.11";
+pub const CONTRACT_VERSION: &str = "1.12";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -152,8 +152,8 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "references",
         actions: &[],
         note: Some(
-            "one of `symbol` or `path`+`line` is required; opt-in — a launch has to name it \
-             with `--enable-tool references`",
+            "one of `symbol` or `path` with `line` and/or `line_content` is required; \
+             opt-in — a launch has to name it with `--enable-tool references`",
         ),
         output_schema_version: Some("1"),
         // Opt-in: the full occurrence list of a popular name is a large answer, and a
@@ -712,7 +712,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.11",
+              "contract_version": "1.12",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -813,8 +813,8 @@ mod tests {
                       {
                         "actions": [],
                         "name": "references",
-                        "note": "one of `symbol` or `path`+`line` is required; opt-in — a launch has to name it with `--enable-tool references`",
-                        "output_schema_fingerprint": "blake3:8bd9b8c89f499607b5be2540567f9fb8bb159aeea4ea479d06bcb0284ee2ce0e",
+                        "note": "one of `symbol` or `path` with `line` and/or `line_content` is required; opt-in — a launch has to name it with `--enable-tool references`",
+                        "output_schema_fingerprint": "blake3:3f954c4b5a2f47d67ceb3dbf31228a0c436589a39fad5539449b1b4af093a09c",
                         "output_schema_version": "1",
                         "params": [
                           {
@@ -848,6 +848,12 @@ mod tests {
                             "type": "boolean"
                           },
                           {
+                            "name": "include_preview",
+                            "nullable": true,
+                            "required": false,
+                            "type": "boolean"
+                          },
+                          {
                             "name": "kinds",
                             "required": false,
                             "type": "array<string>"
@@ -863,6 +869,12 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "integer"
+                          },
+                          {
+                            "name": "line_content",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
                           },
                           {
                             "name": "max_files",

@@ -769,7 +769,8 @@ fn def_from_file_line(
     let text = db.file_text(file_id);
     let line_index = LineIndex::new(&text);
     let line_col = line_index.line_col(offset);
-    let snippet = line_text(&text, line_col.line).map(str::to_string);
+    let snippet = crate::name_lookup::line_text(db, file_id, line_col.line)
+        .map(|line| line.trim_end().to_owned());
     let to_line_col = |range: Option<TextRange>| {
         range.and_then(|range| line_index.utf16_line_col_range(&text, range))
     };
@@ -780,10 +781,6 @@ fn def_from_file_line(
         name_range: to_line_col(ranges.name),
         enclosing_range: to_line_col(ranges.enclosing),
     })
-}
-
-fn line_text(text: &str, line: u32) -> Option<&str> {
-    text.lines().nth(line as usize).map(str::trim_end)
 }
 
 fn file_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
