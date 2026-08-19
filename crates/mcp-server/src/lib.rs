@@ -250,7 +250,9 @@ struct SymbolInfoParams {
     path: Option<String>,
     /// `path`: 0-based line of the symbol occurrence.
     line: Option<u32>,
-    /// `path`: 0-based character offset within the line of the symbol occurrence (default 0).
+    /// `path`: 0-based offset within the line of the symbol occurrence, counted in UTF-16
+    /// units — the unit every column this server publishes is counted in, so a
+    /// `range.start_character` out of any answer goes straight back in (default 0).
     column: Option<u32>,
     /// Card sections to include: any of `definition` | `type` | `doc`. Empty = all. `usages`
     /// is always a summary and is added when the call graph is ready.
@@ -288,7 +290,9 @@ struct ReferencesParams {
     path: Option<String>,
     /// `path`: 0-based line of the occurrence to anchor on.
     line: Option<u32>,
-    /// `path`: 0-based character offset within the line. Defaults to 0 for a `path`+`line`
+    /// `path`: 0-based offset within the line, counted in UTF-16 units — the unit every
+    /// column this server publishes is counted in, so a `range.start_character` out of any
+    /// answer goes straight back in. Defaults to 0 for a `path`+`line`
     /// anchor; beside `line_content` it has NO default and narrows only when you pass it —
     /// sending one picks the token under it and refuses when that token is not in your quote,
     /// which is the opposite of what the quote is for.
@@ -2573,7 +2577,9 @@ mod tool_descriptions {
               - area_root_id: Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
             declared in the configuration and used from an extension takes `anchor_root_id: ""`
             with `area_root_id: "<extension>"`.
-              - column: `path`: 0-based character offset within the line. Defaults to 0 for a `path`+`line`
+              - column: `path`: 0-based offset within the line, counted in UTF-16 units — the unit every
+            column this server publishes is counted in, so a `range.start_character` out of any
+            answer goes straight back in. Defaults to 0 for a `path`+`line`
             anchor; beside `line_content` it has NO default and narrows only when you pass it —
             sending one picks the token under it and refuses when that token is not in your quote,
             which is the opposite of what the quote is for.
@@ -2654,7 +2660,9 @@ mod tool_descriptions {
             `graph` with the returned `graph_id`). Reads the resident host; while it builds it returns
             a retry envelope. The `usages` summary needs the call graph; if it is still indexing the
             core card is still served with `usages_unavailable`.
-              - column: `path`: 0-based character offset within the line of the symbol occurrence (default 0).
+              - column: `path`: 0-based offset within the line of the symbol occurrence, counted in UTF-16
+            units — the unit every column this server publishes is counted in, so a
+            `range.start_character` out of any answer goes straight back in (default 0).
               - include: Card sections to include: any of `definition` | `type` | `doc`. Empty = all. `usages`
             is always a summary and is added when the call graph is ready.
               - line: `path`: 0-based line of the symbol occurrence.

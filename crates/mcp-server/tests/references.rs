@@ -2123,6 +2123,62 @@ async fn the_hint_names_the_root_beside_the_path_it_recommends() {
     client.cancel().await.ok();
 }
 
+/// Gate — a column taken out of an answer goes back in unchanged.
+///
+/// Published columns are UTF-16, because that is what `position_encoding` declares. The
+/// `column` parameter has to read them the same way, and the only input that can tell the two
+/// unit systems apart is a character outside the BMP standing before the name: every BSL
+/// identifier, Cyrillic included, is one UTF-16 unit per character and would agree either way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_column_taken_from_an_answer_addresses_the_same_token_when_sent_back() {
+    let ws = stage_fixture();
+    // Twenty-five of them, not one: every astral character shifts a character-counted walk
+    // one place to the right, and a shift smaller than the identifier lands INSIDE the same
+    // token and resolves anyway. The stand has to move the column clear off the name, or it
+    // measures nothing.
+    let astral = "😀".repeat(25);
+    write_module(
+        ws.path(),
+        "Астральный",
+        &format!(
+            "Процедура Астральная() Экспорт\n    \
+             Текст = \"{astral}\"; ПервыйОбщийМодуль.НеУстаревшаяФункция();\n\
+             КонецПроцедуры\n"
+        ),
+    );
+    let client = client_with_references(ws.path()).await;
+
+    let answer = references(&client, &[("symbol", Value::from(STAND_METHOD))]).await;
+    let place = answer["references"]
+        .as_array()
+        .expect("the list")
+        .iter()
+        .map(|entry| &entry["location"])
+        .find(|location| location["path"].as_str().is_some_and(|p| p.contains("Астральный")))
+        .expect("the occurrence past the emoji")
+        .clone();
+
+    let round_trip = references(
+        &client,
+        &[
+            ("root_id", place["root_id"].clone()),
+            ("path", place["path"].clone()),
+            ("line", place["range"]["start_line"].clone()),
+            ("column", place["range"]["start_character"].clone()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        round_trip["outcome"], "resolved",
+        "a column this answer published did not address the token it came from: {round_trip}",
+    );
+    assert_eq!(
+        round_trip["total"], answer["total"],
+        "and it addressed the same symbol: {round_trip}",
+    );
+
+    client.cancel().await.ok();
+}
 /// Gate — masking a line does not move the window onto a different occurrence of the name.
 ///
 /// Redaction is not only a shortening: a literal of fewer than three characters grows into

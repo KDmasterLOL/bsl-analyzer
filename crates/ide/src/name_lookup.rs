@@ -215,10 +215,11 @@ pub fn resolve_place(db: &RootDatabaseImpl, place: &NamePlace) -> ResolvedPlace 
 /// the line — at a line end the token search would select the NEXT line's first token and
 /// answer for a symbol the caller never pointed at.
 ///
-/// `column` is a 0-based CHARACTER offset, as every surface spells it, while line-index
-/// columns are byte offsets: the conversion walks characters because BSL identifiers are
-/// Cyrillic. One implementation on purpose — it is the inverse of [`resolve_file_range`],
-/// and two copies drifting apart would make one `path`+`line`+`column` name two tokens.
+/// `column` is counted in UTF-16 units, the unit every published column is counted in
+/// (`position_encoding`). That makes this the exact inverse of [`resolve_file_range`], so a
+/// caller may take a `start_character` out of any answer and hand it straight back — which
+/// is what every surface now tells it to do. Walking Unicode scalars instead agrees on the
+/// BMP, where all of BSL lives, and parts company on the one line that carries an emoji.
 pub fn offset_for_line_col(
     db: &RootDatabaseImpl,
     file_id: FileId,
@@ -232,10 +233,8 @@ pub fn offset_for_line_col(
     let line_index =
         ide_db::RootDatabase::line_index(db, ide_db::base_db::FileIdInput::new(db, file_id));
     let line_start = line_index.try_line_start(line)?;
-    let line_str = text[u32::from(line_start) as usize..].split('\n').next().unwrap_or("");
-    let byte_in_line =
-        line_str.char_indices().nth(column as usize).map_or(line_str.len(), |(i, _)| i);
-    let offset = line_start + TextSize::from(byte_in_line as u32);
+    let byte_in_line = line_index.utf16_col_to_byte_col(&text, line, column)?;
+    let offset = line_start + TextSize::from(byte_in_line);
 
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
