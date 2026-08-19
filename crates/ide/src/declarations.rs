@@ -337,9 +337,15 @@ enum Owner {
 ///
 /// `symbol_info` reads the same spelling with a priority — a method before a
 /// variable, and the object or record-set module before the manager module —
-/// returning on the first hit. Merging them into one bucket made a name it
-/// resolves cleanly come back `ambiguous` here, with no way to get at the
-/// object module's own method by name at all.
+/// returning on the first hit. Merging them into one bucket left no way to get at
+/// the object module's own method by name at all.
+///
+/// The priority is between the MODULES of one object and says nothing about two
+/// spellings of the object itself: a directory and its case variant are two
+/// declarations, reported as such, exactly as two same-named common modules are.
+/// `symbol_info` picks one of those through the first-wins `ModuleIndex`, and this
+/// surface deliberately does not — that divergence is the reason the index is not
+/// the basis here.
 ///
 /// The member kind ranks ABOVE the module kind because that is the order the
 /// card surface reads: a variable exported by the object module does not hide

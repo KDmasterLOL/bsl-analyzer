@@ -681,28 +681,43 @@ mod tests {
     }
 
     /// The category codes a closed-vocabulary sentence lists, read out of the text that
-    /// publishes it: the values stand in backticks, separated by `|`, and the run ends at
-    /// the first thing that is not one of those. Reading them beats listing the dead ones —
-    /// a list catches only the value that put it there.
+    /// publishes it.
+    ///
+    /// Found by the phrase that INTRODUCES the vocabulary, not by one of its values: an
+    /// anchor on a live code cannot see a dead one written to the left of it, which is the
+    /// same hard-wired knowledge of one value that the list of dead codes was. Both texts
+    /// name the field before the phrase, so the field decides which vocabulary is read —
+    /// the outcome and kind vocabularies live in the same paragraphs.
     fn closed_vocabulary_of(text: &str) -> Vec<String> {
         let mut codes = Vec::new();
-        let Some(start) = text.find("common_module").map(|at| at.saturating_sub(1)) else {
-            return codes;
-        };
-        let mut rest = &text[start..];
-        while let Some(stripped) = rest.strip_prefix('`') {
-            let Some((code, tail)) = stripped.split_once('`') else { break };
-            if code.is_empty() || !code.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
-                break;
+        for phrase in ["closed vocabulary", "закрытый словарь"] {
+            for at in text.match_indices(phrase).map(|(at, _)| at) {
+                let lead_start =
+                    text[..at].char_indices().rev().nth(120).map_or(0, |(index, _)| index);
+                if !text[lead_start..at].contains("category") {
+                    continue;
+                }
+                let mut rest = text[at + phrase.len()..].trim_start_matches(SEPARATORS);
+                while let Some(stripped) = rest.strip_prefix('`') {
+                    let Some((code, tail)) = stripped.split_once('`') else { break };
+                    if code.is_empty() || !code.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    {
+                        break;
+                    }
+                    codes.push(code.to_owned());
+                    rest = tail.trim_start_matches(SEPARATORS);
+                    let Some(next) = rest.strip_prefix('|') else { break };
+                    rest = next.trim_start_matches(SEPARATORS);
+                }
             }
-            codes.push(code.to_owned());
-            // A serialized schema writes its line breaks as the two characters `\` and `n`.
-            rest = tail.trim_start_matches([' ', '\n', '\\', 'n', '/']);
-            let Some(next) = rest.strip_prefix('|') else { break };
-            rest = next.trim_start_matches([' ', '\n', '\\', 'n', '/']);
         }
         codes
     }
+
+    /// What may stand between two values of a published vocabulary: spaces, the line breaks
+    /// of a document, the `\` and `n` a serialized schema writes them as, and the `///` a
+    /// doc comment carries into it.
+    const SEPARATORS: [char; 6] = [' ', '\n', '\r', '\\', 'n', '/'];
 
     /// Two closed vocabularies leave this tool on the wire, and their only worth over
     /// free-form strings is that a consumer may match on them. That holds while the document
