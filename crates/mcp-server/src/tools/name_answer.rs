@@ -135,7 +135,18 @@ fn insert_location(
     place: &ide::NamePlace,
     address: &mut Map<String, Value>,
 ) {
-    let resolved = ide::resolve_place(db, place);
+    insert_resolved_location(&ide::resolve_place(db, place), roots, address);
+}
+
+/// Publish a resolved place as the contract's `location`, or the reason there is
+/// none. Shared with `references`, whose hits are places without being
+/// declarations: one mapping, so the two cannot name the same absence
+/// differently.
+pub(crate) fn insert_resolved_location(
+    resolved: &ide::ResolvedPlace,
+    roots: Option<&bsl_search::WorkspaceRoots>,
+    address: &mut Map<String, Value>,
+) {
     match (&resolved.path, roots) {
         (Some(path), Some(roots)) => {
             match loc::Location::from_path(roots, std::path::Path::new(path)) {

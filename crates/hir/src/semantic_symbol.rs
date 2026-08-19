@@ -195,10 +195,6 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return Some(symbol_from_definition(self.db(), definition, None));
         }
 
-        if let Some(definition) = self.sema.try_resolve_builtin(token.text()) {
-            return Some(symbol_from_definition(self.db(), definition, None));
-        }
-
         if let Some(symbol) = self.symbol_for_body_local(token) {
             return Some(symbol);
         }
@@ -312,11 +308,6 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return Some(def);
         }
 
-        if let Some(def) = self.sema.try_resolve_builtin(token_text) {
-            tracing::debug!(?def, "resolved as builtin");
-            return Some(def);
-        }
-
         if let Some(def) = self.resolve_local_to_definition(token) {
             tracing::debug!(?def, "resolved as local symbol");
             return Some(def);
@@ -332,10 +323,17 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             return Some(Definition::Variable(var_id));
         }
 
-        // Last, because it is a PLATFORM global: a module method or variable named
-        // like a metadata plural holds the name, and asking the collection first
-        // made its own declaration unreachable from its uses. Same Local → Module →
-        // Global order the comment above states for global common-module exports.
+        // Platform scopes come last, and for one reason: a module that declares
+        // `Сообщить` means its own procedure everywhere in itself. Asking the platform
+        // first made such a declaration unreachable from its own uses — the reference
+        // walk then answered "no walk exists" about a method it had just found.
+        if let Some(def) = self.sema.try_resolve_builtin(token_text) {
+            tracing::debug!(?def, "resolved as builtin");
+            return Some(def);
+        }
+
+        // Same rule, same order: a module method or variable named like a metadata
+        // plural holds the name.
         if bsl_metadata::MdoType::is_plural_form(token_text) {
             if let Some(mdo_type) = bsl_metadata::MdoType::from_plural(token_text) {
                 tracing::debug!(?mdo_type, "resolved as MDO collection");
@@ -350,12 +348,17 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     /// See `Semantics::global_export_definition`'s shadow contract: a nearer
     /// scope (local/parameter, same-module method or variable) wins over the
     /// global common-module export.
-    fn global_export_definition(&self, token: &syntax::SyntaxToken) -> Option<Definition> {
+    /// Whether this file's own scopes already answer the name — a binding of the body, or
+    /// a method or variable of the module. Everything workspace-wide loses to them.
+    fn shadowed_by_local_or_module(&self, token: &syntax::SyntaxToken) -> bool {
         let name = Name::new(token.text());
-        let shadowed = self.resolve_local_to_definition(token).is_some()
+        self.resolve_local_to_definition(token).is_some()
             || self.module_method(&name).is_some()
-            || self.module_variable(&name).is_some();
-        if shadowed {
+            || self.module_variable(&name).is_some()
+    }
+
+    fn global_export_definition(&self, token: &syntax::SyntaxToken) -> Option<Definition> {
+        if self.shadowed_by_local_or_module(token) {
             return None;
         }
 

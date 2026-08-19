@@ -264,6 +264,55 @@ struct SymbolInfoParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+struct ReferencesParams {
+    /// Qualified name of the symbol whose references you want: a common-module method
+    /// (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), an object/manager module method
+    /// (`Справочник.Товары.ОбновитьКэш`), a form-module method
+    /// (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
+    /// handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
+    /// declared without `Экспорт` has no qualified name — `symbol_info` reads the same
+    /// spelling the same way — so reach it by `path`+`line`.
+    symbol: Option<String>,
+    /// `symbol`: which root to look for the DECLARATION in. The way out of
+    /// `outcome: "ambiguous"`, when a configuration and an extension declare the same name.
+    /// Not a filter on the answer — that is `area_root_id`.
+    anchor_root_id: Option<String>,
+    /// `path`: the source root that path is spelled against, as carried by every `search`
+    /// code hit. Omit for a path already spelled against the workspace; `""` names the
+    /// configuration.
+    root_id: Option<String>,
+    /// Positional anchor for what no name addresses (a local, a parameter): absolute or
+    /// workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
+    path: Option<String>,
+    /// `path`: 0-based line of the occurrence to anchor on.
+    line: Option<u32>,
+    /// `path`: 0-based character offset within the line (default 0).
+    column: Option<u32>,
+    /// Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
+    /// declared in the configuration and used from an extension takes `anchor_root_id: ""`
+    /// with `area_root_id: "<extension>"`.
+    area_root_id: Option<String>,
+    /// Show only references under this root-relative directory prefix (e.g.
+    /// `CommonModules/Продажи`). Combine with `area_root_id`: one relative path lives in
+    /// every root that repeats the configuration's layout.
+    area_path_prefix: Option<String>,
+    /// Keep only these kinds: any of `declaration` | `call` | `write` | `read`. Empty = all.
+    #[serde(default)]
+    kinds: Vec<String>,
+    /// Whether the declaration itself is one of the references (default: true).
+    include_declaration: Option<bool>,
+    /// Cap on returned references (default 50, max 500). `total` is counted before it, and
+    /// the per-file histogram covers everything the limit hid.
+    limit: Option<usize>,
+    /// Cap on candidate files walked (default 2000, max 10000). Reaching it makes `total` a
+    /// lower bound and sets `narrowing_comparable: false`.
+    max_files: Option<usize>,
+    /// Output budget in tokens (~4 chars each), default 6000; a trimmed response says so in
+    /// `freshness.completeness`.
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 struct DiagnosticsParams {
     /// catalog | schema | status | file | workspace.
     action: String,
@@ -1526,6 +1575,126 @@ impl McpServer {
         .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
     }
 
+    /// Every occurrence of ONE symbol across the workspace, each labelled with what it does
+    /// at its site (`declaration` | `call` | `write` | `read`). Use to answer "who uses X",
+    /// "is this method called anywhere", "where is this variable written" before renaming or
+    /// deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
+    /// `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
+    /// `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
+    /// local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
+    /// `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
+    /// `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
+    /// could not read everything),
+    /// `ambiguous` (several declarations answer to that name — the answer's
+    /// `resolution_hint` names the axis that separates THESE ones: a root, a qualified
+    /// `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
+    /// name resolves to something no reference walk enumerates — a metadata object, a
+    /// platform member, a module as a whole). Narrow a large answer with `area_root_id`,
+    /// `area_path_prefix` or `kinds` and walk the per-file `files` histogram; there is no
+    /// cursor. Not for the caller graph of a method (use `graph` with its `graph_id`) or for
+    /// finding code by meaning (use `search`). Reads the resident host; while it builds it
+    /// returns a retry envelope.
+    #[tool(
+        name = "references",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            tools::references::ReferencesResponse,
+        >(),
+        annotations(read_only_hint = true)
+    )]
+    async fn references(
+        &self,
+        params: Parameters<ReferencesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+
+        let p = params.0;
+        if p.symbol.is_none() && p.path.is_none() {
+            return Err(McpError::invalid_params(
+                "one of 'symbol' or 'path'+'line' is required",
+                None,
+            ));
+        }
+
+        let diag = self.state.diagnostics().clone();
+        diag.ensure_loading();
+        match diag.status() {
+            DiagnosticsStatus::Disabled => {
+                return Err(McpError::invalid_params(
+                    "references is only available in the workspace profile",
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Failed(msg) => {
+                return Err(McpError::internal_error(
+                    format!("references database load failed: {msg}"),
+                    None,
+                ))
+            }
+            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
+                return Ok(tools::metadata::loading(&diag.status_report()))
+            }
+            DiagnosticsStatus::Ready { .. } => {}
+        }
+
+        let max_output_tokens = p.max_output_tokens.unwrap_or(tools::references::DEFAULT_BUDGET);
+
+        tokio::task::spawn_blocking(move || {
+            // The whole answer is assembled under the resident read lock: the hits, the
+            // paths they are published under and the root table that names them all
+            // describe ONE revision, and taking any of them afterwards would stamp the
+            // envelope of a resident that no longer produced the body.
+            let read = || {
+                diag.read(|resident, _generation| {
+                    let params = tools::references::Params {
+                        symbol: p.symbol.as_deref(),
+                        anchor_root_id: p.anchor_root_id.as_deref(),
+                        root_id: p.root_id.as_deref(),
+                        path: p.path.as_deref(),
+                        line: p.line,
+                        column: p.column,
+                        area_root_id: p.area_root_id.as_deref(),
+                        area_path_prefix: p.area_path_prefix.as_deref(),
+                        kinds: &p.kinds,
+                        include_declaration: p.include_declaration,
+                        limit: p.limit,
+                        max_files: p.max_files,
+                    };
+                    tools::references::answer(resident, &params, max_output_tokens)
+                })
+            };
+
+            let mut outcome = read();
+            // A name that matched nothing may be one added since the last throttled drift
+            // scan, and `not_found` is the outcome a caller acts on as final. Force ONE
+            // storm-guarded re-scan and retry, the same way a `symbol_info` card miss does.
+            if let ResidentOutcome::Ready(Ok(answer), _) = &outcome {
+                if p.symbol.is_some() && answer.is_miss() {
+                    diag.force_rescan();
+                    outcome = read();
+                }
+            }
+
+            match outcome {
+                ResidentOutcome::Ready(answer, freshness) => Ok(tools::references::finish(
+                    answer?,
+                    freshness.revision,
+                    freshness.topology,
+                    freshness.stale,
+                )),
+                ResidentOutcome::Loading => Ok(tools::metadata::loading(&diag.status_report())),
+                ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                    "references is only available in the workspace profile",
+                    None,
+                )),
+                ResidentOutcome::Failed(msg) => {
+                    Err(McpError::internal_error(format!("references database: {msg}"), None))
+                }
+            }
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+    }
+
     /// Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
     /// type mismatch, unresolved calls, and 180+ other rules. Use to check a file or the whole
     /// config for issues, or to discover which rules exist. Not for finding code (use `search`)
@@ -2104,6 +2273,48 @@ mod tool_descriptions {
         out
     }
 
+    /// The description is what an agent reads BEFORE any outcome, so it must not name an
+    /// axis the answer may contradict: an object module and its manager module are one
+    /// `ambiguous` in one root, where `anchor_root_id` separates nothing. The clause points
+    /// at the field that names the axis per answer, and this gate reads that clause alone —
+    /// `anchor_root_id` is a legitimate word elsewhere in the same text.
+    #[test]
+    fn the_references_description_defers_to_the_answers_own_hint() {
+        let tools = McpServer::workspace_tool_router().list_all();
+        let references = tools
+            .iter()
+            .find(|tool| tool.name == "references")
+            .expect("the workspace router declares `references`");
+        let description = references.description.as_deref().expect("a description");
+        let start = description.find("`ambiguous`").expect("the description names `ambiguous`");
+        let end = description[start..]
+            .find("`not_found`")
+            .map(|offset| start + offset)
+            .expect("the description names `not_found`");
+        let clause = &description[start..end];
+
+        let zero = description
+            .find("proven zero")
+            .map(|at| &description[at..])
+            .expect("the description promises a proven zero");
+        assert!(
+            zero.starts_with("proven zero unless")
+                || zero[..80.min(zero.len())].contains("total_is_lower_bound"),
+            "a walk cut short by `max_files` counts a floor, so the zero it reports proves \
+             nothing: {zero}",
+        );
+
+        assert!(
+            clause.contains("resolution_hint"),
+            "the ambiguity clause must send the agent to the field that names the axis: {clause}",
+        );
+        assert!(
+            !clause.contains("anchor_root_id"),
+            "one axis cannot be promised for every ambiguity — same-root declarations have \
+             none: {clause}",
+        );
+    }
+
     #[test]
     fn workspace_tools_contract() {
         let rendered = render(&McpServer::workspace_tool_router().list_all());
@@ -2295,6 +2506,58 @@ mod tool_descriptions {
             row cap fired too, the note says raising the budget alone will not help.
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
+
+            ## references
+            Every occurrence of ONE symbol across the workspace, each labelled with what it does
+            at its site (`declaration` | `call` | `write` | `read`). Use to answer "who uses X",
+            "is this method called anywhere", "where is this variable written" before renaming or
+            deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
+            `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
+            `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
+            local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
+            `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
+            `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
+            could not read everything),
+            `ambiguous` (several declarations answer to that name — the answer's
+            `resolution_hint` names the axis that separates THESE ones: a root, a qualified
+            `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
+            name resolves to something no reference walk enumerates — a metadata object, a
+            platform member, a module as a whole). Narrow a large answer with `area_root_id`,
+            `area_path_prefix` or `kinds` and walk the per-file `files` histogram; there is no
+            cursor. Not for the caller graph of a method (use `graph` with its `graph_id`) or for
+            finding code by meaning (use `search`). Reads the resident host; while it builds it
+            returns a retry envelope.
+              - anchor_root_id: `symbol`: which root to look for the DECLARATION in. The way out of
+            `outcome: "ambiguous"`, when a configuration and an extension declare the same name.
+            Not a filter on the answer — that is `area_root_id`.
+              - area_path_prefix: Show only references under this root-relative directory prefix (e.g.
+            `CommonModules/Продажи`). Combine with `area_root_id`: one relative path lives in
+            every root that repeats the configuration's layout.
+              - area_root_id: Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
+            declared in the configuration and used from an extension takes `anchor_root_id: ""`
+            with `area_root_id: "<extension>"`.
+              - column: `path`: 0-based character offset within the line (default 0).
+              - include_declaration: Whether the declaration itself is one of the references (default: true).
+              - kinds: Keep only these kinds: any of `declaration` | `call` | `write` | `read`. Empty = all.
+              - limit: Cap on returned references (default 50, max 500). `total` is counted before it, and
+            the per-file histogram covers everything the limit hid.
+              - line: `path`: 0-based line of the occurrence to anchor on.
+              - max_files: Cap on candidate files walked (default 2000, max 10000). Reaching it makes `total` a
+            lower bound and sets `narrowing_comparable: false`.
+              - max_output_tokens: Output budget in tokens (~4 chars each), default 6000; a trimmed response says so in
+            `freshness.completeness`.
+              - path: Positional anchor for what no name addresses (a local, a parameter): absolute or
+            workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
+              - root_id: `path`: the source root that path is spelled against, as carried by every `search`
+            code hit. Omit for a path already spelled against the workspace; `""` names the
+            configuration.
+              - symbol: Qualified name of the symbol whose references you want: a common-module method
+            (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), an object/manager module method
+            (`Справочник.Товары.ОбновитьКэш`), a form-module method
+            (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
+            handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
+            declared without `Экспорт` has no qualified name — `symbol_info` reads the same
+            spelling the same way — so reach it by `path`+`line`.
 
             ## search
             Hybrid lexical + semantic code search across the project source. Use when you need to

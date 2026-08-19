@@ -1,28 +1,66 @@
 //! The launch-time tool gate over a real MCP session.
 //!
-//! The build ships no opt-in tool yet, so a test driven by the declaration alone would
-//! pass against any implementation. These tests drive the gate directly instead: they hide
-//! `syntax_help`, a real tool of the `reference` profile that answers from compile-time
-//! platform tables without network, index or workspace, and check the surface a client
-//! actually sees.
+//! Two stands, and they answer different questions. The `reference` profile hides
+//! `syntax_help` — a tool that is served by default and answers from compile-time platform
+//! tables without network, index or workspace — which exercises the gate mechanism itself.
+//! The `workspace` profile carries `references`, the first tool DECLARED opt-in, and that
+//! is where the declaration is checked: whether a plain launch omits it and a launch naming
+//! it serves it. Renaming the constant of the first stand would prove neither, since the
+//! declaration it would be testing belongs to the other profile.
+
+use std::path::Path;
 
 use mcp_server::{serve_stream, McpProfile, McpServer, SharedState, ToolGate};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::ServiceError;
 use rmcp::ServiceExt;
+use tempfile::TempDir;
 
 /// A name no profile declares, used as the yardstick for "this tool does not exist".
 const UNKNOWN_TOOL: &str = "no_such_tool_in_any_profile";
 
 const GATED_TOOL: &str = "syntax_help";
 
+/// The tool the WORKSPACE profile declares opt-in.
+const OPT_IN_TOOL: &str = "references";
+
 type Client = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
-async fn session(gate: &ToolGate) -> Client {
-    let server = McpServer::with_gate(McpProfile::Reference, SharedState::reference(None), gate);
+async fn serve(server: McpServer) -> Client {
     let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
     tokio::spawn(serve_stream(server, server_io));
-    ().serve(client_io).await.expect("reference session initialized")
+    ().serve(client_io).await.expect("session initialized")
+}
+
+async fn session(gate: &ToolGate) -> Client {
+    serve(McpServer::with_gate(McpProfile::Reference, SharedState::reference(None), gate)).await
+}
+
+/// Copy the checked-in metadata fixture into a scratch dir, so derived caches never land in
+/// the repo tree. The gate is decided before any of it is read, but a workspace state has
+/// to name a real project to exist at all.
+fn stage_workspace() -> TempDir {
+    let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer"));
+    let dst = TempDir::new().expect("scratch workspace");
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry.expect("walk fixture");
+        let rel = entry.path().strip_prefix(src).expect("path under fixture root");
+        let target = dst.path().join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target).expect("mkdir");
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("mkdir parent");
+            }
+            std::fs::copy(entry.path(), &target).expect("copy fixture file");
+        }
+    }
+    dst
+}
+
+async fn workspace_session(root: &Path, gate: &ToolGate) -> Client {
+    let state = SharedState::workspace(root.to_path_buf()).expect("valid workspace project");
+    serve(McpServer::with_gate(McpProfile::Workspace, state, gate)).await
 }
 
 async fn tool_names(client: &Client) -> Vec<String> {
@@ -126,4 +164,42 @@ async fn default_construction_applies_the_declared_gate() {
     let gated = session(&ToolGate::for_launch(McpProfile::Reference, &[])).await;
     assert_eq!(served, tool_names(&gated).await);
     gated.cancel().await.ok();
+}
+
+/// The opt-in declaration itself: a plain launch of the workspace profile omits
+/// `references`, and one that names it serves it. This is the check the `reference`-profile
+/// stand above cannot make — there every declared tool is served by default, so the same
+/// assertions would hold with `default_enabled` ignored entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_opt_in_tool_appears_only_when_a_launch_names_it() {
+    let ws = stage_workspace();
+
+    let plain =
+        workspace_session(ws.path(), &ToolGate::for_launch(McpProfile::Workspace, &[])).await;
+    let default_surface = tool_names(&plain).await;
+    assert!(
+        !default_surface.contains(&OPT_IN_TOOL.to_owned()),
+        "an opt-in tool must not be served unasked: {default_surface:?}"
+    );
+    let hidden = refusal(&plain, OPT_IN_TOOL).await.expect("an opt-in tool must be refused");
+    let unknown = refusal(&plain, UNKNOWN_TOOL).await.expect("an unknown tool must be refused");
+    assert_eq!(hidden, unknown, "an opt-in tool must be refused exactly like an unknown one");
+    plain.cancel().await.ok();
+
+    let enabled = workspace_session(
+        ws.path(),
+        &ToolGate::for_launch(McpProfile::Workspace, &[OPT_IN_TOOL.to_owned()]),
+    )
+    .await;
+    let enabled_surface = tool_names(&enabled).await;
+    assert!(
+        enabled_surface.contains(&OPT_IN_TOOL.to_owned()),
+        "naming the tool at launch must serve it: {enabled_surface:?}"
+    );
+    // Served, not refused: the call still fails validation (it names no symbol), and that
+    // failure must not be the same one an unknown name gets — otherwise "listed" would be
+    // the only thing enabling changed.
+    let served = refusal(&enabled, OPT_IN_TOOL).await.expect("an argument-less call is invalid");
+    assert_ne!(served, unknown, "an enabled tool must be reached, not refused as unknown");
+    enabled.cancel().await.ok();
 }

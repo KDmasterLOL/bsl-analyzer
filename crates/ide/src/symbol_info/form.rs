@@ -101,11 +101,17 @@ fn resolve_form_lookup(db: &RootDatabaseImpl, lookup: FormLookup<'_>) -> Option<
     Some(ResolvedForm { file_id: form_file, owner, form_name, form })
 }
 
-fn is_form_marker(s: &str) -> bool {
+/// `Форма` / `Form` as the marker segment of an owned form's qualified name.
+/// Shared with the reference surface, which has to read the SAME strings as a
+/// form name — two spellings of one keyword would make one surface resolve a
+/// name the other calls missing.
+pub(crate) fn is_form_marker(s: &str) -> bool {
     name_eq(s, "Форма") || name_eq(s, "Form")
 }
 
-fn is_common_form_keyword(s: &str) -> bool {
+/// `ОбщаяФорма` / `CommonForm`. Shared for the same reason as
+/// [`is_form_marker`].
+pub(crate) fn is_common_form_keyword(s: &str) -> bool {
     name_eq(s, "ОбщаяФорма") || name_eq(s, "CommonForm")
 }
 

@@ -165,7 +165,7 @@ fn module_shape_token_stream() {
             792..817 Preprocessor "#КонецОбласти"
             819..855 Variable "ЛокальнаяМодульная"
             856..857 Operator "="
-            858..876 BuiltinFunction [EXPORT] "Вычислить"
+            858..876 Function "Вычислить"
         "##]],
     );
 }

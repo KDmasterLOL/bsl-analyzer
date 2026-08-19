@@ -7,7 +7,7 @@
 //! applies the output budget, and serializes. Resolution is resident-led: the card is servable
 //! whenever the resident host is `Ready`, independent of the call graph.
 
-mod form;
+pub(crate) mod form;
 
 use bsl_metadata::MdoType;
 use hir::{
@@ -539,26 +539,10 @@ fn resolve_position(
     pos: SymbolPosition,
     req: &SymbolInfoRequest,
 ) -> Option<SymbolInfoCard> {
-    let text = db.file_text(pos.file_id);
-    let line_index = LineIndex::new(&text);
-    // `column` is a 0-based CHARACTER offset within the line (agent-facing); line-index columns
-    // are byte offsets, so advance `column` characters into the line to find the byte column —
-    // correct for the Cyrillic identifiers BSL uses.
-    let line_start = line_index.try_line_start(pos.line)?;
-    let line_str = text[u32::from(line_start) as usize..].split('\n').next().unwrap_or("");
-    let byte_in_line =
-        line_str.char_indices().nth(pos.column as usize).map_or(line_str.len(), |(i, _)| i);
-    let offset = line_start + syntax::TextSize::from(byte_in_line as u32);
-
+    let offset = crate::name_lookup::offset_for_line_col(db, pos.file_id, pos.line, pos.column)?;
     let parse = db.parse(pos.file_id);
     let root = parse.syntax_node();
     let token = root.token_at_offset(offset).right_biased()?;
-    // Guard an out-of-range column: at a line end `right_biased` can select the NEXT line's first
-    // token, which would answer for a symbol the caller never pointed at. Refuse if the resolved
-    // token does not start on the requested line.
-    if line_index.line_col(token.text_range().start()).line != pos.line {
-        return None;
-    }
 
     let sema = Semantics::new(db);
     let def = sema.resolve_name_to_definition(pos.file_id, &token)?;

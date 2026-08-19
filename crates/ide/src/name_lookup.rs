@@ -13,10 +13,11 @@
 //! never decides order or completeness.
 
 use hir::{module_key_for_path, DefDatabase, ModuleKey, Name};
-use ide_db::base_db::{SourceDatabase, SourceRootId, BSL_SOURCE_ROOT};
+use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRootId, BSL_SOURCE_ROOT};
 use ide_db::RootDatabaseImpl;
+use line_index::LineIndex;
 use stdx::case::CaseExt;
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
 use vfs::FileId;
 
 /// The source root holding `.bsl`. Extension sources are registered into it
@@ -208,14 +209,67 @@ pub struct ResolvedPlace {
 }
 
 pub fn resolve_place(db: &RootDatabaseImpl, place: &NamePlace) -> ResolvedPlace {
-    let text = db.file_text(place.file_id);
+    resolve_file_range(db, place.file_id, place.range, place.enclosing_range)
+}
+
+/// The byte offset a `line` + `column` pair names, or `None` when the column runs past
+/// the line — at a line end the token search would select the NEXT line's first token and
+/// answer for a symbol the caller never pointed at.
+///
+/// `column` is a 0-based CHARACTER offset, as every surface spells it, while line-index
+/// columns are byte offsets: the conversion walks characters because BSL identifiers are
+/// Cyrillic. One implementation on purpose — it is the inverse of [`resolve_file_range`],
+/// and two copies drifting apart would make one `path`+`line`+`column` name two tokens.
+pub fn offset_for_line_col(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    line: u32,
+    column: u32,
+) -> Option<TextSize> {
+    let text = db.file_text(file_id);
+    let line_index = LineIndex::new(&text);
+    let line_start = line_index.try_line_start(line)?;
+    let line_str = text[u32::from(line_start) as usize..].split('\n').next().unwrap_or("");
+    let byte_in_line =
+        line_str.char_indices().nth(column as usize).map_or(line_str.len(), |(i, _)| i);
+    let offset = line_start + TextSize::from(byte_in_line as u32);
+
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let token = root.token_at_offset(offset).right_biased()?;
+    if line_index.line_col(token.text_range().start()).line != line {
+        return None;
+    }
+    Some(offset)
+}
+
+/// The same conversion for a place held as loose parts — a reference hit, which is not a
+/// declaration and so is not a [`NamePlace`]. One implementation, so two surfaces cannot
+/// end up counting columns differently.
+pub fn resolve_file_range(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    range: Option<TextRange>,
+    enclosing_range: Option<TextRange>,
+) -> ResolvedPlace {
+    // A place that names only its file needs no line index, and building one
+    // means reading the whole file: a per-file histogram over a thousand files
+    // would walk every byte of every one of them for an answer already in hand.
+    if range.is_none() && enclosing_range.is_none() {
+        return ResolvedPlace {
+            path: workspace_path(db, file_id),
+            range: None,
+            enclosing_range: None,
+        };
+    }
+    let text = db.file_text(file_id);
     let index = line_index::LineIndex::new(&text);
     let to_line_col =
         |range: Option<TextRange>| range.and_then(|r| index.utf16_line_col_range(&text, r));
     ResolvedPlace {
-        path: workspace_path(db, place.file_id),
-        range: to_line_col(place.range),
-        enclosing_range: to_line_col(place.enclosing_range),
+        path: workspace_path(db, file_id),
+        range: to_line_col(range),
+        enclosing_range: to_line_col(enclosing_range),
     }
 }
 

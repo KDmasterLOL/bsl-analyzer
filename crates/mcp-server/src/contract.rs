@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.10";
+pub const CONTRACT_VERSION: &str = "1.11";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -147,6 +147,19 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         note: Some("one of `symbol` or `path`+`line` is required"),
         output_schema_version: None,
         default_enabled: true,
+    },
+    ToolDecl {
+        name: "references",
+        actions: &[],
+        note: Some(
+            "one of `symbol` or `path`+`line` is required; opt-in — a launch has to name it \
+             with `--enable-tool references`",
+        ),
+        output_schema_version: Some("1"),
+        // Opt-in: the full occurrence list of a popular name is a large answer, and a
+        // profile that served it unasked would spend an agent's budget on a question it
+        // did not ask.
+        default_enabled: false,
     },
     tool("diagnostics", DIAGNOSTICS_ACTIONS),
     tool("outline", &[]),
@@ -699,7 +712,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.10",
+              "contract_version": "1.11",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -796,7 +809,94 @@ mod tests {
                     ]
                   },
                   "workspace": {
-                    "opt_in_tools": [],
+                    "opt_in_tools": [
+                      {
+                        "actions": [],
+                        "name": "references",
+                        "note": "one of `symbol` or `path`+`line` is required; opt-in — a launch has to name it with `--enable-tool references`",
+                        "output_schema_fingerprint": "blake3:8bd9b8c89f499607b5be2540567f9fb8bb159aeea4ea479d06bcb0284ee2ce0e",
+                        "output_schema_version": "1",
+                        "params": [
+                          {
+                            "name": "anchor_root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "area_path_prefix",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "area_root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "column",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "include_declaration",
+                            "nullable": true,
+                            "required": false,
+                            "type": "boolean"
+                          },
+                          {
+                            "name": "kinds",
+                            "required": false,
+                            "type": "array<string>"
+                          },
+                          {
+                            "name": "limit",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "line",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_files",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "path",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "symbol",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    ],
                     "tools": [
                       {
                         "actions": [
