@@ -271,7 +271,7 @@ struct ReferencesParams {
     /// (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
     /// handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
     /// declared without `Экспорт` has no qualified name — `symbol_info` reads the same
-    /// spelling the same way — so reach it by `path`+`line`.
+    /// spelling the same way — so reach it by `path` with `line_content`.
     symbol: Option<String>,
     /// `symbol`: which root to look for the DECLARATION in. The way out of
     /// `outcome: "ambiguous"`, when a configuration and an extension declare the same name.
@@ -281,13 +281,28 @@ struct ReferencesParams {
     /// code hit. Omit for a path already spelled against the workspace; `""` names the
     /// configuration.
     root_id: Option<String>,
-    /// Positional anchor for what no name addresses (a local, a parameter): absolute or
-    /// workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
+    /// Anchor on a file for what no name addresses (a local, a parameter, a non-exported
+    /// member): absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+    /// Needs `line_content` (the text of the line, checked against the file) or `line` (bare
+    /// coordinates, taken on trust) — either alone will do, and together they narrow.
     path: Option<String>,
     /// `path`: 0-based line of the occurrence to anchor on.
     line: Option<u32>,
-    /// `path`: 0-based character offset within the line (default 0).
+    /// `path`: 0-based character offset within the line. Defaults to 0 for a `path`+`line`
+    /// anchor; beside `line_content` it has NO default and narrows only when you pass it —
+    /// sending one picks the token under it and refuses when that token is not in your quote,
+    /// which is the opposite of what the quote is for.
     column: Option<u32>,
+    /// `path`: the text of the line the occurrence is on, as you read it — any substring that
+    /// carries at least one whole identifier (a quote cutting a name in half certifies
+    /// nothing and is refused by name). Checked against the file before anything is counted,
+    /// so a file edited since you read it answers `outcome: "anchor_stale"` instead of a
+    /// confident list about whatever token now stands at your coordinates. Makes `line`
+    /// optional — and `line` beside it never CHOOSES: when the quote names one symbol the
+    /// answer is that symbol wherever it moved (`anchor.relocated_from_line`), and when it
+    /// names several the answer is `ambiguous` with `pointed_by_line` on the place your line
+    /// stood at.
+    line_content: Option<String>,
     /// Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
     /// declared in the configuration and used from an extension takes `anchor_root_id: ""`
     /// with `area_root_id: "<extension>"`.
@@ -307,6 +322,11 @@ struct ReferencesParams {
     /// Cap on candidate files walked (default 2000, max 10000). Reaching it makes `total` a
     /// lower bound and sets `narrowing_comparable: false`.
     max_files: Option<usize>,
+    /// Add a one-line `snippet` of source to every reference (default false). Decoration
+    /// only: it is paid for out of whatever budget the answer leaves, so the references, the
+    /// `total` and the per-file histogram are the same either way, and previews that did not
+    /// fit are counted in `previews_omitted`.
+    include_preview: Option<bool>,
     /// Output budget in tokens (~4 chars each), default 6000; a trimmed response says so in
     /// `freshness.completeness`.
     max_output_tokens: Option<usize>,
@@ -1581,15 +1601,19 @@ impl McpServer {
     /// deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
     /// `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
     /// `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
-    /// local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
+    /// local, a parameter or a non-exported member pass `path` with `line_content` — the text
+    /// of the line as you read it, which is checked against the file before anything is
+    /// counted — or `path`+`line` when you trust the coordinates. The answer always says which of five things happened in
     /// `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
     /// `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
     /// could not read everything),
     /// `ambiguous` (several declarations answer to that name — the answer's
     /// `resolution_hint` names the axis that separates THESE ones: a root, a qualified
-    /// `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
+    /// `symbol`, or a `root_id`+`path` pair with the text of a line), `not_found` (nothing matched exactly), `unsupported_symbol` (the
     /// name resolves to something no reference walk enumerates — a metadata object, a
-    /// platform member, a module as a whole). Narrow a large answer with `area_root_id`,
+    /// platform member, a module as a whole), `anchor_stale` (the quoted line does not
+    /// describe that file any more — `anchor_stale.reason` says how, and the freshness
+    /// envelope says which revision you diverged from). Narrow a large answer with `area_root_id`,
     /// `area_path_prefix` or `kinds` and walk the per-file `files` histogram; there is no
     /// cursor. Not for the caller graph of a method (use `graph` with its `graph_id`) or for
     /// finding code by meaning (use `search`). Reads the resident host; while it builds it
@@ -1610,7 +1634,11 @@ impl McpServer {
         let p = params.0;
         if p.symbol.is_none() && p.path.is_none() {
             return Err(McpError::invalid_params(
-                "one of 'symbol' or 'path'+'line' is required",
+                if p.line_content.is_some() {
+                    tools::references::CONTENT_NEEDS_PATH
+                } else {
+                    tools::references::NO_ANCHOR
+                },
                 None,
             ));
         }
@@ -1652,23 +1680,28 @@ impl McpServer {
                         path: p.path.as_deref(),
                         line: p.line,
                         column: p.column,
+                        line_content: p.line_content.as_deref(),
                         area_root_id: p.area_root_id.as_deref(),
                         area_path_prefix: p.area_path_prefix.as_deref(),
                         kinds: &p.kinds,
                         include_declaration: p.include_declaration,
                         limit: p.limit,
                         max_files: p.max_files,
+                        include_preview: p.include_preview,
                     };
                     tools::references::answer(resident, &params, max_output_tokens)
                 })
             };
 
             let mut outcome = read();
-            // A name that matched nothing may be one added since the last throttled drift
-            // scan, and `not_found` is the outcome a caller acts on as final. Force ONE
-            // storm-guarded re-scan and retry, the same way a `symbol_info` card miss does.
+            // An answer that carries evidence of a divergence may be describing a resident
+            // that fell behind the last throttled drift scan, and both `not_found` and
+            // `anchor_stale` are outcomes a caller acts on as final. Force ONE storm-guarded
+            // re-scan and retry, the same way a `symbol_info` card miss does. WHICH answers
+            // qualify is decided by the answer itself — see `warrants_rescan`; nothing is
+            // decided here, because a decision written here cannot be observed from a test.
             if let ResidentOutcome::Ready(Ok(answer), _) = &outcome {
-                if p.symbol.is_some() && answer.is_miss() {
+                if tools::references::warrants_rescan(answer) {
                     diag.force_rescan();
                     outcome = read();
                 }
@@ -2514,15 +2547,19 @@ mod tool_descriptions {
             deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
             `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
             `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
-            local, a parameter or a non-exported member pass `path`+`line` instead. The answer always says which of four things happened in
+            local, a parameter or a non-exported member pass `path` with `line_content` — the text
+            of the line as you read it, which is checked against the file before anything is
+            counted — or `path`+`line` when you trust the coordinates. The answer always says which of five things happened in
             `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
             `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
             could not read everything),
             `ambiguous` (several declarations answer to that name — the answer's
             `resolution_hint` names the axis that separates THESE ones: a root, a qualified
-            `symbol`, or a positional anchor), `not_found` (nothing matched exactly), `unsupported_symbol` (the
+            `symbol`, or a `root_id`+`path` pair with the text of a line), `not_found` (nothing matched exactly), `unsupported_symbol` (the
             name resolves to something no reference walk enumerates — a metadata object, a
-            platform member, a module as a whole). Narrow a large answer with `area_root_id`,
+            platform member, a module as a whole), `anchor_stale` (the quoted line does not
+            describe that file any more — `anchor_stale.reason` says how, and the freshness
+            envelope says which revision you diverged from). Narrow a large answer with `area_root_id`,
             `area_path_prefix` or `kinds` and walk the per-file `files` histogram; there is no
             cursor. Not for the caller graph of a method (use `graph` with its `graph_id`) or for
             finding code by meaning (use `search`). Reads the resident host; while it builds it
@@ -2536,18 +2573,36 @@ mod tool_descriptions {
               - area_root_id: Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
             declared in the configuration and used from an extension takes `anchor_root_id: ""`
             with `area_root_id: "<extension>"`.
-              - column: `path`: 0-based character offset within the line (default 0).
+              - column: `path`: 0-based character offset within the line. Defaults to 0 for a `path`+`line`
+            anchor; beside `line_content` it has NO default and narrows only when you pass it —
+            sending one picks the token under it and refuses when that token is not in your quote,
+            which is the opposite of what the quote is for.
               - include_declaration: Whether the declaration itself is one of the references (default: true).
+              - include_preview: Add a one-line `snippet` of source to every reference (default false). Decoration
+            only: it is paid for out of whatever budget the answer leaves, so the references, the
+            `total` and the per-file histogram are the same either way, and previews that did not
+            fit are counted in `previews_omitted`.
               - kinds: Keep only these kinds: any of `declaration` | `call` | `write` | `read`. Empty = all.
               - limit: Cap on returned references (default 50, max 500). `total` is counted before it, and
             the per-file histogram covers everything the limit hid.
               - line: `path`: 0-based line of the occurrence to anchor on.
+              - line_content: `path`: the text of the line the occurrence is on, as you read it — any substring that
+            carries at least one whole identifier (a quote cutting a name in half certifies
+            nothing and is refused by name). Checked against the file before anything is counted,
+            so a file edited since you read it answers `outcome: "anchor_stale"` instead of a
+            confident list about whatever token now stands at your coordinates. Makes `line`
+            optional — and `line` beside it never CHOOSES: when the quote names one symbol the
+            answer is that symbol wherever it moved (`anchor.relocated_from_line`), and when it
+            names several the answer is `ambiguous` with `pointed_by_line` on the place your line
+            stood at.
               - max_files: Cap on candidate files walked (default 2000, max 10000). Reaching it makes `total` a
             lower bound and sets `narrowing_comparable: false`.
               - max_output_tokens: Output budget in tokens (~4 chars each), default 6000; a trimmed response says so in
             `freshness.completeness`.
-              - path: Positional anchor for what no name addresses (a local, a parameter): absolute or
-            workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
+              - path: Anchor on a file for what no name addresses (a local, a parameter, a non-exported
+            member): absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
+            Needs `line_content` (the text of the line, checked against the file) or `line` (bare
+            coordinates, taken on trust) — either alone will do, and together they narrow.
               - root_id: `path`: the source root that path is spelled against, as carried by every `search`
             code hit. Omit for a path already spelled against the workspace; `""` names the
             configuration.
@@ -2557,7 +2612,7 @@ mod tool_descriptions {
             (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
             handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
             declared without `Экспорт` has no qualified name — `symbol_info` reads the same
-            spelling the same way — so reach it by `path`+`line`.
+            spelling the same way — so reach it by `path` with `line_content`.
 
             ## search
             Hybrid lexical + semantic code search across the project source. Use when you need to

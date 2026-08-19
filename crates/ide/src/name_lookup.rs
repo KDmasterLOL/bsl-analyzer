@@ -15,7 +15,6 @@
 use hir::{module_key_for_path, DefDatabase, ModuleKey, Name};
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRootId, BSL_SOURCE_ROOT};
 use ide_db::RootDatabaseImpl;
-use line_index::LineIndex;
 use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
@@ -227,7 +226,11 @@ pub fn offset_for_line_col(
     column: u32,
 ) -> Option<TextSize> {
     let text = db.file_text(file_id);
-    let line_index = LineIndex::new(&text);
+    // The memoised index, not a fresh one: the text anchor calls this once per line its
+    // quote matched, and rebuilding the index each time would scan the whole file per
+    // matching line — a cost that was a constant while only one position was ever resolved.
+    let line_index =
+        ide_db::RootDatabase::line_index(db, ide_db::base_db::FileIdInput::new(db, file_id));
     let line_start = line_index.try_line_start(line)?;
     let line_str = text[u32::from(line_start) as usize..].split('\n').next().unwrap_or("");
     let byte_in_line =
@@ -271,6 +274,85 @@ pub fn resolve_file_range(
         range: to_line_col(range),
         enclosing_range: to_line_col(enclosing_range),
     }
+}
+
+/// The text of one line, its terminator excluded and nothing else stripped.
+///
+/// Reads the memoised line index over `db.file_text` — the same text every occurrence
+/// offset was counted against, so a line quoted beside a range describes the revision that
+/// range belongs to. Reading the file from disk instead would quote a revision the answer
+/// is not signed with.
+///
+/// Trimming stays with the caller, and deliberately: a declaration card drops trailing
+/// whitespace, while a preview keeps its leading indentation because the published columns
+/// index it. One reader deciding that for both would rewrite bytes on a surface that never
+/// asked.
+pub fn line_text(db: &RootDatabaseImpl, file_id: FileId, line: u32) -> Option<String> {
+    let text = db.file_text(file_id);
+    let index =
+        ide_db::RootDatabase::line_index(db, ide_db::base_db::FileIdInput::new(db, file_id));
+    index
+        .safe_line_str(text.as_ref(), line)
+        // `line_range` stops one byte before the `\n`, so a CRLF line keeps its `\r`. The
+        // terminator of such a line is `\r\n` whole, and a caller that trusted the promise
+        // without trimming would publish half of it.
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+}
+
+/// One line together with everything before it that can change how it must be masked, and
+/// where the line begins inside that slice.
+///
+/// A secret is armed by a marker — `Пароль`, `Токен` — standing before its literal in the
+/// same STATEMENT, and BSL wraps long assignments across lines freely. Handing a redactor one
+/// physical line therefore hides the marker whenever the wrap falls between them, and the
+/// literal goes out in clear text. `context` is the earliest byte a statement covering this
+/// line can start at — the enclosing method, or the file.
+///
+/// The terminator and trailing whitespace are NOT stripped here: the caller needs the slice
+/// to end exactly where the line does, and trims what it publishes.
+pub fn line_with_context(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    line: u32,
+    context: u32,
+) -> Option<(String, usize)> {
+    let text = db.file_text(file_id);
+    let index =
+        ide_db::RootDatabase::line_index(db, ide_db::base_db::FileIdInput::new(db, file_id));
+    let range = index.line_range(line)?;
+    let start = usize::from(range.start()).min(text.len());
+    let end = usize::from(range.end()).min(text.len());
+    let context = (context as usize).min(start);
+    let slice = text.get(context..end)?;
+    Some((slice.to_owned(), start - context))
+}
+
+/// The qualified name that addresses a symbol, when one does.
+///
+/// Only an exported module method has a spelling the surfaces accept back. A
+/// name published for anything else would be an address that answers
+/// `not_found`, and this module's rule is that a key some tool would refuse is
+/// not published at all.
+///
+/// The name is built from the method's OWN module, never from wherever it was found.
+pub fn qualified_method_symbol(
+    db: &RootDatabaseImpl,
+    symbol: &hir::SemanticSymbol,
+) -> Option<String> {
+    let definition = symbol.definition.as_ref()?;
+    let hir::Definition::Method(method_id) = definition else { return None };
+    if !definition.is_export(db) {
+        return None;
+    }
+    // The module that DECLARES the method, which is where its qualified name comes from.
+    // Spelling it from the file the caller pointed at would prefix a method of `Продажи`
+    // with `Клиент` whenever the call site is elsewhere — an address that resolves to a
+    // third method, or to nothing.
+    let file_id = method_id.module.file_id;
+    let source_root = db.source_root_input(ROOT).root(db);
+    let path = source_root.file_set().path_for_file(&file_id)?;
+    let key = module_key_for_path(&path.as_path().to_string_lossy())?;
+    Some(method_symbol(&key, symbol.name.as_str()))
 }
 
 /// Ask the FILE which root it belongs to rather than assuming the source one.

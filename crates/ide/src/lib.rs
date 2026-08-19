@@ -69,14 +69,15 @@ pub use ide_diagnostics::{
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use name_lookup::{
-    lookup_names, match_tier, resolve_file_range, resolve_place, ExternalNameSource, NameCandidate,
-    NameCategory, NameLookupResult, NameMatchTier, NamePlace, NameQuery, PlatformRef, ProviderHits,
-    ProviderId, ProviderReport, ProviderState, ResolvedPlace, WORKSPACE_SYMBOL_LIMIT,
+    line_text, line_with_context, lookup_names, match_tier, resolve_file_range, resolve_place,
+    ExternalNameSource, NameCandidate, NameCategory, NameLookupResult, NameMatchTier, NamePlace,
+    NameQuery, PlatformRef, ProviderHits, ProviderId, ProviderReport, ProviderState, ResolvedPlace,
+    WORKSPACE_SYMBOL_LIMIT,
 };
 pub use reference_kind::{classify_reference_token, ReferenceKind};
 pub use references::{
-    find_references_by_name, BodySource, FileIdSet, ReferenceAnchor, ReferenceArea, ReferenceHit,
-    ReferencesOutcome, ReferencesRequest, ReferencesResult,
+    find_references_by_name, AnchorSite, AnchorStaleReason, BodySource, FileIdSet, ReferenceAnchor,
+    ReferenceArea, ReferenceHit, ReferencesOutcome, ReferencesRequest, ReferencesResult,
 };
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};

@@ -1168,3 +1168,501 @@ fn the_object_of_a_module_is_found_in_both_path_layouts() {
         "the manager module of the second spelling must not be ranked away: {both:?}",
     );
 }
+
+// --- the self-certifying anchor -----------------------------------------------------------
+
+fn by_text(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    line: Option<u32>,
+    column: Option<u32>,
+    content: &str,
+) -> ide::ReferencesResult {
+    find_references_by_name(
+        db,
+        &request(ReferenceAnchor::Text { file_id, line, column, content: content.to_owned() }),
+    )
+}
+
+/// The same module after someone renamed the method — the line the caller quoted is gone,
+/// and its coordinates now name a different symbol.
+const SALES_RENAMED: &str = "\
+Процедура Пересчитать() Экспорт
+КонецПроцедуры
+";
+
+/// Gate I6 — a quote the file no longer carries anchors nothing, and the coordinates alone
+/// would have answered anyway.
+#[test]
+fn a_quote_the_file_does_not_carry_yields_no_references() {
+    let (renamed, files) = db_with(&[
+        ("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES_RENAMED),
+        ("/ws/src/cf/CommonModules/Клиент/Ext/Module.bsl", CLIENT),
+    ]);
+
+    let quoted = by_text(&renamed, files[0], Some(0), None, "Процедура Расчёт() Экспорт");
+    assert_eq!(
+        quoted.outcome,
+        ReferencesOutcome::AnchorStale {
+            reason: ide::AnchorStaleReason::NotInFile,
+            line_matches: 0,
+        },
+    );
+    assert!(quoted.hits.is_empty(), "a stale anchor counts nothing: {:?}", quoted.hits);
+
+    // What the anchor exists to close: the very same coordinates, taken on their own, answer
+    // confidently about the symbol that moved into them.
+    let positional = find_references_by_name(
+        &renamed,
+        &request(ReferenceAnchor::Position { file_id: files[0], line: 0, column: 10 }),
+    );
+    assert_eq!(positional.outcome, ReferencesOutcome::Resolved);
+    assert!(
+        !positional.hits.is_empty(),
+        "the control for the control: coordinates alone do answer, and about another symbol",
+    );
+
+    // The control: the file the caller actually read still answers the quote.
+    let (intact, files) = two_common_modules();
+    let quoted = by_text(&intact, files[0], Some(0), None, "Процедура Расчёт() Экспорт");
+    assert_eq!(quoted.outcome, ReferencesOutcome::Resolved);
+    assert_eq!(quoted.hits.len(), 2, "declaration + one call: {:?}", quoted.hits);
+}
+
+/// The module with three lines inserted above the declaration the caller quoted.
+const SALES_SHIFTED: &str = "\
+// Пересчёт продаж.
+// Второй комментарий.
+// Третий комментарий.
+Процедура Расчёт() Экспорт
+КонецПроцедуры
+";
+
+/// Gate I7 — lines inserted above the quote move the anchor with it, and the answer says so.
+#[test]
+fn lines_inserted_above_relocate_the_anchor_instead_of_changing_the_answer() {
+    let (before, files) = two_common_modules();
+    let original = by_text(&before, files[0], Some(0), None, "Процедура Расчёт() Экспорт");
+    assert_eq!(original.outcome, ReferencesOutcome::Resolved);
+    assert_eq!(original.anchor_line, Some(0));
+
+    let (after, files) = db_with(&[
+        ("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES_SHIFTED),
+        ("/ws/src/cf/CommonModules/Клиент/Ext/Module.bsl", CLIENT),
+    ]);
+    // The caller sends the line number it read before the insertion.
+    let relocated = by_text(&after, files[0], Some(0), None, "Процедура Расчёт() Экспорт");
+
+    assert_eq!(relocated.outcome, ReferencesOutcome::Resolved);
+    assert_eq!(relocated.hits.len(), original.hits.len(), "the same symbol, the same count");
+    assert_eq!(
+        relocated.anchor_line,
+        Some(3),
+        "the anchor stands where the quote went, not where it was sent",
+    );
+}
+
+/// Two methods, each with a parameter of the same name: one quoted line, two different
+/// symbols.
+const TWO_LOCALS: &str = "\
+Процедура Первая(Значение) Экспорт
+    Значение = 1;
+КонецПроцедуры
+
+Процедура Вторая(Значение) Экспорт
+    Значение = 2;
+КонецПроцедуры
+";
+
+/// One method, one parameter, written on four lines: one quoted line, one symbol.
+const ONE_LOCAL_MANY_LINES: &str = "\
+Процедура Одна(Счётчик) Экспорт
+    Счётчик = Счётчик + 1;
+    Счётчик = Счётчик + 1;
+    Счётчик = Счётчик + 1;
+КонецПроцедуры
+";
+
+/// Gate I8 — a quote matching more than one SYMBOL is an ambiguity, and one matching one
+/// symbol on many lines is not.
+#[test]
+fn a_quote_matching_two_symbols_is_ambiguous_and_one_matching_five_lines_is_not() {
+    let (db, files) = db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", TWO_LOCALS)]);
+    let ambiguous = by_text(&db, files[0], None, None, "Значение = ");
+
+    assert_eq!(ambiguous.outcome, ReferencesOutcome::Ambiguous);
+    assert_eq!(
+        ambiguous.anchor_sites.len(),
+        2,
+        "an ambiguity without the places to choose from is the same silence, one level up: {:?}",
+        ambiguous.anchor_sites,
+    );
+    assert!(ambiguous.hits.is_empty(), "an ambiguity counts nothing");
+
+    // The control: the same shape of input — one quote, several matching lines — where the
+    // lines all carry ONE symbol and there is nothing to choose between.
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", ONE_LOCAL_MANY_LINES)]);
+    let resolved = by_text(&db, files[0], None, None, "Счётчик");
+    assert_eq!(resolved.outcome, ReferencesOutcome::Resolved);
+    assert!(!resolved.hits.is_empty(), "one symbol on many lines is one answer");
+}
+
+/// A module carrying one line for every way a quote can fail to anchor.
+const FOUR_REFUSALS: &str = "\
+// просто комментарий
+Процедура Считать() Экспорт
+    Результат = Продажи.Расчёт(Параметр);
+КонецПроцедуры
+";
+
+/// Gate I9 — every reachable refusal has a code of its own, and the four inputs tell them
+/// apart on one file.
+#[test]
+fn each_way_a_quote_fails_to_anchor_has_its_own_code() {
+    let (db, files) = db_with(&[
+        ("/ws/src/cf/CommonModules/Считыватель/Ext/Module.bsl", FOUR_REFUSALS),
+        ("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES),
+    ]);
+    let file = files[0];
+    let reason = |result: &ide::ReferencesResult| match result.outcome {
+        ReferencesOutcome::AnchorStale { reason, .. } => reason,
+        ref other => panic!("expected a stale anchor, got {other:?}"),
+    };
+
+    assert_eq!(
+        reason(&by_text(&db, file, None, None, "Процедура Отсутствует()")),
+        ide::AnchorStaleReason::NotInFile,
+    );
+    assert_eq!(
+        reason(&by_text(&db, file, Some(0), None, "// просто комментарий")),
+        ide::AnchorStaleReason::NoNameInQuotedText,
+    );
+    assert_eq!(
+        reason(&by_text(&db, file, Some(3), None, "КонецПроцедуры")),
+        ide::AnchorStaleReason::NameNotResolved,
+    );
+    // `Результат` stands at column 4 of the quoted line and is not part of the quote: the
+    // caller's aim and its quote disagree, which is a different mistake from either.
+    assert_eq!(
+        reason(&by_text(&db, file, Some(2), Some(4), "Продажи.Расчёт(Параметр)")),
+        ide::AnchorStaleReason::ColumnOutsideQuotedText,
+    );
+
+    // The control: the same file, the same quote, aimed at a name the quote does carry.
+    let resolved = by_text(&db, file, Some(2), Some(16), "Продажи.Расчёт(Параметр)");
+    assert_eq!(resolved.outcome, ReferencesOutcome::Resolved);
+}
+
+/// A quote naming a property that semantics cannot resolve, on a line that also holds a
+/// SHORTER identifier whose text is a substring of the quoted one.
+const SHORTER_NAME_INSIDE: &str = "\
+Процедура Тест(Номер) Экспорт
+    Номер = Объект.НомерСтроки;
+КонецПроцедуры
+";
+
+/// A name is quoted or it is not, and a name is not quoted by a longer word that happens to
+/// contain it. Otherwise the anchor answers confidently about the neighbour — the silent
+/// wrong answer it exists to close, one identifier over.
+#[test]
+fn a_longer_identifier_does_not_quote_the_shorter_one_inside_it() {
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", SHORTER_NAME_INSIDE)]);
+
+    let result = by_text(&db, files[0], None, None, "НомерСтроки");
+
+    assert_eq!(
+        result.outcome,
+        ReferencesOutcome::AnchorStale {
+            reason: ide::AnchorStaleReason::NameNotResolved,
+            line_matches: 1,
+        },
+        "`Номер` is a substring of the quote, not a name in it: {result:?}",
+    );
+    assert!(result.hits.is_empty(), "nothing was anchored, so nothing is counted");
+
+    // The control: the same file, the same reader, quoting the shorter name itself. The
+    // assertion above is about which names the quote carries, not about a reader that
+    // stopped matching.
+    let control = by_text(&db, files[0], None, None, "Номер = ");
+    assert_eq!(control.outcome, ReferencesOutcome::Resolved);
+    assert!(!control.hits.is_empty(), "{control:?}");
+}
+
+/// Gate — the qualified name published beside an ambiguity is the one that addresses the
+/// SYMBOL, and a method lives in its own module, not in the file the quote came from.
+#[test]
+fn an_anchor_site_is_named_by_the_module_that_declares_it() {
+    let (db, files) = db_with(&[
+        ("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES),
+        ("/ws/src/cf/CommonModules/Склад/Ext/Module.bsl", SALES),
+        (
+            "/ws/src/cf/CommonModules/Клиент/Ext/Module.bsl",
+            "Процедура Вызвать() Экспорт\n    Продажи.Расчёт();\n    Склад.Расчёт();\nКонецПроцедуры\n",
+        ),
+    ]);
+
+    let result = by_text(&db, files[2], None, None, "Расчёт();");
+
+    assert_eq!(result.outcome, ReferencesOutcome::Ambiguous, "{result:?}");
+    let mut named: Vec<String> =
+        result.anchor_sites.iter().filter_map(|site| site.symbol.clone()).collect();
+    named.sort();
+    assert_eq!(
+        named,
+        ["Продажи.Расчёт", "Склад.Расчёт"],
+        "an address that resolves to a third method is worse than no address: {:?}",
+        result.anchor_sites,
+    );
+}
+
+/// Gate — the candidate a text anchor counts is a SYMBOL, so a name repeated past the cap
+/// inside one method neither raises the cap flag nor hides a second symbol.
+#[test]
+fn the_anchor_cap_counts_symbols_and_not_the_tokens_that_name_them() {
+    let mut source = String::from("Процедура Первая(Значение) Экспорт\n");
+    for _ in 0..65 {
+        source.push_str("    Значение = 1;\n");
+    }
+    source.push_str(
+        "КонецПроцедуры\n\nПроцедура Вторая(Значение) Экспорт\n    Значение = 2;\nКонецПроцедуры\n",
+    );
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", source.as_str())]);
+
+    let result = by_text(&db, files[0], None, None, "Значение = ");
+
+    assert_eq!(
+        result.outcome,
+        ReferencesOutcome::Ambiguous,
+        "a second symbol past the sixty-fourth TOKEN is still a second symbol: {result:?}",
+    );
+    assert_eq!(result.anchor_sites.len(), 2);
+    assert!(
+        !result.anchor_candidates_capped,
+        "two candidates is not a capped list, however many tokens name them",
+    );
+}
+
+/// Gate — an empty quote certifies nothing, and must not report that it was found on every
+/// line of the file. `contains("")` is true everywhere, so the count would be the file's
+/// length dressed up as evidence.
+#[test]
+fn an_empty_quote_is_found_nowhere_rather_than_everywhere() {
+    let (db, files) = db_with(&[("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES)]);
+
+    let result = by_text(&db, files[0], None, None, "   ");
+
+    assert_eq!(
+        result.outcome,
+        ReferencesOutcome::AnchorStale {
+            reason: ide::AnchorStaleReason::NotInFile,
+            line_matches: 0,
+        },
+        "an empty quote matched every line: {result:?}",
+    );
+}
+
+/// A structure built with a literal key, and its field read on two lines. The plainest BSL
+/// there is that reaches a member through a TYPED receiver.
+const TYPED_MEMBER_TWICE: &str = "\
+Процедура Тест() Экспорт
+    С = Новый Структура(\"Поле\", 1);
+    Х = С.Поле;
+    У = С.Поле;
+КонецПроцедуры
+";
+
+/// A platform method called on two lines — a member whose key already identifies the SYMBOL.
+const DEFINITION_MEMBER_TWICE: &str = "\
+Процедура Тест() Экспорт
+    М = Новый Массив;
+    М.Добавить(1);
+    М.Добавить(2);
+КонецПроцедуры
+";
+
+/// Gate — two mentions of ONE member of a typed receiver are one symbol.
+///
+/// `SemanticSymbolKey::TypedMember` is the OCCURRENCE's own range, so a dedup that trusted
+/// the key everywhere would answer `ambiguous` with two clones of one place — against this
+/// stage's own promise that one symbol on several lines is one answer, and against a hint
+/// (`narrow line_content`) that cannot help, since any narrowing still holds the member.
+#[test]
+fn two_mentions_of_one_typed_member_are_not_an_ambiguity() {
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", TYPED_MEMBER_TWICE)]);
+
+    let unpinned = by_text(&db, files[0], None, None, "Поле");
+    // The control: the same file with the line pinned leaves ONE candidate, so it never
+    // reaches the dedup. Whatever it answers, the unpinned call has to answer the same.
+    let pinned = by_text(&db, files[0], Some(2), None, "Поле");
+
+    assert_eq!(
+        unpinned.outcome, pinned.outcome,
+        "two mentions of one member became a choice between clones: {:?}",
+        unpinned.anchor_sites,
+    );
+    assert!(unpinned.anchor_sites.is_empty(), "{:?}", unpinned.anchor_sites);
+
+    // The second control: the same shape over a member whose key already IS a symbol
+    // identity. It collapsed before this fix and must keep collapsing after it, so the
+    // change is about the member key and not about dedup at large.
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", DEFINITION_MEMBER_TWICE)]);
+    let calls = by_text(&db, files[0], None, None, "Добавить");
+    assert_eq!(
+        calls.outcome,
+        ReferencesOutcome::UnsupportedSymbol { category: ide::UnsupportedCategory::UnknownScope },
+    );
+    assert!(calls.anchor_sites.is_empty());
+}
+
+/// Gate — the shared line reader excludes the whole terminator, and a CRLF terminator is
+/// `\r\n`. Its doc-comment promises exactly that, and the first caller that trusts the
+/// promise without trimming would publish the `\r`.
+#[test]
+fn the_line_reader_excludes_a_crlf_terminator_whole() {
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", "А = 1;\r\nБ = 2;\r\n")]);
+
+    assert_eq!(ide::line_text(&db, files[0], 0).as_deref(), Some("А = 1;"));
+    // The control: the same reader over LF, where the two spellings must agree.
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", "А = 1;\nБ = 2;\n")]);
+    assert_eq!(ide::line_text(&db, files[0], 0).as_deref(), Some("А = 1;"));
+}
+
+/// The file the client read, and the same file after a method with an identical body was
+/// inserted above. The quoted line now stands twice, and the coordinate the client kept
+/// belongs to the NEW method.
+const DUPLICATED_QUOTE_BEFORE: &str = "\
+Процедура Первая(Значение) Экспорт
+    Значение = 1;
+КонецПроцедуры
+";
+
+const DUPLICATED_QUOTE_AFTER: &str = "\
+Процедура Нулевая(Значение) Экспорт
+    Значение = 1;
+    Значение = Значение + 1;
+КонецПроцедуры
+
+Процедура Первая(Значение) Экспорт
+    Значение = 1;
+КонецПроцедуры
+";
+
+/// Gate — a coordinate is evidence only where it decides nothing.
+///
+/// Pinning to a `line` that still carries the quote looks safe and is not: when the text
+/// repeats, "your line still carries it" is a coincidence. Without this the stale request
+/// answers `resolved` about the NEW method's local, standing at exactly the line it asked
+/// for — so no relocation is announced and the answer is shaped like a correct fresh one.
+#[test]
+fn a_line_that_still_carries_a_repeated_quote_does_not_pin_the_anchor() {
+    let (before, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", DUPLICATED_QUOTE_BEFORE)]);
+    let read = by_text(&before, files[0], Some(1), None, "Значение = 1;");
+    assert_eq!(read.outcome, ReferencesOutcome::Resolved, "the client's own picture");
+    assert_eq!(read.hits.len(), 2);
+
+    let (after, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", DUPLICATED_QUOTE_AFTER)]);
+    let stale = by_text(&after, files[0], Some(1), None, "Значение = 1;");
+
+    assert_eq!(
+        stale.outcome,
+        ReferencesOutcome::Ambiguous,
+        "a repeated quote plus a coordinate the caller distrusts is a choice, not an answer: \
+         {stale:?}",
+    );
+    assert!(stale.hits.is_empty(), "an ambiguity counts nothing");
+    let pointed: Vec<&ide::AnchorSite> =
+        stale.anchor_sites.iter().filter(|site| site.pointed_by_line).collect();
+    assert_eq!(
+        pointed.len(),
+        1,
+        "the caller has to see which place its own line meant: {:?}",
+        stale.anchor_sites,
+    );
+
+    // The control: the same file, the same quote, and the line the occurrence actually moved
+    // to. One coordinate is not the axis here — the quote still names two symbols — so the
+    // control is instead the UNIQUE quote, where a coordinate decides nothing and the answer
+    // is the direct one.
+    let unique = by_text(&after, files[0], Some(1), None, "Значение = Значение + 1;");
+    assert_eq!(unique.outcome, ReferencesOutcome::Resolved, "{unique:?}");
+    assert_eq!(unique.anchor_line, Some(2), "a unique quote relocates and says so");
+}
+
+/// Two modules declaring one method name, and a caller invoking both on ONE line.
+const TWO_CALLS_ONE_LINE: &str = "\
+Процедура Вызвать() Экспорт
+    Продажи.Расчёт(); Склад.Расчёт();
+КонецПроцедуры
+";
+
+/// Gate — a quote is a place on the line, not a bag of names.
+///
+/// The quote names one of two calls that share a method name. Matching by name alone would
+/// pick up the other call's token — outside the quoted text entirely — and answer `ambiguous`
+/// about a quote that named exactly one occurrence.
+#[test]
+fn a_partial_quote_does_not_reach_a_namesake_standing_outside_it() {
+    let (db, files) = db_with(&[
+        ("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl", SALES),
+        ("/ws/src/cf/CommonModules/Склад/Ext/Module.bsl", SALES),
+        ("/ws/src/cf/CommonModules/Клиент/Ext/Module.bsl", TWO_CALLS_ONE_LINE),
+    ]);
+
+    let one = by_text(&db, files[2], None, None, "Продажи.Расчёт()");
+    assert_eq!(
+        one.outcome,
+        ReferencesOutcome::Resolved,
+        "the quote stands over one call and names one symbol: {:?}",
+        one.anchor_sites,
+    );
+    assert!(one.hits.iter().any(|hit| hit.file_id == files[0]), "and it is the quoted one");
+    assert!(
+        !one.hits.iter().any(|hit| hit.file_id == files[1]),
+        "the neighbour's method is not in the answer: {:?}",
+        one.hits,
+    );
+
+    // The control: quoting the WHOLE line does stand over both calls, and two symbols under
+    // one quote are a genuine choice.
+    let both = by_text(&db, files[2], None, None, "Продажи.Расчёт(); Склад.Расчёт();");
+    assert_eq!(both.outcome, ReferencesOutcome::Ambiguous, "{both:?}");
+    assert_eq!(both.anchor_sites.len(), 2);
+}
+
+/// One platform function called twice on one line, in two spellings.
+const BUILTIN_TWO_CASES: &str = "\
+Процедура Тест() Экспорт
+    Сообщить(1); СООБЩИТЬ(2);
+КонецПроцедуры
+";
+
+/// Gate — BSL does not distinguish spellings, so one function written twice is one symbol.
+///
+/// A definition keyed by a name carries the spelling of its occurrence, so derived equality
+/// sees two entities where the language has one. The control is the same quote aimed by a
+/// column: it reaches one token, cannot go through the dedup, and its answer is what the
+/// unaimed one has to give too.
+#[test]
+fn one_platform_function_in_two_spellings_is_one_symbol() {
+    let (db, files) =
+        db_with(&[("/ws/src/cf/CommonModules/Первый/Ext/Module.bsl", BUILTIN_TWO_CASES)]);
+
+    let aimed = by_text(&db, files[0], Some(1), Some(4), "Сообщить(1); СООБЩИТЬ(2);");
+    let whole = by_text(&db, files[0], Some(1), None, "Сообщить(1); СООБЩИТЬ(2);");
+
+    assert_eq!(
+        whole.outcome, aimed.outcome,
+        "two spellings of one function became a choice between clones: {:?}",
+        whole.anchor_sites,
+    );
+    assert!(whole.anchor_sites.is_empty(), "{:?}", whole.anchor_sites);
+}
