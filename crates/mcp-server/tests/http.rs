@@ -4,7 +4,11 @@
 //! validation, project locking, listener binding, and the one final
 //! `McpServer::shutdown` call. This suite verifies only the transport boundary.
 
-use std::{net::SocketAddr, sync::Once, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{Mutex, Once},
+    time::Duration,
+};
 
 use mcp_server::{serve_http, McpProfile, McpServer, SharedState, MAX_HTTP_REQUEST_BODY_BYTES};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HOST};
@@ -231,6 +235,73 @@ async fn disallowed_host_is_rejected_before_mcp_dispatch() {
 
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
     server.stop().await;
+}
+
+/// Captured warnings, shared by every test in this binary. The transport serves on its own
+/// tokio worker threads, so a thread-scoped subscriber would never see its events; the
+/// global one does, and each caller keys its assertions on an allowlist entry unique to
+/// its own server rather than on the buffer being otherwise empty.
+static WARNINGS: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+static CAPTURE_WARNINGS: Once = Once::new();
+
+fn capture_warnings() {
+    #[derive(Clone, Copy)]
+    struct Sink;
+    impl std::io::Write for Sink {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            WARNINGS.lock().expect("warning buffer is never poisoned").extend_from_slice(data);
+            Ok(data.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl tracing_subscriber::fmt::MakeWriter<'_> for Sink {
+        type Writer = Sink;
+        fn make_writer(&self) -> Sink {
+            *self
+        }
+    }
+
+    CAPTURE_WARNINGS.call_once(|| {
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(Sink)
+            .without_time()
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("no other test installs a global subscriber");
+    });
+}
+
+fn captured_warnings() -> String {
+    String::from_utf8_lossy(&WARNINGS.lock().expect("warning buffer is never poisoned"))
+        .into_owned()
+}
+
+/// A refusal is a mismatch between the request's `Host` and the configured allowlist.
+/// Logging only the first leaves the operator unable to see which of the two is wrong —
+/// the reading that produced #30, where an allowlist that authorized nothing looked
+/// like a server refusing the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_names_the_allowlist_it_failed_against() {
+    capture_warnings();
+    let server = TestServer::start(vec!["refusal-probe.example.test".to_owned()]).await;
+    let response = reqwest::Client::new()
+        .get(server.health_url())
+        .header(HOST, "refusal-probe-client.example.test")
+        .send()
+        .await
+        .expect("request should receive an HTTP response");
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    server.stop().await;
+
+    let line = captured_warnings()
+        .lines()
+        .find(|line| line.contains("refusal-probe-client.example.test"))
+        .map(str::to_owned)
+        .expect("the refusal is warned about");
+    assert!(line.contains("allowed=refusal-probe.example.test"), "{line}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

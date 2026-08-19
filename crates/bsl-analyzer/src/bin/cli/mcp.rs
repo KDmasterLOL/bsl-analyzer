@@ -92,7 +92,13 @@ pub struct McpServeArgs {
     #[arg(long)]
     port: Option<u16>,
 
-    /// Accepted HTTP Host value. Repeat for aliases; required for non-loopback binding.
+    /// Accepted HTTP Host header: the address clients dial, not the name of the client.
+    ///
+    /// Repeat for aliases; an entry without a port accepts any port. At least one is
+    /// required for a non-loopback --host. A list given here replaces the built-in
+    /// localhost, 127.0.0.1 and ::1 entirely, so name them again if the server must keep
+    /// answering its own machine. A wildcard bind address such as 0.0.0.0 is not a Host
+    /// value and allows nothing that a client normally sends.
     #[arg(long = "allowed-host")]
     allowed_hosts: Vec<String>,
 
@@ -289,6 +295,9 @@ pub fn run(command: McpCommand) -> Result<(), Box<dyn Error + Send + Sync>> {
 
 fn run_mcp_serve(args: McpServeArgs) -> Result<(), Box<dyn Error + Send + Sync>> {
     let http_options = validate_serve_args(&args)?;
+    if let Some(ref options) = http_options {
+        warn_on_wildcard_allowlist(&options.allowed_hosts);
+    }
     let raw_password =
         resolve_onec_password(&args.onec_password, env::var("BSL_ONEC_PASSWORD").ok());
     let password = decode_password(&raw_password);
@@ -432,6 +441,23 @@ fn profile_of(profile: McpProfileCli) -> mcp_server::McpProfile {
     match profile {
         McpProfileCli::Workspace => mcp_server::McpProfile::Workspace,
         McpProfileCli::Reference => mcp_server::McpProfile::Reference,
+    }
+}
+
+/// Warn about an allowlist entry that names a wildcard bind address.
+///
+/// A warning rather than a rejection: `0.0.0.0` is a legal thing to dial on Linux, so the
+/// entry is not provably dead. It is, however, almost always the bind address copied into
+/// the wrong flag, and the resulting server refuses every real client while looking
+/// configured — a diagnosis that costs far more later than a line at startup.
+fn warn_on_wildcard_allowlist(allowed_hosts: &[String]) {
+    let wildcard = mcp_server::wildcard_allowed_hosts(allowed_hosts);
+    if !wildcard.is_empty() {
+        tracing::warn!(
+            entries = %wildcard.join(", "),
+            "--allowed-host names a bind address rather than a Host header; a client sends \
+             the address it dialed, which is never a wildcard"
+        );
     }
 }
 
@@ -1384,7 +1410,8 @@ mod tests {
     use super::{
         daemon_command, resolve_onec_password, resolve_serve_mode_with_override,
         resolve_workspace_cache, validate_backend_pid, validate_onec_settings, validate_serve_args,
-        McpCommand, McpProfileCli, McpServeArgs, McpServeMode, ServeModeContext,
+        warn_on_wildcard_allowlist, McpCommand, McpProfileCli, McpServeArgs, McpServeMode,
+        ServeModeContext,
     };
     use clap::Parser;
     use std::io;
@@ -1718,6 +1745,54 @@ mod tests {
                 "{mode:?} must reject --allowed-host"
             );
         }
+    }
+
+    /// Captures the warnings a closure emits. The scoped default owns only this thread,
+    /// which is exactly the reach needed: the emission under test runs inline.
+    fn warnings_during<T>(f: impl FnOnce() -> T) -> (T, String) {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(data);
+                Ok(data.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for Buf {
+            type Writer = Buf;
+            fn make_writer(&self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(buf.clone())
+            .without_time()
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf.0.lock().unwrap().clone();
+        (result, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// A wildcard entry passes validation — it is non-empty and satisfies the non-loopback
+    /// rule — while authorizing nothing a client sends. Silence there is what turns a
+    /// typo into a server that starts cleanly and refuses everyone.
+    #[test]
+    fn a_wildcard_allowlist_entry_is_warned_about_and_a_real_one_is_not() {
+        let wildcard = vec!["0.0.0.0".to_owned(), "mcp.example.test".to_owned()];
+        let (_, warned) = warnings_during(|| warn_on_wildcard_allowlist(&wildcard));
+        assert!(warned.contains("0.0.0.0"), "{warned}");
+        assert!(warned.contains("--allowed-host"), "{warned}");
+        assert!(!warned.contains("mcp.example.test"), "only the wildcard is named: {warned}");
+
+        let real = vec!["mcp.example.test".to_owned(), "127.0.0.1".to_owned()];
+        let (_, quiet) = warnings_during(|| warn_on_wildcard_allowlist(&real));
+        assert!(quiet.is_empty(), "a usable allowlist warns about nothing: {quiet}");
     }
 
     #[test]
