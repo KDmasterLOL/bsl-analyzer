@@ -642,3 +642,37 @@ fn register_dimension_card_has_type_and_ownership() {
     );
     assert_eq!(container.name, "РегистрСведений1");
 }
+
+/// A module whose first declaration line ends in a run of spaces, and a second one that does
+/// not. The pair is the point: the second line reads the same under any implementation, so a
+/// difference between the two answers can only come from how the trailing run is handled.
+const TRAILING_WHITESPACE_MODULE: &str = "
+//- /CommonModules/МойМодуль/Ext/Module.bsl
+Функция СХвостом(А) Экспорт   
+    Возврат А;
+КонецФункции
+
+Функция БезХвоста(А) Экспорт
+    Возврат А;
+КонецФункции
+";
+
+/// The declaration line a card publishes carries no trailing whitespace, whatever reads it
+/// out of the file.
+#[test]
+fn a_declaration_line_is_published_without_its_trailing_whitespace() {
+    let (db, _) = setup_bsl(TRAILING_WHITESPACE_MODULE);
+    let snippet = |symbol: &str| {
+        by_name(&db, symbol)
+            .expect("resident resolves the method")
+            .definition
+            .expect("definition site")
+            .snippet
+            .expect("declaration line")
+    };
+
+    assert_eq!(snippet("МойМодуль.СХвостом"), "Функция СХвостом(А) Экспорт");
+    // The control: a declaration with nothing to strip publishes the same bytes either way,
+    // so the assertion above is about the trailing run and not about the reader at large.
+    assert_eq!(snippet("МойМодуль.БезХвоста"), "Функция БезХвоста(А) Экспорт");
+}

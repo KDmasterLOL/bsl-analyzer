@@ -23,6 +23,52 @@ pub enum Definition {
     Unresolved,
 }
 
+impl Definition {
+    /// Whether these two name the same thing in the language, rather than in the source.
+    ///
+    /// Several variants carry a [`Name`] spelled the way the occurrence spelled it, and BSL
+    /// is case-insensitive: `Сообщить` and `СООБЩИТЬ` are one function written twice. Derived
+    /// equality compares those spellings byte for byte, so a caller deduplicating by it sees
+    /// two entities where the language has one — and answers with a choice between clones of
+    /// one place.
+    ///
+    /// Only the name-carrying variants fold. The ones keyed by an id keep exact equality:
+    /// two methods called `Расчёт` in two modules are genuinely two, and folding them would
+    /// hide an ambiguity that is real.
+    pub fn same_entity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Definition::BuiltinFunction(left), Definition::BuiltinFunction(right)) => {
+                left.eq_ignore_case(right)
+            }
+            (
+                Definition::BuiltinMethodHandle { handle: left, method_name: left_name },
+                Definition::BuiltinMethodHandle { handle: right, method_name: right_name },
+            ) => left == right && left_name.eq_ignore_case(right_name),
+            (
+                Definition::MdoObject { mdo_type: left, object_name: left_name },
+                Definition::MdoObject { mdo_type: right, object_name: right_name },
+            ) => left == right && left_name.eq_ignore_case(right_name),
+            (
+                Definition::MdoManagerModule {
+                    mdo_type: left,
+                    object_name: left_name,
+                    file_id: left_file,
+                },
+                Definition::MdoManagerModule {
+                    mdo_type: right,
+                    object_name: right_name,
+                    file_id: right_file,
+                },
+            ) => left == right && left_file == right_file && left_name.eq_ignore_case(right_name),
+            (
+                Definition::VirtualTableField { table_name: left_table, field_name: left_field },
+                Definition::VirtualTableField { table_name: right_table, field_name: right_field },
+            ) => left_table.eq_ignore_case(right_table) && left_field.eq_ignore_case(right_field),
+            (left, right) => left == right,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReferenceScope {
     FileLocal,

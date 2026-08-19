@@ -27,21 +27,45 @@ pub(crate) fn redact_secrets(src: &str) -> String {
     if !is_sensitive(src) {
         return src.to_string();
     }
-    redact_targeted(src)
+    redact_targeted_tracking(src, &[]).0
+}
+
+/// The same redaction, plus where one byte offset of the source ended up in the result.
+///
+/// Masking moves everything after a literal it rewrote — left when the secret was longer than
+/// `***`, right when it was shorter — so a caller holding a position in the ORIGINAL text
+/// cannot find it again by looking. Guessing (searching for the same word near the old
+/// column) picks the wrong occurrence whenever a namesake stands closer to it than the shift,
+/// which is a caption pointing at another place and reading as if it were right. The masker
+/// walks the text anyway; telling it which point to follow costs nothing and is exact.
+///
+/// `points` are byte offsets into `src`, in ascending order; the answers are byte offsets
+/// into the result. A point inside a literal that got masked lands on the mask, so ask about
+/// something outside one.
+pub(crate) fn redact_secrets_tracking(src: &str, points: &[usize]) -> (String, Vec<usize>) {
+    if !is_sensitive(src) {
+        return (src.to_string(), points.to_vec());
+    }
+    redact_targeted_tracking(src, points)
 }
 
 /// Single pass: emit the source verbatim except that a string literal is replaced with `"***"`
 /// when an earlier marker in the same statement armed masking. `armed` resets at every `;`.
-fn redact_targeted(src: &str) -> String {
+fn redact_targeted_tracking(src: &str, points: &[usize]) -> (String, Vec<usize>) {
     let mut out = String::with_capacity(src.len());
-    let mut chars = src.chars().peekable();
+    let mut chars = src.char_indices().peekable();
+    // Where each point has landed in `out`, recorded the first time the input reaches it.
+    let mut moved: Vec<usize> = Vec::with_capacity(points.len());
     // A sensitive marker has appeared earlier in the current statement, so the next literal is
     // its secret value. Reset at each statement boundary (`;`).
     let mut armed = false;
     // The identifier/word currently being accumulated; its sensitivity is judged when it ends.
     let mut word = String::new();
 
-    while let Some(c) = chars.next() {
+    while let Some((at, c)) = chars.next() {
+        while moved.len() < points.len() && at >= points[moved.len()] {
+            moved.push(out.len());
+        }
         if c == '"' {
             // The word immediately before a literal (an assignment LHS like `Токен`) is a marker.
             if is_sensitive(&word) {
@@ -49,19 +73,31 @@ fn redact_targeted(src: &str) -> String {
             }
             word.clear();
 
+            // Where this literal begins on both sides, so a tracked point INSIDE it can be
+            // placed once its fate is known. A `|`-continued literal spans lines, and the
+            // start of a line is exactly the kind of point a caller asks about — resolving it
+            // only after the literal was consumed would put it past the whole literal and
+            // hand back a slice that begins in the wrong place.
+            let literal_at = at;
+            let literal_out = out.len();
+
             // Consume the whole literal, honouring `""` escapes and multi-line continuations.
             let mut content = String::new();
             loop {
                 match chars.next() {
-                    Some('"') if chars.peek() == Some(&'"') => {
+                    Some((_, '"')) if chars.peek().is_some_and(|(_, ch)| *ch == '"') => {
                         chars.next();
                         content.push('"');
                         content.push('"');
                     }
-                    Some('"') | None => break,
-                    Some(ch) => content.push(ch),
+                    Some((_, '"')) | None => break,
+                    Some((_, ch)) => content.push(ch),
                 }
             }
+            let literal_end = chars.peek().map_or(src.len(), |(at, _)| *at);
+            // Captured before the branch below, which may arm the NEXT literal: what decides a
+            // point inside THIS one is whether THIS one was masked.
+            let masked = armed;
 
             if armed {
                 out.push('"');
@@ -77,6 +113,19 @@ fn redact_targeted(src: &str) -> String {
                 if !content.trim().chars().any(char::is_whitespace) && is_sensitive(&content) {
                     armed = true;
                 }
+            }
+
+            // A point inside a literal that was masked lands on the mask — there is nothing
+            // else it could name. One inside a literal copied through keeps its place exactly,
+            // because copying preserves length: an escaped `""` is two characters in and two
+            // out, and the quotes are re-emitted one for one.
+            while moved.len() < points.len() && points[moved.len()] < literal_end {
+                let point = points[moved.len()];
+                moved.push(if masked || point <= literal_at {
+                    literal_out
+                } else {
+                    literal_out + (point - literal_at)
+                });
             }
         } else if c == ';' {
             // Statement boundary: a new statement starts unarmed.
@@ -95,7 +144,11 @@ fn redact_targeted(src: &str) -> String {
         }
     }
 
-    out
+    // A point past the last character lands at the end of what was written.
+    while moved.len() < points.len() {
+        moved.push(out.len());
+    }
+    (out, moved)
 }
 
 #[cfg(test)]

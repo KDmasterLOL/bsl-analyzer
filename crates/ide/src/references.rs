@@ -1,7 +1,8 @@
 use hir::{
-    normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics,
+    normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol,
+    SemanticSymbolKey, Semantics,
 };
-use ide_db::base_db::RootQueryDb;
+use ide_db::base_db::{RootQueryDb, SourceDatabase};
 use ide_db::{RootDatabase, RootDatabaseImpl};
 use rustc_hash::FxHashSet;
 use salsa::Database;
@@ -150,6 +151,65 @@ pub enum ReferenceAnchor {
     Name(String),
     /// 0-based line and 0-based character offset within that line.
     Position { file_id: FileId, line: u32, column: u32 },
+    /// The text of the line the caller read, which certifies the coordinates it
+    /// came with. `line` and `column` narrow it; they do not address it, so a
+    /// file that moved under the caller relocates the anchor instead of silently
+    /// answering about whatever token now stands at those coordinates.
+    Text { file_id: FileId, line: Option<u32>, column: Option<u32>, content: String },
+}
+
+/// Why the quoted line no longer anchors anything.
+///
+/// One code per reachable state, because they call for different moves: a quote
+/// that is nowhere in the file is a stale read, a quote with no name in it is a
+/// mis-aimed one, and a name that resolves to nothing is neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorStaleReason {
+    /// No line of the file contains the quoted text.
+    NotInFile,
+    /// A line matched, and the token `column` aims at does not occur in the quote.
+    ColumnOutsideQuotedText,
+    /// Lines matched, and no name on any of them occurs in the quote.
+    NoNameInQuotedText,
+    /// A name was quoted, and semantics derives no symbol from it.
+    NameNotResolved,
+}
+
+impl AnchorStaleReason {
+    pub const ALL: [Self; 4] = [
+        Self::NotInFile,
+        Self::ColumnOutsideQuotedText,
+        Self::NoNameInQuotedText,
+        Self::NameNotResolved,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotInFile => "not_in_file",
+            Self::ColumnOutsideQuotedText => "column_outside_quoted_text",
+            Self::NoNameInQuotedText => "no_name_in_quoted_text",
+            Self::NameNotResolved => "name_not_resolved",
+        }
+    }
+}
+
+/// One place a text anchor could have meant — what `declarations` are to an
+/// ambiguity by name: the list the caller picks from.
+#[derive(Debug, Clone)]
+pub struct AnchorSite {
+    pub file_id: FileId,
+    /// The name token itself.
+    pub range: TextRange,
+    /// The method it sits in, when it sits in one.
+    pub enclosing_range: Option<TextRange>,
+    /// The qualified name that addresses this symbol, when one does. Absent
+    /// rather than guessed: an address the surface would refuse is worse than
+    /// none, because the caller spends a round trip proving it wrong.
+    pub symbol: Option<String>,
+    /// This place stands on the line the request named. A quote that names several symbols
+    /// is not resolved by a coordinate the caller itself distrusts — but the caller is shown
+    /// which place that coordinate meant, so one more call settles it.
+    pub pointed_by_line: bool,
 }
 
 /// Which part of the workspace the answer is confined to.
@@ -201,6 +261,16 @@ pub enum ReferencesOutcome {
     /// it. Told apart from a zero-length list on purpose: a client renames on
     /// the strength of that zero.
     UnsupportedSymbol { category: UnsupportedCategory },
+    /// The quoted line does not describe this file any more. Kept apart from
+    /// `NotFound`, which means "nothing matched exactly": here the caller's
+    /// picture of the file and ours parted, and the caller has to be told which
+    /// of the two moved rather than handed a confident list about another symbol.
+    AnchorStale {
+        reason: AnchorStaleReason,
+        /// How many lines of the file carry the quoted text — zero says the
+        /// quote is gone, more than zero says it is the aim that missed.
+        line_matches: usize,
+    },
 }
 
 /// Whose data COMPOSES the body of the answer — not who was asked along the way.
@@ -241,6 +311,12 @@ pub struct ReferencesResult {
     /// one the answer could have resolved to or been ambiguous about — so it travels
     /// with every outcome, not just `Resolved`.
     pub anchor_candidates_capped: bool,
+    /// The line a text anchor actually landed on. `None` for every other anchor:
+    /// a name has no line, and a position stands where it was told to.
+    pub anchor_line: Option<u32>,
+    /// The places a text anchor could not choose between. Empty for every
+    /// outcome other than an ambiguity the quoted line produced.
+    pub anchor_sites: Vec<AnchorSite>,
 }
 
 impl ReferencesResult {
@@ -255,6 +331,8 @@ impl ReferencesResult {
             files_scanned: 0,
             files_capped: false,
             anchor_candidates_capped: false,
+            anchor_line: None,
+            anchor_sites: Vec::new(),
         }
     }
 }
@@ -267,6 +345,9 @@ pub fn find_references_by_name(db: &RootDatabaseImpl, req: &ReferencesRequest) -
         ReferenceAnchor::Name(name) => resolve_by_name(db, name, req),
         ReferenceAnchor::Position { file_id, line, column } => {
             resolve_by_position(db, *file_id, *line, *column, req)
+        }
+        ReferenceAnchor::Text { file_id, line, column, content } => {
+            resolve_by_text(db, *file_id, *line, *column, content, req)
         }
     }
 }
@@ -470,6 +551,228 @@ fn resolve_by_position(
     collect_references(db, file_id, &symbol, req)
 }
 
+/// The self-certifying anchor: the caller quotes the line it read, and the quote
+/// is checked against the file before anything is counted.
+///
+/// The positional anchor cannot do this. A client that read a file, kept
+/// `line`/`column` and sent them after someone else edited gets a confident list
+/// about whatever token now stands there — the one silent wrong answer this
+/// surface exists to close. Here `line` and `column` only narrow: when the
+/// quoted text moved, the anchor moves with it and says so.
+fn resolve_by_text(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    line: Option<u32>,
+    column: Option<u32>,
+    content: &str,
+    req: &ReferencesRequest,
+) -> ReferencesResult {
+    let stale = |reason: AnchorStaleReason, line_matches: usize| {
+        ReferencesResult::outcome_only(
+            ReferencesOutcome::AnchorStale { reason, line_matches },
+            BodySource::Resident,
+        )
+    };
+
+    let needle = content.trim();
+    // `contains("")` is true of every line, so an empty quote would report itself found on
+    // all of them — the file's length dressed up as evidence.
+    if needle.is_empty() {
+        return stale(AnchorStaleReason::NotInFile, 0);
+    }
+    let text = db.file_text(file_id);
+    let index =
+        ide_db::RootDatabase::line_index(db, ide_db::base_db::FileIdInput::new(db, file_id));
+
+    // Every place the quote actually STANDS, as a range of the file — not merely which lines
+    // carry it. A quote is usually a slice of a line, and comparing names against the whole
+    // line accepted a token that shares a name with something in the quote while standing
+    // outside it: `Продажи.Расчёт(); Склад.Расчёт();` quoted as `Продажи.Расчёт()` picked up
+    // the OTHER call's `Расчёт` and answered `ambiguous` about a quote that named exactly one
+    // occurrence. Containment also settles the half-quoted name for free: a quote cutting an
+    // identifier holds no whole token, so it certifies nothing and says so.
+    //
+    // Exact comparison, no case folding: the caller quotes what it read, and folding would
+    // match a DIFFERENT spelling — the very likeness-instead-of-identity match this anchor
+    // exists to rule out.
+    let mut spans: Vec<TextRange> = Vec::new();
+    let mut matching_lines: Vec<u32> = Vec::new();
+    let mut number = 0u32;
+    while let Some(line_text) = index.safe_line_str(&text, number) {
+        let Some(line_start) = index.try_line_start(number) else { break };
+        let before = spans.len();
+        for (at, _) in line_text.trim_end().match_indices(needle) {
+            let from = line_start + TextSize::from(at as u32);
+            spans.push(TextRange::at(from, TextSize::of(needle)));
+        }
+        if spans.len() > before {
+            matching_lines.push(number);
+        }
+        number += 1;
+    }
+    let line_matches = matching_lines.len();
+    if spans.is_empty() {
+        return stale(AnchorStaleReason::NotInFile, 0);
+    }
+
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    // A name the caller did not quote is not what it pointed at, even when it shares the line
+    // — or the spelling.
+    let inside_quote = |token: &syntax::SyntaxToken| {
+        token.kind().is_name_token()
+            && spans.iter().any(|span| span.contains_range(token.text_range()))
+    };
+
+    let (tokens, aimed_by_column) = match column {
+        Some(column) => {
+            let tokens: Vec<syntax::SyntaxToken> = matching_lines
+                .iter()
+                .filter_map(|&line| {
+                    let offset =
+                        crate::name_lookup::offset_for_line_col(db, file_id, line, column)?;
+                    root.token_at_offset(offset).right_biased()
+                })
+                .filter(inside_quote)
+                .collect();
+            (tokens, true)
+        }
+        None => {
+            // Descendants, not a `next_token()` chain: rowan ends such a walk at the first
+            // empty node, and a recovered file has them.
+            let tokens: Vec<syntax::SyntaxToken> = root
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(inside_quote)
+                .collect();
+            (tokens, false)
+        }
+    };
+
+    if tokens.is_empty() {
+        // The axis the caller aimed with is the one the answer names: a column
+        // that missed is a different mistake from a quote with no name in it.
+        return stale(
+            if aimed_by_column {
+                AnchorStaleReason::ColumnOutsideQuotedText
+            } else {
+                AnchorStaleReason::NoNameInQuotedText
+            },
+            line_matches,
+        );
+    }
+
+    // Deduplicated by SYMBOL, not by token: one symbol quoted on five lines is
+    // one answer, and there is nothing for the caller to choose between.
+    //
+    // The cap counts symbols for the same reason. Counting tokens would raise the flag on an
+    // ordinary long method that writes one variable sixty-five times — where the outcome
+    // could not have been different — and, worse, would drop a SECOND symbol standing past
+    // the sixty-fourth token, turning an ambiguity into a silent choice.
+    let line_of = |token: &syntax::SyntaxToken| index.line_col(token.text_range().start()).line;
+
+    let mut anchors: Vec<AnchorCandidate> = Vec::new();
+    let mut capped = false;
+    let sema = Semantics::new(db);
+    for token in tokens {
+        let Some(symbol) = sema.symbol_for_token(file_id, &token) else { continue };
+        let asked_for = line.is_some_and(|asked| asked == line_of(&token));
+        if let Some(known) = anchors.iter_mut().find(|known| same_anchor(&known.symbol, &symbol)) {
+            // A later token of a symbol already known replaces the stored one only when it
+            // stands where the caller pointed: the reported line is then the caller's own,
+            // and a relocation is not announced where nothing moved.
+            if asked_for && !known.pointed_by_line {
+                known.token = token;
+                known.pointed_by_line = true;
+            }
+            continue;
+        }
+        if anchors.len() == ANCHOR_CANDIDATE_LIMIT {
+            capped = true;
+            break;
+        }
+        anchors.push(AnchorCandidate { symbol, token, pointed_by_line: asked_for });
+    }
+
+    if anchors.is_empty() {
+        return ReferencesResult {
+            anchor_candidates_capped: capped,
+            ..stale(AnchorStaleReason::NameNotResolved, line_matches)
+        };
+    }
+
+    if anchors.len() > 1 {
+        let sites = anchors
+            .iter()
+            .map(|candidate| AnchorSite {
+                file_id,
+                range: candidate.token.text_range(),
+                enclosing_range: enclosing_method_range(&candidate.token),
+                symbol: crate::name_lookup::qualified_method_symbol(db, &candidate.symbol),
+                pointed_by_line: candidate.pointed_by_line,
+            })
+            .collect();
+        return ReferencesResult {
+            anchor_sites: sites,
+            anchor_candidates_capped: capped,
+            ..ReferencesResult::outcome_only(ReferencesOutcome::Ambiguous, BodySource::Resident)
+        };
+    }
+
+    let anchor = &anchors[0];
+    let mut result = collect_references(db, file_id, &anchor.symbol, req);
+    result.anchor_line = Some(line_of(&anchor.token));
+    result.anchor_candidates_capped = capped;
+    result
+}
+
+/// One symbol the quote could name, with the token that will speak for it.
+struct AnchorCandidate {
+    symbol: SemanticSymbol,
+    token: syntax::SyntaxToken,
+    /// This candidate stands on the line the caller sent. It decides nothing — the quote
+    /// does the choosing — and it is published so a caller looking at several places can see
+    /// which one its own coordinate meant.
+    pointed_by_line: bool,
+}
+
+/// Whether two candidates are the SAME symbol, for the purpose of choosing an anchor.
+///
+/// `SemanticSymbolKey` is that identity almost everywhere, and deliberately not for a member
+/// reached through a typed receiver: `TypedMember` is keyed by the OCCURRENCE's own range
+/// (`crates/hir/src/semantic_symbol.rs`), so two reads of one field would never collapse and
+/// an unambiguous quote would come back ambiguous with two clones of one place. Worse, the
+/// hint that answer carries — narrow the quote — cannot help, because every narrowing still
+/// holds the member.
+///
+/// Such a member is identified by what it IS: its name and its type. Two same-named members
+/// of the same type reached through different receivers do collapse, and that costs nothing —
+/// a typed member carries no definition, so its reference scope is `Unknown` and each of them
+/// alone answers `unsupported_symbol` anyway.
+fn same_anchor(left: &SemanticSymbol, right: &SemanticSymbol) -> bool {
+    match (&left.key, &right.key) {
+        (SemanticSymbolKey::TypedMember { .. }, SemanticSymbolKey::TypedMember { .. }) => {
+            left.ty == right.ty && left.name.eq_ignore_case(&right.name)
+        }
+        // A definition keyed by a name carries the spelling of the occurrence, and BSL does
+        // not distinguish spellings: one platform function written twice in two cases is one
+        // function. `same_entity` folds exactly the variants where that holds and keeps exact
+        // equality for the ones keyed by an id, where two same-named things are genuinely two.
+        (SemanticSymbolKey::Definition(left), SemanticSymbolKey::Definition(right)) => {
+            left.same_entity(right)
+        }
+        (left, right) => left == right,
+    }
+}
+
+/// The method an occurrence sits in, when it sits in one.
+fn enclosing_method_range(token: &syntax::SyntaxToken) -> Option<TextRange> {
+    token
+        .parent_ancestors()
+        .find(|node| matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF))
+        .map(|node| node.text_range())
+}
+
 fn symbol_at(db: &RootDatabaseImpl, file_id: FileId, offset: TextSize) -> Option<SemanticSymbol> {
     let parse = db.parse(file_id);
     let root = parse.syntax_node();
@@ -536,12 +839,7 @@ fn collect_references(
             if !req.include_declaration && kind == ReferenceKind::Declaration {
                 continue;
             }
-            let enclosing_range = token
-                .parent_ancestors()
-                .find(|node| {
-                    matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
-                })
-                .map(|node| node.text_range());
+            let enclosing_range = enclosing_method_range(&token);
             hits.push(ReferenceHit { file_id, range: location.range, enclosing_range, kind });
         }
     }
@@ -567,6 +865,8 @@ fn collect_references(
         files_scanned: scanned.len(),
         files_capped,
         anchor_candidates_capped: false,
+        anchor_line: None,
+        anchor_sites: Vec::new(),
     }
 }
 
