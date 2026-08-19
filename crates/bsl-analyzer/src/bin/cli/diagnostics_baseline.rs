@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeMap,
     error::Error,
     fmt,
-    io::Write,
+    io::{BufReader, Write},
     path::{Path, PathBuf},
 };
 
@@ -12,8 +13,18 @@ use ide::diagnostics_baseline::{
     DiagnosticsBaselineEntry, DiagnosticsBaselineExtension, DiagnosticsBaselineRange,
     DiagnosticsBaselineScope, DiagnosticsBaselineSummary, DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
 };
+use ide::partitioned_diagnostics_baseline::{
+    classify_partitioned_diagnostics, diagnostics_manifest_json, diagnostics_partition_json,
+    load_diagnostics_baseline_set, migrate_v1_reader, partition_object_path,
+    ClassifiedPartitionedDiagnostics, DiagnosticsBaselineManifest,
+    DiagnosticsBaselinePartitionFile, PartitionedBaselineDiagnosticCandidate,
+    DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+};
 use serde::Serialize;
 
+use bsl_analyzer::diagnostics_baseline::transaction::{
+    publish_set, repair_object, PartitionFileWriter, PreparedPartition,
+};
 use bsl_analyzer::reporters::FileAnalysis;
 
 type Candidate<T> = BaselineDiagnosticCandidate<(T, usize)>;
@@ -28,9 +39,9 @@ pub enum DiagnosticsCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum DiagnosticsBaselineCommand {
-    Create(DiagnosticsBaselineArgs),
-    Check(DiagnosticsBaselineArgs),
-    Update(DiagnosticsBaselineArgs),
+    Create(DiagnosticsBaselineCreateArgs),
+    Check(DiagnosticsBaselineSelectedArgs),
+    Update(DiagnosticsBaselineSelectedArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -45,6 +56,27 @@ pub struct DiagnosticsBaselineArgs {
     pub format: DiagnosticsBaselineOutputFormat,
 }
 
+#[derive(Debug, Clone, Args)]
+pub struct DiagnosticsBaselineCreateArgs {
+    #[command(flatten)]
+    pub common: DiagnosticsBaselineArgs,
+
+    #[arg(long, conflicts_with = "from_v1")]
+    pub partition: Option<String>,
+
+    #[arg(long = "from-v1", value_name = "PATH")]
+    pub from_v1: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DiagnosticsBaselineSelectedArgs {
+    #[command(flatten)]
+    pub common: DiagnosticsBaselineArgs,
+
+    #[arg(long)]
+    pub partition: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum DiagnosticsBaselineOutputFormat {
     #[default]
@@ -53,10 +85,74 @@ pub enum DiagnosticsBaselineOutputFormat {
 }
 
 impl DiagnosticsBaselineCommand {
-    pub fn output_format(&self) -> DiagnosticsBaselineOutputFormat {
+    pub fn common(&self) -> &DiagnosticsBaselineArgs {
         match self {
-            Self::Create(args) | Self::Check(args) | Self::Update(args) => args.format,
+            Self::Create(args) => &args.common,
+            Self::Check(args) | Self::Update(args) => &args.common,
         }
+    }
+
+    pub fn partition(&self) -> Option<&str> {
+        match self {
+            Self::Create(args) => args.partition.as_deref(),
+            Self::Check(args) | Self::Update(args) => args.partition.as_deref(),
+        }
+    }
+
+    pub fn migration_source(&self) -> Option<&Path> {
+        match self {
+            Self::Create(args) => args.from_v1.as_deref(),
+            Self::Check(_) | Self::Update(_) => None,
+        }
+    }
+
+    pub fn output_format(&self) -> DiagnosticsBaselineOutputFormat {
+        self.common().format
+    }
+
+    pub fn preflight(
+        &self,
+        project: &project_model::Project,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let resolved = project
+            .diagnostics_baseline()?
+            .ok_or("[diagnostics.baseline].path or .directory is not configured")?;
+        let partitioned = matches!(
+            resolved.mode,
+            project_model::DiagnosticsBaselineProjectMode::Partitioned { .. }
+        );
+        if !partitioned && (self.partition().is_some() || self.migration_source().is_some()) {
+            return Err("--partition and --from-v1 require [diagnostics.baseline].directory".into());
+        }
+        if let Some(selected) = self.partition() {
+            let plan = project
+                .diagnostics_baseline_partition_plan()?
+                .ok_or("--partition requires partitioned baseline mode")?;
+            if !plan.partitions.iter().any(|partition| partition.id == selected) {
+                return Err(format!("unknown diagnostics baseline partition: {selected}").into());
+            }
+            if matches!(self, Self::Create(_)) {
+                let directory = project_model::ManagedBaselineDirectory::open(
+                    &project.root,
+                    &resolved.project_path,
+                    false,
+                );
+                if directory
+                    .as_ref()
+                    .ok()
+                    .and_then(|directory| directory.open_file("manifest.json").ok())
+                    .is_none()
+                {
+                    return Err("the first partitioned baseline must be created in full".into());
+                }
+            }
+        }
+        if let Some(source) = self.migration_source() {
+            let source = source.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            project_model::ManagedBaselineDirectory::open_project_root(&project.root)?
+                .open_file(&source)?;
+        }
+        Ok(())
     }
 }
 
@@ -74,6 +170,12 @@ pub struct DiagnosticsBaselineOperationResult {
     pub removed: usize,
     pub unchanged: usize,
     pub diagnostics: Vec<DiagnosticsBaselineEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_partition: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary>,
 }
 
 impl fmt::Display for DiagnosticsBaselineOperationResult {
@@ -114,6 +216,9 @@ pub fn apply(
 
     let resolved =
         project.diagnostics_baseline()?.ok_or("[diagnostics.baseline].path is not configured")?;
+    if matches!(resolved.mode, project_model::DiagnosticsBaselineProjectMode::Partitioned { .. }) {
+        return apply_partitioned(project, files, command, &resolved);
+    }
     let scope = scope(&resolved.scope);
     let candidates = candidates(project, files.iter().enumerate())?;
 
@@ -153,6 +258,9 @@ pub fn apply(
                 removed: 0,
                 unchanged: 0,
                 diagnostics: baseline.diagnostics,
+                generation: None,
+                selected_partition: None,
+                partitions: vec![],
             })
         }
         DiagnosticsBaselineCommand::Check(_) => {
@@ -180,6 +288,9 @@ pub fn apply(
                 removed,
                 unchanged: classified.known.len(),
                 diagnostics,
+                generation: None,
+                selected_partition: None,
+                partitions: vec![],
             })
         }
         DiagnosticsBaselineCommand::Update(_) => {
@@ -210,9 +321,591 @@ pub fn apply(
                 removed,
                 unchanged,
                 diagnostics,
+                generation: None,
+                selected_partition: None,
+                partitions: vec![],
             })
         }
     }
+}
+
+fn apply_partitioned(
+    project: &project_model::Project,
+    files: &[FileAnalysis],
+    command: DiagnosticsBaselineCommand,
+    resolved: &project_model::ResolvedDiagnosticsBaseline,
+) -> Result<DiagnosticsBaselineOperationResult, Box<dyn Error + Send + Sync>> {
+    command.preflight(project)?;
+    let plan = project
+        .diagnostics_baseline_partition_plan()?
+        .ok_or("partitioned diagnostics baseline plan is unavailable")?;
+    let create = matches!(command, DiagnosticsBaselineCommand::Create(_));
+    let directory = project_model::ManagedBaselineDirectory::open(
+        &project.root,
+        &resolved.project_path,
+        create || matches!(command, DiagnosticsBaselineCommand::Update(_)),
+    )?;
+    let selected = command.partition().map(str::to_owned);
+    let coverage: std::collections::BTreeMap<_, _> = plan
+        .partitions
+        .iter()
+        .map(|partition| (partition.id.clone(), DiagnosticsBaselineCoverage::Full))
+        .collect();
+
+    match command {
+        DiagnosticsBaselineCommand::Create(args) => {
+            let existing_manifest = read_partitioned_manifest(&directory)?;
+            if let Some(selected) = args.partition {
+                let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
+                let manifest = existing_manifest
+                    .ok_or("the first partitioned baseline must be created in full")?;
+                let partition = plan
+                    .partitions
+                    .iter()
+                    .find(|partition| partition.id == selected)
+                    .expect("selector was checked during preflight");
+                let expected = manifest
+                    .partitions
+                    .iter()
+                    .find(|entry| entry.partition_id == selected)
+                    .ok_or("selected partition is absent from manifest")?;
+                let mut buckets = current_entries_by_partition(&plan, current)?;
+                let diagnostics = buckets.remove(&selected).unwrap();
+                let bytes =
+                    diagnostics_partition_json(partition.identity.clone(), diagnostics.clone())?;
+                validate_set_for_repair(&directory, &plan, &manifest, &selected, &bytes)?;
+                repair_object(&directory, expected, &bytes)?;
+                let snapshot = load_diagnostics_baseline_set(&directory, &plan)?;
+                let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
+                let classified = classify_partitioned_diagnostics(
+                    &snapshot,
+                    resolved.project_path.clone(),
+                    current,
+                    &coverage,
+                )?;
+                let (_, _, unchanged, partitions) = selected_counts(&classified, Some(&selected));
+                return Ok(DiagnosticsBaselineOperationResult {
+                    operation: "created",
+                    path: resolved.project_path.clone(),
+                    success: true,
+                    added: 0,
+                    removed: 0,
+                    unchanged,
+                    diagnostics,
+                    generation: Some(manifest.generation),
+                    selected_partition: Some(selected),
+                    partitions,
+                });
+            }
+            if existing_manifest.is_some() {
+                return Err("diagnostics baseline manifest already exists".into());
+            }
+            if let Some(source) = args.from_v1 {
+                let source = source.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+                let project_root =
+                    project_model::ManagedBaselineDirectory::open_project_root(&project.root)?;
+                let mut writers: BTreeMap<_, _> = plan
+                    .partitions
+                    .iter()
+                    .map(|partition| {
+                        Ok((partition.id.clone(), PartitionFileWriter::new(&directory, partition)?))
+                    })
+                    .collect::<Result<
+                        _,
+                        ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError,
+                    >>()?;
+                let added = migrate_v1_reader(
+                    BufReader::new(project_root.open_file(&source)?),
+                    &plan,
+                    |owner, entry| writers.get_mut(owner).unwrap().write_entry(entry),
+                )?;
+                let mut prepared = Vec::with_capacity(writers.len());
+                for writer in writers.into_values() {
+                    match writer.finish() {
+                        Ok((partition, _)) => prepared.push(partition),
+                        Err(error) => {
+                            cleanup_staged_partitions(&directory, &prepared);
+                            return Err(error.into());
+                        }
+                    }
+                }
+                let published = publish_set(
+                    &directory,
+                    plan.project_scope_fingerprint.clone(),
+                    prepared,
+                    None,
+                )?;
+                return Ok(DiagnosticsBaselineOperationResult {
+                    operation: "created",
+                    path: resolved.project_path.clone(),
+                    success: true,
+                    added,
+                    removed: 0,
+                    unchanged: 0,
+                    diagnostics: vec![],
+                    generation: Some(published.manifest.generation),
+                    selected_partition: None,
+                    partitions: vec![],
+                });
+            }
+            let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
+            let buckets = current_entries_by_partition(&plan, current)?;
+            let prepared = prepare_all(&plan, buckets)?;
+            let published =
+                publish_set(&directory, plan.project_scope_fingerprint.clone(), prepared, None)?;
+            let diagnostics = load_diagnostics_baseline_set(&directory, &plan)?
+                .partitions
+                .values()
+                .flat_map(|partition| partition.owned_entries())
+                .collect::<Vec<_>>();
+            Ok(DiagnosticsBaselineOperationResult {
+                operation: "created",
+                path: resolved.project_path.clone(),
+                success: true,
+                added: diagnostics.len(),
+                removed: 0,
+                unchanged: 0,
+                diagnostics,
+                generation: Some(published.manifest.generation),
+                selected_partition: None,
+                partitions: vec![],
+            })
+        }
+        DiagnosticsBaselineCommand::Check(_) => {
+            let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
+            let snapshot = load_diagnostics_baseline_set(&directory, &plan)?;
+            let classified = classify_partitioned_diagnostics(
+                &snapshot,
+                resolved.project_path.clone(),
+                current,
+                &coverage,
+            )?;
+            operation_from_classified(
+                "checked",
+                resolved.project_path.clone(),
+                snapshot.manifest.generation,
+                selected,
+                classified,
+                &plan,
+            )
+        }
+        DiagnosticsBaselineCommand::Update(_) => {
+            let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
+            let snapshot = match load_diagnostics_baseline_set(&directory, &plan) {
+                Ok(snapshot) => snapshot,
+                Err(error) if selected.is_none() && matches!(
+                    error,
+                    ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError::ScopeMismatch
+                        | ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError::MissingPartitions { .. }
+                        | ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError::OrphanPartitions(_)
+                        | ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError::PartitionIdentityMismatch(_)
+                ) => {
+                    let old = read_partitioned_manifest(&directory)?
+                        .ok_or("diagnostics baseline manifest is missing")?;
+                    let buckets = current_entries_by_partition(&plan, current)?;
+                    let diagnostics = buckets.values().flatten().cloned().collect::<Vec<_>>();
+                    let published = publish_set(
+                        &directory,
+                        plan.project_scope_fingerprint.clone(),
+                        prepare_all(&plan, buckets)?,
+                        Some(&old.generation),
+                    )?;
+                    return Ok(DiagnosticsBaselineOperationResult {
+                        operation: "updated",
+                        path: resolved.project_path.clone(),
+                        success: true,
+                        added: diagnostics.len(),
+                        removed: 0,
+                        unchanged: 0,
+                        diagnostics,
+                        generation: Some(published.manifest.generation),
+                        selected_partition: None,
+                        partitions: vec![],
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let generation = snapshot.manifest.generation.clone();
+            let classified = classify_partitioned_diagnostics(
+                &snapshot,
+                resolved.project_path.clone(),
+                current,
+                &coverage,
+            )?;
+            let (added, removed, unchanged, summaries) =
+                selected_counts(&classified, selected.as_deref());
+            let mut buckets: std::collections::BTreeMap<String, Vec<DiagnosticsBaselineEntry>> =
+                plan.partitions.iter().map(|partition| (partition.id.clone(), vec![])).collect();
+            for item in classified.new.iter().chain(&classified.known) {
+                let owner = plan
+                    .owner_for_project_path(&item.entry.path)
+                    .ok_or("unowned current diagnostic")?;
+                buckets.get_mut(owner).unwrap().push(item.entry.clone());
+            }
+            let mut prepared = Vec::new();
+            for partition in &plan.partitions {
+                if selected.as_deref().is_none_or(|id| id == partition.id) {
+                    prepared.push(PreparedPartition::Write {
+                        id: partition.id.clone(),
+                        key: partition.key.clone(),
+                        bytes: diagnostics_partition_json(
+                            partition.identity.clone(),
+                            buckets.remove(&partition.id).unwrap(),
+                        )?,
+                    });
+                } else {
+                    let entry = snapshot
+                        .manifest
+                        .partitions
+                        .iter()
+                        .find(|entry| entry.partition_id == partition.id)
+                        .unwrap()
+                        .clone();
+                    prepared.push(PreparedPartition::Reuse {
+                        id: partition.id.clone(),
+                        key: partition.key.clone(),
+                        entry,
+                    });
+                }
+            }
+            let published = publish_set(
+                &directory,
+                plan.project_scope_fingerprint.clone(),
+                prepared,
+                Some(&generation),
+            )?;
+            let diagnostics = classified
+                .new
+                .into_iter()
+                .chain(classified.known)
+                .filter(|item| {
+                    selected
+                        .as_deref()
+                        .is_none_or(|id| plan.owner_for_project_path(&item.entry.path) == Some(id))
+                })
+                .map(|item| item.entry)
+                .collect();
+            Ok(DiagnosticsBaselineOperationResult {
+                operation: "updated",
+                path: resolved.project_path.clone(),
+                success: true,
+                added,
+                removed,
+                unchanged,
+                diagnostics,
+                generation: Some(published.manifest.generation),
+                selected_partition: selected,
+                partitions: summaries,
+            })
+        }
+    }
+}
+
+fn cleanup_staged_partitions(
+    directory: &project_model::ManagedBaselineDirectory,
+    partitions: &[PreparedPartition],
+) {
+    for partition in partitions {
+        let PreparedPartition::Staged { path, .. } = partition else {
+            continue;
+        };
+        match directory.remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(%error, %path, "staged baseline cleanup failed"),
+        }
+    }
+}
+
+fn read_partitioned_manifest(
+    directory: &project_model::ManagedBaselineDirectory,
+) -> Result<
+    Option<ide::partitioned_diagnostics_baseline::DiagnosticsBaselineManifest>,
+    Box<dyn Error + Send + Sync>,
+> {
+    use std::io::Read;
+    match directory.open_file("manifest.json") {
+        Ok(mut file) => {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            Ok(Some(serde_json::from_slice(&bytes)?))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn validate_set_for_repair(
+    directory: &project_model::ManagedBaselineDirectory,
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    manifest: &DiagnosticsBaselineManifest,
+    selected: &str,
+    replacement: &[u8],
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    diagnostics_manifest_json(manifest)?;
+    if manifest.project_scope_fingerprint != plan.project_scope_fingerprint {
+        return Err("diagnostics baseline scope does not match the current project".into());
+    }
+    if manifest.partitions.len() != plan.partitions.len()
+        || plan.partitions.iter().any(|partition| {
+            !manifest.partitions.iter().any(|entry| entry.partition_id == partition.id)
+        })
+    {
+        return Err("diagnostics baseline partition set does not match the current project".into());
+    }
+
+    let selected_entry = manifest
+        .partitions
+        .iter()
+        .find(|entry| entry.partition_id == selected)
+        .ok_or("selected partition is absent from manifest")?;
+    let repairable = match read_managed_file(directory, &selected_entry.file) {
+        Ok(bytes) => blake3::hash(&bytes).to_hex().as_str() != selected_entry.blake3,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut fingerprints = std::collections::HashSet::new();
+    for entry in &manifest.partitions {
+        let partition = plan
+            .partitions
+            .iter()
+            .find(|partition| partition.id == entry.partition_id)
+            .ok_or("diagnostics baseline manifest contains an unknown partition")?;
+        if entry.file != partition_object_path(&partition.id, &partition.key, &entry.blake3)? {
+            return Err(format!("invalid diagnostics baseline object path: {}", entry.file).into());
+        }
+        let bytes = if entry.partition_id == selected {
+            replacement.to_vec()
+        } else {
+            read_managed_file(directory, &entry.file)?
+        };
+        if blake3::hash(&bytes).to_hex().as_str() != entry.blake3 {
+            return Err(format!("diagnostics baseline object is corrupt: {}", entry.file).into());
+        }
+        let file: DiagnosticsBaselinePartitionFile = serde_json::from_slice(&bytes)?;
+        if file.schema_version != DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION {
+            return Err(format!(
+                "unsupported diagnostics baseline partition schema: {}",
+                file.schema_version
+            )
+            .into());
+        }
+        if file.partition != partition.identity {
+            return Err(format!(
+                "diagnostics baseline partition identity mismatch: {}",
+                entry.partition_id
+            )
+            .into());
+        }
+        diagnostics_partition_json(file.partition, file.diagnostics.clone())?;
+        for diagnostic in file.diagnostics {
+            if plan.owner_for_project_path(&diagnostic.path) != Some(entry.partition_id.as_str()) {
+                return Err(format!(
+                    "diagnostics baseline entry has the wrong owner: {}",
+                    diagnostic.path
+                )
+                .into());
+            }
+            if !fingerprints.insert(diagnostic.fingerprint.clone()) {
+                return Err(format!(
+                    "duplicate diagnostics baseline fingerprint: {}",
+                    diagnostic.fingerprint
+                )
+                .into());
+            }
+        }
+    }
+    if !repairable {
+        return Err("selected diagnostics baseline object is already valid".into());
+    }
+    Ok(())
+}
+
+fn read_managed_file(
+    directory: &project_model::ManagedBaselineDirectory,
+    path: &str,
+) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    directory.open_file(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+type IndexedPartitionedCandidate<T> = PartitionedBaselineDiagnosticCandidate<(T, usize, String)>;
+
+fn partitioned_candidates<'a, T: Clone + 'a>(
+    project: &project_model::Project,
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    files: impl IntoIterator<Item = (T, &'a FileAnalysis)>,
+) -> Result<Vec<IndexedPartitionedCandidate<T>>, Box<dyn Error + Send + Sync>> {
+    let root = project.root.canonicalize()?;
+    let mut result = Vec::new();
+    for (file_id, file) in files {
+        let path = file
+            .path
+            .strip_prefix(&root)?
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        let owner = plan
+            .owner_for_project_path(&path)
+            .ok_or_else(|| format!("diagnostics file has no partition owner: {path}"))?
+            .to_owned();
+        for (index, diagnostic) in file.diagnostics.iter().enumerate() {
+            result.push(PartitionedBaselineDiagnosticCandidate {
+                partition_id: owner.clone(),
+                candidate: BaselineDiagnosticCandidate {
+                    diagnostic: (file_id.clone(), index, owner.clone()),
+                    path: path.clone(),
+                    code: diagnostic.code.clone(),
+                    snippet: file.line_snippets.get(index).cloned(),
+                    message: diagnostic.message.clone(),
+                    severity: diagnostic.severity.clone(),
+                    range: DiagnosticsBaselineRange {
+                        start_line: diagnostic.start_line.try_into()?,
+                        start_column: diagnostic.start_column.try_into()?,
+                        end_line: diagnostic.end_line.try_into()?,
+                        end_column: diagnostic.end_column.try_into()?,
+                    },
+                },
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn current_entries_by_partition<T>(
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    current: Vec<PartitionedBaselineDiagnosticCandidate<T>>,
+) -> Result<
+    std::collections::BTreeMap<String, Vec<DiagnosticsBaselineEntry>>,
+    Box<dyn Error + Send + Sync>,
+> {
+    let mut buckets: std::collections::BTreeMap<_, Vec<_>> =
+        plan.partitions.iter().map(|partition| (partition.id.clone(), vec![])).collect();
+    let empty = DiagnosticsBaseline {
+        schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+        scope: scope_from_plan(plan),
+        diagnostics: vec![],
+    };
+    let candidates = current
+        .into_iter()
+        .map(|item| BaselineDiagnosticCandidate {
+            diagnostic: item.partition_id,
+            path: item.candidate.path,
+            code: item.candidate.code,
+            snippet: item.candidate.snippet,
+            message: item.candidate.message,
+            severity: item.candidate.severity,
+            range: item.candidate.range,
+        })
+        .collect();
+    let classified = classify_diagnostics(
+        &empty,
+        String::new(),
+        candidates,
+        &DiagnosticsBaselineCoverage::Full,
+    )?;
+    for item in classified.new {
+        if matches!(item.entry.code.as_str(), "UnknownSuppressionCode" | "SuppressionWithoutCode") {
+            continue;
+        }
+        buckets.get_mut(&item.diagnostic).unwrap().push(item.entry);
+    }
+    Ok(buckets)
+}
+
+fn scope_from_plan(
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+) -> DiagnosticsBaselineScope {
+    DiagnosticsBaselineScope {
+        source_root: plan.project_scope.source_root.clone(),
+        extensions: plan
+            .project_scope
+            .extensions
+            .iter()
+            .map(|extension| DiagnosticsBaselineExtension {
+                name: extension.name.clone(),
+                path: extension.path.clone(),
+                depends_on: extension.depends_on.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn prepare_all(
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    mut buckets: std::collections::BTreeMap<String, Vec<DiagnosticsBaselineEntry>>,
+) -> Result<Vec<PreparedPartition>, Box<dyn Error + Send + Sync>> {
+    plan.partitions
+        .iter()
+        .map(|partition| {
+            Ok(PreparedPartition::Write {
+                id: partition.id.clone(),
+                key: partition.key.clone(),
+                bytes: diagnostics_partition_json(
+                    partition.identity.clone(),
+                    buckets.remove(&partition.id).unwrap_or_default(),
+                )?,
+            })
+        })
+        .collect()
+}
+
+fn selected_counts<T>(
+    classified: &ClassifiedPartitionedDiagnostics<T>,
+    selected: Option<&str>,
+) -> (usize, usize, usize, Vec<ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary>) {
+    let summaries = classified.summary.partitions.clone();
+    if let Some(selected) = selected {
+        let summary = summaries.iter().find(|summary| summary.id == selected).unwrap();
+        (summary.new, summary.resolved, summary.known, summaries)
+    } else {
+        (
+            classified.summary.new.unwrap_or_default(),
+            classified.summary.resolved.unwrap_or_default(),
+            classified.summary.known.unwrap_or_default(),
+            summaries,
+        )
+    }
+}
+
+fn operation_from_classified<T>(
+    operation: &'static str,
+    path: String,
+    generation: String,
+    selected: Option<String>,
+    classified: ClassifiedPartitionedDiagnostics<T>,
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+) -> Result<DiagnosticsBaselineOperationResult, Box<dyn Error + Send + Sync>> {
+    let (added, removed, unchanged, partitions) = selected_counts(&classified, selected.as_deref());
+    let selected_id = selected.as_deref();
+    let resolved = match selected_id {
+        Some(id) => classified.resolved.retain_partition(id),
+        None => classified.resolved,
+    };
+    let mut diagnostics: Vec<_> = classified
+        .new
+        .into_iter()
+        .map(|item| item.entry)
+        .chain(resolved)
+        .filter(|entry| {
+            selected_id.is_none_or(|id| plan.owner_for_project_path(&entry.path) == Some(id))
+        })
+        .collect();
+    diagnostics.sort_by(|left, right| left.fingerprint.cmp(&right.fingerprint));
+    Ok(DiagnosticsBaselineOperationResult {
+        operation,
+        path,
+        success: added == 0 && removed == 0,
+        added,
+        removed,
+        unchanged,
+        diagnostics,
+        generation: Some(generation),
+        selected_partition: selected,
+        partitions,
+    })
 }
 
 fn scope(scope: &project_model::DiagnosticsBaselineProjectScope) -> DiagnosticsBaselineScope {
@@ -270,13 +963,24 @@ pub fn classify_files(
     coverage: DiagnosticsBaselineCoverage,
 ) -> Result<DiagnosticsBaselineSummary, Box<dyn Error + Send + Sync>> {
     let loaded = ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(project);
-    classify_files_with_loaded(project, files, coverage, &loaded)
+    let root = project.root.canonicalize()?;
+    let all_project_files = files
+        .iter()
+        .flatten()
+        .map(|file| {
+            file.path
+                .strip_prefix(&root)
+                .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+        })
+        .collect::<Result<_, _>>()?;
+    classify_files_with_loaded(project, files, coverage, Some(&all_project_files), &loaded)
 }
 
 pub fn classify_files_with_loaded(
     project: &project_model::Project,
     files: &mut [Option<FileAnalysis>],
     coverage: DiagnosticsBaselineCoverage,
+    all_project_files: Option<&std::collections::BTreeSet<String>>,
     loaded: &ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot,
 ) -> Result<DiagnosticsBaselineSummary, Box<dyn Error + Send + Sync>> {
     use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
@@ -284,6 +988,35 @@ pub fn classify_files_with_loaded(
         DiagnosticsBaselineSnapshot::Disabled => return Ok(DiagnosticsBaselineSummary::disabled()),
         DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
             (baseline, project_path)
+        }
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
+            let current = partitioned_candidates(
+                project,
+                plan,
+                files
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, file)| file.as_ref().map(|file| (index, file))),
+            )?;
+            let per_partition_coverage =
+                ide::partitioned_diagnostics_baseline::partitioned_coverage(
+                    plan,
+                    &coverage,
+                    all_project_files,
+                )?;
+            let classified = classify_partitioned_diagnostics(
+                baseline,
+                project_path.clone(),
+                current,
+                &per_partition_coverage,
+            )?;
+            let known: std::collections::HashSet<_> = classified
+                .known
+                .iter()
+                .map(|item| (item.diagnostic.0, item.diagnostic.1))
+                .collect();
+            suppress_known_files(files, &known);
+            return Ok(classified.summary);
         }
         DiagnosticsBaselineSnapshot::Error { detail, .. } => return Err(detail.clone().into()),
     };
@@ -297,6 +1030,14 @@ pub fn classify_files_with_loaded(
     let classified = classify_diagnostics(baseline, project_path.clone(), current, &coverage)?;
     let known: std::collections::HashSet<_> =
         classified.known.iter().map(|item| item.diagnostic).collect();
+    suppress_known_files(files, &known);
+    Ok(classified.summary)
+}
+
+fn suppress_known_files(
+    files: &mut [Option<FileAnalysis>],
+    known: &std::collections::HashSet<(usize, usize)>,
+) {
     for (file_index, file) in files.iter_mut().enumerate() {
         let Some(analysis) = file else { continue };
         let mut diagnostic_index = 0;
@@ -315,7 +1056,6 @@ pub fn classify_files_with_loaded(
             *file = None;
         }
     }
-    Ok(classified.summary)
 }
 
 fn read_baseline(
@@ -386,11 +1126,21 @@ mod tests {
         }
     }
 
+    fn create_args() -> DiagnosticsBaselineCreateArgs {
+        DiagnosticsBaselineCreateArgs { common: args(), partition: None, from_v1: None }
+    }
+
+    fn selected_args() -> DiagnosticsBaselineSelectedArgs {
+        DiagnosticsBaselineSelectedArgs { common: args(), partition: None }
+    }
+
     fn project(root: &Path, configured: bool) -> Project {
         let mut config = ProjectConfig::default();
         if configured {
-            config.diagnostics.baseline =
-                Some(DiagnosticsBaselineConfig { path: "baseline.json".to_owned() });
+            config.diagnostics.baseline = Some(DiagnosticsBaselineConfig {
+                path: Some("baseline.json".to_owned()),
+                ..Default::default()
+            });
         }
         Project::with_config(root, config).unwrap()
     }
@@ -427,7 +1177,7 @@ mod tests {
             &project,
             &[file(dir.path())],
             &full(),
-            DiagnosticsBaselineCommand::Create(args()),
+            DiagnosticsBaselineCommand::Create(create_args()),
         )
         .unwrap();
         assert_eq!((result.added, result.removed, result.unchanged), (1, 0, 0));
@@ -445,7 +1195,7 @@ mod tests {
             &project(dir.path(), false),
             &[],
             &full(),
-            DiagnosticsBaselineCommand::Create(args()),
+            DiagnosticsBaselineCommand::Create(create_args()),
         )
         .unwrap_err();
         assert!(error.to_string().contains("not configured"));
@@ -458,8 +1208,9 @@ mod tests {
         let mut file = file(dir.path());
         file.line_snippets.clear();
 
-        let error = apply(&project, &[file], &full(), DiagnosticsBaselineCommand::Create(args()))
-            .unwrap_err();
+        let error =
+            apply(&project, &[file], &full(), DiagnosticsBaselineCommand::Create(create_args()))
+                .unwrap_err();
 
         assert!(error.to_string().contains("snippet"));
         assert!(!dir.path().join("baseline.json").exists());
@@ -490,7 +1241,8 @@ mod tests {
     fn create_baseline(dir: &Path) -> (Project, Vec<FileAnalysis>, Vec<u8>) {
         let project = project(dir, true);
         let files = vec![file(dir)];
-        apply(&project, &files, &full(), DiagnosticsBaselineCommand::Create(args())).unwrap();
+        apply(&project, &files, &full(), DiagnosticsBaselineCommand::Create(create_args()))
+            .unwrap();
         let bytes = std::fs::read(dir.join("baseline.json")).unwrap();
         (project, files, bytes)
     }
@@ -498,7 +1250,8 @@ mod tests {
     fn assert_check_keeps_bytes(project: &Project, files: &[FileAnalysis], expected_ok: bool) {
         let path = project.root.join("baseline.json");
         let before = std::fs::read(&path).unwrap();
-        let result = apply(project, files, &full(), DiagnosticsBaselineCommand::Check(args()));
+        let result =
+            apply(project, files, &full(), DiagnosticsBaselineCommand::Check(selected_args()));
         match result {
             Ok(result) => assert_eq!(result.success, expected_ok, "{result:?}"),
             Err(_) => assert!(!expected_ok),
@@ -534,7 +1287,8 @@ mod tests {
         files[0].diagnostics[0].start_line = 7;
         files[0].diagnostics[0].end_line = 7;
         let result =
-            apply(&project, &files, &full(), DiagnosticsBaselineCommand::Update(args())).unwrap();
+            apply(&project, &files, &full(), DiagnosticsBaselineCommand::Update(selected_args()))
+                .unwrap();
         assert_eq!((result.added, result.removed, result.unchanged), (0, 0, 1));
 
         let resolved = project.diagnostics_baseline().unwrap().unwrap();
@@ -545,7 +1299,8 @@ mod tests {
 
         files[0].diagnostics[0].code = "MagicNumber".to_owned();
         let result =
-            apply(&project, &files, &full(), DiagnosticsBaselineCommand::Update(args())).unwrap();
+            apply(&project, &files, &full(), DiagnosticsBaselineCommand::Update(selected_args()))
+                .unwrap();
         assert_eq!((result.added, result.removed, result.unchanged), (1, 1, 0));
     }
 
@@ -614,7 +1369,7 @@ mod tests {
             &project,
             &[first, second],
             &super::super::analyze::CoverageProof { total: 2, analyzed: 2, ..Default::default() },
-            DiagnosticsBaselineCommand::Create(args()),
+            DiagnosticsBaselineCommand::Create(create_args()),
         )
         .unwrap();
 

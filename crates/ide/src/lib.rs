@@ -16,6 +16,7 @@ mod hover;
 mod inlay_hints;
 pub mod jsonl;
 mod name_lookup;
+pub mod partitioned_diagnostics_baseline;
 mod reference_kind;
 mod references;
 mod rename;

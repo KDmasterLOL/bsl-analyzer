@@ -132,6 +132,11 @@ fn inspect_diagnostics_baseline(
                 issue: false,
             }
         }
+        DiagnosticsBaselineSnapshot::ReadySet { .. } => DiagnosticsBaselineCheck {
+            status: "ERROR: partitioned diagnostics baseline is not supported by check-config"
+                .to_owned(),
+            issue: true,
+        },
         DiagnosticsBaselineSnapshot::Error { path, code, detail, .. } => {
             let path = path.as_deref().map(|path| path.display().to_string()).unwrap_or_default();
             let status = match code.as_str() {

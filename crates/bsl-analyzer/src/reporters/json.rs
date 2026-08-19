@@ -73,9 +73,12 @@ mod tests {
                 resolved: Some(3),
                 path: Some("baseline.json".to_owned()),
                 schema_version: Some(1),
+                manifest_schema_version: None,
                 complete: state == ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
                 error_code: None,
                 detail: None,
+                partitions: vec![],
+                errors: vec![],
             };
             JsonReporter.report(&results, temp.path()).unwrap();
             let value: serde_json::Value =

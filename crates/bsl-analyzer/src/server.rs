@@ -538,6 +538,7 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
         vfs::loader::Message::WatchOnly { files } => {
             const VFS_WATCH_ONLY_BATCH: usize = 64;
             let count = files.len();
+            let baseline_paths = state.diagnostics_baseline.observation_paths();
             for chunk in files.chunks(VFS_WATCH_ONLY_BATCH) {
                 let mut vfs = state.vfs.write();
                 for path in chunk {
@@ -550,24 +551,47 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
             // each of which invalidates the configuration of its owning root.
             // Refresh open documents so their diagnostics reflect the new metadata.
             if state.vfs_done {
-                state.analysis_host.request_cancellation();
+                let changed: Vec<std::path::PathBuf> = files
+                    .iter()
+                    .filter(|path| {
+                        let path: &std::path::Path = path.as_ref();
+                        !baseline_paths.iter().any(|baseline| baseline == path)
+                    })
+                    .map(|path| AsRef::<std::path::Path>::as_ref(path).to_path_buf())
+                    .collect();
+                let baseline_changed =
+                    changed.len() != files.len() && state.reload_diagnostics_baseline();
+                if baseline_changed {
+                    state.reset_workspace_batch();
+                }
                 // Per-MDO substrate: re-discover the affected roots and re-read only
                 // the changed/new XML, so resolve_metadata_object reflects the edit at
                 // MDO granularity (and a disk-backed file_text never reads stale bytes).
-                let changed: Vec<std::path::PathBuf> = files
-                    .iter()
-                    .map(|p| AsRef::<std::path::Path>::as_ref(p).to_path_buf())
-                    .collect();
-                state.refresh_metadata_substrate(&changed);
-                // Coarse path: load_configuration is still the authoritative consumer
-                // until the per-MDO resolvers are migrated, so keep bumping its root.
-                state
-                    .analysis_host
-                    .raw_database_mut()
-                    .bump_config_for_paths(files.iter().map(|p| p.as_ref()));
-                state.supersede_call_hierarchy_index(base_db::BSL_SOURCE_ROOT);
-                for uri in state.opened_document_uris() {
-                    crate::handlers::notification::schedule_diagnostics(state, &uri);
+                if baseline_changed || !changed.is_empty() {
+                    state.analysis_host.request_cancellation();
+                }
+                if !changed.is_empty() {
+                    state.refresh_metadata_substrate(&changed);
+                    // Coarse path: load_configuration is still the authoritative consumer
+                    // until the per-MDO resolvers are migrated, so keep bumping its root.
+                    state
+                        .analysis_host
+                        .raw_database_mut()
+                        .bump_config_for_paths(changed.iter().map(|p| p.as_path()));
+                    state.supersede_call_hierarchy_index(base_db::BSL_SOURCE_ROOT);
+                }
+                if baseline_changed || !changed.is_empty() {
+                    let uris = state.opened_document_uris();
+                    if baseline_changed {
+                        invalidate_diagnostics(state, &uris);
+                    }
+                    for uri in uris {
+                        crate::handlers::notification::schedule_diagnostics(state, &uri);
+                    }
+                }
+                if baseline_changed {
+                    state.mark_workspace_batch_dirty();
+                    state.request_workspace_diagnostic_refresh();
                 }
             }
             tracing::debug!(count, vfs_done = state.vfs_done, "registered WatchOnly batch",);
@@ -596,6 +620,15 @@ fn handle_loader_msg(state: &mut GlobalState, msg: vfs::loader::Message) -> Resu
         }
     }
     Ok(())
+}
+
+fn invalidate_diagnostics(state: &mut GlobalState, uris: &[lsp_types::Url]) {
+    for uri in uris {
+        if let Some(token) = state.diagnostics_tokens.remove(uri) {
+            token.cancel();
+        }
+        *state.diagnostics_generation.entry(uri.clone()).or_default() += 1;
+    }
 }
 
 fn handle_task(state: &mut GlobalState, task: crate::global_state::Task) -> Result<()> {
@@ -1074,7 +1107,7 @@ fn handle_vfs_msg(
     // down the batch's published state first — this clears stale pushes even when the new
     // scope is `off`, where `mark_workspace_batch_dirty` below would no-op and leave them
     // lingering — then re-arm below if the feature is still enabled. Mirrors the save path.
-    if outcome.config_file_changed {
+    if outcome.config_file_changed || outcome.diagnostics_baseline_changed {
         state.reset_workspace_batch();
     }
 
@@ -1309,6 +1342,16 @@ mod tests {
     use super::*;
     use crate::global_state::Task;
     use std::sync::Arc;
+
+    #[test]
+    fn baseline_reload_invalidates_diagnostics_before_pool_scheduling() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender);
+        let uri = lsp_types::Url::parse("file:///workspace/module.bsl").unwrap();
+        state.diagnostics_generation.insert(uri.clone(), 7);
+        invalidate_diagnostics(&mut state, std::slice::from_ref(&uri));
+        assert_eq!(state.diagnostics_generation[&uri], 8);
+    }
 
     #[test]
     fn test_server_capabilities() {

@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod diagnostics_baseline_fs;
+pub use diagnostics_baseline_fs::ManagedBaselineDirectory;
+
 pub mod extension_topology;
 pub mod file_role;
 pub mod source_set;
@@ -38,13 +41,15 @@ impl fmt::Display for ConfigLoadError {
 
 impl std::error::Error for ConfigLoadError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnosticsBaselineProjectScope {
     pub source_root: String,
     pub extensions: Vec<DiagnosticsBaselineProjectExtension>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnosticsBaselineProjectExtension {
     pub name: String,
     pub path: String,
@@ -56,6 +61,55 @@ pub struct ResolvedDiagnosticsBaseline {
     pub path: PathBuf,
     pub project_path: String,
     pub scope: DiagnosticsBaselineProjectScope,
+    pub mode: DiagnosticsBaselineProjectMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiagnosticsBaselineProjectMode {
+    Legacy,
+    Partitioned { groups: Vec<DiagnosticsBaselineGroupConfig> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DiagnosticsBaselinePartitionIdentity {
+    Main { path: String },
+    Extension { name: String, path: String, depends_on: Vec<String> },
+    Group { name: String, members: Vec<DiagnosticsBaselineProjectExtension> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBaselinePartition {
+    pub id: String,
+    pub key: String,
+    pub identity: DiagnosticsBaselinePartitionIdentity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBaselineRootOwner {
+    pub root: String,
+    pub partition_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticsBaselinePartitionPlan {
+    pub project_scope: DiagnosticsBaselineProjectScope,
+    pub project_scope_fingerprint: String,
+    pub partitions: Vec<DiagnosticsBaselinePartition>,
+    pub roots: Vec<DiagnosticsBaselineRootOwner>,
+}
+
+impl DiagnosticsBaselinePartitionPlan {
+    pub fn owner_for_project_path(&self, path: &str) -> Option<&str> {
+        self.roots
+            .iter()
+            .find(|owner| {
+                owner.root.is_empty()
+                    || path == owner.root
+                    || path.strip_prefix(&owner.root).is_some_and(|suffix| suffix.starts_with('/'))
+            })
+            .map(|owner| owner.partition_id.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +120,9 @@ pub enum DiagnosticsBaselineProjectError {
     NotAFile(PathBuf),
     NonUtf8(PathBuf),
     PathCollision(String),
+    InvalidConfig(String),
+    LegacyExtension(String),
+    InvalidGroup(String),
 }
 
 impl fmt::Display for DiagnosticsBaselineProjectError {
@@ -85,6 +142,16 @@ impl fmt::Display for DiagnosticsBaselineProjectError {
             }
             Self::NonUtf8(path) => write!(f, "project path is not valid UTF-8: {}", path.display()),
             Self::PathCollision(path) => write!(f, "project roots collide at: {path}"),
+            Self::InvalidConfig(message) => {
+                write!(f, "invalid diagnostics baseline config: {message}")
+            }
+            Self::LegacyExtension(name) => write!(
+                f,
+                "partitioned diagnostics baseline requires a structured extension entry: {name}"
+            ),
+            Self::InvalidGroup(message) => {
+                write!(f, "invalid diagnostics baseline group: {message}")
+            }
         }
     }
 }
@@ -186,11 +253,46 @@ impl Project {
     pub fn diagnostics_baseline(
         &self,
     ) -> Result<Option<ResolvedDiagnosticsBaseline>, DiagnosticsBaselineProjectError> {
-        let Some(configured_path) = self.config.diagnostics_baseline_path(&self.root) else {
+        let Some(config) = self.config.diagnostics.baseline.as_ref() else {
             return Ok(None);
         };
+        let (configured_path, mode) = match (&config.path, &config.directory) {
+            (Some(path), None) if config.groups.is_empty() => (
+                self.config.resolve_config_path(&self.root, path),
+                DiagnosticsBaselineProjectMode::Legacy,
+            ),
+            (None, Some(directory)) => {
+                validate_partitioned_config_path(directory)?;
+                (
+                    self.config.resolve_config_path(&self.root, directory),
+                    DiagnosticsBaselineProjectMode::Partitioned { groups: config.groups.clone() },
+                )
+            }
+            (Some(_), Some(_)) => {
+                return Err(DiagnosticsBaselineProjectError::InvalidConfig(
+                    "path and directory are mutually exclusive".to_owned(),
+                ))
+            }
+            (Some(_), None) => {
+                return Err(DiagnosticsBaselineProjectError::InvalidConfig(
+                    "groups require directory mode".to_owned(),
+                ))
+            }
+            (None, None) => {
+                return Err(DiagnosticsBaselineProjectError::InvalidConfig(
+                    "either path or directory is required".to_owned(),
+                ))
+            }
+        };
         let project_root = canonicalize_baseline_path(&self.root)?;
-        let target = resolve_baseline_target(&configured_path, &project_root)?;
+        let target = match &mode {
+            DiagnosticsBaselineProjectMode::Legacy => {
+                resolve_baseline_target(&configured_path, &project_root)?
+            }
+            DiagnosticsBaselineProjectMode::Partitioned { .. } => {
+                resolve_baseline_directory(&configured_path, &project_root)?
+            }
+        };
         let source_root = relative_baseline_path(
             &canonicalize_baseline_path(self.source_path())?,
             &project_root,
@@ -222,6 +324,179 @@ impl Project {
             project_path: relative_baseline_path(&target, &project_root)?,
             path: target,
             scope: DiagnosticsBaselineProjectScope { source_root, extensions },
+            mode,
+        }))
+    }
+
+    pub fn diagnostics_baseline_partition_plan(
+        &self,
+    ) -> Result<Option<DiagnosticsBaselinePartitionPlan>, DiagnosticsBaselineProjectError> {
+        let Some(resolved) = self.diagnostics_baseline()? else { return Ok(None) };
+        let DiagnosticsBaselineProjectMode::Partitioned { groups } = &resolved.mode else {
+            return Ok(None);
+        };
+        for node in self.topology.nodes() {
+            if !node.is_structured() {
+                return Err(DiagnosticsBaselineProjectError::LegacyExtension(
+                    node.name().to_owned(),
+                ));
+            }
+        }
+
+        let mut canonical_roots = vec![canonicalize_baseline_path(self.source_path())?];
+        canonical_roots.extend(
+            self.topology
+                .nodes()
+                .iter()
+                .map(|node| canonicalize_baseline_path(node.canonical_path()))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        for (index, left) in canonical_roots.iter().enumerate() {
+            for right in canonical_roots.iter().skip(index + 1) {
+                if left.starts_with(right) || right.starts_with(left) {
+                    return Err(DiagnosticsBaselineProjectError::PathCollision(
+                        relative_baseline_path(
+                            if left.components().count() >= right.components().count() {
+                                left
+                            } else {
+                                right
+                            },
+                            &canonicalize_baseline_path(&self.root)?,
+                        )?,
+                    ));
+                }
+            }
+        }
+
+        let mut group_names = std::collections::HashSet::new();
+        let mut member_to_group = std::collections::HashMap::<String, String>::new();
+        let mut normalized_groups = Vec::with_capacity(groups.len());
+        for group in groups {
+            let name = group.name.trim();
+            if name.is_empty() {
+                return Err(DiagnosticsBaselineProjectError::InvalidGroup(
+                    "name is empty".to_owned(),
+                ));
+            }
+            let folded_name = stdx::case::fold_lower_per_char(name);
+            if !group_names.insert(folded_name) {
+                return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
+                    "duplicate name after case folding: {name}"
+                )));
+            }
+            if group.extensions.is_empty() {
+                return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
+                    "{name} has no extensions"
+                )));
+            }
+            let mut requested = std::collections::HashSet::new();
+            for extension in &group.extensions {
+                let folded = stdx::case::fold_lower_per_char(extension);
+                if !requested.insert(folded.clone()) {
+                    return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
+                        "{name} repeats extension {extension}"
+                    )));
+                }
+                let Some(node) = self
+                    .topology
+                    .nodes()
+                    .iter()
+                    .find(|node| stdx::case::fold_lower_per_char(node.name()) == folded)
+                else {
+                    return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
+                        "{name} references unknown extension {extension}"
+                    )));
+                };
+                if let Some(first) = member_to_group.insert(folded, name.to_owned()) {
+                    return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
+                        "extension {} belongs to both {first} and {name}",
+                        node.name()
+                    )));
+                }
+            }
+            normalized_groups.push((name.to_owned(), requested));
+        }
+        normalized_groups.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut partitions = vec![partition(
+            "main".to_owned(),
+            DiagnosticsBaselinePartitionIdentity::Main { path: resolved.scope.source_root.clone() },
+        )];
+        let mut roots = vec![DiagnosticsBaselineRootOwner {
+            root: resolved.scope.source_root.clone(),
+            partition_id: "main".to_owned(),
+        }];
+
+        for (group_name, members) in &normalized_groups {
+            let id = format!("group:{group_name}");
+            validate_partition_id(&id)?;
+            let identity_members = resolved
+                .scope
+                .extensions
+                .iter()
+                .filter(|extension| {
+                    members.contains(&stdx::case::fold_lower_per_char(&extension.name))
+                })
+                .cloned()
+                .collect();
+            partitions.push(partition(
+                id.clone(),
+                DiagnosticsBaselinePartitionIdentity::Group {
+                    name: group_name.clone(),
+                    members: identity_members,
+                },
+            ));
+            roots.extend(
+                resolved
+                    .scope
+                    .extensions
+                    .iter()
+                    .filter(|extension| {
+                        members.contains(&stdx::case::fold_lower_per_char(&extension.name))
+                    })
+                    .map(|extension| DiagnosticsBaselineRootOwner {
+                        root: extension.path.clone(),
+                        partition_id: id.clone(),
+                    }),
+            );
+        }
+
+        for extension in &resolved.scope.extensions {
+            if member_to_group.contains_key(&stdx::case::fold_lower_per_char(&extension.name)) {
+                continue;
+            }
+            let id = format!("extension:{}", extension.name);
+            validate_partition_id(&id)?;
+            partitions.push(partition(
+                id.clone(),
+                DiagnosticsBaselinePartitionIdentity::Extension {
+                    name: extension.name.clone(),
+                    path: extension.path.clone(),
+                    depends_on: extension.depends_on.clone(),
+                },
+            ));
+            roots.push(DiagnosticsBaselineRootOwner {
+                root: extension.path.clone(),
+                partition_id: id,
+            });
+        }
+
+        partitions.sort_by(|left, right| {
+            partition_sort_key(&left.id).cmp(&partition_sort_key(&right.id))
+        });
+        roots.sort_by(|left, right| {
+            right.root.len().cmp(&left.root.len()).then(left.root.cmp(&right.root))
+        });
+        let scope_bytes = serde_json::to_vec(&resolved.scope)
+            .map_err(|error| DiagnosticsBaselineProjectError::InvalidConfig(error.to_string()))?;
+        let mut scope_hasher = blake3::Hasher::new();
+        scope_hasher.update(b"bsl-analyzer/diagnostics-baseline/project-scope/v1\0");
+        scope_hasher.update(&scope_bytes);
+        Ok(Some(DiagnosticsBaselinePartitionPlan {
+            project_scope: resolved.scope,
+            project_scope_fingerprint: scope_hasher.finalize().to_hex().to_string(),
+            partitions,
+            roots,
         }))
     }
 
@@ -476,6 +751,82 @@ fn resolve_baseline_target(
             path: path.to_path_buf(),
             message: error.to_string(),
         }),
+    }
+}
+
+fn resolve_baseline_directory(
+    path: &Path,
+    project_root: &Path,
+) -> Result<PathBuf, DiagnosticsBaselineProjectError> {
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let name =
+            ancestor.file_name().ok_or_else(|| DiagnosticsBaselineProjectError::CannotResolve {
+                path: path.to_path_buf(),
+                message: "directory has no existing ancestor".to_owned(),
+            })?;
+        suffix.push(name.to_owned());
+        ancestor =
+            ancestor.parent().ok_or_else(|| DiagnosticsBaselineProjectError::CannotResolve {
+                path: path.to_path_buf(),
+                message: "directory has no parent".to_owned(),
+            })?;
+    }
+    let metadata = std::fs::symlink_metadata(ancestor).map_err(|error| {
+        DiagnosticsBaselineProjectError::CannotResolve {
+            path: ancestor.to_path_buf(),
+            message: error.to_string(),
+        }
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(DiagnosticsBaselineProjectError::Symlink(ancestor.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Err(DiagnosticsBaselineProjectError::CannotResolve {
+            path: ancestor.to_path_buf(),
+            message: "ancestor is not a directory".to_owned(),
+        });
+    }
+    let mut target = canonicalize_baseline_path(ancestor)?;
+    for component in suffix.into_iter().rev() {
+        target.push(component);
+    }
+    relative_baseline_path(&target, project_root)?;
+    Ok(target)
+}
+
+fn validate_partitioned_config_path(path: &str) -> Result<(), DiagnosticsBaselineProjectError> {
+    diagnostics_baseline_fs::validate_managed_path(path)
+        .map(|_| ())
+        .map_err(|error| DiagnosticsBaselineProjectError::InvalidConfig(error.to_string()))
+}
+
+fn validate_partition_id(id: &str) -> Result<(), DiagnosticsBaselineProjectError> {
+    const MAX_BYTES: usize = 64;
+    if id.len() > MAX_BYTES {
+        return Err(DiagnosticsBaselineProjectError::InvalidConfig(format!(
+            "partition id exceeds {MAX_BYTES} UTF-8 bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn partition(
+    id: String,
+    identity: DiagnosticsBaselinePartitionIdentity,
+) -> DiagnosticsBaselinePartition {
+    let key = blake3::hash(id.as_bytes()).to_hex().to_string();
+    DiagnosticsBaselinePartition { id, key, identity }
+}
+
+fn partition_sort_key(id: &str) -> (u8, &str) {
+    if id == "main" {
+        (0, id)
+    } else if id.starts_with("group:") {
+        (1, id)
+    } else {
+        (2, id)
     }
 }
 
@@ -989,7 +1340,8 @@ impl ProjectConfig {
         if !path.exists() {
             return Err(err("file not found".to_string()));
         }
-        let content = std::fs::read_to_string(path).map_err(|e| err(e.to_string()))?;
+        let path = std::path::absolute(path).map_err(|error| err(error.to_string()))?;
+        let content = std::fs::read_to_string(&path).map_err(|e| err(e.to_string()))?;
         if path.extension().is_some_and(|ext| ext == "toml") {
             let toml_config =
                 toml::from_str::<TomlConfig>(&content).map_err(|e| err(e.to_string()))?;
@@ -1014,9 +1366,18 @@ impl ProjectConfig {
     }
 
     pub fn diagnostics_baseline_path(&self, project_root: &Path) -> Option<PathBuf> {
-        let path = &self.diagnostics.baseline.as_ref()?.path;
+        let path = self.diagnostics.baseline.as_ref()?.path.as_ref()?;
+        Some(self.resolve_config_path(project_root, path))
+    }
+
+    pub fn diagnostics_baseline_directory(&self, project_root: &Path) -> Option<PathBuf> {
+        let path = self.diagnostics.baseline.as_ref()?.directory.as_ref()?;
+        Some(self.resolve_config_path(project_root, path))
+    }
+
+    fn resolve_config_path(&self, project_root: &Path, path: &str) -> PathBuf {
         let base = self.config_file_path.as_deref().and_then(Path::parent).unwrap_or(project_root);
-        Some(base.join(path))
+        base.join(path)
     }
 
     pub fn configuration_path(&self, project_root: &Path) -> Option<PathBuf> {
@@ -1070,10 +1431,22 @@ impl ProjectDiagnosticsConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsBaselineConfig {
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub directory: Option<String>,
+    #[serde(default)]
+    pub groups: Vec<DiagnosticsBaselineGroupConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsBaselineGroupConfig {
+    pub name: String,
+    pub extensions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2173,11 +2546,13 @@ mod tests {
         branch_pattern_matches, current_git_branch, current_git_commit,
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
         resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches,
-        DiagnosticsBaselineConfig, DiagnosticsBaselineProjectError, ExtensionDecl, FeaturesConfig,
-        PostgresAccessMode, Project, ProjectConfig, ProjectDiagnosticsConfig, ProjectError,
-        ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
-        SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
-        SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
+        DiagnosticsBaselineConfig, DiagnosticsBaselineGroupConfig,
+        DiagnosticsBaselinePartitionIdentity, DiagnosticsBaselineProjectError,
+        DiagnosticsBaselineProjectMode, ExtensionDecl, FeaturesConfig, PostgresAccessMode, Project,
+        ProjectConfig, ProjectDiagnosticsConfig, ProjectError, ResolvePostgresUrlError,
+        SearchBaselineBackend, SearchBaselinePolicyConfig, SearchBaselineSupportState,
+        SearchPostgresConfig, SearchPostgresCredentialHelperConfig, SourceSetOverride,
+        StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
     use super::{configuration_kind, ConfigurationKind};
     use chrono::{Duration, TimeZone, Utc};
@@ -3356,6 +3731,291 @@ LineLength = { maxLineLength = 120 }
     }
 
     #[test]
+    fn partitioned_baseline_config_contract() {
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        fs::create_dir(&config_dir).unwrap();
+        let path = config_dir.join("project.toml");
+        fs::write(
+            &path,
+            r#"
+[diagnostics.baseline]
+directory = "baselines"
+
+[[diagnostics.baseline.groups]]
+name = "vendor"
+extensions = ["VendorCore", "VendorReports"]
+"#,
+        )
+        .unwrap();
+
+        let config = ProjectConfig::load_from_file(&path).unwrap();
+        assert_eq!(config.diagnostics_baseline_path(dir.path()), None);
+        assert_eq!(
+            config.diagnostics_baseline_directory(dir.path()),
+            Some(config_dir.join("baselines"))
+        );
+        let resolved = Project::with_config(dir.path(), config)
+            .unwrap()
+            .diagnostics_baseline()
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.project_path, "config/baselines");
+        assert_eq!(
+            resolved.mode,
+            DiagnosticsBaselineProjectMode::Partitioned {
+                groups: vec![DiagnosticsBaselineGroupConfig {
+                    name: "vendor".to_owned(),
+                    extensions: vec!["VendorCore".to_owned(), "VendorReports".to_owned()],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn partitioned_baseline_config_contract_rejects_conflicting_modes() {
+        let dir = tempdir().unwrap();
+        for baseline in [
+            DiagnosticsBaselineConfig {
+                path: Some("baseline.json".to_owned()),
+                directory: Some("baselines".to_owned()),
+                groups: vec![],
+            },
+            DiagnosticsBaselineConfig {
+                path: Some("baseline.json".to_owned()),
+                directory: None,
+                groups: vec![DiagnosticsBaselineGroupConfig {
+                    name: "vendor".to_owned(),
+                    extensions: vec!["Ext".to_owned()],
+                }],
+            },
+            DiagnosticsBaselineConfig::default(),
+        ] {
+            let config = ProjectConfig {
+                diagnostics: ProjectDiagnosticsConfig {
+                    baseline: Some(baseline),
+                    ..Default::default()
+                },
+                extensions: Some(vec![]),
+                ..Default::default()
+            };
+            let error = Project::with_config(dir.path(), config)
+                .unwrap()
+                .diagnostics_baseline()
+                .unwrap_err();
+            assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+        }
+    }
+
+    #[test]
+    fn partitioned_baseline_config_contract_rejects_absolute_and_parent_paths() {
+        let dir = tempdir().unwrap();
+        for directory in ["../baselines", "/tmp/baselines"] {
+            let config = ProjectConfig {
+                diagnostics: ProjectDiagnosticsConfig {
+                    baseline: Some(DiagnosticsBaselineConfig {
+                        directory: Some(directory.to_owned()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                extensions: Some(vec![]),
+                ..Default::default()
+            };
+            let error = Project::with_config(dir.path(), config)
+                .unwrap()
+                .diagnostics_baseline()
+                .unwrap_err();
+            assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+        }
+    }
+
+    fn partitioned_config(
+        directory: &str,
+        groups: Vec<DiagnosticsBaselineGroupConfig>,
+    ) -> ProjectDiagnosticsConfig {
+        ProjectDiagnosticsConfig {
+            baseline: Some(DiagnosticsBaselineConfig {
+                directory: Some(directory.to_owned()),
+                groups,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn diagnostics_partition_identity_and_ownership() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        for name in ["A", "B", "C"] {
+            touch_extension(dir.path(), &format!("src/cfe/{name}"));
+        }
+        let config = ProjectConfig {
+            diagnostics: partitioned_config(
+                "baselines",
+                vec![DiagnosticsBaselineGroupConfig {
+                    name: "vendor".to_owned(),
+                    extensions: vec!["B".to_owned(), "A".to_owned()],
+                }],
+            ),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![
+                structured("B", "src/cfe/B", &["A"]),
+                structured("A", "src/cfe/A", &[]),
+                structured("C", "src/cfe/C", &[]),
+            ]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let first = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        let second = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        assert_eq!(first, second);
+        assert_eq!(
+            first.partitions.iter().map(|partition| partition.id.as_str()).collect::<Vec<_>>(),
+            ["main", "group:vendor", "extension:C"]
+        );
+        let group = &first.partitions[1].identity;
+        let DiagnosticsBaselinePartitionIdentity::Group { members, .. } = group else {
+            panic!("expected group identity")
+        };
+        assert_eq!(
+            members.iter().map(|member| member.name.as_str()).collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(members[1].depends_on, ["A"]);
+        assert_eq!(
+            first.owner_for_project_path("src/cf/CommonModules/Main/Ext/Module.bsl"),
+            Some("main")
+        );
+        assert_eq!(
+            first.owner_for_project_path("src/cfe/A/CommonModules/A/Ext/Module.bsl"),
+            Some("group:vendor")
+        );
+        assert_eq!(
+            first.owner_for_project_path("src/cfe/C/CommonModules/C/Ext/Module.bsl"),
+            Some("extension:C")
+        );
+        assert_eq!(first.owner_for_project_path("outside/file.bsl"), None);
+        assert!(first.partitions.iter().all(|partition| {
+            partition.key.len() == 64
+                && partition
+                    .key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        }));
+    }
+
+    #[test]
+    fn diagnostics_partition_identity_and_ownership_rejects_bad_groups() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/A");
+        let extensions = Some(vec![structured("A", "src/cfe/A", &[])]);
+        let cases = [
+            vec![DiagnosticsBaselineGroupConfig { name: "empty".to_owned(), extensions: vec![] }],
+            vec![DiagnosticsBaselineGroupConfig {
+                name: "unknown".to_owned(),
+                extensions: vec!["Missing".to_owned()],
+            }],
+            vec![DiagnosticsBaselineGroupConfig {
+                name: "repeat".to_owned(),
+                extensions: vec!["A".to_owned(), "a".to_owned()],
+            }],
+            vec![
+                DiagnosticsBaselineGroupConfig {
+                    name: "one".to_owned(),
+                    extensions: vec!["A".to_owned()],
+                },
+                DiagnosticsBaselineGroupConfig {
+                    name: "two".to_owned(),
+                    extensions: vec!["A".to_owned()],
+                },
+            ],
+            vec![
+                DiagnosticsBaselineGroupConfig {
+                    name: "Vendor".to_owned(),
+                    extensions: vec!["A".to_owned()],
+                },
+                DiagnosticsBaselineGroupConfig {
+                    name: "vendor".to_owned(),
+                    extensions: vec!["A".to_owned()],
+                },
+            ],
+        ];
+        for groups in cases {
+            let config = ProjectConfig {
+                diagnostics: partitioned_config("baselines", groups),
+                configuration_root: Some("src/cf".to_owned()),
+                extensions: extensions.clone(),
+                ..Default::default()
+            };
+            let error = Project::with_config(dir.path(), config)
+                .unwrap()
+                .diagnostics_baseline_partition_plan()
+                .unwrap_err();
+            assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidGroup(_)));
+        }
+    }
+
+    #[test]
+    fn diagnostics_partition_identity_bounds_machine_ids() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/A");
+        let config = ProjectConfig {
+            diagnostics: partitioned_config(
+                "baselines",
+                vec![DiagnosticsBaselineGroupConfig {
+                    name: "x".repeat(65),
+                    extensions: vec!["A".to_owned()],
+                }],
+            ),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+            ..Default::default()
+        };
+        let error = Project::with_config(dir.path(), config)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn diagnostics_partition_identity_and_ownership_rejects_legacy_and_nested_roots() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/A");
+        let legacy = ProjectConfig {
+            diagnostics: partitioned_config("baselines", vec![]),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec!["src/cfe/A".into()]),
+            ..Default::default()
+        };
+        let error = Project::with_config(dir.path(), legacy)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::LegacyExtension(_)));
+
+        let nested_dir = tempdir().unwrap();
+        write_configuration_xml(&nested_dir.path().join("src"), "<xml/>");
+        touch_extension(nested_dir.path(), "src/cfe/A");
+        let nested = ProjectConfig {
+            diagnostics: partitioned_config("baselines", vec![]),
+            configuration_root: Some("src".to_owned()),
+            extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+            ..Default::default()
+        };
+        let error = Project::with_config(nested_dir.path(), nested)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::PathCollision(_)));
+    }
+
+    #[test]
     fn diagnostics_baseline_scope_preserves_topology_and_normalized_paths() {
         let dir = tempdir().unwrap();
         write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
@@ -3495,7 +4155,10 @@ LineLength = { maxLineLength = 120 }
 
     fn baseline_config(path: &str) -> ProjectDiagnosticsConfig {
         ProjectDiagnosticsConfig {
-            baseline: Some(DiagnosticsBaselineConfig { path: path.to_owned() }),
+            baseline: Some(DiagnosticsBaselineConfig {
+                path: Some(path.to_owned()),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }

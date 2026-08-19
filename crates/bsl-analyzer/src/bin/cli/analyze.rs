@@ -145,11 +145,7 @@ pub fn analyze(
 pub fn diagnostics_baseline(
     command: super::diagnostics_baseline::DiagnosticsBaselineCommand,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let args = match &command {
-        super::diagnostics_baseline::DiagnosticsBaselineCommand::Create(args)
-        | super::diagnostics_baseline::DiagnosticsBaselineCommand::Check(args)
-        | super::diagnostics_baseline::DiagnosticsBaselineCommand::Update(args) => args.clone(),
-    };
+    let args = command.common().clone();
     analyze_salsa(
         args.source_dir,
         None,
@@ -392,6 +388,9 @@ fn analyze_salsa(
     let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
     if baseline_command.is_some() && project.diagnostics_baseline()?.is_none() {
         return Err("[diagnostics.baseline].path is not configured".into());
+    }
+    if let Some(command) = &baseline_command {
+        command.preflight(&project)?;
     }
     // Validate and retain one immutable snapshot before JSONL can emit its start event.
     // A malformed configured file therefore fails the run without a partial report.
@@ -858,10 +857,18 @@ fn analyze_salsa(
                 };
             ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Partial { completed_files }
         };
+        let all_project_files = file_ids
+            .iter()
+            .filter_map(|(_, path)| path.strip_prefix(&source_dir).ok())
+            .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+            .collect();
+        let can_prove_partition_completion =
+            scope.is_none() && !presentation_filter && author_filter.is_none();
         Some(super::diagnostics_baseline::classify_files_with_loaded(
             &project,
             &mut file_analyses,
             coverage,
+            can_prove_partition_completion.then_some(&all_project_files),
             loaded_baseline.as_ref().expect("normal analysis loads one baseline snapshot"),
         )?)
     } else {
