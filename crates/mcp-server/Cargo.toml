@@ -85,6 +85,9 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 [dev-dependencies]
 expect-test.workspace = true
 tempfile.workspace = true
+# The HTTP suite asserts that a refused request names the allowlist it failed against;
+# the field is only observable through a subscriber.
+tracing-subscriber.workspace = true
 # Client features for integration tests that drive real MCP handshakes through
 # the broker and Streamable HTTP transports. Unified with the library's server
 # features at build time.
