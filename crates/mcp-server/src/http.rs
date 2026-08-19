@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -102,6 +102,22 @@ fn host_is_allowed(host_header: &str, allowed_hosts: &[String]) -> bool {
     )
 }
 
+/// Allowlist entries naming a wildcard bind address. `0.0.0.0` and `::` tell a listener
+/// "every interface", but a `Host` header carries the authority the client dialed, so such
+/// an entry authorizes a spelling almost nothing sends — the allowlist looks configured
+/// while accepting nothing.
+pub fn wildcard_allowed_hosts(allowed_hosts: &[String]) -> Vec<&str> {
+    allowed_hosts
+        .iter()
+        .filter(|entry| {
+            parse_allowed_authority(entry)
+                .and_then(|(host, _)| host.parse::<IpAddr>().ok())
+                .is_some_and(|ip| ip.is_unspecified())
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 /// Refuse a disallowed `Host` before anything reads the request body.
 ///
 /// rmcp applies this check inside its own service, which reaches only `/mcp` and only
@@ -124,7 +140,13 @@ async fn host_gate(
         return StatusCode::BAD_REQUEST.into_response();
     }
     if !host_is_allowed(&host, &allowed_hosts) {
-        tracing::warn!(host, "rejected request with disallowed Host header");
+        // The refusal is a mismatch between two values, so naming only one of them leaves
+        // the operator guessing which side is wrong.
+        tracing::warn!(
+            host,
+            allowed = %allowed_hosts.join(", "),
+            "rejected request with disallowed Host header"
+        );
         return StatusCode::FORBIDDEN.into_response();
     }
     next.run(request).await
@@ -231,10 +253,38 @@ async fn grace_after_cancel(cancellation: &CancellationToken) {
 mod tests {
     use std::net::{IpAddr, SocketAddr};
 
-    use super::{effective_allowed_hosts, host_is_allowed};
+    use super::{effective_allowed_hosts, host_is_allowed, wildcard_allowed_hosts};
 
     fn address(ip: &str, port: u16) -> SocketAddr {
         SocketAddr::new(ip.parse::<IpAddr>().expect("test address should parse"), port)
+    }
+
+    /// The names that merely look like a wildcard carry the load here: a check that only
+    /// matched the literal `0.0.0.0` would also flag `0.0.0.0.example.test`, a perfectly
+    /// dialable name, and stay green on `[::]:8021`.
+    #[test]
+    fn only_an_unspecified_address_counts_as_a_wildcard_allowlist_entry() {
+        let entries: Vec<String> = [
+            "0.0.0.0",
+            "0.0.0.0:8021",
+            "::",
+            "[::]",
+            "[::]:8021",
+            "0.0.0.0.example.test",
+            "localhost",
+            "127.0.0.1",
+            "[::1]:8021",
+            "mcp.example.test",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+
+        assert_eq!(
+            wildcard_allowed_hosts(&entries),
+            ["0.0.0.0", "0.0.0.0:8021", "::", "[::]", "[::]:8021"]
+        );
+        assert!(wildcard_allowed_hosts(&[]).is_empty());
     }
 
     #[test]

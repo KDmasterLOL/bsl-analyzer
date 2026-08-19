@@ -234,6 +234,59 @@ pub(super) fn state_with_hub(root: &Path) -> (DiagnosticsState, WorkspaceChangeH
     (state, hub)
 }
 
+/// A closure that keeps the diagnostics sink lossy: it drains whatever the hub
+/// holds for the state's cursor and throws it away, advancing the cursor exactly
+/// as a delivery would.
+///
+/// Needed where `&state` is out of reach, since a reconciler probe owns everything
+/// it touches; and needed at all because one write is not one event: the watcher
+/// may emit another for the same file at any moment, and the reconciler counts a
+/// path delivered during its scan as merely late rather than missed. A test that
+/// discards once and hopes no duplicate arrives is testing the machine's timing,
+/// not its rule.
+pub(super) fn cursor_discarder(state: &DiagnosticsState) -> impl FnOnce() + Send + 'static {
+    let hub = state.change_hub.clone();
+    let cursor = state.hub_cursor.clone();
+    move || {
+        let current = *lock_recover(&cursor);
+        if let (Some(hub), Some(current)) = (hub, current) {
+            let batch = hub.drain(current);
+            *lock_recover(&cursor) = Some(batch.cursor);
+        }
+    }
+}
+
+/// Keep discarding until the hub has nothing left to say, and report whether it
+/// went quiet within the budget.
+///
+/// A completed `fs::write` is one edit but several raw events, and the hub's
+/// accumulator records them on its own schedule. Draining once leaves whatever
+/// has not landed yet to arrive later — during a reconcile tick it would be read
+/// as a delivery, and a test simulating a LOST delivery would observe the
+/// opposite of what it set up. Consuming to quiet removes those events instead
+/// of racing them.
+pub(super) fn discard_until_quiet(
+    state: &DiagnosticsState,
+    hub: &WorkspaceChangeHub,
+    quiet_rounds: usize,
+) -> bool {
+    let mut quiet = 0;
+    for _ in 0..300 {
+        let before = hub.events_seen();
+        state.drain_and_discard_cursor();
+        if hub.events_seen() == before {
+            quiet += 1;
+            if quiet == quiet_rounds {
+                return true;
+            }
+        } else {
+            quiet = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 pub(super) fn raw_generation(state: &DiagnosticsState) -> u64 {
     lock_recover(&state.inner).generation
 }

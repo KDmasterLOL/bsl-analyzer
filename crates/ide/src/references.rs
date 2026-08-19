@@ -1,10 +1,18 @@
 use hir::{
     normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol, Semantics,
 };
-use ide_db::RootDatabase;
-use syntax::TextSize;
+use ide_db::base_db::RootQueryDb;
+use ide_db::{RootDatabase, RootDatabaseImpl};
+use rustc_hash::FxHashSet;
+use salsa::Database;
+use syntax::{SyntaxKind, TextRange, TextSize};
 use vfs::FileId;
 
+use crate::declarations::{
+    classify_unreferenceable, resolve_declarations, Declaration, UnsupportedCategory,
+};
+use crate::name_lookup::{lookup_names, NameLookupResult, NameMatchTier, NameQuery};
+use crate::reference_kind::{classify_reference_token, ReferenceKind};
 use crate::Location;
 
 pub fn find_references<DB: RootDatabase>(
@@ -122,6 +130,444 @@ pub(crate) fn find_references_in_file<DB: RootDatabase>(
     );
 
     references
+}
+
+// --- reference search by name -----------------------------------------------------------
+
+/// The files an area or an anchor is confined to. A set of ids and not a path
+/// prefix: a root is declared with one spelling and indexed with another
+/// whenever a symlink is involved, and a prefix comparison would then match
+/// nothing while reporting an honest-looking zero.
+pub type FileIdSet = FxHashSet<FileId>;
+
+/// How many dictionary candidates one anchor resolution may consider.
+const ANCHOR_CANDIDATE_LIMIT: usize = 64;
+
+/// What the caller points at.
+#[derive(Debug, Clone)]
+pub enum ReferenceAnchor {
+    /// A qualified name of one to three segments, or a short one.
+    Name(String),
+    /// 0-based line and 0-based character offset within that line.
+    Position { file_id: FileId, line: u32, column: u32 },
+}
+
+/// Which part of the workspace the answer is confined to.
+#[derive(Debug, Clone, Default)]
+pub struct ReferenceArea {
+    /// `None` — the whole workspace.
+    pub files: Option<FileIdSet>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReferencesRequest {
+    pub anchor: ReferenceAnchor,
+    /// Files among which the DECLARATION is looked for. `None` — the whole
+    /// workspace. Narrows the candidate set before its size is counted, so it
+    /// is the way out of [`ReferencesOutcome::Ambiguous`] — unlike
+    /// [`ReferenceArea`], which narrows the references already found.
+    pub anchor_files: Option<FileIdSet>,
+    pub area: ReferenceArea,
+    /// `None` — every kind.
+    pub kinds: Option<Vec<ReferenceKind>>,
+    pub include_declaration: bool,
+    /// Cap on candidate files walked. Reaching it makes the total a lower
+    /// bound, which the caller is told about rather than left to guess.
+    pub max_files: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceHit {
+    pub file_id: FileId,
+    /// The occurrence itself.
+    pub range: TextRange,
+    /// The method the occurrence sits in, when it sits in one.
+    pub enclosing_range: Option<TextRange>,
+    pub kind: ReferenceKind,
+}
+
+/// Whether the symbol was determined at all — a different question from whether
+/// the answer is complete, which the freshness envelope answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferencesOutcome {
+    /// The anchor is one symbol; the hit list IS the answer, and an empty list
+    /// means exactly zero references.
+    Resolved,
+    /// More than one symbol answers to this anchor; no references are counted.
+    Ambiguous,
+    /// Nothing matched exactly enough to anchor on.
+    NotFound,
+    /// The name was resolved precisely, but nothing can enumerate references to
+    /// it. Told apart from a zero-length list on purpose: a client renames on
+    /// the strength of that zero.
+    UnsupportedSymbol { category: UnsupportedCategory },
+}
+
+/// Whose data COMPOSES the body of the answer — not who was asked along the way.
+///
+/// The location contract gives the name dictionary a null revision and a null
+/// topology fingerprint, because several artefacts with different revisions
+/// stand behind it. Stamping that on a body the resident composed would erase
+/// the fingerprint the caller needs; stamping the resident's revision on a body
+/// of dictionary candidates would claim an identity those candidates do not
+/// share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodySource {
+    Resident,
+    NameDictionary,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReferencesResult {
+    pub outcome: ReferencesOutcome,
+    pub body_source: BodySource,
+    /// Every reference that survived the area and kind filters, before any
+    /// display limit. Empty for every outcome other than `Resolved`.
+    pub hits: Vec<ReferenceHit>,
+    /// Per-file counts over the same set as `hits`, most-populated first.
+    pub per_file: Vec<(FileId, usize)>,
+    /// The declarations found when the anchor is a qualified name — one when
+    /// resolved, several when ambiguous.
+    pub declarations: Vec<Declaration>,
+    /// The dictionary's answer, when the dictionary is what composed the body.
+    pub candidates: Option<NameLookupResult>,
+    pub files_scanned: usize,
+    /// `max_files` cut the walk short: `hits.len()` is a lower bound, and two
+    /// answers taken under this flag are not comparable with each other.
+    pub files_capped: bool,
+    /// The exact matches alone filled the dictionary's candidate budget, so one more
+    /// may have been cut before the anchor was chosen. Unlike [`Self::files_capped`],
+    /// this cap can change the OUTCOME itself — a declaration that fell off the list is
+    /// one the answer could have resolved to or been ambiguous about — so it travels
+    /// with every outcome, not just `Resolved`.
+    pub anchor_candidates_capped: bool,
+}
+
+impl ReferencesResult {
+    fn outcome_only(outcome: ReferencesOutcome, body_source: BodySource) -> Self {
+        Self {
+            outcome,
+            body_source,
+            hits: Vec::new(),
+            per_file: Vec::new(),
+            declarations: Vec::new(),
+            candidates: None,
+            files_scanned: 0,
+            files_capped: false,
+            anchor_candidates_capped: false,
+        }
+    }
+}
+
+/// Find every reference to the symbol the request anchors on.
+pub fn find_references_by_name(db: &RootDatabaseImpl, req: &ReferencesRequest) -> ReferencesResult {
+    let _span = tracing::info_span!("find_references_by_name").entered();
+
+    match &req.anchor {
+        ReferenceAnchor::Name(name) => resolve_by_name(db, name, req),
+        ReferenceAnchor::Position { file_id, line, column } => {
+            resolve_by_position(db, *file_id, *line, *column, req)
+        }
+    }
+}
+
+/// Stage one, then stage two — and they are not interchangeable. A qualified
+/// name is matched against declarations; the name dictionary compares the whole
+/// needle with a short member name and would score `Продажи.Расчёт` against
+/// `Расчёт` at no tier at all.
+fn resolve_by_name(db: &RootDatabaseImpl, name: &str, req: &ReferencesRequest) -> ReferencesResult {
+    let mut declarations = resolve_declarations(db, name);
+    if let Some(files) = &req.anchor_files {
+        declarations.retain(|decl| files.contains(&decl.file_id));
+    }
+
+    match declarations.len() {
+        1 => {
+            let declaration = declarations[0];
+            let Some(symbol) = symbol_at(db, declaration.file_id, declaration.name_range.start())
+            else {
+                // The declaration is there and its symbol is not: nothing knows
+                // where to look, which is what this category says.
+                return ReferencesResult::outcome_only(
+                    ReferencesOutcome::UnsupportedSymbol {
+                        category: UnsupportedCategory::UnknownScope,
+                    },
+                    BodySource::Resident,
+                );
+            };
+            let mut result = collect_references(db, declaration.file_id, &symbol, req);
+            result.declarations = declarations;
+            result
+        }
+        0 => {
+            let dictionary = resolve_by_dictionary(db, name, req);
+            // The dictionary is holding a declaration this name can be walked from, so
+            // the string is not "something no walk enumerates" however the card surface
+            // reads it. Asking the card first is what made a module's own `Сообщить` a
+            // platform member: `symbol_info` answers about the platform for a bare name,
+            // and it is right about the string — but the walk exists all the same.
+            if dictionary.anchorable {
+                return dictionary.result;
+            }
+            match classify_unreferenceable(db, name) {
+                Some(category) => ReferencesResult::outcome_only(
+                    ReferencesOutcome::UnsupportedSymbol { category },
+                    BodySource::Resident,
+                ),
+                None => dictionary.result,
+            }
+        }
+        _ => ReferencesResult {
+            declarations,
+            ..ReferencesResult::outcome_only(ReferencesOutcome::Ambiguous, BodySource::Resident)
+        },
+    }
+}
+
+/// Stage two: a short or inexact name, answered by the name dictionary.
+///
+/// Only `Exact` and `CaseInsensitive` can anchor — a prefix or a substring
+/// match names a different symbol, and counting its references would answer a
+/// question nobody asked.
+/// What stage two made of the name, and whether the dictionary held a declaration the
+/// name could be walked from at all — the question that decides whether the card surface
+/// gets to call the name unwalkable.
+struct DictionaryAnswer {
+    result: ReferencesResult,
+    anchorable: bool,
+}
+
+fn resolve_by_dictionary(
+    db: &RootDatabaseImpl,
+    name: &str,
+    req: &ReferencesRequest,
+) -> DictionaryAnswer {
+    let query = NameQuery::new(name, ANCHOR_CANDIDATE_LIMIT);
+    let lookup = lookup_names(db, &query, &[]);
+
+    let exact: Vec<&crate::name_lookup::NameCandidate> = lookup
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(candidate.match_tier, NameMatchTier::Exact | NameMatchTier::CaseInsensitive)
+        })
+        .collect();
+
+    // Whether a reference walk EXISTS is decided before any narrowing: an exact
+    // match with a range of its own is a declaration something can be walked
+    // from, whatever file set the caller passed.
+    let anchorable: Vec<&crate::name_lookup::NameCandidate> = exact
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.place.is_some_and(|place| place.range.is_some()))
+        .collect();
+
+    // The anchor's file set narrows WHICH DECLARATION is taken, so it applies to
+    // the candidates that could be one. Applying it a step earlier would drop a
+    // platform member — which belongs to no root by construction — and turn
+    // `unsupported_symbol` into `not_found`: a narrowing parameter would be
+    // changing the CLASS of the answer, not the set it is drawn from.
+    let anchored: Vec<&crate::name_lookup::NameCandidate> = anchorable
+        .iter()
+        .copied()
+        .filter(|candidate| match &req.anchor_files {
+            Some(files) => candidate.place.is_some_and(|place| files.contains(&place.file_id)),
+            None => true,
+        })
+        .collect();
+
+    // What could never be an anchor, whatever the file set: an exact match with no
+    // range of its own. Kept apart from "an anchor that this file set excludes",
+    // because only the first means "no reference walk exists for this symbol".
+    let unanchorable: Vec<UnsupportedCategory> = exact
+        .iter()
+        .filter(|candidate| candidate.place.is_none_or(|place| place.range.is_none()))
+        .filter_map(|candidate| UnsupportedCategory::from_name_category(candidate.category))
+        .collect();
+
+    let result = match anchored.len() {
+        1 => {
+            let place = anchored[0].place.expect("filtered on a place");
+            let range = place.range.expect("filtered on a range");
+            match symbol_at(db, place.file_id, range.start()) {
+                // The body is the reference list the resident walked, even
+                // though it was the dictionary that found the anchor.
+                Some(symbol) => collect_references(db, place.file_id, &symbol, req),
+                None => ReferencesResult {
+                    candidates: Some(lookup.clone()),
+                    ..ReferencesResult::outcome_only(
+                        ReferencesOutcome::NotFound,
+                        BodySource::NameDictionary,
+                    )
+                },
+            }
+        }
+        // Matched exactly, but nothing to walk: a metadata object, a platform
+        // member, a module as a whole. Saying `not_found` here would deny a
+        // name the search did find — while saying it about a method the anchor's
+        // file set merely excluded would deny a walk that exists. A short name
+        // is regularly both at once (a module method named like a platform
+        // member), so the walk's existence is read off `anchorable`, which the
+        // file set never touched, and not off "nothing anchored here".
+        0 if anchorable.is_empty() && !unanchorable.is_empty() => {
+            let category = unanchorable[0];
+            ReferencesResult {
+                candidates: Some(lookup.clone()),
+                ..ReferencesResult::outcome_only(
+                    ReferencesOutcome::UnsupportedSymbol { category },
+                    BodySource::NameDictionary,
+                )
+            }
+        }
+        0 => ReferencesResult {
+            candidates: Some(lookup.clone()),
+            ..ReferencesResult::outcome_only(
+                ReferencesOutcome::NotFound,
+                BodySource::NameDictionary,
+            )
+        },
+        _ => ReferencesResult {
+            candidates: Some(lookup.clone()),
+            ..ReferencesResult::outcome_only(
+                ReferencesOutcome::Ambiguous,
+                BodySource::NameDictionary,
+            )
+        },
+    };
+
+    DictionaryAnswer {
+        // The list is sorted by tier before it is cut, so exact matches are the last
+        // to go: they are lost only once they fill the budget by themselves.
+        // `NameLookupResult::truncated` is the wrong signal here — it is also true when
+        // an unrelated provider capped its own prefix matches.
+        result: ReferencesResult {
+            anchor_candidates_capped: exact.len() >= ANCHOR_CANDIDATE_LIMIT,
+            ..result
+        },
+        anchorable: !anchorable.is_empty(),
+    }
+}
+
+/// The fallback anchor: a position, for what no name addresses — a local, a
+/// parameter.
+///
+/// Each way of missing gets its own outcome. Today's `find_references` folds
+/// three different facts into one empty vector, and that is the defect this
+/// surface exists to close.
+fn resolve_by_position(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    line: u32,
+    column: u32,
+    req: &ReferencesRequest,
+) -> ReferencesResult {
+    let Some(offset) = crate::name_lookup::offset_for_line_col(db, file_id, line, column) else {
+        return ReferencesResult::outcome_only(ReferencesOutcome::NotFound, BodySource::Resident);
+    };
+    let Some(symbol) = symbol_at(db, file_id, offset) else {
+        return ReferencesResult::outcome_only(ReferencesOutcome::NotFound, BodySource::Resident);
+    };
+    collect_references(db, file_id, &symbol, req)
+}
+
+fn symbol_at(db: &RootDatabaseImpl, file_id: FileId, offset: TextSize) -> Option<SemanticSymbol> {
+    let parse = db.parse(file_id);
+    let root = parse.syntax_node();
+    let token = root.token_at_offset(offset).right_biased()?;
+    if !token.kind().is_name_token() {
+        return None;
+    }
+    Semantics::new(db).symbol_for_token(file_id, &token)
+}
+
+fn collect_references(
+    db: &RootDatabaseImpl,
+    home_file: FileId,
+    symbol: &SemanticSymbol,
+    req: &ReferencesRequest,
+) -> ReferencesResult {
+    let scope = symbol.reference_scope(db);
+    let candidate_files: Vec<FileId> = match scope {
+        ReferenceScope::FileLocal => vec![home_file],
+        // The one case where an empty list is not an answer: nothing knows
+        // where to look, so nothing was looked at.
+        ReferenceScope::Unknown => {
+            return ReferencesResult::outcome_only(
+                ReferencesOutcome::UnsupportedSymbol {
+                    category: UnsupportedCategory::UnknownScope,
+                },
+                BodySource::Resident,
+            )
+        }
+        ReferenceScope::ModuleSymbolWorkspace => {
+            workspace_candidate_files(db, home_file, &symbol.name)
+        }
+    };
+
+    // The area is applied to the candidate files, before the walk: the total
+    // must count what the filter admits, not what it later hides.
+    let candidate_files: Vec<FileId> = match &req.area.files {
+        Some(files) => candidate_files.into_iter().filter(|id| files.contains(id)).collect(),
+        None => candidate_files,
+    };
+
+    let files_capped = candidate_files.len() > req.max_files;
+    let scanned = &candidate_files[..candidate_files.len().min(req.max_files)];
+
+    let mut hits = Vec::new();
+    for &file_id in scanned {
+        db.unwind_if_revision_cancelled();
+        let locations = find_references_in_file(db, file_id, symbol);
+        if locations.is_empty() {
+            continue;
+        }
+        let parse = db.parse(file_id);
+        let root = parse.syntax_node();
+        for location in locations {
+            let Some(token) = root.token_at_offset(location.range.start()).right_biased() else {
+                continue;
+            };
+            let kind = classify_reference_token(&token);
+            if let Some(wanted) = &req.kinds {
+                if !wanted.contains(&kind) {
+                    continue;
+                }
+            }
+            if !req.include_declaration && kind == ReferenceKind::Declaration {
+                continue;
+            }
+            let enclosing_range = token
+                .parent_ancestors()
+                .find(|node| {
+                    matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF)
+                })
+                .map(|node| node.text_range());
+            hits.push(ReferenceHit { file_id, range: location.range, enclosing_range, kind });
+        }
+    }
+
+    hits.sort_by_key(|hit| (hit.file_id.0, hit.range.start()));
+
+    let mut per_file: Vec<(FileId, usize)> = Vec::new();
+    for hit in &hits {
+        match per_file.last_mut() {
+            Some((file_id, count)) if *file_id == hit.file_id => *count += 1,
+            _ => per_file.push((hit.file_id, 1)),
+        }
+    }
+    per_file.sort_by_key(|(file_id, count)| (std::cmp::Reverse(*count), file_id.0));
+
+    ReferencesResult {
+        outcome: ReferencesOutcome::Resolved,
+        body_source: BodySource::Resident,
+        hits,
+        per_file,
+        declarations: Vec::new(),
+        candidates: None,
+        files_scanned: scanned.len(),
+        files_capped,
+        anchor_candidates_capped: false,
+    }
 }
 
 #[cfg(test)]

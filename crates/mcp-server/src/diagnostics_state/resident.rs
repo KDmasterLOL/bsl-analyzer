@@ -337,6 +337,16 @@ impl DiagnosticsResident {
         &self.db
     }
 
+    /// Every served file, with the absolute path it was indexed under.
+    ///
+    /// The spelling matters: it is the CANONICAL one, and the attributor that
+    /// mints published pairs asks both spellings — so a caller narrowing by root
+    /// gets the files this resident actually holds, not the ones a declared
+    /// prefix would have matched.
+    pub(crate) fn files(&self) -> impl Iterator<Item = (&Path, FileId)> + '_ {
+        self.by_path.iter().map(|(path, file_id)| (Path::new(path.as_str()), *file_id))
+    }
+
     pub(crate) fn file_count(&self) -> usize {
         self.by_path.len()
     }

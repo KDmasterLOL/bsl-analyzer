@@ -3,6 +3,7 @@ mod call_hierarchy;
 mod call_hierarchy_index;
 mod completion;
 pub mod config_finder;
+mod declarations;
 pub mod diagnostics_catalog;
 mod document_highlight;
 mod document_symbols;
@@ -14,6 +15,7 @@ mod hover;
 mod inlay_hints;
 pub mod jsonl;
 mod name_lookup;
+mod reference_kind;
 mod references;
 mod rename;
 mod selection_range;
@@ -30,6 +32,10 @@ pub use call_hierarchy_index::{
     CallHierarchyIndexModuleProjection, CallHierarchyRssSample,
 };
 pub use completion::{CompletionItem, CompletionItemKind};
+pub use declarations::{
+    classify_unreferenceable, resolve_declarations, Declaration, DeclarationKind,
+    UnsupportedCategory,
+};
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
@@ -63,9 +69,14 @@ pub use ide_diagnostics::{
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use name_lookup::{
-    lookup_names, match_tier, resolve_place, ExternalNameSource, NameCandidate, NameCategory,
-    NameLookupResult, NameMatchTier, NamePlace, NameQuery, PlatformRef, ProviderHits, ProviderId,
-    ProviderReport, ProviderState, ResolvedPlace, WORKSPACE_SYMBOL_LIMIT,
+    lookup_names, match_tier, resolve_file_range, resolve_place, ExternalNameSource, NameCandidate,
+    NameCategory, NameLookupResult, NameMatchTier, NamePlace, NameQuery, PlatformRef, ProviderHits,
+    ProviderId, ProviderReport, ProviderState, ResolvedPlace, WORKSPACE_SYMBOL_LIMIT,
+};
+pub use reference_kind::{classify_reference_token, ReferenceKind};
+pub use references::{
+    find_references_by_name, BodySource, FileIdSet, ReferenceAnchor, ReferenceArea, ReferenceHit,
+    ReferencesOutcome, ReferencesRequest, ReferencesResult,
 };
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};

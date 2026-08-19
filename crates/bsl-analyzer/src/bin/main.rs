@@ -434,6 +434,33 @@ mod contract_surface {
         );
     }
 
+    /// `--allowed-host` gates a `Host` header, not network reach, and an explicit list
+    /// drops the built-in loopback entries. Both facts are load-bearing and neither is
+    /// guessable from the flag's name: an operator who missed them reads the resulting
+    /// 403 as the server refusing the network (#30). The long help is the only place a
+    /// `--help` reader meets them, so it is asserted rather than left to drift.
+    #[test]
+    fn allowed_host_help_states_what_it_matches_and_what_it_replaces() {
+        let mut serve = Cli::command();
+        let serve = serve
+            .find_subcommand_mut("mcp")
+            .expect("mcp command")
+            .find_subcommand_mut("serve")
+            .expect("mcp serve command");
+        let allowed_host = serve
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("allowed-host"))
+            .expect("mcp serve declares --allowed-host");
+        let help =
+            allowed_host.get_long_help().expect("--allowed-host carries long help").to_string();
+
+        assert!(help.contains("Host header"), "{help}");
+        assert!(help.contains("replaces"), "{help}");
+        for default in ["localhost", "127.0.0.1", "::1"] {
+            assert!(help.contains(default), "the replaced default {default} is unnamed: {help}");
+        }
+    }
+
     fn render(cmd: &Value, depth: usize) -> String {
         let indent = "  ".repeat(depth);
         let mut out = String::new();
@@ -512,6 +539,7 @@ mod contract_surface {
                   backend-pid
                   cache-dir
                   configuration-root
+                  enable-tool
                   extension !no-extensions
                   extension-depends-on
                   host
@@ -525,6 +553,7 @@ mod contract_surface {
                   source-dir (-s)
                 install
                   dry-run
+                  enable-tool
                   env
                   force
                   name

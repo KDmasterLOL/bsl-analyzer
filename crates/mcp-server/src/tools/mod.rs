@@ -12,6 +12,7 @@ pub mod outline;
 pub mod platform;
 pub mod query;
 pub mod redact;
+pub mod references;
 pub mod resident;
 pub mod response;
 pub mod search;
