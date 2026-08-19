@@ -469,7 +469,7 @@ mod contract_surface {
     }
 
     #[test]
-    fn cli_contract_diagnostics_baseline() {
+    fn cli_contract_partitioned_baseline() {
         let surface = surface();
         let baseline = command(command(&surface, "diagnostics"), "baseline");
         for name in ["create", "check", "update"] {
@@ -478,6 +478,8 @@ mod contract_surface {
             assert!(names.contains(&"source-dir"), "{name}: {names:?}");
             assert!(names.contains(&"config"), "{name}: {names:?}");
             assert!(names.contains(&"format"), "{name}: {names:?}");
+            assert!(names.contains(&"partition"), "{name}: {names:?}");
+            assert_eq!(names.contains(&"from-v1"), name == "create", "{name}: {names:?}");
         }
     }
 
@@ -550,14 +552,18 @@ mod contract_surface {
                   create
                     config (-c)
                     format = text | json
+                    from-v1 !partition
+                    partition !from-v1
                     source-dir (-s)
                   check
                     config (-c)
                     format = text | json
+                    partition
                     source-dir (-s)
                   update
                     config (-c)
                     format = text | json
+                    partition
                     source-dir (-s)
               contract
               format

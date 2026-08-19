@@ -333,9 +333,11 @@ impl DiagnosticsState {
         if observation == resident.diagnostics_baseline_observation {
             return;
         }
-        let snapshot = ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(
-            &resident.project,
-        );
+        let snapshot =
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load_reusing(
+                &resident.project,
+                &resident.diagnostics_baseline,
+            );
         resident.diagnostics_baseline_observation = snapshot.observation();
         resident.diagnostics_baseline = snapshot;
     }

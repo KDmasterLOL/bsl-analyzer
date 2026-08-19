@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -237,7 +237,7 @@ pub struct GlobalState {
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
     pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
-    pub(crate) diagnostics_baseline_notified_epoch: Option<String>,
+    pub(crate) diagnostics_baseline_notification_ledger: BTreeSet<String>,
     pub shutdown_requested: bool,
 
     pub loader_receiver: Receiver<loader::Message>,
@@ -437,7 +437,7 @@ impl GlobalState {
             diagnostics_baseline: Arc::new(
                 ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Disabled,
             ),
-            diagnostics_baseline_notified_epoch: None,
+            diagnostics_baseline_notification_ledger: BTreeSet::new(),
             shutdown_requested: false,
             loader,
             loader_receiver,
@@ -996,7 +996,7 @@ mod vfs_race_tests {
                     loader::Entry::Directories(dirs) => {
                         dirs.include.iter().map(|p| p.to_string()).collect::<Vec<_>>()
                     }
-                    loader::Entry::Files(_) => Vec::new(),
+                    loader::Entry::Files(_) | loader::Entry::WatchOnlyFiles(_) => Vec::new(),
                 })
                 .collect()
         };

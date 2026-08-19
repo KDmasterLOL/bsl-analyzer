@@ -5,6 +5,7 @@ use paths::{AbsPath, AbsPathBuf};
 #[derive(Debug, Clone)]
 pub enum Entry {
     Files(Vec<AbsPathBuf>),
+    WatchOnlyFiles(Vec<AbsPathBuf>),
     Directories(Directories),
 }
 
@@ -98,14 +99,14 @@ impl Entry {
 
     pub fn contains_file(&self, path: &AbsPath) -> bool {
         match self {
-            Entry::Files(files) => files.iter().any(|it| it == path),
+            Entry::Files(files) | Entry::WatchOnlyFiles(files) => files.iter().any(|it| it == path),
             Entry::Directories(dirs) => dirs.contains_file(path),
         }
     }
 
     pub fn contains_dir(&self, path: &AbsPath) -> bool {
         match self {
-            Entry::Files(_) => false,
+            Entry::Files(_) | Entry::WatchOnlyFiles(_) => false,
             Entry::Directories(dirs) => dirs.contains_dir(path),
         }
     }

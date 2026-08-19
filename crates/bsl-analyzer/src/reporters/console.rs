@@ -16,6 +16,18 @@ fn baseline_lines(baseline: &ide::diagnostics_baseline::DiagnosticsBaselineSumma
     {
         lines.push(format!("  New: {new}, known: {known}, resolved: {resolved}"));
     }
+    for partition in &baseline.partitions {
+        let state = match partition.state {
+            DiagnosticsBaselineState::Disabled => "disabled",
+            DiagnosticsBaselineState::Full => "full",
+            DiagnosticsBaselineState::Partial => "partial",
+            DiagnosticsBaselineState::Error => "error",
+        };
+        lines.push(format!(
+            "  {}: {state} (new {}, known {}, resolved {})",
+            partition.id, partition.new, partition.known, partition.resolved
+        ));
+    }
     lines
 }
 
@@ -78,9 +90,12 @@ mod tests {
                 resolved: Some(3),
                 path: Some("baseline.json".to_owned()),
                 schema_version: Some(1),
+                manifest_schema_version: None,
                 complete: state == DiagnosticsBaselineState::Full,
                 error_code: None,
                 detail: None,
+                partitions: vec![],
+                errors: vec![],
             };
             let lines = baseline_lines(&summary);
             assert_eq!(lines[0], format!("Diagnostics baseline: {label}"));

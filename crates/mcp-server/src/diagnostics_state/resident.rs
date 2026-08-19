@@ -7,6 +7,29 @@ use vfs::{FileId, Vfs, VfsPath};
 
 use super::workspace_sweep::{CodeAggregate, SweepCancel, SweepOptions, WorkspaceSweep};
 
+fn partitioned_baseline_error(
+    path: &str,
+    set: &ide::partitioned_diagnostics_baseline::DiagnosticsBaselineSetSnapshot,
+    detail: String,
+) -> ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+    ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+        state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+        new: None,
+        known: None,
+        resolved: None,
+        path: Some(path.to_owned()),
+        schema_version: Some(
+            ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+        ),
+        manifest_schema_version: Some(set.manifest.schema_version),
+        complete: false,
+        error_code: Some("classification_error".to_owned()),
+        detail: Some(detail),
+        partitions: vec![],
+        errors: vec![],
+    }
+}
+
 /// Adapts the resident's owned [`Vfs`] to the lock-neutral [`ide_host_core::VfsWrite`]
 /// the shared metadata policy expects. The resident is only ever touched while the
 /// caller holds the state mutex (the db is `!Sync`), so a single-threaded `RefCell`
@@ -638,6 +661,11 @@ impl DiagnosticsResident {
                 .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
                 .collect()
         };
+        let all_project_files: std::collections::BTreeSet<String> = path_of
+            .values()
+            .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
+            .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+            .collect();
         let complete = !cancelled
             && !truncated
             && files_out_of_scope == 0
@@ -650,38 +678,78 @@ impl DiagnosticsResident {
             ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Partial { completed_files }
         };
         let candidates: Vec<_> = prepared.into_iter().flatten().flatten().collect();
-        let (active, baseline) = match self.diagnostics_baseline.ready() {
-            None => (
+        let snapshot = &self.diagnostics_baseline;
+        let (active, baseline) = if let Some((set, plan, baseline_path)) = snapshot.ready_set() {
+            let wrapped: Result<Vec<_>, _> = candidates
+                .into_iter()
+                .map(|candidate| {
+                    let owner = plan.owner_for_project_path(&candidate.path).ok_or_else(|| {
+                        format!("diagnostics file has no partition owner: {}", candidate.path)
+                    })?;
+                    Ok(ide::partitioned_diagnostics_baseline::PartitionedBaselineDiagnosticCandidate {
+                        partition_id: owner.to_owned(),
+                        candidate,
+                    })
+                })
+                .collect();
+            let classified = wrapped.and_then(|wrapped| {
+                let coverage = ide::partitioned_diagnostics_baseline::partitioned_coverage(
+                    plan,
+                    &coverage,
+                    (config.scope.is_none() && self.author_filter.is_none())
+                        .then_some(&all_project_files),
+                )?;
+                ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
+                    set,
+                    baseline_path.to_owned(),
+                    wrapped,
+                    &coverage,
+                )
+                .map_err(|error| error.to_string())
+            });
+            match classified {
+                Ok(classified) => (
+                    classified.new.into_iter().map(|item| item.diagnostic).collect::<Vec<_>>(),
+                    classified.summary,
+                ),
+                Err(error) => (Vec::new(), partitioned_baseline_error(baseline_path, set, error)),
+            }
+        } else if let Some((baseline, baseline_path)) = snapshot.ready() {
+            match ide::diagnostics_baseline::classify_diagnostics(
+                baseline,
+                baseline_path.to_owned(),
+                candidates,
+                &coverage,
+            ) {
+                Ok(classified) => (
+                    classified.new.into_iter().map(|item| item.diagnostic).collect::<Vec<_>>(),
+                    classified.summary,
+                ),
+                Err(error) => (
+                    Vec::new(),
+                    ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                        state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+                        new: None,
+                        known: None,
+                        resolved: None,
+                        path: Some(baseline_path.to_owned()),
+                        schema_version: Some(baseline.schema_version),
+                        manifest_schema_version: None,
+                        complete: false,
+                        error_code: Some("missing_snippet".to_owned()),
+                        detail: Some(error.to_string()),
+                        partitions: vec![],
+                        errors: vec![],
+                    },
+                ),
+            }
+        } else if let Some(summary) = snapshot.error_summary() {
+            (Vec::new(), summary)
+        } else {
+            (
                 candidates.into_iter().map(|candidate| candidate.diagnostic).collect::<Vec<_>>(),
                 ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
-            ),
-            Some((baseline, baseline_path)) => {
-                match ide::diagnostics_baseline::classify_diagnostics(
-                    baseline,
-                    baseline_path.to_owned(),
-                    candidates,
-                    &coverage,
-                ) {
-                    Ok(classified) => (
-                        classified.new.into_iter().map(|item| item.diagnostic).collect::<Vec<_>>(),
-                        classified.summary,
-                    ),
-                    Err(error) => (
-                        Vec::new(),
-                        ide::diagnostics_baseline::DiagnosticsBaselineSummary {
-                            state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
-                            new: None,
-                            known: None,
-                            resolved: None,
-                            path: Some(baseline_path.to_owned()),
-                            schema_version: Some(baseline.schema_version),
-                            complete: false,
-                            error_code: Some("missing_snippet".to_owned()),
-                            detail: Some(error.to_string()),
-                        },
-                    ),
-                }
-            }
+            )
         };
         let mut active_by_file: HashMap<FileId, Vec<ide::Diagnostic>> = HashMap::new();
         for (file_id, diagnostic) in active {

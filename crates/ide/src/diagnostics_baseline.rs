@@ -135,11 +135,41 @@ pub struct DiagnosticsBaselineSummary {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_version: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_schema_version: Option<u32>,
     pub complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partitions: Vec<DiagnosticsBaselinePartitionSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<DiagnosticsBaselineErrorSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsBaselineErrorSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_id: Option<String>,
+    pub code: String,
+    pub detail: String,
+    pub epoch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsBaselinePartitionSummary {
+    pub id: String,
+    pub identity: project_model::DiagnosticsBaselinePartitionIdentity,
+    pub path: String,
+    pub schema_version: u32,
+    pub state: DiagnosticsBaselineState,
+    pub new: usize,
+    pub known: usize,
+    pub resolved: usize,
+    pub complete: bool,
 }
 
 impl DiagnosticsBaselineSummary {
@@ -151,9 +181,12 @@ impl DiagnosticsBaselineSummary {
             resolved: None,
             path: None,
             schema_version: None,
+            manifest_schema_version: None,
             complete: true,
             error_code: None,
             detail: None,
+            partitions: vec![],
+            errors: vec![],
         }
     }
 }
@@ -337,9 +370,12 @@ pub fn classify_diagnostics<T>(
         resolved: Some(resolved.len()),
         path: Some(baseline_path),
         schema_version: Some(baseline.schema_version),
+        manifest_schema_version: None,
         complete,
         error_code: None,
         detail: None,
+        partitions: vec![],
+        errors: vec![],
     };
 
     Ok(ClassifiedDiagnostics { new, known, resolved, summary })
@@ -423,9 +459,12 @@ mod tests {
                 resolved: None,
                 path: None,
                 schema_version: None,
+                manifest_schema_version: None,
                 complete: state == DiagnosticsBaselineState::Full,
                 error_code: None,
                 detail: None,
+                partitions: vec![],
+                errors: vec![],
             };
             let value = serde_json::to_value(summary).unwrap();
             assert_eq!(value["state"], state_string(state));

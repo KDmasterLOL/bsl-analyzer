@@ -37,7 +37,19 @@ jobs:
         run: cargo test -p bsl-analyzer diagnostics_baseline_create
       - name: Diagnostics baseline atomic update
         run: cargo test -p bsl-analyzer diagnostics_baseline_update
+      - name: Partitioned diagnostics baseline transaction
+        run: cargo test -p bsl-analyzer partitioned_baseline_transaction
       - name: HTTP transport tests
         run: cargo test -p mcp-server --test http
       - name: Broker runtime tests
         run: cargo test -p mcp-server --test broker
+
+  partitioned-baseline-scale:
+    name: Partitioned baseline 1.6M release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ide --release --test partitioned_baseline_scale -- --ignored
+      - run: cargo test -p bsl-analyzer --release --test partitioned_baseline_scale -- --ignored
