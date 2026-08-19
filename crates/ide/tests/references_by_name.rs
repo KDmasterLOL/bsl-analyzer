@@ -1133,3 +1133,38 @@ fn an_exported_variable_does_not_hide_a_manager_method_of_the_same_name() {
         "control: between two methods the object module is the one the card surface reads",
     );
 }
+
+/// The service level `Ext` is optional in a module path — the parser accepts both layouts —
+/// so the object a module belongs to cannot be "two segments up". Cutting a fixed two put
+/// one object's two modules in different groups (priority lost) and two different objects of
+/// the flat layout in one (a declaration silently dropped). Both halves are checked, because
+/// the same wrong key produces opposite damage on them.
+#[test]
+fn the_object_of_a_module_is_found_in_both_path_layouts() {
+    let method = "Процедура Пересчитать() Экспорт\nКонецПроцедуры\n";
+
+    // One object, two layouts: the priority must still apply.
+    let (mixed, mixed_files) = db_with(&[
+        ("/ws/src/cf/Catalogs/Товары/Ext/ObjectModule.bsl", method),
+        ("/ws/src/cf/Catalogs/Товары/ManagerModule.bsl", method),
+    ]);
+    let declarations = resolve_declarations(&mixed, "Справочник.Товары.Пересчитать");
+    assert_eq!(
+        declarations.len(),
+        1,
+        "one object holds both modules however they are laid out: {declarations:?}",
+    );
+    assert_eq!(declarations[0].file_id, mixed_files[0], "and the object module answers");
+
+    // Two objects in the flat layout: neither may swallow the other's declaration.
+    let (flat, flat_files) = db_with(&[
+        ("/ws/src/cf/Catalogs/Товары/ObjectModule.bsl", method),
+        ("/ws/src/cf/Catalogs/ТОВАРЫ/ManagerModule.bsl", method),
+    ]);
+    let both = resolve_declarations(&flat, "Справочник.Товары.Пересчитать");
+    assert_eq!(both.len(), 2, "two spellings are two objects, and the name reaches both: {both:?}",);
+    assert!(
+        both.iter().any(|declaration| declaration.file_id == flat_files[1]),
+        "the manager module of the second spelling must not be ranked away: {both:?}",
+    );
+}

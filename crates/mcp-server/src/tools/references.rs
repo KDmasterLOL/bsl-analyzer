@@ -680,6 +680,30 @@ mod tests {
         }
     }
 
+    /// The category codes a closed-vocabulary sentence lists, read out of the text that
+    /// publishes it: the values stand in backticks, separated by `|`, and the run ends at
+    /// the first thing that is not one of those. Reading them beats listing the dead ones —
+    /// a list catches only the value that put it there.
+    fn closed_vocabulary_of(text: &str) -> Vec<String> {
+        let mut codes = Vec::new();
+        let Some(start) = text.find("common_module").map(|at| at.saturating_sub(1)) else {
+            return codes;
+        };
+        let mut rest = &text[start..];
+        while let Some(stripped) = rest.strip_prefix('`') {
+            let Some((code, tail)) = stripped.split_once('`') else { break };
+            if code.is_empty() || !code.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
+                break;
+            }
+            codes.push(code.to_owned());
+            // A serialized schema writes its line breaks as the two characters `\` and `n`.
+            rest = tail.trim_start_matches([' ', '\n', '\\', 'n', '/']);
+            let Some(next) = rest.strip_prefix('|') else { break };
+            rest = next.trim_start_matches([' ', '\n', '\\', 'n', '/']);
+        }
+        codes
+    }
+
     /// Two closed vocabularies leave this tool on the wire, and their only worth over
     /// free-form strings is that a consumer may match on them. That holds while the document
     /// a consumer reads carries every value.
@@ -715,33 +739,28 @@ mod tests {
         // document still names after the surface stopped serving it. A closed vocabulary
         // with an unreachable value teaches a state a client will wait for forever, and it
         // travels in the published `output_schema_fingerprint` as part of the contract.
+        //
+        // Read out of the published text, not compared against a list of codes known to be
+        // dead: such a list only ever catches the value that put it there, and the next
+        // stale one walks past the gate that exists to stop it.
         let served: Vec<&str> =
             ide::UnsupportedCategory::ALL.iter().map(|category| category.as_str()).collect();
         let schema = rmcp::handler::server::tool::schema_for_type::<ReferencesResponse>();
         let published = serde_json::to_string(&schema).expect("the schema serializes");
-        for code in [
-            "common_module",
-            "module",
-            "metadata_object",
-            "metadata_member",
-            "form",
-            "platform_member",
-            "unknown_scope",
-            "module_method",
-            "module_variable",
-        ] {
-            if served.contains(&code) {
-                continue;
+        for source in [published.as_str(), section] {
+            let listed = closed_vocabulary_of(source);
+            assert!(
+                !listed.is_empty(),
+                "the category vocabulary was not found in the published text, so this gate \
+                 read nothing",
+            );
+            for code in listed {
+                assert!(
+                    served.contains(&code.as_str()),
+                    "`{code}` is published in the `category` vocabulary, but no input can \
+                     produce it (served: {served:?})",
+                );
             }
-            assert!(
-                !published.contains(&format!("`{code}`")),
-                "the published schema names `{code}`, which no input can produce",
-            );
-            assert!(
-                !section.contains(&format!("`{code}` | "))
-                    && !section.contains(&format!("| `{code}`")),
-                "the tool's section lists `{code}` in a closed vocabulary that cannot yield it",
-            );
         }
 
         for kind in [

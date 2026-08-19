@@ -388,18 +388,27 @@ impl Owner {
     }
 }
 
-/// The object the modules belong to, taken from the path: a module file lives at
-/// `<object>/Ext/<Kind>.bsl`, so dropping the last two segments names the object
-/// itself. The priority above holds INSIDE one such object and nowhere else — a
-/// configuration and an extension each hold their own, and ranking across them
-/// would let one root's object module delete another root's manager module, which
-/// is the multiplicity this whole return type exists to keep.
+/// The object the modules belong to, taken from the path. The priority above holds
+/// INSIDE one such object and nowhere else — a configuration and an extension each
+/// hold their own, and ranking across them would let one root's object module delete
+/// another root's manager module, which is the multiplicity this whole return type
+/// exists to keep.
+///
+/// The service level is OPTIONAL in a module path — `split_module_path` accepts
+/// `<object>/Ext/<Kind>.bsl` and `<object>/<Kind>.bsl` alike — so the segment is
+/// dropped when it is there and kept out of the count when it is not. Cutting a fixed
+/// two segments put the two layouts of one object in different groups, and two
+/// different objects of the flat layout in the same one.
 fn object_of_module_path(path: &str) -> &str {
     let normalized = path.trim_end_matches('/');
-    match normalized.rmatch_indices('/').nth(1) {
-        Some((at, _)) => &normalized[..at],
-        None => normalized,
+    let Some((without_file, _)) = normalized.rsplit_once('/') else { return normalized };
+    let is_service_level = without_file.rsplit('/').next().is_some_and(|segment| {
+        bsl_conventions::conventional_of(segment) == Some(bsl_conventions::ConventionalName::Ext)
+    });
+    if !is_service_level {
+        return without_file;
     }
+    without_file.rsplit_once('/').map_or(without_file, |(object, _)| object)
 }
 
 fn parse_mdo_type(s: &str) -> Option<bsl_metadata::MdoType> {
