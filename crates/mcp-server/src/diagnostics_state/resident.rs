@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use ide::{Analysis, RootDatabaseImpl};
 use vfs::{FileId, Vfs, VfsPath};
 
-use super::workspace_sweep::{CodeAggregate, SweepCancel, SweepOptions, WorkspaceSweep};
+use super::workspace_sweep::{CodeAggregate, SweepOptions, WorkspaceSweep};
+use crate::cancel::RequestCancel;
 
 /// Adapts the resident's owned [`Vfs`] to the lock-neutral [`ide_host_core::VfsWrite`]
 /// the shared metadata policy expects. The resident is only ever touched while the
@@ -504,7 +505,7 @@ impl DiagnosticsResident {
         &self,
         config: &ide::DiagnosticsConfig,
         opts: &SweepOptions,
-        cancel: &SweepCancel,
+        cancel: &RequestCancel,
     ) -> WorkspaceSweep {
         use rayon::prelude::*;
         use std::collections::HashSet;
@@ -513,6 +514,20 @@ impl DiagnosticsResident {
         // Vendor-diff file-gate: unchanged-vs-base files are excluded up front so the
         // sweep never walks thousands of files whose report is guaranteed empty;
         // `files_out_of_scope` keeps the coverage bookkeeping honest about the gap.
+        // The workers below observe cancellation through their own salsa handles, but
+        // this selection runs before the first of them exists — and with `max_files` at
+        // zero no worker runs at all. Left unchecked, a cancelled sweep would walk and
+        // sort the whole workspace under the resident lock for an answer nobody reads.
+        //
+        // It stops the way the sweep stops everywhere else — an empty report marked
+        // cancelled — and not by unwinding: a sweep that reports what it managed is
+        // this call's whole shape, and the coverage numbers beside it stay honest.
+        if cancel.is_cancelled() {
+            return WorkspaceSweep::nothing_swept(
+                self.by_path.len() + self.holes.len(),
+                self.holes.len(),
+            );
+        }
         let mut files: Vec<FileId> = Vec::with_capacity(self.by_path.len());
         let mut files_out_of_scope = 0usize;
         for (path, file_id) in &self.by_path {
@@ -645,7 +660,7 @@ impl DiagnosticsResident {
 
 /// Per-rayon-worker sweep state: an [`Analysis`] over an owned db clone plus whether
 /// that clone's salsa cancellation token has been registered with the sweep's
-/// [`SweepCancel`]. A rayon split clones the worker; the fresh db handle carries a
+/// [`RequestCancel`]. A rayon split clones the worker; the fresh db handle carries a
 /// FRESH token, so `Clone` resets `registered` and the split re-registers before its
 /// first query.
 struct SweepWorker {
@@ -1342,13 +1357,75 @@ mod tests {
         }
     }
 
+    /// A sweep cancelled before it starts does not select its files either.
+    ///
+    /// The workers observe the cancel through their own salsa handles, but the
+    /// selection runs ahead of them — and with `max_files` at zero no worker runs at
+    /// all. The out-of-scope counter is what makes the difference visible: a sweep that
+    /// walked the workspace after the cancel would have counted the excluded files.
+    #[test]
+    fn a_cancelled_sweep_does_not_even_select_its_files() {
+        use std::sync::Arc;
+
+        use crate::cancel::RequestCancel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        super::super::test_support::write_common_module(
+            root,
+            "Клиент",
+            false,
+            "&НаКлиенте\nПроцедура Показать() Экспорт КонецПроцедуры",
+        );
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let cancelled = RequestCancel::default();
+        cancelled.cancel_all();
+        let out = state.read(|resident, _| {
+            let workdir =
+                resident.workspace_root().canonicalize().expect("workspace root canonicalizes");
+            let module = module_path(root, "Сервер").canonicalize().expect("module exists");
+            let rel = module
+                .strip_prefix(&workdir)
+                .expect("module under workspace root")
+                .to_string_lossy()
+                .into_owned();
+            let scope =
+                Arc::new(base_db::AnalysisScope::from_report("vendor", &workdir, [(rel, None)]));
+
+            let mut config = resident.config().clone();
+            config.scope = Some(scope);
+            let mut opts = sweep_opts();
+            // No worker runs at all: whatever observes the cancel here is the selection.
+            opts.max_files = 0;
+            let sweep = resident.workspace_aggregates(&config, &opts, &cancelled);
+            (resident.file_count(), sweep)
+        });
+        match out {
+            ResidentOutcome::Ready((file_count, sweep), _) => {
+                assert!(sweep.cancelled, "the sweep must report the cancellation");
+                assert_eq!(sweep.files_swept, 0);
+                assert_eq!(sweep.files_total, file_count, "coverage still describes the config");
+                assert_eq!(
+                    sweep.files_out_of_scope, 0,
+                    "the cancelled sweep walked and classified the workspace anyway"
+                );
+            }
+            _ => panic!("expected Ready"),
+        }
+    }
+
     /// Under a vendor-diff scope the sweep analyses only files with changed lines;
     /// the excluded rest is counted so the coverage bookkeeping stays honest.
     #[test]
     fn sweep_under_scope_excludes_unchanged_files_and_counts_them() {
         use std::sync::Arc;
 
-        use super::super::SweepCancel;
+        use crate::cancel::RequestCancel;
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1380,7 +1457,7 @@ mod tests {
             let mut config = resident.config().clone();
             config.scope = Some(scope);
             let sweep =
-                resident.workspace_aggregates(&config, &sweep_opts(), &SweepCancel::default());
+                resident.workspace_aggregates(&config, &sweep_opts(), &RequestCancel::default());
             (resident.file_count(), sweep)
         });
         match out {
@@ -1404,7 +1481,7 @@ mod tests {
     /// cancellation touches only per-worker clone tokens, never the master db.
     #[test]
     fn pre_cancelled_sweep_is_partial_and_leaves_the_resident_usable() {
-        use super::super::SweepCancel;
+        use crate::cancel::RequestCancel;
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1414,7 +1491,7 @@ mod tests {
         state.ensure_loading();
         wait_ready(&state);
 
-        let cancelled_sweep = SweepCancel::default();
+        let cancelled_sweep = RequestCancel::default();
         cancelled_sweep.cancel_all();
         let out = state.read(|resident, _| {
             resident.workspace_aggregates(resident.config(), &sweep_opts(), &cancelled_sweep)
@@ -1430,7 +1507,11 @@ mod tests {
         }
 
         let out = state.read(|resident, _| {
-            resident.workspace_aggregates(resident.config(), &sweep_opts(), &SweepCancel::default())
+            resident.workspace_aggregates(
+                resident.config(),
+                &sweep_opts(),
+                &RequestCancel::default(),
+            )
         });
         match out {
             ResidentOutcome::Ready(sweep, _) => {
@@ -1488,7 +1569,7 @@ mod tests {
     /// final and the resident keeps serving per-file diagnostics.
     #[test]
     fn late_cancel_after_sweep_completion_is_a_noop() {
-        use super::super::SweepCancel;
+        use crate::cancel::RequestCancel;
         use ide::DiagnosticsConfig;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1499,7 +1580,7 @@ mod tests {
         state.ensure_loading();
         wait_ready(&state);
 
-        let cancel = SweepCancel::default();
+        let cancel = RequestCancel::default();
         let out = state.read(|resident, _| {
             resident.workspace_aggregates(resident.config(), &sweep_opts(), &cancel)
         });

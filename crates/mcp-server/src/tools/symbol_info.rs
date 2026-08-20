@@ -57,6 +57,7 @@ pub(crate) fn locale_from(raw: Option<&str>) -> Result<Locale, McpError> {
 )]
 pub(crate) fn resolve_card(
     resident: &DiagnosticsResident,
+    db: &ide::RootDatabaseImpl,
     symbol: Option<&str>,
     root_id: Option<&str>,
     path: Option<&str>,
@@ -130,7 +131,7 @@ pub(crate) fn resolve_card(
         // graph id must be encoded relative to it (NOT the config root) to resolve its usages.
         workspace_root: Some(resident.workspace_root().to_path_buf()),
     };
-    Ok(ide::symbol_info(resident.db(), &req))
+    Ok(ide::symbol_info(db, &req))
 }
 
 /// Serialize a resolved card, enriching it with a graph-derived `usages` summary when the
@@ -490,6 +491,7 @@ mod tests {
             // Line 1, past `Функция `, is the function's own name in both modules.
             resolve_card(
                 resident,
+                resident.db(),
                 None,
                 Some(root_id.as_str()),
                 Some(SHARED_MODULE_REL),

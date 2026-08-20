@@ -108,8 +108,12 @@ struct Selection {
     path_prefix: Option<String>,
 }
 
+/// `db` is the caller's per-request handle, not `resident.db()`: the whole answer —
+/// anchor, walk and render — must run on the handle whose salsa token this request can
+/// cancel, or a cancelled call would keep computing on the master handle.
 pub(crate) fn answer(
     resident: &DiagnosticsResident,
+    db: &ide::RootDatabaseImpl,
     params: &Params<'_>,
     max_output_tokens: usize,
 ) -> Result<Answer, McpError> {
@@ -135,12 +139,12 @@ pub(crate) fn answer(
         ));
     }
     let anchor_selection = match params.anchor_root_id {
-        Some(root_id) => Some(select(resident, Some(root_id), None)?),
+        Some(root_id) => Some(select(resident, db, Some(root_id), None)?),
         None => None,
     };
     let area_selection = match (params.area_root_id, params.area_path_prefix) {
         (None, None) => None,
-        (root_id, prefix) => Some(select(resident, root_id, prefix)?),
+        (root_id, prefix) => Some(select(resident, db, root_id, prefix)?),
     };
 
     let request = ReferencesRequest {
@@ -152,7 +156,6 @@ pub(crate) fn answer(
         max_files,
     };
 
-    let db = resident.db();
     let result = ide::find_references_by_name(db, &request);
     Ok(render(
         db,
@@ -293,6 +296,7 @@ fn build_anchor(
 /// address the histogram publishes.
 fn select(
     resident: &DiagnosticsResident,
+    db: &ide::RootDatabaseImpl,
     root_id: Option<&str>,
     path_prefix: Option<&str>,
 ) -> Result<Selection, McpError> {
@@ -312,6 +316,10 @@ fn select(
 
     let mut files = FileIdSet::default();
     for (path, file_id) in resident.files() {
+        // Nothing in this loop is a salsa query, so the request's token is observed
+        // here or not at all: on a large configuration this walks tens of thousands
+        // of files doing pure path arithmetic.
+        salsa::Database::unwind_if_revision_cancelled(db);
         // `root_of` and not `key_of_path`: the latter canonicalises what it is
         // given, and a resident path is canonical already — one `canonicalize`
         // syscall per workspace file, on a configuration with tens of thousands
@@ -453,6 +461,12 @@ fn render(
                 .per_file
                 .iter()
                 .map(|(file_id, count)| {
+                    // A bucket names only its file, so `resolve_file_range` returns
+                    // before it reads any text — the one place in rendering where no
+                    // salsa query runs and the token would go unread. The loop is
+                    // unbounded (every file with a hit) and pays a `canonicalize`
+                    // syscall per bucket, so it is also the one that must not run on.
+                    salsa::Database::unwind_if_revision_cancelled(db);
                     let mut entry = Map::new();
                     insert_resolved_location(
                         &ide::resolve_file_range(db, *file_id, None, None),
@@ -1208,6 +1222,112 @@ pub(crate) struct ReferencesResponse {
 mod tests {
     use super::*;
 
+    /// The per-file histogram is the one part of rendering that runs without a salsa
+    /// query: a bucket names only its file, so `resolve_file_range` returns before it
+    /// reads any text. The input says so — `limit: 0` empties the list of shown
+    /// occurrences, whose own `resolve_file_range` DOES read text and would unwind on
+    /// its own, hiding whether the histogram observes anything at all.
+    #[test]
+    fn the_histogram_observes_a_cancelled_request() {
+        // Walking references moves the process-global span counter the cancellation
+        // gates measure with; taking their gate keeps this test out of their numbers.
+        let _serialised = crate::walk_probe::WALK_GATE.blocking_lock();
+        use base_db::{SourceDatabase, SourceRoot, SourceRootId};
+        use std::panic::AssertUnwindSafe;
+        use vfs::{FileId, FileSet, VfsPath};
+
+        let mut db = ide::RootDatabaseImpl::new();
+        let module = FileId(0);
+        let mut file_set = FileSet::default();
+        file_set.insert(module, VfsPath::new("/ws/src/cf/CommonModules/Продажи/Ext/Module.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(module, SourceRootId(0));
+        db.set_file_text(module, "Процедура Расчёт() Экспорт\nКонецПроцедуры\n");
+
+        let (roots, _) = bsl_search::WorkspaceRoots::build(
+            std::path::Path::new("/ws"),
+            std::path::Path::new("/ws/src/cf"),
+            &[],
+        );
+        let request = ide::ReferencesRequest {
+            anchor: ide::ReferenceAnchor::Name("Продажи.Расчёт".to_owned()),
+            anchor_files: None,
+            area: ide::ReferenceArea::default(),
+            kinds: None,
+            include_declaration: true,
+            max_files: DEFAULT_MAX_FILES,
+        };
+        let result = ide::find_references_by_name(&db, &request);
+        assert!(!result.per_file.is_empty(), "the stand must produce a bucket to render");
+        let params = Params {
+            symbol: Some("Продажи.Расчёт"),
+            anchor_root_id: None,
+            root_id: None,
+            path: None,
+            line: None,
+            column: None,
+            area_root_id: None,
+            area_path_prefix: None,
+            line_content: None,
+            kinds: &[],
+            include_declaration: None,
+            limit: None,
+            max_files: None,
+            include_preview: None,
+        };
+        let anchor = ide::ReferenceAnchor::Name("Продажи.Расчёт".to_owned());
+
+        salsa::Database::cancellation_token(&db).cancel();
+        let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+            render(&db, &roots, &result, &params, &anchor, None, 0, DEFAULT_BUDGET, 0)
+        }));
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the histogram was built for a cancelled request"
+        );
+    }
+
+    /// The area filter walks EVERY resident file doing pure path arithmetic — not one
+    /// salsa query in the loop — so a cancelled request is observed there by the
+    /// checkpoint or not at all. Decisive for that reason: an unwind out of `select`
+    /// can have come from nothing else.
+    #[test]
+    fn the_area_filter_observes_a_cancelled_request() {
+        use crate::diagnostics_state::{DiagnosticsState, ResidentOutcome};
+        use std::panic::AssertUnwindSafe;
+
+        let dir = tempfile::tempdir().unwrap();
+        crate::diagnostics_state::test_support::write_common_module(
+            dir.path(),
+            "Модуль",
+            true,
+            "&НаСервере\nПроцедура П() Экспорт\nКонецПроцедуры\n",
+        );
+        crate::diagnostics_state::test_support::write(
+            dir.path(),
+            "bsl-analyzer.toml",
+            "[source]\nroot = \".\"\n",
+        );
+        let state = DiagnosticsState::for_workspace(dir.path().to_path_buf());
+        state.ensure_loading();
+        crate::diagnostics_state::test_support::wait_ready(&state);
+
+        let out = state.read(|resident, _| {
+            let db = resident.db().clone();
+            salsa::Database::cancellation_token(&db).cancel();
+            let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                select(resident, &db, None, Some("")).map(|s| s.files.len())
+            }));
+            matches!(caught, Err(salsa::Cancelled::Local))
+        });
+        match out {
+            ResidentOutcome::Ready(unwound, _) => {
+                assert!(unwound, "the area filter walked on with the request cancelled");
+            }
+            _ => panic!("expected Ready outcome"),
+        }
+    }
+
     /// The section of the tools document that describes this tool.
     ///
     /// The bound is not decoration: `call` and `read` occur throughout that file in other
@@ -1499,6 +1619,9 @@ mod tests {
     /// body, same anchor, one number apart.
     #[test]
     fn an_unread_file_makes_the_walk_partial() {
+        // Walking references moves the process-global span counter the cancellation
+        // gates measure with; taking their gate keeps this test out of their numbers.
+        let _serialised = crate::walk_probe::WALK_GATE.blocking_lock();
         use base_db::{SourceDatabase, SourceRoot, SourceRootId};
         use vfs::{FileId, FileSet, VfsPath};
 
