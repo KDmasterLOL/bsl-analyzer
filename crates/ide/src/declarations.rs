@@ -24,6 +24,7 @@ use vfs::FileId;
 use crate::name_lookup::NameCategory;
 use crate::symbol_info::form::{is_common_form_keyword, is_form_marker};
 use crate::symbol_info::{symbol_info, SymbolInfoRequest, SymbolInfoSections};
+use salsa::Database;
 
 /// The source root holding `.bsl` — extensions are registered into it alongside
 /// the base configuration, so one root covers every module.
@@ -98,6 +99,7 @@ pub fn resolve_declarations(db: &RootDatabaseImpl, name: &str) -> Vec<Declaratio
     // same string in.
     let mut found: Vec<(String, OwnerRank, Declaration)> = Vec::new();
     for module in members.modules.values() {
+        db.unwind_if_revision_cancelled();
         let Some(path) = file_set.path_for_file(&module.file_id) else { continue };
         let path = path.as_path().to_string_lossy().replace('\\', "/");
         let Some(key) = module_key_for_path(&path) else { continue };
@@ -134,8 +136,22 @@ pub fn resolve_declarations(db: &RootDatabaseImpl, name: &str) -> Vec<Declaratio
         }
     }
 
+    rank_and_order(db, &found)
+}
+
+/// Keep the best-ranked declaration per object and put them in file order — the
+/// reduction that follows the module walk.
+///
+/// Its own function so a cancelled request can be shown to stop here too: the walk
+/// above checkpoints per module, and this phase is as long as what the walk found. The
+/// sort is indivisible, so its checkpoint goes immediately before it.
+fn rank_and_order(
+    db: &RootDatabaseImpl,
+    found: &[(String, OwnerRank, Declaration)],
+) -> Vec<Declaration> {
     let mut best: rustc_hash::FxHashMap<&str, OwnerRank> = rustc_hash::FxHashMap::default();
-    for (object, rank, _) in &found {
+    for (object, rank, _) in found {
+        db.unwind_if_revision_cancelled();
         let slot = best.entry(object.as_str()).or_insert(*rank);
         if rank < slot {
             *slot = *rank;
@@ -143,9 +159,11 @@ pub fn resolve_declarations(db: &RootDatabaseImpl, name: &str) -> Vec<Declaratio
     }
     let mut out: Vec<Declaration> = found
         .iter()
+        .inspect(|_| db.unwind_if_revision_cancelled())
         .filter(|(object, rank, _)| best.get(object.as_str()) == Some(rank))
         .map(|(_, _, declaration)| *declaration)
         .collect();
+    db.unwind_if_revision_cancelled();
     out.sort_by_key(|decl| (decl.file_id.0, decl.name_range.start()));
     out
 }
@@ -293,6 +311,7 @@ impl<'a> FormMember<'a> {
 
         let mut out = Vec::new();
         for file_id in file_set.iter() {
+            db.unwind_if_revision_cancelled();
             let Some(path) = file_set.path_for_file(&file_id) else { continue };
             let Some(key) = parse_form_module_path(&path.as_path().to_string_lossy()) else {
                 continue;
@@ -312,6 +331,7 @@ impl<'a> FormMember<'a> {
             }
         }
 
+        db.unwind_if_revision_cancelled();
         out.sort_by_key(|declaration| (declaration.file_id.0, declaration.name_range.start()));
         out
     }
@@ -419,4 +439,41 @@ fn object_of_module_path(path: &str) -> &str {
 
 fn parse_mdo_type(s: &str) -> Option<bsl_metadata::MdoType> {
     s.parse::<bsl_metadata::MdoType>().ok().or_else(|| bsl_metadata::MdoType::from_plural(s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syntax::TextRange;
+
+    /// The reduction after the module walk answers to the cancel too: ranking per
+    /// object, filtering and ordering are as long as what the walk found, and none of
+    /// them runs a query.
+    #[test]
+    fn the_reduction_observes_a_cancelled_request() {
+        let db = RootDatabaseImpl::default();
+        let found: Vec<(String, OwnerRank, Declaration)> = (0..20u32)
+            .map(|i| {
+                (
+                    format!("объект{i}"),
+                    OwnerRank { member: MemberRank::Method, module: ModuleRank::OwnObject },
+                    Declaration {
+                        file_id: FileId(i),
+                        name_range: TextRange::new(i.into(), (i + 1).into()),
+                        enclosing_range: None,
+                        kind: DeclarationKind::Method,
+                    },
+                )
+            })
+            .collect();
+
+        salsa::Database::cancellation_token(&db).cancel();
+        let caught =
+            salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| rank_and_order(&db, &found)));
+
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the declarations were ranked and ordered after the request was cancelled"
+        );
+    }
 }
