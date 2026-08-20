@@ -1,14 +1,28 @@
 # Parser BSL Grammar Audit
 
-> **Still current, and its premise is now supported by the repository's own
-> history.** Unlike the SDBL notes, this assessment has not been overtaken by
-> rewrite work: no clean-room slice has ever touched the BSL grammar layer. Note
-> that the evidence here is weaker in form than for SDBL — the initial commit
-> names the upstream grammars in its planning document rather than in the BSL
-> source files, and a header referencing `BSLLexer.g4` appeared only in
-> `fe2f7ed2`; `BSLParser.g4` was never named in a BSL parser file. This layer is
+> **Baseline claim retracted, 2026-08-20.** This note declared
+> `BSLParser.g4` its comparison baseline and reads as the result of comparing
+> against it. That comparison never took place: like the rest of the April 2026
+> notes in this directory, it was written without access to the upstream grammar
+> files (`sdbl-provenance-2026-07-audit.md`, «Why this document exists»). Every
+> statement below about what upstream *is* — the structural line-ups, the
+> per-file risk verdicts, the risk ordering — is recollection and structural
+> intuition, not a finding. One sentence that quoted an upstream rule in ANTLR
+> notation has been removed for the same reason; it was not a citation of
+> anything this note had read.
+>
+> What survives is the part about **our own** files, which the author could read:
+> where the local parser collapses layers, where recovery logic is local, where
+> precedence is explicit. Those are the starting hypotheses of Slice B3, not its
+> conclusions. See `bsl-clean-room-slices.md` for the plan that replaces this
+> note's «Practical next step».
+>
+> The premise that the BSL layer is provenance-sensitive is *separately*
+> established, and not by this note: the initial commit `a6204f78` assigns named
+> rules of the upstream grammar as work items in its planning document, and a
+> header referencing `BSLLexer.g4` was added in `fe2f7ed2` and removed in
+> `843b00ab`. `BSLParser.g4` was never named in a BSL parser file. This layer is
 > the reason `parser` and `lexer` cannot become Tier A on SDBL progress alone.
-> See `sdbl-provenance-2026-07-audit.md`.
 
 ## Scope
 
@@ -20,9 +34,10 @@ layer in `crates/parser`:
 - `crates/parser/src/grammar/statements.rs`
 - `crates/parser/src/grammar/expressions.rs`
 
-The comparison baseline is the sibling upstream grammar file:
-
-- `../bsl-parser/src/main/antlr/BSLParser.g4`
+The intended comparison baseline was the sibling upstream grammar file
+`../bsl-parser/src/main/antlr/BSLParser.g4`. It was never opened — see the
+retraction above. No such checkout exists on the machine this note was written
+on, and none is to be obtained for the replacement work.
 
 ## High-level conclusion
 
@@ -142,8 +157,6 @@ What looks clearly local:
   - `additive_expr`
   - `multiplicative_expr`
   - `unary_expr`
-- upstream ANTLR grammar is flatter:
-  `expression: member (operation member)*`
 - `postfix_expr_with_call_info` is a local abstraction tailored to statement
   validation and assignment-vs-call disambiguation;
 - multiline string handling and postfix validity checks are clearly adapted to
@@ -185,8 +198,11 @@ From most concerning to least concerning:
 3. `statements.rs`
 4. `expressions.rs`
 
-This ordering is not about code quality. It is about how directly each file
-still appears to track upstream grammar structure.
+This ordering is not about code quality, and — given the retraction above — it
+is not evidence either. It records how directly each file *appeared* to track
+upstream grammar structure to a reader who had the local files and not the
+upstream one. Slice B3 assigns per-rule verdicts from the language specification
+and does not inherit this ordering.
 
 ## Comparison with SDBL
 
@@ -217,14 +233,12 @@ code. There is already real local implementation value here, especially in:
 
 ## Practical next step
 
-For relicensing work, the most useful next move is **not** a full BSL rewrite
-yet. The better next move is:
-
-1. finish SDBL parser/lexer cleanup first;
-2. then return to BSL grammar with a narrower goal:
-   - preserve parser architecture and recovery logic,
-   - rewrite grammar-expression routines from primary language behavior rather
-     than upstream grammar text.
+**Superseded by `bsl-clean-room-slices.md`.** That plan keeps this note's
+conclusion — no full BSL rewrite — and makes it precise: the token inventory and
+the preprocessor symbols are rewritten from Chapter 4 of the 8.3.27 Developer's
+Guide (slices B1 and B2), the grammar rules are *attested* rather than rewritten
+(slice B3), and the parser architecture and recovery logic are preserved
+throughout.
 
 ## Bottom line
 
