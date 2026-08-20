@@ -16,6 +16,26 @@
 //! [`resident_call`] owns all three. Tools describe what to compute and how to render
 //! each outcome; they do not decide when to observe cancellation, because a decision
 //! written in a tool can only be verified in that tool.
+//!
+//! # How soon a cancelled call lets go
+//!
+//! The guarantee is stated in artefacts, not in loop steps: **a cancelled call frees the
+//! resident within ONE artefact** — a file, a module, a metadata object, a candidate.
+//! A walk that grows with the workspace observes the token at every artefact it visits,
+//! and so does the selection that feeds it: filtering a whole configuration costs a full
+//! pass and, for a category with no members, never reaches the loop that would have
+//! noticed. A step that cannot be divided — a sort, a fold that must finish — takes its
+//! checkpoint immediately before it, so a cancel that has already arrived does not pay
+//! for tens of thousands of comparisons.
+//!
+//! Work bounded by ONE artefact is deliberately left alone: the attributes of an object,
+//! the methods of a module, the findings of a file, the matches within a line. The walk
+//! that reached that artefact already checkpointed on it, and its size is bounded by the
+//! artefact rather than by the workspace.
+//!
+//! Finer than that is not merely expensive, it is wrong in places: the drift apply
+//! (`apply_resident_changes`, `retry_resident_holes`) writes salsa inputs, and unwinding
+//! through it would tear a mutation in half. The WRITE path is not cancellable at all.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;

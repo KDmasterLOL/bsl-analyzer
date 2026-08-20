@@ -446,6 +446,31 @@ mod tests {
     use super::*;
     use syntax::TextRange;
 
+    /// The form-member reduction answers to the cancel as well.
+    ///
+    /// On an EMPTY source root, because that is the only input that can see it: with
+    /// files present the walk's own per-file checkpoint unwinds first and would pass
+    /// this test whether the checkpoint before the sort existed or not.
+    #[test]
+    fn the_form_member_sort_observes_a_cancelled_request() {
+        use ide_db::base_db::SourceRoot;
+        use vfs::file_set::FileSet;
+
+        let mut db = RootDatabaseImpl::default();
+        db.set_source_root(ROOT, SourceRoot::new_local(FileSet::new()));
+        salsa::Database::cancellation_token(&db).cancel();
+
+        let member = FormMember {
+            owner: None, form: "ФормаСписка", member: "ПриОткрытии"
+        };
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| member.resolve(&db)));
+
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the form declarations were ordered after the request was cancelled"
+        );
+    }
+
     /// The reduction after the module walk answers to the cancel too: ranking per
     /// object, filtering and ordering are as long as what the walk found, and none of
     /// them runs a query.
