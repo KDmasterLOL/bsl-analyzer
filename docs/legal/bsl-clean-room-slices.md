@@ -12,24 +12,24 @@ the SDBL programme in full would not move either crate.
 
 ## Status as of 2026-08-20
 
-Nothing is done. No slice has ever touched the BSL layer, and no provenance
-marker of any kind survives in it — `843b00ab` and `3aa29b99` removed them all,
-so the evidence lives only in git history.
+B1 is done. No provenance marker of any kind survives in the BSL layer —
+`843b00ab` and `3aa29b99` removed them all, so the evidence for what was
+derived lives only in git history.
 
 | Slice | Area | Issue | State |
 |---|---|---|---|
-| B1 | BSL token inventory (`lexer`) | #233 | not started |
+| B1 | BSL token inventory (`lexer`) | #233 | **done** — [`bsl-clean-room-slice-b1.md`](bsl-clean-room-slice-b1.md) |
 | B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | not started |
 | B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | not started |
 | B4 | Test material | #236 | not started |
 
 ## Scope: half of what is already done
 
-Measured 2026-08-20 on `develop`.
+Measured 2026-08-20 on `develop`, before B1 landed.
 
 | What | Lines | Units |
 |---|---:|---|
-| BSL lexer, `crates/lexer/src/lib.rs` | 945 | 101 `TokenKind` variants |
+| BSL lexer, `crates/lexer/src/lib.rs` | 945 | 101 `TokenKind` variants — B1 left 99 |
 | BSL grammar, `grammar.rs` + `grammar/{items,statements,expressions}.rs` | 1462 | 77 functions, of which 59 build tree nodes |
 | Preprocessor symbols, `crates/ide-diagnostics/src/utils/preprocessor_symbols.rs` | 89 | 29 spellings |
 | For comparison: SDBL, already attested | 4891 | |
@@ -383,9 +383,12 @@ compatibility record stands.
 Step 1 is done; the rest are separate slices with their own attestations, on the
 model of `sdbl-clean-room-slice*.md`.
 
-The invariants sit after B2 rather than first because J1 and J2 are cheap to
-state and expensive to satisfy: B1 and B2 change the token inventory, and a
-harness built before them would be rebuilt after them.
+J3, J4 and J5 sit after B2. J1 and J2 turned out to belong to B1 and were
+built there: the reason for deferring them — "a harness built before them would
+be rebuilt after them" — rests on B1 **and** B2 changing the token inventory,
+and only B1 does. B2's subject is
+`crates/ide-diagnostics/src/utils/preprocessor_symbols.rs`, which does not
+touch `TokenKind`, so the harness B1 built survives B2 unchanged.
 
 ## What item 10 will not deliver
 

@@ -153,7 +153,6 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
         SyntaxKind::PRE_END_IF => check_keyword(actual, &["#КонецЕсли", "#EndIf"]),
         SyntaxKind::PRE_REGION => check_keyword(actual, &["#Область", "#Region"]),
         SyntaxKind::PRE_END_REGION => check_keyword(actual, &["#КонецОбласти", "#EndRegion"]),
-        SyntaxKind::PRE_USE => check_keyword(actual, &["#Использовать", "#Use"]),
         SyntaxKind::PRE_INSERT => check_keyword(actual, &["#Вставка", "#Insert"]),
 
         SyntaxKind::ANN_AT_CLIENT => check_keyword(actual, &["&НаКлиенте", "&AtClient"]),

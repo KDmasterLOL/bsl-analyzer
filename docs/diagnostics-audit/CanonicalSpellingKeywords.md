@@ -56,7 +56,7 @@ Handler берет `ctx.parse()`, проходит по всем tokens чере
   `Новый`, `Выполнить`, event handlers, async/await, логические операторы,
   boolean/null/undefined literals;
 - preprocessor directive tokens: `#Если`, `#ИначеЕсли`, `#Иначе`,
-  `#КонецЕсли`, `#Область`, `#КонецОбласти`, `#Использовать`, `#Вставить`;
+  `#КонецЕсли`, `#Область`, `#КонецОбласти`, `#Вставка`;
 - известные preprocessor symbols, если `IDENT` находится внутри
   preprocessor-директивы;
 - compilation directives: `&НаКлиенте`, `&НаСервере`,

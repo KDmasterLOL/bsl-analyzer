@@ -69,7 +69,6 @@ pub enum SyntaxKind {
     PRE_END_IF,
     PRE_REGION,
     PRE_END_REGION,
-    PRE_USE,
     PRE_INSERT,
     PRE_END_INSERT,
     PRE_DELETE,
@@ -113,7 +112,6 @@ pub enum SyntaxKind {
     BAR,
     HASH,
     AMPERSAND,
-    EXCLAMATION,
 
     FLOAT,
     DECIMAL,
@@ -358,7 +356,6 @@ impl SyntaxKind {
                 | SyntaxKind::PRE_END_IF
                 | SyntaxKind::PRE_REGION
                 | SyntaxKind::PRE_END_REGION
-                | SyntaxKind::PRE_USE
         )
     }
 

@@ -1,3 +1,15 @@
+//! BSL (1C:Enterprise embedded language) lexer.
+//!
+//! ## Provenance
+//!
+//! The token inventory is re-derived from Глава 4 «Встроенный язык» of the
+//! 1C:Enterprise 8.3.27 Developer's Guide
+//! (<https://its.1c.ru/db/v8327doc#bookmark:dev:TI000000116>), one vocabulary
+//! at a time, with the sections recorded per variant in
+//! `docs/legal/bsl-clean-room-slice-b1.md`. Group banners below name the
+//! section that defines each vocabulary; the attestation document is
+//! authoritative on scope.
+
 pub mod sdbl;
 
 use logos::Logos;
@@ -5,6 +17,10 @@ use smol_str::SmolStr;
 
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TokenKind {
+    // ===================================================================
+    // Зарезервированные слова — таблица 4.2.4.6, тридцать двуязычных пар.
+    // Регистр не значим: 4.2.4.5 и примечание к самой таблице.
+    // ===================================================================
     #[regex(r"(?i)процедура|(?i)procedure")]
     KwProcedure,
 
@@ -17,6 +33,14 @@ pub enum TokenKind {
     #[regex(r"(?i)конецфункции|(?i)endfunction")]
     KwEndFunction,
 
+    // ===================================================================
+    // Ключевые слова вне таблицы 4.2.4.6.
+    //
+    // Источник намеренно не резервирует их: они определены разделами, где
+    // описана сама конструкция, и потому не запрещены как имена. Разделы —
+    // 4.6.1/4.6.3/4.6.4 (Экспорт, Знач, Асинх), 4.6.9 (Ждать),
+    // 4.3.2/4.3.3/4.3.5 (литералы), 4.6.11 (обработчики событий).
+    // ===================================================================
     #[regex(r"(?i)экспорт|(?i)export")]
     KwExport,
 
@@ -125,6 +149,12 @@ pub enum TokenKind {
     #[regex(r"(?i)null")]
     KwNull,
 
+    // ===================================================================
+    // Инструкции препроцессора — таблица 4.8.1.2.
+    //
+    // Список закрыт: открытой формы `#<имя>` источник не знает, поэтому
+    // `#` перед неизвестным словом остаётся нераспознанным текстом.
+    // ===================================================================
     #[regex(r"#[ \t]*(?i:если|if)")]
     PreIf,
 
@@ -143,9 +173,6 @@ pub enum TokenKind {
     #[regex(r"#[ \t]*(?i:конецобласти|endregion)")]
     PreEndRegion,
 
-    #[regex(r"#(?i)использовать|#(?i)use")]
-    PreUse,
-
     #[regex(r"#(?i)вставка|#(?i)insert")]
     PreInsert,
 
@@ -158,6 +185,12 @@ pub enum TokenKind {
     #[regex(r"#(?i)конецудаления|#(?i)enddelete")]
     PreEndDelete,
 
+    // ===================================================================
+    // Директивы компиляции — таблица 4.8.1.3.
+    //
+    // Имя семейства `Ann*` унаследовано: по источнику это директивы
+    // компиляции, а не аннотации 4.8.2.
+    // ===================================================================
     #[regex(r"&(?i)наклиенте|&(?i)atclient")]
     AnnAtClient,
 
@@ -173,21 +206,33 @@ pub enum TokenKind {
     #[regex(r"&(?i)наклиентенасервере|&(?i)atclientatserver")]
     AnnAtClientAtServer,
 
+    // ===================================================================
+    // Аннотации — таблица 4.8.2.
+    // ===================================================================
     #[regex(r"&(?i)перед|&(?i)before")]
     AnnBefore,
 
     #[regex(r"&(?i)после|&(?i)after")]
     AnnAfter,
 
-    #[regex(r"&(?i)вместо|&(?i)instead")]
+    /// `&Instead` источником не задан и оставлен разрешением совместимости
+    /// с предшественником: 4.8.2 даёт английское имя `Вместо` как `Around`.
+    #[regex(r"&(?i)вместо|&(?i)around|&(?i)instead")]
     AnnAround,
 
     #[regex(r"&(?i)изменениеиконтроль|&(?i)changeandvalidate")]
     AnnChangeAndValidate,
 
+    /// Языковой формой не является: 4.8.2 гласит, что система не поддерживает
+    /// пользовательских аннотаций. Разрешение IDE — неизвестное написание
+    /// после `&` должно оставаться опознаваемой аннотацией, иначе
+    /// восстановление теряет весь заголовок метода.
     #[regex(r"&[_\p{L}][_\p{L}0-9]*")]
     AnnCustom,
 
+    // ===================================================================
+    // Операторы и пунктуация — таблица 4.2.5, приоритеты 4.5.4.
+    // ===================================================================
     #[token("=")]
     Eq,
 
@@ -227,10 +272,15 @@ pub enum TokenKind {
     #[token(")")]
     RParen,
 
-    #[token("{")]
+    /// Приходит только преобразованием лексем SDBL.
+    ///
+    /// В Главе 4 фигурных скобок нет: они принадлежат расширению
+    /// языка запросов для системы компоновки данных.
     LBrace,
 
-    #[token("}")]
+    /// Приходит только преобразованием лексем SDBL.
+    ///
+    /// Закрывающая половина пары; см. [`TokenKind::LBrace`].
     RBrace,
 
     #[token("[")]
@@ -257,18 +307,28 @@ pub enum TokenKind {
     #[token("~")]
     Tilde,
 
-    #[token("|", priority = 1)]
+    /// Приходит только преобразованием лексем SDBL.
+    ///
+    /// 4.2.5 даёт `|` только внутри строковой константы, и перенос строки
+    /// лексер берёт целиком видами `StringPart` / `StringTail`. Образец на
+    /// одиночный `|` был недостижим: он проигрывал `StringPart` по приоритету.
     Bar,
 
-    #[token("#")]
+    /// Приходит только преобразованием лексем SDBL.
+    ///
+    /// 4.8.1.2 знает `#` только зачином инструкции из закрытого списка,
+    /// и всю инструкцию лексер берёт целиком видом `Pre*`.
     Hash,
 
-    #[token("&")]
+    /// Приходит только преобразованием лексем SDBL.
+    ///
+    /// 4.8.1.3 и 4.8.2 знают `&` только зачином директивы или аннотации
+    /// из закрытых списков, и всё написание лексер берёт целиком видом `Ann*`.
     Ampersand,
 
-    #[token("!")]
-    Exclamation,
-
+    // ===================================================================
+    // Литералы — 4.3: число 4.3.8, строка 4.3.6, дата 4.3.4.
+    // ===================================================================
     #[regex(r"[0-9]+\.[0-9]*")]
     Float,
 
@@ -287,13 +347,15 @@ pub enum TokenKind {
     #[regex(r#"\|([^"\n\r]|"")*"#, priority = 2)]
     StringPart,
 
-    // In BSL single quotes delimit date literals exclusively. The 1C platform
-    // lexes them liberally: digits with optional separators (`- . , :` and
-    // space) in any of the date/datetime forms (`'YYYYMMDDHHMMSS'`,
-    // `'YYYY-MM-DD HH:MM:SS'`, `'YYYY.MM.DD HH:MM:SS'`, ...), and the empty
-    // literal `''` denotes the blank date. Recognise the token shape here;
-    // validating the actual date value belongs to a diagnostic, not the lexer.
-    #[regex(r"'[0-9.,: -]*'")]
+    /// Одинарные кавычки в BSL обрамляют только литерал даты — 4.2.5.
+    ///
+    /// 4.3.4 говорит, что в литерале игнорируются все значения, отличные от
+    /// цифр, и приводит `Дата('2017\03\23 10~45~25')`, поэтому класс
+    /// разделителей открыт. Он всё же сужен на буквы, кавычки и перевод
+    /// строки: иначе один незакрытый апостроф поглощал бы идентификаторы,
+    /// строковый литерал и остаток модуля, а так его радиус — одна строка.
+    /// Проверка самого значения даты — дело диагностики, не лексера.
+    #[regex(r#"'[^'"\n\r\p{L}]*'"#)]
     Date,
 
     #[regex(r"[_\p{L}][_\p{L}0-9]*", priority = 1)]
@@ -368,7 +430,6 @@ impl TokenKind {
         TokenKind::PreEndIf,
         TokenKind::PreRegion,
         TokenKind::PreEndRegion,
-        TokenKind::PreUse,
         TokenKind::PreInsert,
         TokenKind::PreEndInsert,
         TokenKind::PreDelete,
@@ -409,7 +470,6 @@ impl TokenKind {
         TokenKind::Bar,
         TokenKind::Hash,
         TokenKind::Ampersand,
-        TokenKind::Exclamation,
         TokenKind::Float,
         TokenKind::Decimal,
         TokenKind::String,
@@ -743,6 +803,36 @@ mod tests {
         let tokens = tokenize("&Вместо(\"Метод\")");
         assert_eq!(tokens[0].kind, TokenKind::AnnAround);
         assert_eq!(tokens[1].kind, TokenKind::LParen);
+    }
+
+    /// Английские написания директив компиляции и аннотаций — 4.8.1.3 и 4.8.2.
+    ///
+    /// Перебором, а не выборкой: у `&Around` длина совпадения буквально равна
+    /// длине `AnnCustom`, и разводит их только приоритет logos. Проверка на
+    /// одном написании зелена и у таблицы, разошедшейся на соседнем.
+    #[test]
+    fn english_spellings_of_directives_and_annotations() {
+        for (input, expected) in [
+            ("&AtClient", TokenKind::AnnAtClient),
+            ("&AtServer", TokenKind::AnnAtServer),
+            ("&AtServerNoContext", TokenKind::AnnAtServerNoContext),
+            ("&AtClientAtServerNoContext", TokenKind::AnnAtClientAtServerNoContext),
+            ("&AtClientAtServer", TokenKind::AnnAtClientAtServer),
+            ("&Before", TokenKind::AnnBefore),
+            ("&After", TokenKind::AnnAfter),
+            ("&Around", TokenKind::AnnAround),
+            ("&ChangeAndValidate", TokenKind::AnnChangeAndValidate),
+        ] {
+            let tokens = tokenize(input);
+            assert_eq!(tokens.len(), 1, "{input}: ожидалась одна лексема, получено {tokens:?}");
+            assert_eq!(tokens[0].kind, expected, "{input}");
+        }
+    }
+
+    /// `&Instead` источником не задан и держится разрешением совместимости.
+    #[test]
+    fn instead_is_kept_as_a_compatibility_spelling() {
+        assert_eq!(tokenize("&Instead")[0].kind, TokenKind::AnnAround);
     }
 
     #[test]
