@@ -184,6 +184,7 @@ pub(crate) fn parse_detail(s: Option<&str>) -> Result<bool, String> {
 /// `result_id`. Runs inside the resident read lock, on the calling thread.
 pub(crate) fn file_findings(
     resident: &DiagnosticsResident,
+    analysis: &ide::Analysis,
     root_id: Option<&str>,
     path: &Path,
     filters: &FileFilters,
@@ -226,7 +227,9 @@ pub(crate) fn file_findings(
             FileError::NotInWorkspace.completeness(),
         );
     };
-    let analysis = resident.analysis();
+    // The caller's handle, not a fresh clone: inside a cancellable read the request's
+    // salsa scope is attached to THAT handle, and a second one would be a different
+    // database to salsa.
     let file_text = analysis.file_text(file_id);
     // Analyse against the project's effective config (the single source of truth shared
     // with LSP and CLI), so disabled rules and tuned thresholds are honoured.
@@ -878,8 +881,9 @@ mod tests {
 
     mod file_action {
         use super::*;
+        use crate::cancel::RequestCancel;
         use crate::diagnostics_state::{
-            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepCancel, SweepOptions,
+            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepOptions,
         };
         use std::fs;
         use std::path::{Path, PathBuf};
@@ -951,7 +955,7 @@ mod tests {
             // `read` supplies the generation under the lock, so the closure must not
             // re-lock `&self`.
             match state.read(|resident, generation| {
-                file_findings(resident, root_id, path, filters, generation)
+                file_findings(resident, &resident.analysis(), root_id, path, filters, generation)
             }) {
                 ResidentOutcome::Ready((body, _completeness), _) => body,
                 _ => panic!("expected Ready outcome"),
@@ -1262,7 +1266,15 @@ mod tests {
             let (unread, completeness) = match state.read(|resident, generation| {
                 (
                     resident.unread_count(),
-                    file_findings(resident, None, &clean, &default_filters(), generation).1,
+                    file_findings(
+                        resident,
+                        &resident.analysis(),
+                        None,
+                        &clean,
+                        &default_filters(),
+                        generation,
+                    )
+                    .1,
                 )
             }) {
                 ResidentOutcome::Ready(pair, _) => pair,
@@ -1308,7 +1320,7 @@ mod tests {
         ) -> Value {
             let filters = FileFilters { max_output_tokens, ..default_filters() };
             match state.read(|resident, generation| {
-                file_findings(resident, None, path, &filters, generation)
+                file_findings(resident, &resident.analysis(), None, path, &filters, generation)
             }) {
                 ResidentOutcome::Ready((_body, completeness), _) => completeness.to_value(),
                 _ => panic!("expected Ready outcome"),
@@ -1398,7 +1410,7 @@ mod tests {
                         codes: Vec::new(),
                         max_files: 100,
                     },
-                    &SweepCancel::default(),
+                    &RequestCancel::default(),
                 )
             }) {
                 ResidentOutcome::Ready(sweep, _) => sweep,
@@ -1457,8 +1469,11 @@ mod tests {
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {
             let outcome = state.read(|resident, gen| {
-                let sweep =
-                    resident.workspace_aggregates(resident.config(), opts, &SweepCancel::default());
+                let sweep = resident.workspace_aggregates(
+                    resident.config(),
+                    opts,
+                    &RequestCancel::default(),
+                );
                 workspace_findings(&sweep, gen, None)
             });
             match outcome {

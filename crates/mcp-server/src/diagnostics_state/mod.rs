@@ -13,7 +13,9 @@
 //! `Send` but `!Sync`, so a `&db` cannot be shared across threads — reads must run on
 //! the thread that holds the handle. Each per-file query therefore runs on the calling
 //! (blocking) thread WHILE holding the mutex, so reads serialise but a drift reload's
-//! `set_file_text` can never alias an in-flight query (no `salsa::Cancelled` path).
+//! `set_file_text` can never alias an in-flight query — a read here never unwinds as
+//! `salsa::Cancelled::PendingWrite`. It does unwind as `Cancelled::Local`, on purpose:
+//! that is how a cancelled request stops, and [`session`] owns that path.
 //! Per-file diagnostics are LRU-cached and fast, so serialising them is cheap. Cloning
 //! the db handle inside the lock shares the memo/LRU cache (`RootDatabaseImpl::clone`
 //! clones the Salsa `Storage`) and the clone never leaves the calling thread.
@@ -30,14 +32,16 @@
 mod drift;
 mod lifecycle;
 mod resident;
+mod session;
 mod snapshot;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod types;
 mod workspace_sweep;
 
-pub(crate) use lifecycle::DiagnosticsState;
+pub(crate) use lifecycle::{lock_recover, DiagnosticsState};
 pub(crate) use resident::{diagnostic_survives_authors, DiagnosticsResident};
+pub(crate) use session::{resident_call, CallOutcome};
 pub(crate) use snapshot::ResidentModuleSnapshotSource;
 #[allow(
     unused_imports,
@@ -48,4 +52,4 @@ pub(crate) use types::{DiagnosticsStatus, Freshness, ResidentOutcome, StatusRepo
     unused_imports,
     reason = "the stable diagnostics facade preserves crate::diagnostics_state workspace sweep paths"
 )]
-pub(crate) use workspace_sweep::{CodeAggregate, SweepCancel, SweepOptions, WorkspaceSweep};
+pub(crate) use workspace_sweep::{CodeAggregate, SweepOptions, WorkspaceSweep};

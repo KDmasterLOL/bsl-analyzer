@@ -90,21 +90,45 @@ fn dash(s: &str) -> &str {
     }
 }
 
+/// Walk a whole-configuration collection with a cancellation checkpoint per item.
+///
+/// These renderers only format what the substrate already holds: they run no salsa
+/// query, so a cancelled request has no query boundary to unwind at and would list
+/// every object in the configuration before anyone noticed. Every walk that scales with
+/// configuration size goes through this iterator — the SELECTION of a category as much
+/// as the listing of what it selected, because a category with no objects still costs a
+/// full pass and never reaches the listing loop.
+///
+/// Where it deliberately does not go: rendering ONE entity — an object's attributes, a
+/// register's dimensions, a service's operations. That work is bounded by the entity,
+/// and the salsa query that resolved it is itself a checkpoint, so the only window left
+/// is one object's worth of `writeln!`.
+fn checkpointed<'a, I>(
+    db: &'a ide::RootDatabaseImpl,
+    items: I,
+) -> impl Iterator<Item = I::Item> + 'a
+where
+    I: IntoIterator + 'a,
+{
+    items.into_iter().inspect(|_| salsa::Database::unwind_if_revision_cancelled(db))
+}
+
 pub fn get_metadata_tree(
+    db: &ide::RootDatabaseImpl,
     config: &Configuration,
     extensions: &[(String, Configuration)],
     filter: Option<String>,
     max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
     if let Some(ref category) = filter {
-        format_filtered_tree(config, category, max_output_tokens)
+        format_filtered_tree(db, config, category, max_output_tokens)
     } else {
-        let mut result = format_summary_tree(config)?;
+        let mut result = format_summary_tree(db, config)?;
         if !extensions.is_empty() {
             let text = result.content[0].raw.as_text().expect("text").text.clone();
             let mut out = text;
             for (name, ext_config) in extensions {
-                out.push_str(&format_extension_summary(name, ext_config));
+                out.push_str(&format_extension_summary(db, name, ext_config));
             }
             result = CallToolResult::success(vec![Content::text(out)]);
         }
@@ -112,15 +136,21 @@ pub fn get_metadata_tree(
     }
 }
 
-fn format_summary_tree(config: &Configuration) -> Result<CallToolResult, McpError> {
+/// `db` is here for one reason: these loops enumerate a whole configuration without
+/// running a single salsa query, so a cancelled request is observed at the checkpoint
+/// or not until the last object.
+fn format_summary_tree(
+    db: &ide::RootDatabaseImpl,
+    config: &Configuration,
+) -> Result<CallToolResult, McpError> {
     let mut categories: BTreeMap<&str, usize> = BTreeMap::new();
 
-    for obj in config.metadata_objects() {
+    for obj in checkpointed(db, config.metadata_objects()) {
         let key = obj.mdo_type.russian_name();
         *categories.entry(key).or_default() += 1;
     }
 
-    for reg in config.registers() {
+    for reg in checkpointed(db, config.registers()) {
         let key = reg.mdo_type().russian_name();
         *categories.entry(key).or_default() += 1;
     }
@@ -212,6 +242,7 @@ fn normalize_filter_category(raw: &str) -> String {
 }
 
 fn format_filtered_tree(
+    db: &ide::RootDatabaseImpl,
     config: &Configuration,
     raw_category: &str,
     max_output_tokens: usize,
@@ -222,13 +253,17 @@ fn format_filtered_tree(
     let mut found = false;
 
     if let Ok(mdo_type) = category.parse::<MdoType>() {
-        let objects: Vec<_> =
-            config.metadata_objects().iter().filter(|o| o.mdo_type == mdo_type).collect();
+        // The SELECTION walks the whole configuration too, and for a category with no
+        // objects the listing loop below never runs — so the checkpoint has to be here,
+        // not only on what survives the filter.
+        let objects: Vec<_> = checkpointed(db, config.metadata_objects())
+            .filter(|o| o.mdo_type == mdo_type)
+            .collect();
 
         if !objects.is_empty() {
             found = true;
             let _ = writeln!(out, "# {} ({})\n", mdo_type.russian_name(), objects.len());
-            for obj in &objects {
+            for obj in checkpointed(db, &objects) {
                 if let Some(ref name_en) = obj.name_en {
                     let _ = writeln!(out, "- {} ({name_en})", obj.name);
                 } else {
@@ -238,12 +273,12 @@ fn format_filtered_tree(
         }
 
         let registers: Vec<_> =
-            config.registers().iter().filter(|r| r.mdo_type() == mdo_type).collect();
+            checkpointed(db, config.registers()).filter(|r| r.mdo_type() == mdo_type).collect();
 
         if !registers.is_empty() {
             found = true;
             let _ = writeln!(out, "# {} ({})\n", mdo_type.russian_name(), registers.len());
-            for reg in &registers {
+            for reg in checkpointed(db, &registers) {
                 let _ = writeln!(out, "- {}", reg.name());
             }
         }
@@ -251,7 +286,7 @@ fn format_filtered_tree(
 
     if !found {
         if let Some(kind) = parse_service_kind(category) {
-            found = format_service_listing(config, kind, &mut out);
+            found = format_service_listing(db, config, kind, &mut out);
         }
     }
 
@@ -263,7 +298,7 @@ fn format_filtered_tree(
                 if !modules.is_empty() {
                     found = true;
                     let _ = writeln!(out, "# ОбщиеМодули ({})\n", modules.len());
-                    for m in modules {
+                    for m in checkpointed(db, modules) {
                         let flags = format_common_module_flags(m);
                         let _ = writeln!(out, "- {} {flags}", m.name());
                     }
@@ -274,7 +309,7 @@ fn format_filtered_tree(
                 if !subs.is_empty() {
                     found = true;
                     let _ = writeln!(out, "# ПодпискиНаСобытия ({})\n", subs.len());
-                    for s in subs {
+                    for s in checkpointed(db, subs) {
                         let _ = writeln!(out, "- {}", s.name());
                     }
                 }
@@ -284,7 +319,7 @@ fn format_filtered_tree(
                 if !types.is_empty() {
                     found = true;
                     let _ = writeln!(out, "# ОпределяемыеТипы ({})\n", types.len());
-                    for t in types {
+                    for t in checkpointed(db, types) {
                         let _ = writeln!(out, "- {}", t.name());
                     }
                 }
@@ -294,7 +329,7 @@ fn format_filtered_tree(
                 if !roles.is_empty() {
                     found = true;
                     let _ = writeln!(out, "# Роли ({})\n", roles.len());
-                    for r in roles {
+                    for r in checkpointed(db, roles) {
                         let _ = writeln!(out, "- {}", r.name());
                     }
                 }
@@ -345,7 +380,12 @@ fn format_common_module_flags(m: &bsl_metadata::CommonModule) -> String {
     }
 }
 
-fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut String) -> bool {
+fn format_service_listing(
+    db: &ide::RootDatabaseImpl,
+    config: &Configuration,
+    kind: ServiceKind,
+    out: &mut String,
+) -> bool {
     match kind {
         ServiceKind::Http => {
             let services = config.http_services();
@@ -353,7 +393,7 @@ fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut S
                 return false;
             }
             let _ = writeln!(out, "# HTTPСервисы ({})\n", services.len());
-            for service in services {
+            for service in checkpointed(db, services) {
                 let _ = writeln!(out, "- {}", service.name());
             }
             true
@@ -364,7 +404,7 @@ fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut S
                 return false;
             }
             let _ = writeln!(out, "# WebСервисы ({})\n", services.len());
-            for service in services {
+            for service in checkpointed(db, services) {
                 let _ = writeln!(out, "- {}", service.name());
             }
             true
@@ -375,7 +415,7 @@ fn format_service_listing(config: &Configuration, kind: ServiceKind, out: &mut S
                 return false;
             }
             let _ = writeln!(out, "# СервисыИнтеграции ({})\n", services.len());
-            for service in services {
+            for service in checkpointed(db, services) {
                 let _ = writeln!(out, "- {}", service.name());
             }
             true
@@ -891,16 +931,20 @@ fn format_form(form: &bsl_metadata::Form, requested_name: Option<&str>) -> Strin
     out
 }
 
-fn format_extension_summary(name: &str, config: &Configuration) -> String {
+fn format_extension_summary(
+    db: &ide::RootDatabaseImpl,
+    name: &str,
+    config: &Configuration,
+) -> String {
     use std::collections::BTreeMap;
     let mut out = format!("\n---\n\n# Расширение: {name}\n\n");
     let mut categories: BTreeMap<&str, usize> = BTreeMap::new();
 
-    for obj in config.metadata_objects() {
+    for obj in checkpointed(db, config.metadata_objects()) {
         let key = obj.mdo_type.russian_name();
         *categories.entry(key).or_default() += 1;
     }
-    for reg in config.registers() {
+    for reg in checkpointed(db, config.registers()) {
         let key = reg.mdo_type().russian_name();
         *categories.entry(key).or_default() += 1;
     }
@@ -1092,6 +1136,97 @@ mod tests {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
     }
 
+    /// Every listing a cancelled `metadata` call can enter stops at its first item
+    /// instead of enumerating the configuration for a response nobody will read.
+    ///
+    /// One filter per branch, because the branches name different collections and a
+    /// checkpoint on one says nothing about the next. What a pre-cancelled token cannot
+    /// reach is a SECOND loop on the same path — the first one unwinds before it — so
+    /// the summary's register pass and the extension summary are covered by entry only;
+    /// they walk the same iterator, and it is the iterator that carries the checkpoint.
+    #[test]
+    fn a_cancelled_listing_stops_at_the_first_item() {
+        let config = fixture_config();
+        let db = ide::RootDatabaseImpl::new();
+        salsa::Database::cancellation_token(&db).cancel();
+
+        // Each entry names the collection the branch walks; a branch whose collection is
+        // empty in the fixture would answer "category not found" and the assertion says so.
+        for filter in [
+            None,
+            Some("Справочник"),
+            Some("РегистрСведений"),
+            Some("ОбщийМодуль"),
+            Some("ПодпискаНаСобытие"),
+            Some("Роль"),
+            Some("HTTPСервис"),
+            Some("WebСервис"),
+            Some("СервисИнтеграции"),
+        ] {
+            let filter = filter.map(str::to_string);
+            let got = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                get_metadata_tree(&db, &config, &[], filter.clone(), usize::MAX)
+            }));
+            assert!(
+                matches!(got, Err(salsa::Cancelled::Local)),
+                "filter {filter:?} rendered its whole listing after the request was cancelled"
+            );
+        }
+
+        let got = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            format_extension_summary(&db, "Расширение", &config)
+        }));
+        assert!(
+            matches!(got, Err(salsa::Cancelled::Local)),
+            "the extension summary counted every object after the request was cancelled"
+        );
+
+        // The SELECTION of a category with no objects, on a configuration with no
+        // registers either: every later loop is empty, so this input can only be
+        // answered by the checkpoint on the selection itself. On the full fixture the
+        // register selection unwinds first and hides whether this one exists at all.
+        let objects_only = objects_only_config();
+        let got = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            get_metadata_tree(&db, &objects_only, &[], Some("ПланОбмена".to_string()), usize::MAX)
+        }));
+        assert!(
+            matches!(got, Err(salsa::Cancelled::Local)),
+            "the category selection walked every object after the request was cancelled"
+        );
+    }
+
+    /// The designer fixture with its registers left out — see the test above for why
+    /// their absence is the point.
+    fn objects_only_config() -> Configuration {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let fixture = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/designer"
+        ));
+        for name in ["Configuration.xml", "ConfigDumpInfo.xml"] {
+            std::fs::copy(fixture.join(name), dir.path().join(name)).expect("copy");
+        }
+        copy_tree(&fixture.join("Catalogs"), &dir.path().join("Catalogs"));
+        let config = bsl_metadata::load_from_directory(dir.path()).expect("load");
+        assert!(
+            config.registers().is_empty() && !config.metadata_objects().is_empty(),
+            "the stand must have objects and no registers, or it proves nothing"
+        );
+        config
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).expect("mkdir");
+        for entry in std::fs::read_dir(from).expect("read_dir").flatten() {
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file_type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), target).expect("copy");
+            }
+        }
+    }
+
     #[test]
     fn get_form_structure_lists_forms_under_the_given_root() {
         // The object form directory is `<root>/<TypeDir>/<object>/Forms`. Passing the repo root
@@ -1181,7 +1316,9 @@ mod tests {
     #[test]
     fn test_metadata_tree_summary() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], None, usize::MAX).unwrap();
+        let result =
+            get_metadata_tree(&ide::RootDatabaseImpl::new(), &config, &[], None, usize::MAX)
+                .unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("дерево метаданных"), "should have header");
@@ -1193,8 +1330,14 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_catalogs() {
         let config = fixture_config();
-        let result =
-            get_metadata_tree(&config, &[], Some("Справочник".into()), usize::MAX).unwrap();
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("Справочник".into()),
+            usize::MAX,
+        )
+        .unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("Справочник"), "should have category name");
@@ -1222,7 +1365,14 @@ mod tests {
         let config = fixture_config();
         for input in ["Catalogs", "Справочники", "Справочник.Справочник1"]
         {
-            let result = get_metadata_tree(&config, &[], Some(input.into()), usize::MAX).unwrap();
+            let result = get_metadata_tree(
+                &ide::RootDatabaseImpl::new(),
+                &config,
+                &[],
+                Some(input.into()),
+                usize::MAX,
+            )
+            .unwrap();
             let text = extract_text(&result);
             assert!(
                 text.contains("Справочник1"),
@@ -1234,8 +1384,14 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_common_modules() {
         let config = fixture_config();
-        let result =
-            get_metadata_tree(&config, &[], Some("ОбщиеМодули".into()), usize::MAX).unwrap();
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("ОбщиеМодули".into()),
+            usize::MAX,
+        )
+        .unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("ОбщиеМодули"), "should have category name");
@@ -1244,8 +1400,13 @@ mod tests {
     #[test]
     fn test_metadata_tree_filter_invalid() {
         let config = fixture_config();
-        let result =
-            get_metadata_tree(&config, &[], Some("НесуществующаяКатегория".into()), usize::MAX);
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("НесуществующаяКатегория".into()),
+            usize::MAX,
+        );
 
         assert!(result.is_err(), "should return error for unknown category");
     }
@@ -1378,8 +1539,14 @@ mod tests {
     #[test]
     fn metadata_tree_filter_lists_http_services_explicitly() {
         let config = fixture_config();
-        let result =
-            get_metadata_tree(&config, &[], Some("HTTPСервис".into()), usize::MAX).unwrap();
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("HTTPСервис".into()),
+            usize::MAX,
+        )
+        .unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("HTTPСервис1"), "filter must enumerate http services: {text}");
@@ -1392,7 +1559,14 @@ mod tests {
     #[test]
     fn metadata_tree_filter_lists_web_services_explicitly() {
         let config = fixture_config();
-        let result = get_metadata_tree(&config, &[], Some("WebСервис".into()), usize::MAX).unwrap();
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("WebСервис".into()),
+            usize::MAX,
+        )
+        .unwrap();
         let text = extract_text(&result);
 
         assert!(text.contains("WebСервис1"), "filter must enumerate web services: {text}");
@@ -1404,8 +1578,14 @@ mod tests {
         // `Метаданные.СервисыИнтеграции` plural), but the MCP enumeration surface must
         // still list integration services as a discrete category for agent discovery.
         let config = fixture_config();
-        let result =
-            get_metadata_tree(&config, &[], Some("СервисИнтеграции".into()), usize::MAX).unwrap();
+        let result = get_metadata_tree(
+            &ide::RootDatabaseImpl::new(),
+            &config,
+            &[],
+            Some("СервисИнтеграции".into()),
+            usize::MAX,
+        )
+        .unwrap();
         let text = extract_text(&result);
 
         assert!(

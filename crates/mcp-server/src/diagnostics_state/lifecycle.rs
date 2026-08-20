@@ -274,7 +274,30 @@ impl DiagnosticsState {
     /// `generation()` inside `f`. The freshness verdict is returned alongside the
     /// result, computed under the same lock, so the caller need not (and must not)
     /// re-sample it.
+    /// The resident read, reachable only through [`ResidentSession`] in production.
+    ///
+    /// Narrowed on purpose: a tool that reads the resident directly reads it on the
+    /// master handle, outside any request's cancellation registry — which is exactly the
+    /// shape every cancellation defect on this path has had. Tests keep direct access:
+    /// they assert on the resident itself, and routing them through a request would test
+    /// the door instead of the subject.
+    #[cfg(not(test))]
+    pub(super) fn read<F, R>(&self, f: F) -> ResidentOutcome<R>
+    where
+        F: FnOnce(&DiagnosticsResident, u64) -> R,
+    {
+        self.read_impl(f)
+    }
+
+    #[cfg(test)]
     pub(crate) fn read<F, R>(&self, f: F) -> ResidentOutcome<R>
+    where
+        F: FnOnce(&DiagnosticsResident, u64) -> R,
+    {
+        self.read_impl(f)
+    }
+
+    fn read_impl<F, R>(&self, f: F) -> ResidentOutcome<R>
     where
         F: FnOnce(&DiagnosticsResident, u64) -> R,
     {
@@ -780,7 +803,7 @@ impl DiagnosticsState {
 /// (nothing to compare), making `stale` depend only on an in-flight reload.
 /// A fold of the analyzer config files' `(presence, len, mtime)`. Any change forces a
 /// full rebuild because it can alter the project's extension set and thus the db inputs.
-pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
