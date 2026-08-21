@@ -418,6 +418,7 @@ path = ".bsl-analyzer-diagnostics-baseline.json"
 ```toml
 [diagnostics.baseline]
 directory = ".bsl-analyzer/diagnostics-baselines"
+include = ["main", "group:vendor"]
 
 [[diagnostics.baseline.groups]]
 name = "vendor"
@@ -430,6 +431,11 @@ extensions = ["VendorCore", "VendorReports"]
 совместим и остаётся форматом одного файла версии 1.
 Вычисленный идентификатор раздела (`main`, `extension:<имя>` или `group:<имя>`)
 не может превышать 64 байта UTF-8.
+
+`include` — необязательный allowlist логических идентификаторов разделов. Только они
+получают policy `baseline`; остальные владельцы остаются в полном анализе с policy
+`unsuppressed`, поэтому их замечания видимы, а их baseline objects не читаются и не
+наблюдаются. Удаление `include` возвращает режим полного набора.
 
 Это не `analysis.diff_base`: diff ограничивает анализ текущими изменениями и даёт
 частичный результат, а базовая линия диагностик сопоставляет известные замечания

@@ -67,7 +67,7 @@ pub struct ResolvedDiagnosticsBaseline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiagnosticsBaselineProjectMode {
     Legacy,
-    Partitioned { groups: Vec<DiagnosticsBaselineGroupConfig> },
+    Partitioned { groups: Vec<DiagnosticsBaselineGroupConfig>, include: Option<Vec<String>> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,11 +91,28 @@ pub struct DiagnosticsBaselineRootOwner {
     pub partition_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsBaselinePartitionPolicy {
+    Baseline,
+    Unsuppressed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticsBaselineSelection {
+    All,
+    Selective,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticsBaselinePartitionPlan {
     pub project_scope: DiagnosticsBaselineProjectScope,
     pub project_scope_fingerprint: String,
+    pub selection_fingerprint: String,
     pub partitions: Vec<DiagnosticsBaselinePartition>,
+    pub enabled_partition_ids: Vec<String>,
+    pub selection: DiagnosticsBaselineSelection,
     pub roots: Vec<DiagnosticsBaselineRootOwner>,
 }
 
@@ -109,6 +126,16 @@ impl DiagnosticsBaselinePartitionPlan {
                     || path.strip_prefix(&owner.root).is_some_and(|suffix| suffix.starts_with('/'))
             })
             .map(|owner| owner.partition_id.as_str())
+    }
+
+    pub fn policy_for_partition(&self, id: &str) -> Option<DiagnosticsBaselinePartitionPolicy> {
+        self.partitions.iter().any(|partition| partition.id == id).then(|| {
+            if self.enabled_partition_ids.iter().any(|enabled| enabled == id) {
+                DiagnosticsBaselinePartitionPolicy::Baseline
+            } else {
+                DiagnosticsBaselinePartitionPolicy::Unsuppressed
+            }
+        })
     }
 }
 
@@ -257,15 +284,33 @@ impl Project {
             return Ok(None);
         };
         let (configured_path, mode) = match (&config.path, &config.directory) {
-            (Some(path), None) if config.groups.is_empty() => (
+            (Some(path), None) if config.groups.is_empty() && config.include.is_none() => (
                 self.config.resolve_config_path(&self.root, path),
                 DiagnosticsBaselineProjectMode::Legacy,
             ),
             (None, Some(directory)) => {
                 validate_partitioned_config_path(directory)?;
+                if let Some(include) = &config.include {
+                    if include.is_empty() {
+                        return Err(DiagnosticsBaselineProjectError::InvalidConfig(
+                            "include must not be empty".to_owned(),
+                        ));
+                    }
+                    let mut seen = std::collections::HashSet::new();
+                    for selector in include {
+                        if !seen.insert(stdx::case::fold_lower_per_char(selector)) {
+                            return Err(DiagnosticsBaselineProjectError::InvalidConfig(format!(
+                                "duplicate include selector after case folding: {selector}"
+                            )));
+                        }
+                    }
+                }
                 (
                     self.config.resolve_config_path(&self.root, directory),
-                    DiagnosticsBaselineProjectMode::Partitioned { groups: config.groups.clone() },
+                    DiagnosticsBaselineProjectMode::Partitioned {
+                        groups: config.groups.clone(),
+                        include: config.include.clone(),
+                    },
                 )
             }
             (Some(_), Some(_)) => {
@@ -275,7 +320,7 @@ impl Project {
             }
             (Some(_), None) => {
                 return Err(DiagnosticsBaselineProjectError::InvalidConfig(
-                    "groups require directory mode".to_owned(),
+                    "path cannot be combined with groups or include".to_owned(),
                 ))
             }
             (None, None) => {
@@ -332,7 +377,7 @@ impl Project {
         &self,
     ) -> Result<Option<DiagnosticsBaselinePartitionPlan>, DiagnosticsBaselineProjectError> {
         let Some(resolved) = self.diagnostics_baseline()? else { return Ok(None) };
-        let DiagnosticsBaselineProjectMode::Partitioned { groups } = &resolved.mode else {
+        let DiagnosticsBaselineProjectMode::Partitioned { groups, include } = &resolved.mode else {
             return Ok(None);
         };
         for node in self.topology.nodes() {
@@ -484,6 +529,47 @@ impl Project {
         partitions.sort_by(|left, right| {
             partition_sort_key(&left.id).cmp(&partition_sort_key(&right.id))
         });
+        if let Some(include) = include {
+            for selector in include {
+                if !partitions.iter().any(|partition| partition.id == *selector) {
+                    return Err(DiagnosticsBaselineProjectError::InvalidConfig(format!(
+                        "include references unknown partition selector: {selector}"
+                    )));
+                }
+            }
+        }
+        let selection = if include.is_some() {
+            DiagnosticsBaselineSelection::Selective
+        } else {
+            DiagnosticsBaselineSelection::All
+        };
+        let enabled_partition_ids = partitions
+            .iter()
+            .filter(|partition| {
+                include.as_ref().is_none_or(|selectors| selectors.contains(&partition.id))
+            })
+            .map(|partition| partition.id.clone())
+            .collect::<Vec<_>>();
+        let selection_bytes = serde_json::to_vec(
+            &partitions
+                .iter()
+                .map(|partition| {
+                    (
+                        &partition.id,
+                        if enabled_partition_ids.contains(&partition.id) {
+                            DiagnosticsBaselinePartitionPolicy::Baseline
+                        } else {
+                            DiagnosticsBaselinePartitionPolicy::Unsuppressed
+                        },
+                        &partition.identity,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| DiagnosticsBaselineProjectError::InvalidConfig(error.to_string()))?;
+        let mut selection_hasher = blake3::Hasher::new();
+        selection_hasher.update(b"bsl-analyzer/diagnostics-baseline/selection/v1\0");
+        selection_hasher.update(&selection_bytes);
         roots.sort_by(|left, right| {
             right.root.len().cmp(&left.root.len()).then(left.root.cmp(&right.root))
         });
@@ -495,7 +581,10 @@ impl Project {
         Ok(Some(DiagnosticsBaselinePartitionPlan {
             project_scope: resolved.scope,
             project_scope_fingerprint: scope_hasher.finalize().to_hex().to_string(),
+            selection_fingerprint: selection_hasher.finalize().to_hex().to_string(),
             partitions,
+            enabled_partition_ids,
+            selection,
             roots,
         }))
     }
@@ -1438,6 +1527,8 @@ pub struct DiagnosticsBaselineConfig {
     pub path: Option<String>,
     #[serde(default)]
     pub directory: Option<String>,
+    #[serde(default)]
+    pub include: Option<Vec<String>>,
     #[serde(default)]
     pub groups: Vec<DiagnosticsBaselineGroupConfig>,
 }
@@ -2547,8 +2638,9 @@ mod tests {
         evaluate_workspace_baseline_support, is_publish_branch_allowed, parse_timestamp_utc,
         resolve_postgres_url, resolve_workspace_branch_policy, wildcard_matches,
         DiagnosticsBaselineConfig, DiagnosticsBaselineGroupConfig,
-        DiagnosticsBaselinePartitionIdentity, DiagnosticsBaselineProjectError,
-        DiagnosticsBaselineProjectMode, ExtensionDecl, FeaturesConfig, PostgresAccessMode, Project,
+        DiagnosticsBaselinePartitionIdentity, DiagnosticsBaselinePartitionPolicy,
+        DiagnosticsBaselineProjectError, DiagnosticsBaselineProjectMode,
+        DiagnosticsBaselineSelection, ExtensionDecl, FeaturesConfig, PostgresAccessMode, Project,
         ProjectConfig, ProjectDiagnosticsConfig, ProjectError, ResolvePostgresUrlError,
         SearchBaselineBackend, SearchBaselinePolicyConfig, SearchBaselineSupportState,
         SearchPostgresConfig, SearchPostgresCredentialHelperConfig, SourceSetOverride,
@@ -3768,8 +3860,116 @@ extensions = ["VendorCore", "VendorReports"]
                     name: "vendor".to_owned(),
                     extensions: vec!["VendorCore".to_owned(), "VendorReports".to_owned()],
                 }],
+                include: None,
             }
         );
+    }
+
+    #[test]
+    fn selective_baseline_default_includes_all() {
+        let config: ProjectConfig = toml::from_str(
+            r#"
+[diagnostics.baseline]
+directory = "baselines"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.diagnostics.baseline.unwrap().include, None);
+    }
+
+    #[test]
+    fn selective_baseline_include_selects_exact_partition_ids() {
+        let config: ProjectConfig = toml::from_str(
+            r#"
+[diagnostics.baseline]
+directory = "baselines"
+include = ["main", "extension:Sales"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.diagnostics.baseline.unwrap().include,
+            Some(vec!["main".to_owned(), "extension:Sales".to_owned()])
+        );
+    }
+
+    #[test]
+    fn selective_baseline_rejects_empty_duplicate_unknown_and_legacy_include() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/Sales");
+        touch_extension(dir.path(), "src/cfe/Vendor");
+
+        for include in [vec![], vec!["main", "main"], vec!["main", "MAIN"]] {
+            let mut diagnostics = partitioned_config("baselines", vec![]);
+            diagnostics.baseline.as_mut().unwrap().include =
+                Some(include.into_iter().map(str::to_owned).collect());
+            let error = Project::with_config(
+                dir.path(),
+                ProjectConfig {
+                    diagnostics,
+                    configuration_root: Some("src/cf".to_owned()),
+                    extensions: Some(vec![structured("Sales", "src/cfe/Sales", &[])]),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+            assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+        }
+
+        for include in [vec!["extension:Missing"], vec!["extension:Vendor"]] {
+            let mut diagnostics = partitioned_config(
+                "baselines",
+                vec![DiagnosticsBaselineGroupConfig {
+                    name: "vendor".to_owned(),
+                    extensions: vec!["Vendor".to_owned()],
+                }],
+            );
+            diagnostics.baseline.as_mut().unwrap().include =
+                Some(include.into_iter().map(str::to_owned).collect());
+            let error = Project::with_config(
+                dir.path(),
+                ProjectConfig {
+                    diagnostics,
+                    configuration_root: Some("src/cf".to_owned()),
+                    extensions: Some(vec![structured("Vendor", "src/cfe/Vendor", &[])]),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+            assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+        }
+
+        let config = ProjectConfig {
+            diagnostics: ProjectDiagnosticsConfig {
+                baseline: Some(DiagnosticsBaselineConfig {
+                    path: Some("baseline.json".to_owned()),
+                    include: Some(vec!["main".to_owned()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            extensions: Some(vec![]),
+            ..Default::default()
+        };
+        let error =
+            Project::with_config(dir.path(), config).unwrap().diagnostics_baseline().unwrap_err();
+        assert!(matches!(
+            error,
+            DiagnosticsBaselineProjectError::InvalidConfig(message)
+                if message == "path cannot be combined with groups or include"
+        ));
+    }
+
+    #[test]
+    fn selective_baseline_config_contract() {
+        selective_baseline_default_includes_all();
+        selective_baseline_include_selects_exact_partition_ids();
+        selective_baseline_rejects_empty_duplicate_unknown_and_legacy_include();
     }
 
     #[test]
@@ -3779,11 +3979,13 @@ extensions = ["VendorCore", "VendorReports"]
             DiagnosticsBaselineConfig {
                 path: Some("baseline.json".to_owned()),
                 directory: Some("baselines".to_owned()),
+                include: None,
                 groups: vec![],
             },
             DiagnosticsBaselineConfig {
                 path: Some("baseline.json".to_owned()),
                 directory: None,
+                include: None,
                 groups: vec![DiagnosticsBaselineGroupConfig {
                     name: "vendor".to_owned(),
                     extensions: vec!["Ext".to_owned()],
@@ -3904,6 +4106,136 @@ extensions = ["VendorCore", "VendorReports"]
                     .bytes()
                     .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         }));
+    }
+
+    #[test]
+    fn selective_baseline_policy_plan() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        for name in ["A", "B", "C"] {
+            touch_extension(dir.path(), &format!("src/cfe/{name}"));
+        }
+
+        let project = |extensions: &[&str], include: Option<Vec<&str>>| {
+            let mut diagnostics = partitioned_config("baselines", vec![]);
+            diagnostics.baseline.as_mut().unwrap().include = include
+                .map(|selectors| selectors.into_iter().map(str::to_owned).collect::<Vec<_>>());
+            Project::with_config(
+                dir.path(),
+                ProjectConfig {
+                    diagnostics,
+                    configuration_root: Some("src/cf".to_owned()),
+                    extensions: Some(
+                        extensions
+                            .iter()
+                            .map(|name| structured(name, &format!("src/cfe/{name}"), &[]))
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+
+        let full =
+            project(&["A", "B"], None).diagnostics_baseline_partition_plan().unwrap().unwrap();
+        assert_eq!(full.selection, DiagnosticsBaselineSelection::All);
+        assert_eq!(full.enabled_partition_ids, ["main", "extension:A", "extension:B"]);
+        assert!(full.partitions.iter().all(|partition| {
+            full.policy_for_partition(&partition.id)
+                == Some(DiagnosticsBaselinePartitionPolicy::Baseline)
+        }));
+
+        let selective = project(&["A", "B"], Some(vec!["extension:B", "main"]))
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap();
+        assert_eq!(selective.selection, DiagnosticsBaselineSelection::Selective);
+        assert_eq!(selective.enabled_partition_ids, ["main", "extension:B"]);
+        assert_eq!(
+            selective.policy_for_partition("extension:A"),
+            Some(DiagnosticsBaselinePartitionPolicy::Unsuppressed)
+        );
+        assert_eq!(selective.roots, full.roots);
+        assert_eq!(selective.project_scope, full.project_scope);
+
+        let added = project(&["A", "B", "C"], Some(vec!["main", "extension:B"]))
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            added.policy_for_partition("extension:C"),
+            Some(DiagnosticsBaselinePartitionPolicy::Unsuppressed)
+        );
+        let removed = project(&["B"], Some(vec!["main", "extension:B"]))
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap();
+        assert_eq!(removed.owner_for_project_path("src/cfe/A/file.bsl"), None);
+
+        let error = project(&["C"], Some(vec!["main", "extension:B"]))
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+        assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn selective_policy_does_not_change_partition_ownership() {
+        selective_baseline_policy_plan();
+    }
+
+    #[test]
+    fn selective_baseline_selection_fingerprint() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/A");
+
+        let plan = |include: Vec<&str>| {
+            let mut diagnostics = partitioned_config("baselines", vec![]);
+            diagnostics.baseline.as_mut().unwrap().include =
+                Some(include.into_iter().map(str::to_owned).collect());
+            Project::with_config(
+                dir.path(),
+                ProjectConfig {
+                    diagnostics,
+                    configuration_root: Some("src/cf".to_owned()),
+                    extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap()
+        };
+
+        let first = plan(vec!["extension:A", "main"]);
+        let reordered = plan(vec!["main", "extension:A"]);
+        let selective = plan(vec!["main"]);
+        assert_eq!(first.selection_fingerprint, reordered.selection_fingerprint);
+        assert_ne!(first.selection_fingerprint, selective.selection_fingerprint);
+        assert_eq!(
+            selective.selection_fingerprint,
+            "de9c18d9f747ca156eefc83917fbaa60d748cd8410ece8f043384354bbad559d"
+        );
+
+        touch_extension(dir.path(), "src/cfe/A2");
+        let mut diagnostics = partitioned_config("baselines", vec![]);
+        diagnostics.baseline.as_mut().unwrap().include = Some(vec!["main".to_owned()]);
+        let changed_identity = Project::with_config(
+            dir.path(),
+            ProjectConfig {
+                diagnostics,
+                configuration_root: Some("src/cf".to_owned()),
+                extensions: Some(vec![structured("A", "src/cfe/A2", &[])]),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .diagnostics_baseline_partition_plan()
+        .unwrap()
+        .unwrap();
+        assert_ne!(selective.selection_fingerprint, changed_identity.selection_fingerprint);
     }
 
     #[test]

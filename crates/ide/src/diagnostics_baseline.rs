@@ -126,6 +126,14 @@ pub enum DiagnosticsBaselineState {
 pub struct DiagnosticsBaselineSummary {
     pub state: DiagnosticsBaselineState,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<project_model::DiagnosticsBaselineSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions_enabled: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions_unsuppressed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsuppressed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub new: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known: Option<usize>,
@@ -163,12 +171,16 @@ pub struct DiagnosticsBaselineErrorSummary {
 pub struct DiagnosticsBaselinePartitionSummary {
     pub id: String,
     pub identity: project_model::DiagnosticsBaselinePartitionIdentity,
-    pub path: String,
-    pub schema_version: u32,
+    pub policy: project_model::DiagnosticsBaselinePartitionPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_version: Option<u32>,
     pub state: DiagnosticsBaselineState,
     pub new: usize,
     pub known: usize,
     pub resolved: usize,
+    pub unsuppressed: usize,
     pub complete: bool,
 }
 
@@ -176,6 +188,10 @@ impl DiagnosticsBaselineSummary {
     pub fn disabled() -> Self {
         Self {
             state: DiagnosticsBaselineState::Disabled,
+            selection: None,
+            partitions_enabled: None,
+            partitions_unsuppressed: None,
+            unsuppressed: None,
             new: None,
             known: None,
             resolved: None,
@@ -365,6 +381,10 @@ pub fn classify_diagnostics<T>(
         } else {
             DiagnosticsBaselineState::Partial
         },
+        selection: None,
+        partitions_enabled: None,
+        partitions_unsuppressed: None,
+        unsuppressed: None,
         new: Some(new.len()),
         known: Some(known.len()),
         resolved: Some(resolved.len()),
@@ -454,6 +474,10 @@ mod tests {
         ] {
             let summary = DiagnosticsBaselineSummary {
                 state,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
                 new: None,
                 known: None,
                 resolved: None,

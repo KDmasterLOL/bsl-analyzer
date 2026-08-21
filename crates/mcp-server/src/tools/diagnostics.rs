@@ -112,6 +112,10 @@ pub struct DiagnosticsBaselineErrorResult {
 pub struct DiagnosticsBaselineSuccess {
     pub state: DiagnosticsBaselineSuccessState,
     pub complete: bool,
+    pub selection: Option<String>,
+    pub partitions_enabled: Option<usize>,
+    pub partitions_unsuppressed: Option<usize>,
+    pub unsuppressed: Option<usize>,
     pub new: Option<usize>,
     pub known: Option<usize>,
     pub resolved: Option<usize>,
@@ -138,6 +142,10 @@ pub enum DiagnosticsBaselineSuccessState {
 pub struct DiagnosticsBaselineError {
     pub state: DiagnosticsBaselineErrorState,
     pub complete: bool,
+    pub selection: Option<String>,
+    pub partitions_enabled: Option<usize>,
+    pub partitions_unsuppressed: Option<usize>,
+    pub unsuppressed: Option<usize>,
     pub error_code: String,
     pub detail: String,
     pub path: Option<String>,
@@ -612,6 +620,10 @@ fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineS
         DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
             DiagnosticsBaselineSummary {
                 state: DiagnosticsBaselineState::Partial,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
                 new: Some(0),
                 known: Some(0),
                 resolved: Some(0),
@@ -625,9 +637,15 @@ fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineS
                 errors: vec![],
             }
         }
-        DiagnosticsBaselineSnapshot::ReadySet { baseline, project_path, .. } => {
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
             DiagnosticsBaselineSummary {
                 state: DiagnosticsBaselineState::Partial,
+                selection: Some(plan.selection),
+                partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                partitions_unsuppressed: Some(
+                    plan.partitions.len() - plan.enabled_partition_ids.len(),
+                ),
+                unsuppressed: Some(0),
                 new: Some(0),
                 known: Some(0),
                 resolved: Some(0),
@@ -639,23 +657,25 @@ fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineS
                 complete: false,
                 error_code: None,
                 detail: None,
-                partitions: baseline
-                    .manifest
+                partitions: plan
                     .partitions
                     .iter()
-                    .filter_map(|entry| {
-                        let partition = baseline.partitions.get(&entry.partition_id)?;
-                        Some(ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary {
-                            id: entry.partition_id.clone(),
-                            identity: partition.identity.clone(),
-                            path: entry.file.clone(),
-                            schema_version: ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+                    .map(|expected| {
+                        let policy = plan.policy_for_partition(&expected.id).unwrap();
+                        let loaded = baseline.partitions.get(&expected.id);
+                        ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary {
+                            id: expected.id.clone(),
+                            identity: expected.identity.clone(),
+                            policy,
+                            path: loaded.map(|partition| partition.file.to_string()),
+                            schema_version: loaded.map(|_| ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION),
                             state: DiagnosticsBaselineState::Partial,
                             new: 0,
                             known: 0,
                             resolved: 0,
+                            unsuppressed: 0,
                             complete: false,
-                        })
+                        }
                     })
                     .collect(),
                 errors: vec![],
@@ -759,6 +779,10 @@ fn classify_file_baseline(
             .map_err(|error| {
                 Box::new(DiagnosticsBaselineSummary {
                     state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+                    selection: None,
+                    partitions_enabled: None,
+                    partitions_unsuppressed: None,
+                    unsuppressed: None,
                     new: None,
                     known: None,
                     resolved: None,
@@ -813,6 +837,7 @@ fn classify_file_baseline(
             let classified =
                 ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
                     baseline,
+                    plan,
                     project_path.clone(),
                     wrapped,
                     &coverage,
@@ -821,12 +846,23 @@ fn classify_file_baseline(
                     let mut summary = unclassified_baseline(resident);
                     summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Error;
                     summary.complete = false;
-                    summary.error_code = Some("missing_snippet".to_owned());
+                    summary.error_code = Some(
+                        match &error {
+                            ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsClassificationError::MissingSnippet(_) => "missing_snippet",
+                            ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsClassificationError::MissingEnabledPartition(_) => "invalid_set",
+                        }
+                        .to_owned(),
+                    );
                     summary.detail = Some(error.to_string());
                     Box::new(summary)
                 })?;
             Ok((
-                classified.new.into_iter().map(|item| item.diagnostic.1).collect(),
+                classified
+                    .new
+                    .into_iter()
+                    .chain(classified.unsuppressed)
+                    .map(|item| item.diagnostic.1)
+                    .collect(),
                 classified.summary,
             ))
         }
@@ -1139,7 +1175,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "14",
+        "schema_version": "15",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -1192,6 +1228,10 @@ fn schema_json() -> Value {
         "baseline_result": {
             "state": "disabled | full | partial | error",
             "complete": "bool — true only when the result proves complete baseline coverage (disabled is complete)",
+            "selection": "all | selective — effective partition selection (partitioned mode only)",
+            "partitions_enabled": "usize — owners using baseline policy (partitioned mode only)",
+            "partitions_unsuppressed": "usize — owners using unsuppressed policy (partitioned mode only)",
+            "unsuppressed": "usize — active findings from unsuppressed owners (partitioned mode only)",
             "new": "usize — current findings absent from the baseline (omitted for disabled/error)",
             "known": "usize — current findings matched by the baseline (omitted for disabled/error)",
             "resolved": "usize — baseline entries proven absent in completed files (omitted for disabled/error)",
@@ -1286,7 +1326,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "14");
+        assert_eq!(body["schema_version"], "15");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -1326,6 +1366,10 @@ mod tests {
         for field in [
             "state",
             "complete",
+            "selection",
+            "partitions_enabled",
+            "partitions_unsuppressed",
+            "unsuppressed",
             "new",
             "known",
             "resolved",
@@ -1391,6 +1435,24 @@ mod tests {
                 reason.as_str(),
             );
         }
+    }
+
+    #[test]
+    fn diagnostics_selective_baseline_response_advertises_schema_15() {
+        let body = schema_json();
+        assert_eq!(body["schema_version"], "15");
+        for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
+        {
+            assert!(body["baseline_result"][field].is_string());
+        }
+    }
+
+    #[test]
+    fn diagnostics_schema_json() {
+        let body = schema_json();
+        assert_eq!(body["schema_version"], "15");
+        assert!(body["baseline_result"]["selection"].is_string());
+        assert!(body["baseline_result"]["unsuppressed"].is_string());
     }
 
     #[test]
@@ -1627,12 +1689,14 @@ mod tests {
                     identity: project_model::DiagnosticsBaselinePartitionIdentity::Main {
                         path: String::new(),
                     },
-                    path: format!("objects/{id}.json"),
-                    schema_version: 2,
+                    policy: project_model::DiagnosticsBaselinePartitionPolicy::Baseline,
+                    path: Some(format!("objects/{id}.json")),
+                    schema_version: Some(2),
                     state: ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
                     new: 0,
                     known: 0,
                     resolved: 0,
+                    unsuppressed: 0,
                     complete: true,
                 };
             let mut summary = DiagnosticsBaselineSummary::disabled();

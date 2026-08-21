@@ -11,10 +11,24 @@ fn baseline_lines(baseline: &ide::diagnostics_baseline::DiagnosticsBaselineSumma
         DiagnosticsBaselineState::Error => "error",
     };
     let mut lines = vec![format!("Diagnostics baseline: {state}")];
+    if let (Some(selection), Some(enabled), Some(unsuppressed)) =
+        (baseline.selection, baseline.partitions_enabled, baseline.partitions_unsuppressed)
+    {
+        let selection = match selection {
+            project_model::DiagnosticsBaselineSelection::All => "all",
+            project_model::DiagnosticsBaselineSelection::Selective => "selective",
+        };
+        lines.push(format!(
+            "  Selection: {selection} (enabled {enabled}, unsuppressed {unsuppressed})"
+        ));
+    }
     if let (Some(new), Some(known), Some(resolved)) =
         (baseline.new, baseline.known, baseline.resolved)
     {
-        lines.push(format!("  New: {new}, known: {known}, resolved: {resolved}"));
+        let unsuppressed = baseline.unsuppressed.unwrap_or_default();
+        lines.push(format!(
+            "  New: {new}, known: {known}, resolved: {resolved}, unsuppressed: {unsuppressed}"
+        ));
     }
     for partition in &baseline.partitions {
         let state = match partition.state {
@@ -23,9 +37,17 @@ fn baseline_lines(baseline: &ide::diagnostics_baseline::DiagnosticsBaselineSumma
             DiagnosticsBaselineState::Partial => "partial",
             DiagnosticsBaselineState::Error => "error",
         };
+        let policy = match partition.policy {
+            project_model::DiagnosticsBaselinePartitionPolicy::Baseline => "baseline",
+            project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed => "unsuppressed",
+        };
         lines.push(format!(
-            "  {}: {state} (new {}, known {}, resolved {})",
-            partition.id, partition.new, partition.known, partition.resolved
+            "  {}: {state} [{policy}] (new {}, known {}, resolved {}, unsuppressed {})",
+            partition.id,
+            partition.new,
+            partition.known,
+            partition.resolved,
+            partition.unsuppressed
         ));
     }
     lines
@@ -85,6 +107,10 @@ mod tests {
         ] {
             let summary = DiagnosticsBaselineSummary {
                 state,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
                 new: Some(1),
                 known: Some(2),
                 resolved: Some(3),
@@ -99,7 +125,7 @@ mod tests {
             };
             let lines = baseline_lines(&summary);
             assert_eq!(lines[0], format!("Diagnostics baseline: {label}"));
-            assert_eq!(lines[1], "  New: 1, known: 2, resolved: 3");
+            assert_eq!(lines[1], "  New: 1, known: 2, resolved: 3, unsuppressed: 0");
         }
     }
 }

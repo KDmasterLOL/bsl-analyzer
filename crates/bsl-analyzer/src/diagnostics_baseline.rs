@@ -73,6 +73,7 @@ pub(crate) fn active_for_file(
             let Ok(classified) =
                 ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
                     baseline,
+                    plan,
                     project_path.clone(),
                     candidates,
                     &coverage,
@@ -80,7 +81,12 @@ pub(crate) fn active_for_file(
             else {
                 return diagnostics;
             };
-            classified.new.into_iter().map(|item| item.diagnostic).collect()
+            classified
+                .new
+                .into_iter()
+                .chain(classified.unsuppressed)
+                .map(|item| item.diagnostic)
+                .collect()
         }
         DiagnosticsBaselineSnapshot::Disabled | DiagnosticsBaselineSnapshot::Error { .. } => {
             return diagnostics;
@@ -248,6 +254,9 @@ directory = "baselines"
             &DiagnosticsBaselineSnapshot::Error {
                 path: None,
                 observation_paths: vec![],
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
                 code: "invalid_set".to_owned(),
                 detail: "broken".to_owned(),
                 epoch: "error".to_owned(),

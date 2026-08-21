@@ -62,9 +62,13 @@ pub fn check_config(
         .into());
     }
     if diagnostics_baseline.issue {
+        let detail = diagnostics_baseline
+            .config_error
+            .as_deref()
+            .unwrap_or("diagnostics baseline reported an error");
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "configuration is invalid: diagnostics baseline reported an error",
+            format!("configuration is invalid: {detail}"),
         )
         .into());
     }
@@ -104,6 +108,7 @@ fn diagnostics_config_from_project(
 struct DiagnosticsBaselineCheck {
     status: String,
     issue: bool,
+    config_error: Option<String>,
 }
 
 fn inspect_diagnostics_baseline(
@@ -113,14 +118,17 @@ fn inspect_diagnostics_baseline(
         return DiagnosticsBaselineCheck {
             status: "unavailable (project invalid)".to_owned(),
             issue: false,
+            config_error: None,
         };
     };
     use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
 
     match DiagnosticsBaselineSnapshot::load(project) {
-        DiagnosticsBaselineSnapshot::Disabled => {
-            DiagnosticsBaselineCheck { status: "disabled".to_owned(), issue: false }
-        }
+        DiagnosticsBaselineSnapshot::Disabled => DiagnosticsBaselineCheck {
+            status: "disabled".to_owned(),
+            issue: false,
+            config_error: None,
+        },
         DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
             DiagnosticsBaselineCheck {
                 status: format!(
@@ -130,13 +138,35 @@ fn inspect_diagnostics_baseline(
                     baseline.diagnostics.len()
                 ),
                 issue: false,
+                config_error: None,
             }
         }
-        DiagnosticsBaselineSnapshot::ReadySet { .. } => DiagnosticsBaselineCheck {
-            status: "ERROR: partitioned diagnostics baseline is not supported by check-config"
-                .to_owned(),
-            issue: true,
-        },
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
+            let selection = match plan.selection {
+                project_model::DiagnosticsBaselineSelection::All => "all",
+                project_model::DiagnosticsBaselineSelection::Selective => "selective",
+            };
+            let enabled = plan.enabled_partition_ids.join(", ");
+            let unsuppressed = plan
+                .partitions
+                .iter()
+                .filter(|partition| {
+                    !plan.enabled_partition_ids.iter().any(|enabled| enabled == &partition.id)
+                })
+                .map(|partition| partition.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            DiagnosticsBaselineCheck {
+                status: format!(
+                    "ready: {} (schema {}, selection {selection}; enabled partitions: {enabled}; unsuppressed partitions: {})",
+                    project_path,
+                    baseline.manifest.schema_version,
+                    if unsuppressed.is_empty() { "none" } else { &unsuppressed }
+                ),
+                issue: false,
+                config_error: None,
+            }
+        }
         DiagnosticsBaselineSnapshot::Error { path, code, detail, .. } => {
             let path = path.as_deref().map(|path| path.display().to_string()).unwrap_or_default();
             let status = match code.as_str() {
@@ -146,7 +176,11 @@ fn inspect_diagnostics_baseline(
                 "unsupported_schema" => format!("ERROR: {detail}: {path}"),
                 _ => format!("ERROR: invalid file {path}: {detail}"),
             };
-            DiagnosticsBaselineCheck { status, issue: true }
+            DiagnosticsBaselineCheck {
+                status,
+                issue: true,
+                config_error: (code == "invalid_configuration").then_some(detail),
+            }
         }
     }
 }

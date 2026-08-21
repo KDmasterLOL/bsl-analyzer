@@ -63,6 +63,18 @@ impl ManagedBaselineDirectory {
         open_regular_file(&dir, &name, options, Path::new(path)).map(File::into_std)
     }
 
+    #[cfg(windows)]
+    pub fn sync_all(&self) -> io::Result<()> {
+        match self.dir.try_clone()?.into_std_file().sync_all() {
+            // Windows directory handles commonly reject FlushFileBuffers even on NTFS. The files
+            // themselves are synced before rename; keep attempting the directory barrier where the
+            // filesystem supports it without making the unsupported case fatal.
+            Err(error) if matches!(error.raw_os_error(), Some(5 | 87)) => Ok(()),
+            result => result,
+        }
+    }
+
+    #[cfg(not(windows))]
     pub fn sync_all(&self) -> io::Result<()> {
         match self.dir.try_clone()?.into_std_file().sync_all() {
             // Some Unix capability handles use O_PATH and cannot be fsynced.
@@ -181,14 +193,17 @@ fn replace_regular_file(
     use std::os::windows::io::AsRawHandle;
 
     use cap_fs_ext::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO,
-    };
+    use windows_sys::Wdk::Storage::FileSystem::{FileRenameInformation, NtSetInformationFile};
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::Storage::FileSystem::{DELETE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO};
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let mut options = OpenOptions::new();
-    options.access_mode(DELETE).follow(FollowSymlinks::No);
+    options.access_mode(DELETE | FILE_READ_ATTRIBUTES).follow(FollowSymlinks::No);
     let source = open_regular_file(from_dir, from_name, options, display)?;
-    let name: Vec<u16> = to_name.as_os_str().encode_wide().collect();
+    let mut name: Vec<u16> = to_name.as_os_str().encode_wide().collect();
+    let name_byte_len = name.len() * std::mem::size_of::<u16>();
+    name.push(0);
     let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let byte_len = header + name.len() * std::mem::size_of::<u16>();
     let storage_len = byte_len.max(std::mem::size_of::<FILE_RENAME_INFO>());
@@ -197,25 +212,27 @@ fn replace_regular_file(
 
     // FILE_RENAME_INFO ends in a variable-length UTF-16 name. The aligned backing buffer owns
     // both the header and that tail for the duration of the syscall.
-    let result = unsafe {
+    let status = unsafe {
         let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         (*info).Anonymous.ReplaceIfExists = true;
         (*info).RootDirectory = to_dir.as_raw_handle().cast();
-        (*info).FileNameLength = (name.len() * std::mem::size_of::<u16>()) as u32;
+        (*info).FileNameLength = name_byte_len as u32;
         std::ptr::copy_nonoverlapping(
             name.as_ptr(),
             std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
             name.len(),
         );
-        SetFileInformationByHandle(
+        let mut io_status = IO_STATUS_BLOCK::default();
+        NtSetInformationFile(
             source.as_raw_handle().cast(),
-            FileRenameInfo,
+            &mut io_status,
             info.cast(),
             byte_len as u32,
+            FileRenameInformation,
         )
     };
-    if result == 0 {
-        Err(io::Error::last_os_error())
+    if status < 0 {
+        Err(io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32))
     } else {
         Ok(())
     }
@@ -284,6 +301,7 @@ mod tests {
         managed.open_file("objects/key/value.json").unwrap().read_to_string(&mut value).unwrap();
         assert_eq!(value, "ok");
         managed.replace_file("objects/key/value.json", "objects/key/renamed.json").unwrap();
+        managed.sync_all().unwrap();
         managed.remove_file("objects/key/renamed.json").unwrap();
         assert_eq!(
             managed.validated_relative_path("objects/key/value.json").unwrap(),

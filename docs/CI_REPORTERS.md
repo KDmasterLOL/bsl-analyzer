@@ -66,7 +66,10 @@ bsl-analyzer-app diagnostics baseline check -s .
 ```
 
 Для раздельного набора настройте `directory`; CI-команда остаётся той же и проверяет
-все разделы атомарно. Локально можно сузить чтение для разбора расхождения:
+все enabled разделы атомарно. При `include` находки остальных владельцев остаются в
+обычных контейнерах отчёта как `unsuppressed`: SARIF/JSON/JSONL/JUnit показывают
+selection и policy-счётчики, а корневой массив GitLab Code Quality и его diagnostic
+fingerprint не меняют форму. Локально можно сузить чтение для разбора расхождения:
 
 ```bash
 bsl-analyzer-app diagnostics baseline check -s . --partition extension:MyExtension
@@ -90,3 +93,8 @@ bsl-analyzer-app diagnostics baseline check -s .
 замечаний во всём проекте и потому не допускаются командами изменения базовой линии.
 GitLab Code Quality остаётся корневым массивом активных замечаний; сводка базовой
 линии добавляется в JSON, JSONL, SARIF и JUnit, но не как фиктивная находка GitLab.
+
+Для rollout добавьте `include` с небольшой группой, выполните полный `create` и
+оставьте общий `check` обязательным CI-gate. Для rollback удалите `include` и
+восстановите отсутствующие объекты явным полным либо выбранным `create`; dormant
+objects не считаются долговременным архивом после topology-changing full update.

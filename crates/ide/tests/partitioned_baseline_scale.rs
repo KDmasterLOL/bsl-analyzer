@@ -14,7 +14,7 @@ use ide::partitioned_diagnostics_baseline::{
 use project_model::{
     DiagnosticsBaselinePartition, DiagnosticsBaselinePartitionIdentity,
     DiagnosticsBaselinePartitionPlan, DiagnosticsBaselineProjectScope,
-    DiagnosticsBaselineRootOwner, ManagedBaselineDirectory,
+    DiagnosticsBaselineRootOwner, DiagnosticsBaselineSelection, ManagedBaselineDirectory,
 };
 
 const RECORDS: usize = 1_600_000;
@@ -86,7 +86,10 @@ fn loads_and_classifies_1_6m_entries_with_bounded_rss() {
             extensions: vec![],
         },
         project_scope_fingerprint: "a".repeat(64),
+        selection_fingerprint: "b".repeat(64),
         partitions: vec![DiagnosticsBaselinePartition { id: "main".to_owned(), key, identity }],
+        enabled_partition_ids: vec!["main".to_owned()],
+        selection: DiagnosticsBaselineSelection::All,
         roots: vec![DiagnosticsBaselineRootOwner {
             root: String::new(),
             partition_id: "main".to_owned(),
@@ -117,6 +120,7 @@ fn loads_and_classifies_1_6m_entries_with_bounded_rss() {
     .unwrap();
     let classified = classify_partitioned_diagnostics(
         &snapshot,
+        &plan,
         "baselines".to_owned(),
         vec![PartitionedBaselineDiagnosticCandidate {
             partition_id: "main".to_owned(),

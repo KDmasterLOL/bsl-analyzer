@@ -119,7 +119,7 @@ fn operations_all_and_selected_are_atomic_and_scoped() {
     assert_eq!(repair["removed"], 0);
     assert_eq!(repair["unchanged"], extension_diagnostics);
     assert_eq!(repair["diagnostics"].as_array().unwrap().len(), extension_diagnostics);
-    assert_eq!(repair["partitions"].as_array().unwrap().len(), 2);
+    assert_eq!(repair["partitions"].as_array().unwrap().len(), 1);
     assert_eq!(repair["selected_partition"], "extension:Ext");
     let repaired = fs::read(root.join("baselines").join(&extension_file)).unwrap();
     let extension_hash = manifest["partitions"]

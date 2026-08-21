@@ -14,6 +14,10 @@ fn partitioned_baseline_error(
 ) -> ide::diagnostics_baseline::DiagnosticsBaselineSummary {
     ide::diagnostics_baseline::DiagnosticsBaselineSummary {
         state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+        selection: None,
+        partitions_enabled: None,
+        partitions_unsuppressed: None,
+        unsuppressed: None,
         new: None,
         known: None,
         resolved: None,
@@ -701,6 +705,7 @@ impl DiagnosticsResident {
                 )?;
                 ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
                     set,
+                    plan,
                     baseline_path.to_owned(),
                     wrapped,
                     &coverage,
@@ -709,7 +714,12 @@ impl DiagnosticsResident {
             });
             match classified {
                 Ok(classified) => (
-                    classified.new.into_iter().map(|item| item.diagnostic).collect::<Vec<_>>(),
+                    classified
+                        .new
+                        .into_iter()
+                        .chain(classified.unsuppressed)
+                        .map(|item| item.diagnostic)
+                        .collect::<Vec<_>>(),
                     classified.summary,
                 ),
                 Err(error) => (Vec::new(), partitioned_baseline_error(baseline_path, set, error)),
@@ -729,6 +739,10 @@ impl DiagnosticsResident {
                     Vec::new(),
                     ide::diagnostics_baseline::DiagnosticsBaselineSummary {
                         state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+                        selection: None,
+                        partitions_enabled: None,
+                        partitions_unsuppressed: None,
+                        unsuppressed: None,
                         new: None,
                         known: None,
                         resolved: None,

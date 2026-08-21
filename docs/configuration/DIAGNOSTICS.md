@@ -93,6 +93,7 @@ bsl-analyzer-app diagnostics baseline update -s .
 ```toml
 [diagnostics.baseline]
 directory = ".bsl-analyzer/diagnostics-baselines"
+include = ["main", "group:vendor"]
 
 [[diagnostics.baseline.groups]]
 name = "vendor"
@@ -104,6 +105,12 @@ extensions = ["VendorCore", "VendorReports"]
 `[source]` и не дублируются. Все файлы применяются одновременно к одному полному
 семантическому анализу; расширения не анализируются изолированно.
 Вычисленный идентификатор раздела ограничен 64 байтами UTF-8.
+
+Необязательный `include` включает подавление только для перечисленных логических
+идентификаторов. Остальные владельцы по-прежнему входят в полный семантический анализ,
+но их находки имеют policy `unsuppressed`, остаются активными и не читают объекты
+baseline. Пустые, повторяющиеся и неизвестные идентификаторы отклоняются; без
+`include` поведение полностью совпадает с прежним полным набором.
 
 Команды без селектора работают со всем набором. `check --partition` только
 проверяет выбранный раздел; `update --partition` обновляет его, сохраняя пути и
@@ -129,6 +136,13 @@ bsl-analyzer-app diagnostics baseline create -s . --from-v1 legacy-baseline.json
 удаление расширения или изменение группы требует полного `update`; старые разделы
 не переносятся эвристически. Все пути остаются внутри корня проекта, ссылки и `..`
 запрещены.
+
+Для постепенного включения сначала добавьте `include`, создайте baseline enabled
+разделов и проверьте JSON-счётчики `partitions_enabled`,
+`partitions_unsuppressed` и `unsuppressed`. Откат конфигурации — удалить `include`:
+сохранённые объекты снова станут enabled. Если полный `update` после изменения
+топологии уже удалил dormant metadata, отсутствующие разделы нужно явно восстановить
+через полный `create`/`update` либо точный `create --partition`.
 
 ### `ordinaryAppSupport`
 
