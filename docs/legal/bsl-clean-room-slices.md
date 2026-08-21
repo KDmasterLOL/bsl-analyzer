@@ -12,9 +12,11 @@ the SDBL programme in full would not move either crate.
 
 ## Status as of 2026-08-21
 
-B1, B2 and B3 are done. B1 and B2 each carry a provenance docstring naming the
+All four slices are done. B1 and B2 each carry a provenance docstring naming the
 section of Chapter 4 they were re-derived from; B3 attested rather than rewrote,
-and its record is a gated checklist covering every grammar function.
+and its record is a gated checklist covering every grammar function; B4 recorded
+the origin of the test material, and what the history does not establish it says
+so about, separately.
 
 Everywhere else in the BSL layer no provenance marker survives: `843b00ab` and
 `3aa29b99` removed them all, so for the parts still awaiting a slice the
@@ -25,7 +27,7 @@ evidence of what was derived lives only in git history.
 | B1 | BSL token inventory (`lexer`) | #233 | **done** — [`bsl-clean-room-slice-b1.md`](bsl-clean-room-slice-b1.md) |
 | B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | **done** — [`bsl-clean-room-slice-b2.md`](bsl-clean-room-slice-b2.md) |
 | B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | **done** — [`bsl-clean-room-slice-b3.md`](bsl-clean-room-slice-b3.md) |
-| B4 | Test material | #236 | not started |
+| B4 | Test material | #236 | **done** — [`bsl-clean-room-slice-b4.md`](bsl-clean-room-slice-b4.md) |
 
 ## Scope: half of what is already done
 
@@ -293,22 +295,34 @@ attestation itself disproves.
 ## B4 — test material
 
 `crates/parser/tests/fixtures/Module.bsl`, 15 157 lines with no terminating
-newline (`wc -l` reports 15 156 for that reason), is a verbatim copy of a
-`bsl-parser` test resource (`16c5db20`, 2025-12-29). The content is clean: the
+newline (`wc -l` reports 15 156 for that reason), came from a `bsl-parser` test
+resource (`16c5db20`, 2025-12-29). It was described here as a verbatim copy; B4
+established that it is not. `f1fc00ff` (2026-05-13) changed two lines of the
+body, correcting an event-handler statement to the syntax 4.6.11.1 gives. The
+licence header has never been touched. The content is clean: the
 file carries an ООО «1С-Софт» header under CC BY 4.0, so it belongs to 1C and is
 free to use with attribution; `bsl-parser` was only the delivery channel.
 
 There is nothing to rewrite, and the attribution is **already in place**:
-`NOTICE` (lines 159–163) names the copyright holder, CC BY 4.0, the intact
+`NOTICE` names the copyright holder, CC BY 4.0, the intact
 licence header, and the acquisition channel through `bsl-parser`; `LICENSING.md`
 names the file and its licence in its third-party table. What `843b00ab` removed
 was six in-code comments of the form
 `Source: bsl-parser/src/test/resources/Module.bsl`, and the `NOTICE` record
 postdates them.
 
-B4 is therefore a verification, not a repair: confirm that the licence header in
-the file is intact and unmodified, that the `NOTICE` statement matches it, and
-that no other BSL test input carries an origin nobody recorded.
+B4 was framed as a verification rather than a repair. Two of its three questions
+answered that way: the licence header is intact, and the `NOTICE` statement
+matches it once the body modification above is added to it. The third did not.
+Sweeping every BSL test input found that the fixture B2 replaced was one case of
+a class: the commits that introduced diagnostic fixtures record, in their own
+words, that test files were copied from `bsl-language-server` and from
+`bsl-language-server-rust`, and `07d2b977` moved 187 of them inline. B4 records
+that class rather than a per-file map — four ways of building such a map were
+tried and each failed in its own direction, which the attestation sets out.
+Thirty-six live fixtures in `crates/bsl-metadata` that no document mentioned are
+now listed file by file, as is `Module.bsl`. Replacing the material with derived
+equivalents is tracked apart from this programme.
 
 B4 also covers the fixture material B2 identifies, and any other BSL test input
 whose origin the same review finds.
@@ -387,9 +401,10 @@ compatibility record stands.
 2. B1. **Done.**
 3. B2. **Done.**
 4. B3. **Done.**
-5. B4.
+5. B4. **Done.**
 6. Record the compatibility decision.
-7. Update `NOTICE` and `LICENSING.md`.
+7. Update `NOTICE` and `LICENSING.md`. B4 wrote the test-material half of this;
+   what remains is whatever the compatibility decision adds.
 
 The remaining steps are separate slices with their own attestations, on the
 model of `sdbl-clean-room-slice*.md`.

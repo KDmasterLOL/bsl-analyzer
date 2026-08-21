@@ -63,6 +63,32 @@ retiring it. It has now been replaced with material derived from section
 4.8.1.2 of the 1C Developer's Guide, and a test in the crate fails if the
 retired material reappears.
 
+A sweep of every BSL test input in the tree, done on 2026-08-21, found
+that the unknown-preprocessor-symbol fixture was one case of a class.
+The commits that introduced diagnostic fixtures say in their own words
+that test files were copied from bsl-language-server and from
+bsl-language-server-rust. 07d2b977 deleted 187 such fixtures when the
+tests moved inline, and the material of a large part of them is still
+present in crates/ide-diagnostics.
+
+What is stated here is that class, not a per-file map. Four independent
+ways of building such a map were tried, and each failed in its own
+direction: attributing a fixture to the commit that merely moved it,
+crediting shared boilerplate as surviving material, matching a line any
+test could contain, and following a rename into a sibling fixture. A
+textual match also cannot see material a test builds programmatically.
+A record that looks precise and is repeatedly wrong — sometimes
+understating what was taken, sometimes attributing our own work to
+others — is worse than a narrower record that holds. The remedy for the
+uncertainty is not a better map but replacement of the material, tracked
+in https://github.com/itrous/bsl-analyzer/issues/52.
+
+Two things are listed file by file, because both are established without
+heuristics: the 21 fixtures added by 4601ffcb, which that commit itself
+enumerates, and crates/parser/tests/fixtures/Module.bsl. Both are in the
+table in LICENSING.md. The evidence in full is in
+docs/legal/bsl-clean-room-slice-b4.md.
+
 These facts are stated here directly, and not left to be discovered in
 the commit history, because the public mirror of this repository does
 not carry that history: a disclosure that can only be verified in a
@@ -87,12 +113,13 @@ grammar in token inventory, token granularity, rule decomposition and
 operator precedence. That rewrite is not finished.
 
 The BSL layer is being rewritten the same way, under
-docs/legal/bsl-clean-room-slices.md. Two sub-slices are complete: the BSL
-token inventory (docs/legal/bsl-clean-room-slice-b1.md) and the
-preprocessor symbol list together with its test material
-(docs/legal/bsl-clean-room-slice-b2.md), both re-derived from Chapter 4 of
-the 1C Developer's Guide for 8.3.27. The BSL grammar rules and the
-remaining test material are not done.
+docs/legal/bsl-clean-room-slices.md. All four sub-slices are complete: the
+BSL token inventory (bsl-clean-room-slice-b1.md) and the preprocessor
+symbol list with its test material (b2.md), both re-derived from Chapter
+4 of the 1C Developer's Guide for 8.3.27; the grammar rules, attested
+rule by rule rather than rewritten (b3.md); and the test material, whose
+origin was established where the history establishes it and left stated
+as unestablished where it does not (b4.md).
 
 The current assessment — what is proven, what has diverged, and what is
 still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.
@@ -184,7 +211,16 @@ Upstream acknowledgements
     CC BY 4.0, redistributed with its own license header intact. The
     copy was taken from the test resources of bsl-parser, which had
     itself adapted it as a fixture; the content and its license are
-    1C's, not that project's.
+    1C's, not that project's. CC BY 4.0 asks that modifications be
+    indicated: the file carries the previous adaptation in its own
+    header, and this repository changed two further lines of the body
+    in f1fc00ff (2026-05-13), correcting an event-handler statement to
+    the syntax section 4.6.11.1 gives. The license header itself has
+    never been touched, and a test fails if it is removed or altered.
+  * crates/bsl-metadata/fixtures/designer/{Catalogs,CommonModules,
+    Documents,Ext,HTTPServices,InformationRegisters,WebServices} —
+    21 BSL files introduced by 4601ffcb, whose message records
+    "Comprehensive test fixtures copied from bsl-language-server-rust".
   * crates/bsl-platform/data/platform_data.json — © ООО «1С-Софт»,
     1C copyright, bundled for interoperability; see
     crates/bsl-platform/data/PROVENANCE.md
