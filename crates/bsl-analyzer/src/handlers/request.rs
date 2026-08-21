@@ -3370,13 +3370,42 @@ mod tests {
         assert_eq!(result[2].kind, None);
     }
 
-    #[test]
-    fn folding_range_reports_comment_kind() {
+    fn folding_lines_for(
+        file_name: &str,
+        source: &str,
+    ) -> Vec<(u32, u32, Option<LspFoldingRangeKind>)> {
         let mut state = create_test_state();
         state.init_empty_source_root();
 
-        let uri = lsp_types::Url::parse("file:///folding_comment.bsl").unwrap();
-        let source = r#"#Область ПрограммныйИнтерфейс
+        let uri = lsp_types::Url::parse(&format!("file:///{file_name}")).unwrap();
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        handle_folding_range(ctx, params)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|range| (range.start_line, range.end_line, range.kind.clone()))
+            .collect()
+    }
+
+    const FOLDING_COMMENT_SOURCE: &str = r#"#Область ПрограммныйИнтерфейс
 
 // Возвращает описание физического лица для передачи в ФЭС.
 //
@@ -3402,37 +3431,40 @@ mod tests {
 
 #КонецОбласти"#;
 
-        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
-        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
-        state.open_files.insert(open_file_id);
-        {
-            let mut vfs = state.vfs.write();
-            vfs.set_file_contents(
-                VfsPath::new(uri.to_file_path().unwrap()),
-                Some(Arc::from(source)),
-            );
-        }
-        state.process_changes(false);
+    fn issue_folding_lines() -> Vec<(u32, u32, Option<LspFoldingRangeKind>)> {
+        vec![
+            (0, 24, Some(LspFoldingRangeKind::Region)),
+            (2, 10, Some(LspFoldingRangeKind::Comment)),
+            (11, 22, None),
+            (13, 15, Some(LspFoldingRangeKind::Comment)),
+            (16, 18, None),
+        ]
+    }
 
-        let ctx = latency_ctx(&state);
-        let params = FoldingRangeParams {
-            text_document: TextDocumentIdentifier { uri },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-
-        let result = handle_folding_range(ctx, params).unwrap().unwrap();
-
-        let lines: Vec<(u32, u32, Option<LspFoldingRangeKind>)> =
-            result.iter().map(|r| (r.start_line, r.end_line, r.kind.clone())).collect();
+    #[test]
+    fn folding_range_reports_comment_kind() {
         assert_eq!(
-            lines,
+            folding_lines_for("folding_comment.bsl", FOLDING_COMMENT_SOURCE),
+            issue_folding_lines()
+        );
+    }
+
+    #[test]
+    fn folding_range_reports_comment_kind_on_crlf() {
+        // Модуль, пришедший из 1С под Windows, разделён CRLF: `\r` уезжает внутрь
+        // токена комментария, а пустая строка приходит парой NEWLINE с пробельным
+        // токеном между ними. Номера строк в ответе от этого меняться не должны.
+        let crlf = FOLDING_COMMENT_SOURCE.replace('\n', "\r\n");
+        assert_eq!(folding_lines_for("folding_comment_crlf.bsl", &crlf), issue_folding_lines());
+
+        // В фикстуре из issue пустых строк внутри серий нет, поэтому сама по себе
+        // она CRLF-слепую сборку серий не различает. Этот вход различает: пустая
+        // строка обязана разорвать серию и здесь.
+        assert_eq!(
+            folding_lines_for("folding_crlf_split.bsl", "// а\r\n// б\r\n\r\n// в\r\n// г\r\n"),
             vec![
-                (0, 24, Some(LspFoldingRangeKind::Region)),
-                (2, 10, Some(LspFoldingRangeKind::Comment)),
-                (11, 22, None),
-                (13, 15, Some(LspFoldingRangeKind::Comment)),
-                (16, 18, None),
+                (0, 1, Some(LspFoldingRangeKind::Comment)),
+                (3, 4, Some(LspFoldingRangeKind::Comment)),
             ]
         );
     }
