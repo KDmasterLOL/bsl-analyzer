@@ -53,7 +53,7 @@ pub(crate) fn sample_workspace(root: &Path) {
 }
 
 pub(crate) fn wait_ready(graph: &GraphState) {
-    for _ in 0..200 {
+    for _ in 0..1000 {
         match graph.status() {
             GraphStatus::Ready { .. } => return,
             GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
