@@ -8,7 +8,7 @@
 
 | Requirement | Основные области кода | Автоматизированное доказательство | Task(s) |
 |---|---|---|---|
-| SDBP-01 Config/specialization | `project-model::DiagnosticsBaselineConfig`, existing partition plan | config/policy/fingerprint units | 1.1–1.3 |
+| SDBP-01 Config/specialization | `project-model::DiagnosticsBaselineConfig`, existing partition plan, `check-config` | config/policy/fingerprint units and CLI integration | 1.1–1.3, 7.7 |
 | SDBP-02 Shared topology | source loading, `ExtensionTopology`, Salsa, owner router | semantic integration | 1.2, 4.1 |
 | SDBP-03 Classification | `ide::partitioned_diagnostics_baseline`, protected diagnostics | classifier units | 2.3, 4.1 |
 | SDBP-04 Effective set/security | manifest loader, capability observations | manifest/reload/adversarial tests | 2.1, 2.2, 3.4, 6.1 |
@@ -25,7 +25,7 @@
 |---|---|
 | `selective_baseline_default_includes_all` | 1.1 |
 | `selective_baseline_include_selects_exact_partition_ids` | 1.1, 1.2 |
-| `selective_baseline_rejects_empty_duplicate_unknown_and_legacy_include` | 1.1 |
+| `check_config_cli_rejects_invalid_include_before_baseline_io` | 1.1, 7.7 |
 | `selective_semantics_keeps_full_topology_for_unsuppressed_extensions` | 4.1 |
 | `selective_policy_does_not_change_partition_ownership` | 1.2, 4.1 |
 | `selective_scope_ignores_changes_outside_enabled_owners` | 1.2, 2.1 |

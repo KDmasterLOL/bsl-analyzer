@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use project_model::{
     DiagnosticsBaselinePartitionIdentity, DiagnosticsBaselinePartitionPlan,
-    ManagedBaselineDirectory,
+    DiagnosticsBaselineSelection, ManagedBaselineDirectory,
 };
 use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -52,10 +52,11 @@ pub struct DiagnosticsBaselineSetSnapshot {
     pub partitions: BTreeMap<String, Arc<PartitionSnapshot>>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DiagnosticsBaselineLoadStats {
     pub partitions_parsed: usize,
     pub fingerprints_validated: usize,
+    pub objects_read: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,8 +121,17 @@ pub struct PartitionedBaselineDiagnosticCandidate<T> {
 pub struct ClassifiedPartitionedDiagnostics<T> {
     pub new: Vec<ClassifiedDiagnostic<T>>,
     pub known: Vec<ClassifiedDiagnostic<T>>,
+    pub unsuppressed: Vec<ClassifiedDiagnostic<T>>,
     pub resolved: ResolvedPartitionedDiagnostics,
     pub summary: DiagnosticsBaselineSummary,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PartitionedDiagnosticsClassificationError {
+    #[error(transparent)]
+    MissingSnippet(#[from] MissingDiagnosticSnippet),
+    #[error("enabled partition is absent from the loaded snapshot: {0}")]
+    MissingEnabledPartition(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -287,10 +297,11 @@ pub fn partitioned_coverage(
 
 pub fn classify_partitioned_diagnostics<T>(
     snapshot: &DiagnosticsBaselineSetSnapshot,
+    plan: &DiagnosticsBaselinePartitionPlan,
     baseline_path: String,
     mut current: Vec<PartitionedBaselineDiagnosticCandidate<T>>,
     coverage: &BTreeMap<String, DiagnosticsBaselineCoverage>,
-) -> Result<ClassifiedPartitionedDiagnostics<T>, MissingDiagnosticSnippet> {
+) -> Result<ClassifiedPartitionedDiagnostics<T>, PartitionedDiagnosticsClassificationError> {
     current.sort_by(|left, right| {
         let left = &left.candidate;
         let right = &right.candidate;
@@ -303,9 +314,10 @@ pub fn classify_partitioned_diagnostics<T>(
     });
     let mut occurrences = HashMap::<(String, String, String), u32>::new();
     let mut matched = BTreeMap::<String, HashSet<[u8; 32]>>::new();
-    let mut counts = BTreeMap::<String, (usize, usize)>::new();
+    let mut counts = BTreeMap::<String, (usize, usize, usize)>::new();
     let mut new = Vec::new();
     let mut known = Vec::new();
+    let mut unsuppressed = Vec::new();
 
     for item in current {
         let candidate = item.candidate;
@@ -330,6 +342,14 @@ pub fn classify_partitioned_diagnostics<T>(
         };
         *occurrence += 1;
         let classified = ClassifiedDiagnostic { diagnostic: candidate.diagnostic, entry };
+        if !protected(&classified.entry.code)
+            && plan.policy_for_partition(&item.partition_id)
+                == Some(project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed)
+        {
+            counts.entry(item.partition_id).or_default().2 += 1;
+            unsuppressed.push(classified);
+            continue;
+        }
         let partition = snapshot.partitions.get(&item.partition_id);
         let is_known = !protected(&classified.entry.code)
             && partition.is_some_and(|partition| partition.find(&fingerprint_bytes).is_some());
@@ -345,40 +365,69 @@ pub fn classify_partitioned_diagnostics<T>(
     }
 
     let mut resolved = ResolvedPartitionedDiagnostics::default();
-    let mut partition_summaries = Vec::with_capacity(snapshot.partitions.len());
-    for manifest_entry in &snapshot.manifest.partitions {
-        let partition = snapshot.partitions[&manifest_entry.partition_id].clone();
-        let partition_coverage = coverage
-            .get(&manifest_entry.partition_id)
-            .unwrap_or(&DiagnosticsBaselineCoverage::Full);
-        let matched = matched.remove(&manifest_entry.partition_id).unwrap_or_default();
+    let mut partition_summaries = Vec::with_capacity(plan.partitions.len());
+    for expected_partition in &plan.partitions {
+        let policy =
+            plan.policy_for_partition(&expected_partition.id).expect("plan partition has policy");
+        let partition_coverage =
+            coverage.get(&expected_partition.id).unwrap_or(&DiagnosticsBaselineCoverage::Full);
         let complete = matches!(partition_coverage, DiagnosticsBaselineCoverage::Full);
+        let (partition_new, partition_known, partition_unsuppressed) =
+            counts.get(&expected_partition.id).copied().unwrap_or_default();
         let mut partition_resolved = 0;
-        for entry in &partition.entries {
-            let covered = match partition_coverage {
-                DiagnosticsBaselineCoverage::Full => true,
-                DiagnosticsBaselineCoverage::Partial { completed_files } => {
-                    completed_files.contains(entry.path.as_ref())
+        let (identity, path, schema_version) = match policy {
+            project_model::DiagnosticsBaselinePartitionPolicy::Baseline => {
+                let manifest_entry = snapshot
+                    .manifest
+                    .partitions
+                    .iter()
+                    .find(|entry| entry.partition_id == expected_partition.id)
+                    .ok_or_else(|| {
+                        PartitionedDiagnosticsClassificationError::MissingEnabledPartition(
+                            expected_partition.id.clone(),
+                        )
+                    })?;
+                let partition =
+                    snapshot.partitions.get(&expected_partition.id).cloned().ok_or_else(|| {
+                        PartitionedDiagnosticsClassificationError::MissingEnabledPartition(
+                            expected_partition.id.clone(),
+                        )
+                    })?;
+                let matched = matched.remove(&expected_partition.id).unwrap_or_default();
+                for entry in &partition.entries {
+                    let covered = match partition_coverage {
+                        DiagnosticsBaselineCoverage::Full => true,
+                        DiagnosticsBaselineCoverage::Partial { completed_files } => {
+                            completed_files.contains(entry.path.as_ref())
+                        }
+                    };
+                    if covered && !matched.contains(&entry.fingerprint) {
+                        partition_resolved += 1;
+                    }
                 }
-            };
-            if covered && !matched.contains(&entry.fingerprint) {
-                partition_resolved += 1;
+                resolved.len += partition_resolved;
+                resolved.partitions.push(ResolvedPartition {
+                    id: expected_partition.id.clone(),
+                    partition: partition.clone(),
+                    matched,
+                    coverage: partition_coverage.clone(),
+                });
+                (
+                    partition.identity.clone(),
+                    Some(manifest_entry.file.clone()),
+                    Some(DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION),
+                )
             }
-        }
-        resolved.len += partition_resolved;
-        resolved.partitions.push(ResolvedPartition {
-            id: manifest_entry.partition_id.clone(),
-            partition: partition.clone(),
-            matched,
-            coverage: partition_coverage.clone(),
-        });
-        let (partition_new, partition_known) =
-            counts.get(&manifest_entry.partition_id).copied().unwrap_or_default();
+            project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed => {
+                (expected_partition.identity.clone(), None, None)
+            }
+        };
         partition_summaries.push(DiagnosticsBaselinePartitionSummary {
-            id: manifest_entry.partition_id.clone(),
-            identity: partition.identity.clone(),
-            path: manifest_entry.file.clone(),
-            schema_version: DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+            id: expected_partition.id.clone(),
+            identity,
+            policy,
+            path,
+            schema_version,
             state: if complete {
                 DiagnosticsBaselineState::Full
             } else {
@@ -387,6 +436,7 @@ pub fn classify_partitioned_diagnostics<T>(
             new: partition_new,
             known: partition_known,
             resolved: partition_resolved,
+            unsuppressed: partition_unsuppressed,
             complete,
         });
     }
@@ -397,6 +447,10 @@ pub fn classify_partitioned_diagnostics<T>(
         } else {
             DiagnosticsBaselineState::Partial
         },
+        selection: Some(plan.selection),
+        partitions_enabled: Some(plan.enabled_partition_ids.len()),
+        partitions_unsuppressed: Some(plan.partitions.len() - plan.enabled_partition_ids.len()),
+        unsuppressed: Some(unsuppressed.len()),
         new: Some(new.len()),
         known: Some(known.len()),
         resolved: Some(resolved.len()),
@@ -409,7 +463,7 @@ pub fn classify_partitioned_diagnostics<T>(
         partitions: partition_summaries,
         errors: vec![],
     };
-    Ok(ClassifiedPartitionedDiagnostics { new, known, resolved, summary })
+    Ok(ClassifiedPartitionedDiagnostics { new, known, unsuppressed, resolved, summary })
 }
 
 pub fn migrate_v1_to_partitioned(
@@ -436,11 +490,17 @@ pub fn migrate_v1_to_partitioned(
     Ok(result)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagnosticsBaselineMigrationStats {
+    pub migrated: usize,
+    pub skipped_unsuppressed: usize,
+}
+
 pub fn migrate_v1_reader<R, F>(
     reader: R,
     plan: &DiagnosticsBaselinePartitionPlan,
     mut write_entry: F,
-) -> Result<usize, PartitionedDiagnosticsBaselineError>
+) -> Result<DiagnosticsBaselineMigrationStats, PartitionedDiagnosticsBaselineError>
 where
     R: Read,
     F: FnMut(&str, &DiagnosticsBaselineEntry) -> Result<(), PartitionedDiagnosticsBaselineError>,
@@ -483,7 +543,7 @@ fn expected_v1_scope(
 struct LegacyMigration {
     schema_version: u32,
     scope: crate::diagnostics_baseline::DiagnosticsBaselineScope,
-    entries: usize,
+    entries: DiagnosticsBaselineMigrationStats,
 }
 
 struct LegacyMigrationSeed<'a, F> {
@@ -563,7 +623,7 @@ impl<'de, F> DeserializeSeed<'de> for LegacyEntriesSeed<'_, F>
 where
     F: FnMut(&str, &DiagnosticsBaselineEntry) -> Result<(), PartitionedDiagnosticsBaselineError>,
 {
-    type Value = usize;
+    type Value = DiagnosticsBaselineMigrationStats;
 
     fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
         deserializer.deserialize_seq(LegacyEntriesVisitor {
@@ -582,7 +642,7 @@ impl<'de, F> Visitor<'de> for LegacyEntriesVisitor<'_, F>
 where
     F: FnMut(&str, &DiagnosticsBaselineEntry) -> Result<(), PartitionedDiagnosticsBaselineError>,
 {
-    type Value = usize;
+    type Value = DiagnosticsBaselineMigrationStats;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an array of schema-v1 diagnostics baseline entries")
@@ -590,7 +650,8 @@ where
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = HashSet::new();
-        let mut count = 0;
+        let mut migrated = 0;
+        let mut skipped_unsuppressed = 0;
         while let Some(entry) = sequence.next_element::<DiagnosticsBaselineEntry>()? {
             validate_source_path(&entry.path, false).map_err(A::Error::custom)?;
             if protected(&entry.code) {
@@ -605,21 +666,25 @@ where
                     PartitionedDiagnosticsBaselineError::FingerprintMismatch(entry.fingerprint),
                 ));
             }
-            let fingerprint = parse_hash(&entry.fingerprint).map_err(A::Error::custom)?;
-            if !seen.insert(fingerprint) {
-                return Err(A::Error::custom(PartitionedDiagnosticsBaselineError::Duplicate(
-                    entry.fingerprint,
-                )));
-            }
             let owner = self.plan.owner_for_project_path(&entry.path).ok_or_else(|| {
                 A::Error::custom(PartitionedDiagnosticsBaselineError::UnownedDiagnostic(
                     entry.path.clone(),
                 ))
             })?;
-            (self.write_entry)(owner, &entry).map_err(A::Error::custom)?;
-            count += 1;
+            if self.plan.enabled_partition_ids.iter().any(|id| id == owner) {
+                let fingerprint = parse_hash(&entry.fingerprint).map_err(A::Error::custom)?;
+                if !seen.insert(fingerprint) {
+                    return Err(A::Error::custom(PartitionedDiagnosticsBaselineError::Duplicate(
+                        entry.fingerprint,
+                    )));
+                }
+                (self.write_entry)(owner, &entry).map_err(A::Error::custom)?;
+                migrated += 1;
+            } else {
+                skipped_unsuppressed += 1;
+            }
         }
-        Ok(count)
+        Ok(DiagnosticsBaselineMigrationStats { migrated, skipped_unsuppressed })
     }
 }
 
@@ -678,13 +743,17 @@ fn load_diagnostics_baseline_set_once(
         validate_manifest_shape(&manifest)?;
         let expected: BTreeMap<_, _> =
             plan.partitions.iter().map(|partition| (partition.id.as_str(), partition)).collect();
-        let expected_ids: BTreeSet<_> = expected.keys().copied().collect();
+        let expected_ids: BTreeSet<_> =
+            plan.enabled_partition_ids.iter().map(String::as_str).collect();
         let actual_ids: BTreeSet<_> =
             manifest.partitions.iter().map(|partition| partition.partition_id.as_str()).collect();
         let missing: Vec<_> =
             expected_ids.difference(&actual_ids).map(|id| (*id).to_owned()).collect();
-        let orphan: Vec<_> =
-            actual_ids.difference(&expected_ids).map(|id| (*id).to_owned()).collect();
+        let orphan: Vec<_> = if plan.selection == DiagnosticsBaselineSelection::All {
+            actual_ids.difference(&expected_ids).map(|id| (*id).to_owned()).collect()
+        } else {
+            Vec::new()
+        };
         if !missing.is_empty() {
             return Err(PartitionedDiagnosticsBaselineError::MissingPartitions {
                 ids: missing,
@@ -699,7 +768,12 @@ fn load_diagnostics_baseline_set_once(
             .partitions
             .iter()
             .filter(|entry| {
-                let expected_partition = expected[entry.partition_id.as_str()];
+                let Some(expected_partition) = expected.get(entry.partition_id.as_str()) else {
+                    return false;
+                };
+                if !expected_ids.contains(entry.partition_id.as_str()) {
+                    return false;
+                }
                 previous
                     .and_then(|snapshot| snapshot.partitions.get(&entry.partition_id))
                     .is_some_and(|partition| {
@@ -723,6 +797,9 @@ fn load_diagnostics_baseline_set_once(
         let mut partitions = BTreeMap::new();
         let mut stats = DiagnosticsBaselineLoadStats::default();
         for manifest_entry in &manifest.partitions {
+            if !expected_ids.contains(manifest_entry.partition_id.as_str()) {
+                continue;
+            }
             let expected_partition = expected[manifest_entry.partition_id.as_str()];
             if reusable.contains(manifest_entry.partition_id.as_str()) {
                 let partition = previous.unwrap().partitions[&manifest_entry.partition_id].clone();
@@ -739,6 +816,7 @@ fn load_diagnostics_baseline_set_once(
                 }
                 Err(error) => return Err(error.into()),
             };
+            stats.objects_read.insert(manifest_entry.file.clone());
             let mut reader = HashingReader::new(file);
             let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
             let parsed = PartitionSeed { pool: &mut pool }.deserialize(&mut deserializer)?;
@@ -798,7 +876,9 @@ fn load_diagnostics_baseline_set_once(
                 }),
             );
         }
-        if manifest.project_scope_fingerprint != plan.project_scope_fingerprint {
+        if plan.selection == DiagnosticsBaselineSelection::All
+            && manifest.project_scope_fingerprint != plan.project_scope_fingerprint
+        {
             return Err(PartitionedDiagnosticsBaselineError::ScopeMismatch);
         }
         Ok((
@@ -1254,6 +1334,10 @@ impl PartitionedDiagnosticsBaselineError {
                 partition_id: Some(id),
                 code: "partition_identity_mismatch",
             },
+            Self::ObjectHashMismatch(id) => PartitionedDiagnosticsBaselineErrorInfo {
+                partition_id: Some(id),
+                code: "object_hash_mismatch",
+            },
             Self::ScopeMismatch => PartitionedDiagnosticsBaselineErrorInfo {
                 partition_id: None,
                 code: "scope_mismatch",
@@ -1270,7 +1354,7 @@ mod tests {
     use super::*;
     use project_model::{
         DiagnosticsBaselinePartition, DiagnosticsBaselinePartitionIdentity,
-        DiagnosticsBaselineRootOwner,
+        DiagnosticsBaselineRootOwner, DiagnosticsBaselineSelection,
     };
     use std::io::Write;
     use tempfile::tempdir;
@@ -1335,6 +1419,7 @@ mod tests {
                 }],
             },
             project_scope_fingerprint: "a".repeat(64),
+            selection_fingerprint: "b".repeat(64),
             partitions: vec![
                 DiagnosticsBaselinePartition {
                     id: "main".to_owned(),
@@ -1347,6 +1432,8 @@ mod tests {
                     identity: extension,
                 },
             ],
+            enabled_partition_ids: vec!["main".to_owned(), "extension:Ext".to_owned()],
+            selection: DiagnosticsBaselineSelection::All,
             roots: vec![
                 DiagnosticsBaselineRootOwner {
                     root: "src/cfe/Ext".to_owned(),
@@ -1358,6 +1445,14 @@ mod tests {
                 },
             ],
         }
+    }
+
+    fn selective_plan(enabled: &[&str]) -> DiagnosticsBaselinePartitionPlan {
+        let mut plan = plan();
+        plan.enabled_partition_ids = enabled.iter().map(|id| (*id).to_owned()).collect();
+        plan.selection = DiagnosticsBaselineSelection::Selective;
+        plan.selection_fingerprint = "c".repeat(64);
+        plan
     }
 
     fn write_set(
@@ -1565,6 +1660,373 @@ mod tests {
     }
 
     #[test]
+    fn selective_manifest_keeps_existing_schemas_and_deterministic_effective_epoch() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main"]);
+        let mut manifest = write_set(&directory, &plan);
+        let dormant =
+            manifest.partitions.iter().find(|entry| entry.partition_id == "extension:Ext").unwrap();
+        std::fs::remove_file(root.path().join("baselines").join(&dormant.file)).unwrap();
+
+        let (snapshot, stats) =
+            load_diagnostics_baseline_set_reusing(&directory, &plan, None, &BTreeSet::new())
+                .unwrap();
+        assert_eq!(snapshot.manifest.schema_version, DIAGNOSTICS_BASELINE_MANIFEST_SCHEMA_VERSION);
+        assert_eq!(snapshot.partitions.len(), 1);
+        assert_eq!(snapshot.partitions["main"].identity, plan.partitions[0].identity);
+        assert_eq!(stats.partitions_parsed, 1);
+        assert_eq!(
+            stats.objects_read,
+            BTreeSet::from([snapshot.partitions["main"].file.to_string()])
+        );
+        assert_eq!(plan.selection_fingerprint, "c".repeat(64));
+
+        manifest.partitions.retain(|entry| entry.partition_id == "main");
+        manifest =
+            diagnostics_manifest(manifest.project_scope_fingerprint.clone(), manifest.partitions);
+        std::fs::write(
+            root.path().join("baselines/manifest.json"),
+            diagnostics_manifest_json(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(load_diagnostics_baseline_set(&directory, &plan).is_ok());
+    }
+
+    #[test]
+    fn selective_loader_fails_closed_for_every_enabled_object_error() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main"]);
+        let manifest = write_set(&directory, &plan);
+        let main = manifest.partitions.iter().find(|entry| entry.partition_id == "main").unwrap();
+        std::fs::remove_file(root.path().join("baselines").join(&main.file)).unwrap();
+        assert!(matches!(
+            load_diagnostics_baseline_set(&directory, &plan),
+            Err(PartitionedDiagnosticsBaselineError::MissingPartitions { ids, .. }) if ids == ["main"]
+        ));
+
+        let corrupt_root = tempdir().unwrap();
+        let corrupt_directory =
+            ManagedBaselineDirectory::open(corrupt_root.path(), "baselines", true).unwrap();
+        let corrupt_manifest = write_set(&corrupt_directory, &plan);
+        let main =
+            corrupt_manifest.partitions.iter().find(|entry| entry.partition_id == "main").unwrap();
+        std::fs::write(corrupt_root.path().join("baselines").join(&main.file), b"{}\n").unwrap();
+        assert!(load_diagnostics_baseline_set(&corrupt_directory, &plan).is_err());
+    }
+
+    #[test]
+    fn selective_loader_rejects_unsafe_enabled_paths_and_links() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main"]);
+        let mut manifest = write_set(&directory, &plan);
+        let main =
+            manifest.partitions.iter_mut().find(|entry| entry.partition_id == "main").unwrap();
+        main.file = "../escape.json".to_owned();
+        manifest =
+            diagnostics_manifest(manifest.project_scope_fingerprint.clone(), manifest.partitions);
+        std::fs::write(
+            root.path().join("baselines/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            load_diagnostics_baseline_set(&directory, &plan),
+            Err(PartitionedDiagnosticsBaselineError::InvalidPath(path)) if path == "../escape.json"
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let enabled_root = tempdir().unwrap();
+            let enabled_directory =
+                ManagedBaselineDirectory::open(enabled_root.path(), "baselines", true).unwrap();
+            let manifest = write_set(&enabled_directory, &plan);
+            let main =
+                manifest.partitions.iter().find(|entry| entry.partition_id == "main").unwrap();
+            let main_path = enabled_root.path().join("baselines").join(&main.file);
+            std::fs::remove_file(&main_path).unwrap();
+            symlink(enabled_root.path().join("outside.json"), &main_path).unwrap();
+            assert!(load_diagnostics_baseline_set(&enabled_directory, &plan).is_err());
+
+            let dormant_root = tempdir().unwrap();
+            let dormant_directory =
+                ManagedBaselineDirectory::open(dormant_root.path(), "baselines", true).unwrap();
+            let manifest = write_set(&dormant_directory, &plan);
+            let dormant = manifest
+                .partitions
+                .iter()
+                .find(|entry| entry.partition_id == "extension:Ext")
+                .unwrap();
+            let dormant_path = dormant_root.path().join("baselines").join(&dormant.file);
+            std::fs::remove_file(&dormant_path).unwrap();
+            symlink(dormant_root.path().join("outside.json"), dormant_path).unwrap();
+            assert!(load_diagnostics_baseline_set(&dormant_directory, &plan).is_ok());
+        }
+    }
+
+    #[test]
+    fn selective_loader_validates_enabled_identity_instead_of_global_scope() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let original = plan();
+        write_set(&directory, &original);
+        let mut changed = selective_plan(&["main"]);
+        changed.project_scope_fingerprint = "d".repeat(64);
+        changed.partitions[1].identity = DiagnosticsBaselinePartitionIdentity::Extension {
+            name: "Ext".to_owned(),
+            path: "src/cfe/Renamed".to_owned(),
+            depends_on: vec![],
+        };
+        let snapshot = load_diagnostics_baseline_set(&directory, &changed).unwrap();
+        assert_eq!(snapshot.partitions.len(), 1);
+        assert_eq!(snapshot.partitions["main"].identity, changed.partitions[0].identity);
+    }
+
+    #[test]
+    fn selective_scope_ignores_changes_outside_enabled_owners() {
+        selective_loader_validates_enabled_identity_instead_of_global_scope();
+    }
+
+    #[test]
+    fn selective_classifier_rejects_incompatible_snapshot_and_plan_without_panic() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let full = plan();
+        write_set(&directory, &full);
+        let snapshot =
+            load_diagnostics_baseline_set(&directory, &selective_plan(&["main"])).unwrap();
+        let coverage = full
+            .partitions
+            .iter()
+            .map(|partition| (partition.id.clone(), DiagnosticsBaselineCoverage::Full))
+            .collect();
+        let error = classify_partitioned_diagnostics::<()>(
+            &snapshot,
+            &full,
+            "baselines".to_owned(),
+            vec![],
+            &coverage,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            PartitionedDiagnosticsClassificationError::MissingEnabledPartition(ref id)
+                if id == "extension:Ext"
+        ));
+    }
+
+    #[test]
+    fn selective_loader_defers_dormant_content_validation_until_reenable() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let full = plan();
+        let mut manifest = write_set(&directory, &full);
+        let extension =
+            full.partitions.iter().find(|partition| partition.id == "extension:Ext").unwrap();
+        let duplicate = entry("src/cfe/Ext/CommonModules/B/Ext/Module.bsl", "UsingGoto");
+        let bytes = pretty_json(&DiagnosticsBaselinePartitionFile {
+            schema_version: DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+            partition: extension.identity.clone(),
+            diagnostics: vec![duplicate.clone(), duplicate],
+        })
+        .unwrap();
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let file = partition_object_path(&extension.id, &extension.key, &hash).unwrap();
+        directory.create_file_new(&file).unwrap().write_all(&bytes).unwrap();
+        let dormant = manifest
+            .partitions
+            .iter_mut()
+            .find(|entry| entry.partition_id == extension.id)
+            .unwrap();
+        dormant.file = file;
+        dormant.blake3 = hash;
+        manifest =
+            diagnostics_manifest(manifest.project_scope_fingerprint.clone(), manifest.partitions);
+        std::fs::write(
+            root.path().join("baselines/manifest.json"),
+            diagnostics_manifest_json(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let selective = selective_plan(&["main"]);
+        assert!(load_diagnostics_baseline_set(&directory, &selective).is_ok());
+        assert!(load_diagnostics_baseline_set(&directory, &full).is_err());
+
+        let mut duplicate_manifest = manifest;
+        duplicate_manifest.partitions.push(
+            duplicate_manifest
+                .partitions
+                .iter()
+                .find(|entry| entry.partition_id == "extension:Ext")
+                .unwrap()
+                .clone(),
+        );
+        duplicate_manifest = diagnostics_manifest(
+            duplicate_manifest.project_scope_fingerprint.clone(),
+            duplicate_manifest.partitions,
+        );
+        assert!(matches!(
+            diagnostics_manifest_json(&duplicate_manifest),
+            Err(PartitionedDiagnosticsBaselineError::DuplicatePartition(id))
+                if id == "extension:Ext"
+        ));
+    }
+
+    #[test]
+    fn selective_baseline_manifest() {
+        selective_manifest_keeps_existing_schemas_and_deterministic_effective_epoch();
+        selective_loader_fails_closed_for_every_enabled_object_error();
+        selective_loader_validates_enabled_identity_instead_of_global_scope();
+        selective_loader_defers_dormant_content_validation_until_reenable();
+    }
+
+    fn classify_selective(
+        current: Vec<PartitionedBaselineDiagnosticCandidate<()>>,
+    ) -> ClassifiedPartitionedDiagnostics<()> {
+        classify_selective_with_coverage(current, DiagnosticsBaselineCoverage::Full)
+    }
+
+    fn classify_selective_with_coverage(
+        current: Vec<PartitionedBaselineDiagnosticCandidate<()>>,
+        extension_coverage: DiagnosticsBaselineCoverage,
+    ) -> ClassifiedPartitionedDiagnostics<()> {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main"]);
+        write_set(&directory, &plan);
+        let snapshot = load_diagnostics_baseline_set(&directory, &plan).unwrap();
+        let coverage = BTreeMap::from([
+            ("main".to_owned(), DiagnosticsBaselineCoverage::Full),
+            ("extension:Ext".to_owned(), extension_coverage),
+        ]);
+        classify_partitioned_diagnostics(
+            &snapshot,
+            &plan,
+            "baselines".to_owned(),
+            current,
+            &coverage,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selective_classifier_keeps_unsuppressed_diagnostics_visible() {
+        let classified = classify_selective(vec![candidate(
+            "extension:Ext",
+            "src/cfe/Ext/CommonModules/B/Ext/Module.bsl",
+            "UsingGoto",
+        )]);
+        assert_eq!(classified.unsuppressed.len(), 1);
+        assert!(classified.new.is_empty());
+        assert!(classified.known.is_empty());
+    }
+
+    #[test]
+    fn selective_classifier_never_looks_up_another_partition() {
+        let classified = classify_selective(vec![candidate(
+            "extension:Ext",
+            "src/cf/CommonModules/A/Ext/Module.bsl",
+            "LineLength",
+        )]);
+        assert_eq!(classified.unsuppressed.len(), 1);
+        assert!(classified.known.is_empty());
+    }
+
+    #[test]
+    fn selective_classifier_preserves_protected_diagnostics_for_both_policies() {
+        let classified = classify_selective(vec![
+            candidate("main", "src/cf/CommonModules/A/Ext/Module.bsl", "UnknownSuppressionCode"),
+            candidate(
+                "extension:Ext",
+                "src/cfe/Ext/CommonModules/B/Ext/Module.bsl",
+                "SuppressionWithoutCode",
+            ),
+        ]);
+        assert_eq!(classified.new.len(), 2);
+        assert!(classified.unsuppressed.is_empty());
+        assert!(classified.known.is_empty());
+    }
+
+    #[test]
+    fn selective_baseline_classification() {
+        selective_classifier_keeps_unsuppressed_diagnostics_visible();
+        selective_classifier_never_looks_up_another_partition();
+        selective_classifier_preserves_protected_diagnostics_for_both_policies();
+    }
+
+    #[test]
+    fn selective_summary_separates_enabled_counts_from_unsuppressed() {
+        let classified = classify_selective(vec![
+            candidate("main", "src/cf/CommonModules/A/Ext/Module.bsl", "LineLength"),
+            candidate("extension:Ext", "src/cfe/Ext/CommonModules/B/Ext/Module.bsl", "UsingGoto"),
+            candidate(
+                "extension:Ext",
+                "src/cfe/Ext/CommonModules/B/Ext/Module.bsl",
+                "CyclomaticComplexity",
+            ),
+            candidate("extension:Ext", "src/cfe/Ext/CommonModules/B/Ext/Module.bsl", "LineLength"),
+        ]);
+        let summary = classified.summary;
+        assert_eq!(summary.selection, Some(DiagnosticsBaselineSelection::Selective));
+        assert_eq!(summary.partitions_enabled, Some(1));
+        assert_eq!(summary.partitions_unsuppressed, Some(1));
+        assert_eq!(summary.unsuppressed, Some(3));
+        assert_eq!((summary.new, summary.known, summary.resolved), (Some(0), Some(1), Some(0)));
+        assert!(summary.complete);
+        assert_eq!(summary.partitions[0].id, "main");
+        assert_eq!(
+            summary.partitions[0].policy,
+            project_model::DiagnosticsBaselinePartitionPolicy::Baseline
+        );
+        assert!(summary.partitions[0].path.is_some());
+        assert_eq!(summary.partitions[1].id, "extension:Ext");
+        assert_eq!(
+            summary.partitions[1].policy,
+            project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed
+        );
+        assert_eq!(summary.partitions[1].unsuppressed, 3);
+        assert!(summary.partitions[1].path.is_none());
+    }
+
+    #[test]
+    fn selective_coverage_does_not_hide_partial_unsuppressed_owner() {
+        let classified = classify_selective_with_coverage(
+            vec![candidate(
+                "extension:Ext",
+                "src/cfe/Ext/CommonModules/B/Ext/Module.bsl",
+                "UsingGoto",
+            )],
+            DiagnosticsBaselineCoverage::Partial { completed_files: BTreeSet::new() },
+        );
+        assert_eq!(classified.summary.state, DiagnosticsBaselineState::Partial);
+        assert!(!classified.summary.complete);
+        let extension = &classified.summary.partitions[1];
+        assert_eq!(extension.state, DiagnosticsBaselineState::Partial);
+        assert!(!extension.complete);
+        assert_eq!(extension.unsuppressed, 1);
+    }
+
+    #[test]
+    fn selective_resolved_is_computed_only_for_full_enabled_partitions() {
+        let classified = classify_selective(vec![]);
+        assert_eq!(classified.resolved.len(), 1);
+        assert_eq!(classified.summary.resolved, Some(1));
+        assert_eq!(classified.summary.partitions[0].resolved, 1);
+        assert_eq!(classified.summary.partitions[1].resolved, 0);
+    }
+
+    #[test]
+    fn selective_baseline_coverage_and_summary() {
+        selective_summary_separates_enabled_counts_from_unsuppressed();
+        selective_coverage_does_not_hide_partial_unsuppressed_owner();
+        selective_resolved_is_computed_only_for_full_enabled_partitions();
+    }
+
+    #[test]
     fn partitioned_baseline_classification_and_summary_routes_once() {
         let root = tempdir().unwrap();
         let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
@@ -1587,9 +2049,14 @@ mod tests {
                 },
             ),
         ]);
-        let classified =
-            classify_partitioned_diagnostics(&snapshot, "baselines".to_owned(), current, &coverage)
-                .unwrap();
+        let classified = classify_partitioned_diagnostics(
+            &snapshot,
+            &plan,
+            "baselines".to_owned(),
+            current,
+            &coverage,
+        )
+        .unwrap();
         assert_eq!(
             (classified.new.len(), classified.known.len(), classified.resolved.len()),
             (2, 1, 1)

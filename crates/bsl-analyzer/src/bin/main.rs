@@ -142,6 +142,8 @@ enum Commands {
         source_set: cli::source_set::SourceSetArgs,
     },
 
+    /// Manage diagnostics baselines. For partitioned baselines, `include` enables
+    /// suppression only for selected owners; all other diagnostics remain unsuppressed.
     Diagnostics {
         #[command(subcommand)]
         command: DiagnosticsCommand,

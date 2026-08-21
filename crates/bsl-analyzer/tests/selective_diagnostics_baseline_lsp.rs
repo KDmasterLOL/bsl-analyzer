@@ -1,0 +1,249 @@
+include!("diagnostics_baseline_lsp.rs");
+
+const UNSUPPRESSED: &str =
+    "Процедура Тест()\n    // bsl-analyzer:off NoSuchRule\n    А = А;\nКонецПроцедуры\n";
+
+fn selective_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for source in ["src/cf", "src/cfe/Ext"] {
+        std::fs::create_dir_all(dir.path().join(source)).unwrap();
+        std::fs::write(dir.path().join(source).join("Configuration.xml"), "<Configuration/>")
+            .unwrap();
+    }
+    std::fs::write(dir.path().join("src/cf/Main.bsl"), BROKEN).unwrap();
+    std::fs::write(dir.path().join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED).unwrap();
+    std::fs::write(
+        dir.path().join("bsl-analyzer.toml"),
+        r#"[source]
+root = "src/cf"
+extensions = [{ name = "Ext", path = "src/cfe/Ext" }]
+[diagnostics.baseline]
+directory = "baselines"
+include = ["main"]
+"#,
+    )
+    .unwrap();
+    let created = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .current_dir(dir.path())
+        .args(["diagnostics", "baseline", "create", "-s", "."])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    dir
+}
+
+fn full_manifest_selective_project() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    for source in ["src/cf", "src/cfe/Ext"] {
+        std::fs::create_dir_all(dir.path().join(source)).unwrap();
+        std::fs::write(dir.path().join(source).join("Configuration.xml"), "<Configuration/>")
+            .unwrap();
+    }
+    std::fs::write(dir.path().join("src/cf/Main.bsl"), BROKEN).unwrap();
+    std::fs::write(dir.path().join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED).unwrap();
+    let config = |include: &str| {
+        std::fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            format!(
+                r#"[source]
+root = "src/cf"
+extensions = [{{ name = "Ext", path = "src/cfe/Ext" }}]
+[diagnostics.baseline]
+directory = "baselines"
+{include}"#
+            ),
+        )
+        .unwrap();
+    };
+    config("");
+    let created = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .current_dir(dir.path())
+        .args(["diagnostics", "baseline", "create", "-s", "."])
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+    config("include = [\"main\"]\n");
+    dir
+}
+
+#[test]
+fn selective_lsp_publishes_new_unsuppressed_and_protected() {
+    let dir = selective_project();
+    let root = dir.path();
+    let mut lsp = Lsp::start(root);
+    let main = lsp.open(&root.join("src/cf/Main.bsl"), BROKEN);
+    assert!(main["params"]["diagnostics"].as_array().unwrap().is_empty());
+    let ext = lsp.open(&root.join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED);
+    let codes = ext["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|diagnostic| diagnostic["code"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(codes.contains("SelfAssign"));
+    assert!(codes.contains("UnknownSuppressionCode"));
+}
+
+#[test]
+fn selective_lsp_enabled_error_is_fail_visible_and_recovers() {
+    let dir = selective_project();
+    let root = dir.path();
+    let mut lsp = Lsp::start(root);
+    assert!(lsp.open(&root.join("src/cf/Main.bsl"), BROKEN)["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!lsp.open(&root.join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED)["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("baselines/manifest.json")).unwrap())
+            .unwrap();
+    let relative = manifest["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["partition_id"] == "main")
+        .unwrap()["file"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let object = root.join("baselines").join(&relative);
+    let valid = std::fs::read(&object).unwrap();
+    std::fs::write(&object, b"{broken").unwrap();
+    let main_uri = lsp_types::Url::from_file_path(root.join("src/cf/Main.bsl")).unwrap();
+    let ext_uri = lsp_types::Url::from_file_path(root.join("src/cfe/Ext/Ext.bsl")).unwrap();
+    let (mut notified, mut main_seen, mut ext_seen) = (false, false, false);
+    while !notified || !main_seen || !ext_seen {
+        let message = lsp.wait_for(|_| true);
+        if message["method"] == "window/showMessage" {
+            notified = true;
+        } else if message["method"] == "textDocument/publishDiagnostics" {
+            let uri = message["params"]["uri"].as_str().unwrap();
+            if uri == main_uri.as_str() || uri == ext_uri.as_str() {
+                assert!(!message["params"]["diagnostics"].as_array().unwrap().is_empty());
+                main_seen |= uri == main_uri.as_str();
+                ext_seen |= uri == ext_uri.as_str();
+            }
+        }
+    }
+
+    std::fs::write(&object, b"{broken").unwrap();
+    let duplicate = std::time::Instant::now() + Duration::from_millis(500);
+    while std::time::Instant::now() < duplicate {
+        match lsp.messages.recv_timeout(Duration::from_millis(50)) {
+            Ok(message) => assert_ne!(message["method"], "window/showMessage"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let directory =
+        project_model::ManagedBaselineDirectory::open(root, "baselines", false).unwrap();
+    directory.create_file_new("replacement.tmp").unwrap().write_all(&valid).unwrap();
+    directory.replace_file("replacement.tmp", &relative).unwrap();
+    let mut main_seen = false;
+    let mut ext_seen = false;
+    while !main_seen || !ext_seen {
+        let message =
+            lsp.wait_for(|message| message["method"] == "textDocument/publishDiagnostics");
+        let uri = message["params"]["uri"].as_str().unwrap();
+        if uri == main_uri.as_str() {
+            assert!(message["params"]["diagnostics"].as_array().unwrap().is_empty());
+            main_seen = true;
+        } else if uri == ext_uri.as_str() {
+            assert!(!message["params"]["diagnostics"].as_array().unwrap().is_empty());
+            ext_seen = true;
+        }
+    }
+
+    std::fs::write(&object, b"{broken-again").unwrap();
+    let notified = lsp.wait_for(|message| message["method"] == "window/showMessage");
+    assert!(notified["params"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("diagnostics baseline")));
+}
+
+#[test]
+fn selective_lsp_config_reload_applies_selection_and_republishes() {
+    let dir = full_manifest_selective_project();
+    let root = dir.path();
+    let mut lsp = Lsp::start(root);
+    assert!(lsp.open(&root.join("src/cf/Main.bsl"), BROKEN)["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert!(!lsp.open(&root.join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED)["params"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    std::fs::write(
+        root.join("bsl-analyzer.toml"),
+        r#"[source]
+root = "src/cf"
+extensions = [{ name = "Ext", path = "src/cfe/Ext" }]
+[diagnostics.baseline]
+directory = "baselines"
+include = ["main", "extension:Ext"]
+"#,
+    )
+    .unwrap();
+    let mut remaining = std::collections::BTreeSet::from([
+        lsp_types::Url::from_file_path(root.join("src/cf/Main.bsl")).unwrap().to_string(),
+        lsp_types::Url::from_file_path(root.join("src/cfe/Ext/Ext.bsl")).unwrap().to_string(),
+    ]);
+    while !remaining.is_empty() {
+        let message = lsp.wait_for(|message| {
+            message["method"] == "textDocument/publishDiagnostics"
+                && message["params"]["uri"].as_str().is_some_and(|uri| remaining.contains(uri))
+        });
+        let uri = message["params"]["uri"].as_str().unwrap();
+        let diagnostics = message["params"]["diagnostics"].as_array().unwrap();
+        let final_state = if uri.ends_with("Main.bsl") {
+            diagnostics.is_empty()
+        } else {
+            !diagnostics.is_empty()
+                && diagnostics
+                    .iter()
+                    .all(|diagnostic| diagnostic["code"].as_str() == Some("UnknownSuppressionCode"))
+        };
+        if final_state {
+            remaining.remove(uri);
+        }
+    }
+}
+
+#[test]
+fn selective_lsp_does_not_watch_unsuppressed_objects() {
+    let dir = full_manifest_selective_project();
+    let root = dir.path();
+    let mut lsp = Lsp::start(root);
+    lsp.open(&root.join("src/cf/Main.bsl"), BROKEN);
+    lsp.open(&root.join("src/cfe/Ext/Ext.bsl"), UNSUPPRESSED);
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("baselines/manifest.json")).unwrap())
+            .unwrap();
+    let dormant = manifest["partitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["partition_id"] == "extension:Ext")
+        .unwrap()["file"]
+        .as_str()
+        .unwrap();
+    std::fs::write(root.join("baselines").join(dormant), b"{broken").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while std::time::Instant::now() < deadline {
+        match lsp.messages.recv_timeout(Duration::from_millis(50)) {
+            Ok(message) => assert!(
+                message["method"] != "window/showMessage"
+                    && message["method"] != "textDocument/publishDiagnostics",
+                "dormant object caused LSP activity: {message}"
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}

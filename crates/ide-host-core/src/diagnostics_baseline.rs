@@ -32,6 +32,9 @@ pub enum DiagnosticsBaselineSnapshot {
     Error {
         path: Option<PathBuf>,
         observation_paths: Vec<PathBuf>,
+        selection: Option<project_model::DiagnosticsBaselineSelection>,
+        partitions_enabled: Option<usize>,
+        partitions_unsuppressed: Option<usize>,
         code: String,
         detail: String,
         epoch: String,
@@ -44,14 +47,10 @@ impl DiagnosticsBaselineSnapshot {
         let Self::ReadySet { baseline: previous_set, observations, path, .. } = previous else {
             return Self::load(project);
         };
-        let changed: BTreeSet<_> = previous_set
-            .manifest
-            .partitions
+        let changed: BTreeSet<_> = observations
             .iter()
-            .filter(|entry| {
-                observations.get(&entry.file) != Some(&observe(&path.join(&entry.file)))
-            })
-            .map(|entry| entry.file.clone())
+            .filter(|(file, previous)| **previous != observe(&path.join(file)))
+            .map(|(file, _)| file.clone())
             .collect();
         Self::load_partitioned(project, Some(previous_set), &changed)
             .unwrap_or_else(|| Self::load(project))
@@ -79,7 +78,7 @@ impl DiagnosticsBaselineSnapshot {
         let (baseline, _) =
             load_diagnostics_baseline_set_reusing(&directory, &plan, previous, changed_objects)
                 .ok()?;
-        let epoch = blake3::Hash::from_bytes(baseline.manifest_hash).to_hex().to_string();
+        let epoch = partitioned_epoch(&baseline, &plan);
         let observations = object_observations(&resolved.path, &baseline);
         Some(Self::ReadySet {
             baseline: std::sync::Arc::new(baseline),
@@ -157,8 +156,7 @@ impl DiagnosticsBaselineSnapshot {
             };
             return match load_diagnostics_baseline_set(&directory, &plan) {
                 Ok(baseline) => {
-                    let epoch =
-                        blake3::Hash::from_bytes(baseline.manifest_hash).to_hex().to_string();
+                    let epoch = partitioned_epoch(&baseline, &plan);
                     let observations = object_observations(&resolved.path, &baseline);
                     Self::ReadySet {
                         baseline: std::sync::Arc::new(baseline),
@@ -171,15 +169,28 @@ impl DiagnosticsBaselineSnapshot {
                 }
                 Err(error) => {
                     let detail = error.to_string();
-                    let (observation_paths, observed_bytes) =
-                        partitioned_error_observation(&project.root, &resolved.project_path);
-                    let snapshot = Self::error_observed_many(
+                    let (observation_paths, observed_bytes) = partitioned_error_observation(
+                        &project.root,
+                        &resolved.project_path,
+                        &plan.enabled_partition_ids,
+                    );
+                    let mut snapshot = Self::error_observed_many(
                         Some(resolved.path),
                         observation_paths,
                         error.info().code,
                         &observed_bytes,
                         detail,
                     );
+                    let Self::Error {
+                        selection, partitions_enabled, partitions_unsuppressed, ..
+                    } = &mut snapshot
+                    else {
+                        unreachable!()
+                    };
+                    *selection = Some(plan.selection);
+                    *partitions_enabled = Some(plan.enabled_partition_ids.len());
+                    *partitions_unsuppressed =
+                        Some(plan.partitions.len() - plan.enabled_partition_ids.len());
                     Self::with_partition_errors(snapshot, &error)
                 }
             };
@@ -248,13 +259,14 @@ impl DiagnosticsBaselineSnapshot {
         for observation_path in &observation_paths {
             fingerprint.update(&[0]);
             fingerprint.update(observation_path.to_string_lossy().as_bytes());
-            fingerprint.update(&[0]);
-            fingerprint.update(observe(observation_path).as_bytes());
         }
         let epoch = fingerprint.finalize().to_hex().to_string();
         Self::Error {
             path,
             observation_paths,
+            selection: None,
+            partitions_enabled: None,
+            partitions_unsuppressed: None,
             code: code.to_owned(),
             detail: detail.clone(),
             epoch: epoch.clone(),
@@ -341,7 +353,7 @@ impl DiagnosticsBaselineSnapshot {
         match self {
             Self::Ready { path, .. } => vec![path.clone()],
             Self::ReadySet { path, baseline, .. } => std::iter::once(path.join("manifest.json"))
-                .chain(baseline.manifest.partitions.iter().map(|entry| path.join(&entry.file)))
+                .chain(baseline.partitions.values().map(|partition| path.join(&*partition.file)))
                 .collect(),
             Self::Error { path, observation_paths, .. } => {
                 if observation_paths.is_empty() {
@@ -377,9 +389,25 @@ impl DiagnosticsBaselineSnapshot {
     }
 
     pub fn error_summary(&self) -> Option<DiagnosticsBaselineSummary> {
-        let Self::Error { path, code, detail, errors, .. } = self else { return None };
+        let Self::Error {
+            path,
+            selection,
+            partitions_enabled,
+            partitions_unsuppressed,
+            code,
+            detail,
+            errors,
+            ..
+        } = self
+        else {
+            return None;
+        };
         Some(DiagnosticsBaselineSummary {
             state: DiagnosticsBaselineState::Error,
+            selection: *selection,
+            partitions_enabled: *partitions_enabled,
+            partitions_unsuppressed: *partitions_unsuppressed,
+            unsuppressed: None,
             new: None,
             known: None,
             resolved: None,
@@ -457,16 +485,30 @@ fn object_observations(
     baseline: &DiagnosticsBaselineSetSnapshot,
 ) -> BTreeMap<String, String> {
     baseline
-        .manifest
         .partitions
-        .iter()
-        .map(|entry| (entry.file.clone(), observe(&directory.join(&entry.file))))
+        .values()
+        .map(|partition| {
+            let file = partition.file.to_string();
+            (file.clone(), observe(&directory.join(file)))
+        })
         .collect()
+}
+
+fn partitioned_epoch(
+    baseline: &DiagnosticsBaselineSetSnapshot,
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"bsl-analyzer/diagnostics-baseline/effective-epoch/v1\0");
+    hasher.update(&baseline.manifest_hash);
+    hasher.update(plan.selection_fingerprint.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 fn partitioned_error_observation(
     project_root: &Path,
     project_path: &str,
+    enabled_partition_ids: &[String],
 ) -> (Vec<PathBuf>, [u8; 32]) {
     let directory = project_root.join(project_path);
     let manifest_path = directory.join("manifest.json");
@@ -490,7 +532,11 @@ fn partitioned_error_observation(
     >(&bytes)
     {
         let mut buffer = [0u8; 64 * 1024];
-        for entry in manifest.partitions {
+        for entry in manifest
+            .partitions
+            .into_iter()
+            .filter(|entry| enabled_partition_ids.contains(&entry.partition_id))
+        {
             let Ok(relative) = managed.validated_relative_path(&entry.file) else { continue };
             paths.push(project_root.join(relative));
             let Ok(mut file) = managed.open_file(&entry.file) else { continue };
@@ -511,7 +557,109 @@ fn partitioned_error_observation(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use ide::partitioned_diagnostics_baseline::{
+        diagnostics_manifest, diagnostics_manifest_json, diagnostics_partition_json,
+        partition_object_path, DiagnosticsBaselineManifestEntry,
+    };
+    use std::io::Write;
     use std::os::unix::fs::symlink;
+
+    fn selective_project(root: &Path) -> project_model::Project {
+        std::fs::write(
+            root.join("bsl-analyzer.toml"),
+            r#"
+[source]
+root = "src/cf"
+extensions = [{ name = "Ext", path = "src/cfe/Ext" }]
+
+[diagnostics.baseline]
+directory = "baselines"
+include = ["main"]
+"#,
+        )
+        .unwrap();
+        let config = project_model::ProjectConfig::load(root).unwrap().unwrap();
+        project_model::Project::with_config(root, config).unwrap()
+    }
+
+    fn write_selective_set(
+        root: &Path,
+        plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    ) -> ide::partitioned_diagnostics_baseline::DiagnosticsBaselineManifest {
+        let directory =
+            project_model::ManagedBaselineDirectory::open(root, "baselines", true).unwrap();
+        let mut entries = Vec::new();
+        for partition in &plan.partitions {
+            let bytes = diagnostics_partition_json(partition.identity.clone(), vec![]).unwrap();
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let file = partition_object_path(&partition.id, &partition.key, &hash).unwrap();
+            directory.create_file_new(&file).unwrap().write_all(&bytes).unwrap();
+            entries.push(DiagnosticsBaselineManifestEntry {
+                partition_id: partition.id.clone(),
+                file,
+                blake3: hash,
+            });
+        }
+        let manifest = diagnostics_manifest(plan.project_scope_fingerprint.clone(), entries);
+        directory
+            .create_file_new("manifest.json")
+            .unwrap()
+            .write_all(&diagnostics_manifest_json(&manifest).unwrap())
+            .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn selective_baseline_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/cf")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src/cfe/Ext")).unwrap();
+        std::fs::write(dir.path().join("src/cf/Configuration.xml"), "<xml/>").unwrap();
+        std::fs::write(dir.path().join("src/cfe/Ext/Configuration.xml"), "<xml/>").unwrap();
+        let project = selective_project(dir.path());
+        let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        let manifest = write_selective_set(dir.path(), &plan);
+
+        let first = DiagnosticsBaselineSnapshot::load(&project);
+        let DiagnosticsBaselineSnapshot::ReadySet {
+            baseline: first_set,
+            observations,
+            epoch: first_epoch,
+            ..
+        } = &first
+        else {
+            panic!("expected ready selective baseline")
+        };
+        assert_eq!(observations.len(), 1);
+        assert_eq!(first.observation_paths().len(), 2);
+        let main = first_set.partitions["main"].clone();
+        let dormant =
+            manifest.partitions.iter().find(|entry| entry.partition_id == "extension:Ext").unwrap();
+        assert!(!first
+            .observation_paths()
+            .contains(&dir.path().join("baselines").join(&dormant.file)));
+        std::fs::write(dir.path().join("baselines").join(&dormant.file), b"dormant changed")
+            .unwrap();
+
+        let second = DiagnosticsBaselineSnapshot::load_reusing(&project, &first);
+        let DiagnosticsBaselineSnapshot::ReadySet {
+            baseline: second_set,
+            observations: second_observations,
+            epoch: second_epoch,
+            ..
+        } = second
+        else {
+            panic!("dormant change must not invalidate selective baseline")
+        };
+        assert!(std::sync::Arc::ptr_eq(&main, &second_set.partitions["main"]));
+        assert_eq!(second_observations.len(), 1);
+        assert_eq!(second_epoch, *first_epoch);
+    }
+
+    #[test]
+    fn selective_loader_never_reads_or_watches_unsuppressed_objects() {
+        selective_baseline_reload();
+    }
 
     #[test]
     fn partitioned_error_observation_rejects_manifest_path_escape() {
@@ -523,7 +671,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            partitioned_error_observation(dir.path(), "baselines").0,
+            partitioned_error_observation(dir.path(), "baselines", &[]).0,
             vec![dir.path().join("baselines/manifest.json")]
         );
     }
@@ -534,7 +682,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("manifest.json"), b"secret").unwrap();
         symlink(outside.path(), dir.path().join("baselines")).unwrap();
-        assert!(partitioned_error_observation(dir.path(), "baselines").0.is_empty());
+        assert!(partitioned_error_observation(dir.path(), "baselines", &[]).0.is_empty());
     }
 
     #[test]
@@ -543,9 +691,9 @@ mod tests {
         std::fs::create_dir(dir.path().join("baselines")).unwrap();
         let manifest = dir.path().join("baselines/manifest.json");
         std::fs::write(&manifest, b"broken-a").unwrap();
-        let first = partitioned_error_observation(dir.path(), "baselines").1;
+        let first = partitioned_error_observation(dir.path(), "baselines", &[]).1;
         std::fs::write(&manifest, b"broken-b").unwrap();
-        assert_ne!(partitioned_error_observation(dir.path(), "baselines").1, first);
+        assert_ne!(partitioned_error_observation(dir.path(), "baselines", &[]).1, first);
     }
 
     #[test]

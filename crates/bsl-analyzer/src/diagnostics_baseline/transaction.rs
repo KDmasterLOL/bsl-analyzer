@@ -18,6 +18,7 @@ pub enum PreparedPartition {
     Write { id: String, key: String, bytes: Vec<u8> },
     Staged { id: String, key: String, path: String, hash: String },
     Reuse { id: String, key: String, entry: DiagnosticsBaselineManifestEntry },
+    Carry { id: String, key: String, entry: DiagnosticsBaselineManifestEntry },
 }
 
 pub struct PartitionFileWriter<'a> {
@@ -248,6 +249,15 @@ fn publish_set_with_hook(
                 entries.push(entry);
                 reused += 1;
             }
+            PreparedPartition::Carry { id, key, entry } => {
+                if entry.partition_id != id
+                    || entry.file != partition_object_path(&id, &key, &entry.blake3)?
+                {
+                    return Err("invalid carried diagnostics baseline partition".into());
+                }
+                entries.push(entry);
+                reused += 1;
+            }
         }
     }
     let manifest = diagnostics_manifest(project_scope_fingerprint, entries);
@@ -268,12 +278,14 @@ fn publish_set_with_hook(
     }
 
     if let Some(old) = original_manifest {
-        let retained: HashSet<_> =
-            manifest.partitions.iter().map(|entry| entry.file.as_str()).collect();
-        for entry in old.partitions {
-            if !retained.contains(entry.file.as_str()) {
-                if let Err(error) = directory.remove_file(&entry.file) {
-                    tracing::warn!(%error, path = entry.file, "diagnostics baseline cleanup failed");
+        if old.project_scope_fingerprint == manifest.project_scope_fingerprint {
+            let retained: HashSet<_> =
+                manifest.partitions.iter().map(|entry| entry.file.as_str()).collect();
+            for entry in old.partitions {
+                if !retained.contains(entry.file.as_str()) {
+                    if let Err(error) = directory.remove_file(&entry.file) {
+                        tracing::warn!(%error, path = entry.file, "diagnostics baseline cleanup failed");
+                    }
                 }
             }
         }
@@ -602,5 +614,69 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("corrupt"));
+    }
+
+    #[test]
+    fn selective_baseline_transaction_is_atomic_under_fault_and_concurrency() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let first = publish_set(
+            &directory,
+            "a".repeat(64),
+            vec![partition("main", b"one"), partition("extension:Ext", b"dormant")],
+            None,
+        )
+        .unwrap();
+        let dormant = first.manifest.partitions[1].clone();
+        directory.remove_file(&dormant.file).unwrap();
+        directory.create_file_new(&dormant.file).unwrap().write_all(b"corrupt").unwrap();
+
+        let carried = PreparedPartition::Carry {
+            id: "extension:Ext".to_owned(),
+            key: blake3::hash(b"extension:Ext").to_hex().to_string(),
+            entry: dormant.clone(),
+        };
+        let second = publish_set(
+            &directory,
+            "a".repeat(64),
+            vec![partition("main", b"two"), carried],
+            Some(&first.manifest.generation),
+        )
+        .unwrap();
+        assert_eq!(second.manifest.partitions[1], dormant);
+
+        let before = read_optional(&directory, "manifest.json").unwrap().unwrap();
+        let error = publish_set_with_hook(
+            &directory,
+            "a".repeat(64),
+            vec![partition("main", b"three")],
+            Some(&second.manifest.generation),
+            |stage| {
+                if stage == TransactionStage::BeforeManifestReplace {
+                    Err(io::Error::other("injected"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(error.is_err());
+        assert_eq!(read_optional(&directory, "manifest.json").unwrap().unwrap(), before);
+        assert!(std::fs::read_dir(root.path().join("baselines")).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".manifest.json.tmp-")));
+
+        let lock = directory.open_or_create_file(".baseline.lock").unwrap();
+        lock.try_lock().unwrap();
+        assert!(publish_set(
+            &directory,
+            "a".repeat(64),
+            vec![partition("main", b"three")],
+            Some(&second.manifest.generation),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("busy"));
     }
 }

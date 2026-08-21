@@ -424,6 +424,9 @@ impl GlobalState {
         &mut self,
         snapshot: ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot,
     ) {
+        if snapshot.errors().is_empty() {
+            self.diagnostics_baseline_notification_ledger.clear();
+        }
         for error in snapshot.errors() {
             let key = format!("{}:{}", error.partition_id.as_deref().unwrap_or("set"), error.epoch);
             if self.diagnostics_baseline_notification_ledger.insert(key) {
@@ -830,8 +833,7 @@ mod diagnostics_baseline_tests {
     use std::io::Write;
     use std::sync::Arc;
 
-    #[test]
-    fn lsp_partitioned_baseline_reload_reuses_arcs_and_preserves_salsa() {
+    fn partitioned_baseline_reload_reuses_arcs_and_preserves_salsa(selective: bool) {
         use ide::diagnostics_baseline::{
             diagnostic_fingerprint, DiagnosticsBaselineEntry, DiagnosticsBaselineRange,
         };
@@ -842,23 +844,31 @@ mod diagnostics_baseline_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        for source in ["src/cf", "src/cfe/Ext"] {
+        for source in ["src/cf", "src/cfe/Ext", "src/cfe/Dormant"] {
             std::fs::create_dir_all(root.join(source)).unwrap();
             std::fs::write(root.join(source).join("Configuration.xml"), "<Configuration/>")
                 .unwrap();
         }
+        let include = if selective { "include = [\"main\", \"extension:Ext\"]\n" } else { "" };
         std::fs::write(
             root.join("bsl-analyzer.toml"),
-            r#"[source]
+            format!(
+                r#"[source]
 root = "src/cf"
-extensions = [{ name = "Ext", path = "src/cfe/Ext" }]
+extensions = [{{ name = "Ext", path = "src/cfe/Ext" }}, {{ name = "Dormant", path = "src/cfe/Dormant" }}]
 [diagnostics.baseline]
 directory = "baselines"
+{include}
 "#,
+            ),
         )
         .unwrap();
         let project = project_model::Project::new(root).unwrap();
         let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        if selective {
+            assert_eq!(plan.enabled_partition_ids, ["main", "extension:Ext"]);
+            assert_eq!(plan.partitions.len(), 3);
+        }
         let directory =
             project_model::ManagedBaselineDirectory::open(root, "baselines", true).unwrap();
         let publish = |main: Vec<DiagnosticsBaselineEntry>| {
@@ -897,7 +907,10 @@ directory = "baselines"
         let database = std::ptr::from_ref(state.analysis_host.raw_database());
         let (first, _, _) = state.diagnostics_baseline.ready_set().unwrap();
         let old_extension = first.partitions["extension:Ext"].clone();
-        assert_eq!(state.diagnostics_baseline.observation_paths().len(), 3);
+        assert_eq!(
+            state.diagnostics_baseline.observation_paths().len(),
+            if selective { 3 } else { 4 }
+        );
 
         let path = "src/cf/Main.bsl";
         let snippet = "Message(1);";
@@ -947,6 +960,16 @@ directory = "baselines"
         assert!(state.process_changes(false).diagnostics_baseline_changed);
         assert!(state.diagnostics_baseline.ready_set().is_some());
         assert_eq!(std::ptr::from_ref(state.analysis_host.raw_database()), database);
+    }
+
+    #[test]
+    fn lsp_partitioned_baseline_reload_reuses_arcs_and_preserves_salsa() {
+        partitioned_baseline_reload_reuses_arcs_and_preserves_salsa(false);
+    }
+
+    #[test]
+    fn selective_lsp_enabled_object_reload_reuses_salsa_and_arcs() {
+        partitioned_baseline_reload_reuses_arcs_and_preserves_salsa(true);
     }
 
     #[test]

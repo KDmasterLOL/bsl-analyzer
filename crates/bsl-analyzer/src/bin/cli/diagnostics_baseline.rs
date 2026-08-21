@@ -14,11 +14,11 @@ use ide::diagnostics_baseline::{
     DiagnosticsBaselineScope, DiagnosticsBaselineSummary, DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
 };
 use ide::partitioned_diagnostics_baseline::{
-    classify_partitioned_diagnostics, diagnostics_manifest_json, diagnostics_partition_json,
-    load_diagnostics_baseline_set, migrate_v1_reader, partition_object_path,
-    ClassifiedPartitionedDiagnostics, DiagnosticsBaselineManifest,
-    DiagnosticsBaselinePartitionFile, PartitionedBaselineDiagnosticCandidate,
-    DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+    classify_partitioned_diagnostics, diagnostics_manifest, diagnostics_manifest_json,
+    diagnostics_partition_json, load_diagnostics_baseline_set, migrate_v1_reader,
+    partition_object_path, ClassifiedPartitionedDiagnostics, DiagnosticsBaselineManifest,
+    DiagnosticsBaselineManifestEntry, DiagnosticsBaselinePartitionFile,
+    PartitionedBaselineDiagnosticCandidate, DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
 };
 use serde::Serialize;
 
@@ -131,6 +131,12 @@ impl DiagnosticsBaselineCommand {
             if !plan.partitions.iter().any(|partition| partition.id == selected) {
                 return Err(format!("unknown diagnostics baseline partition: {selected}").into());
             }
+            if !matches!(self, Self::Check(_))
+                && plan.policy_for_partition(selected)
+                    == Some(project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed)
+            {
+                return Err(format!("partition_unsuppressed: {selected}").into());
+            }
             if matches!(self, Self::Create(_)) {
                 let directory = project_model::ManagedBaselineDirectory::open(
                     &project.root,
@@ -169,6 +175,16 @@ pub struct DiagnosticsBaselineOperationResult {
     pub added: usize,
     pub removed: usize,
     pub unchanged: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selection: Option<project_model::DiagnosticsBaselineSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions_enabled: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partitions_unsuppressed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsuppressed: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_unsuppressed: Option<usize>,
     pub diagnostics: Vec<DiagnosticsBaselineEntry>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
@@ -257,6 +273,11 @@ pub fn apply(
                 added: baseline.diagnostics.len(),
                 removed: 0,
                 unchanged: 0,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
+                skipped_unsuppressed: None,
                 diagnostics: baseline.diagnostics,
                 generation: None,
                 selected_partition: None,
@@ -287,6 +308,11 @@ pub fn apply(
                 added,
                 removed,
                 unchanged: classified.known.len(),
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
+                skipped_unsuppressed: None,
                 diagnostics,
                 generation: None,
                 selected_partition: None,
@@ -320,6 +346,11 @@ pub fn apply(
                 added,
                 removed,
                 unchanged,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
+                skipped_unsuppressed: None,
                 diagnostics,
                 generation: None,
                 selected_partition: None,
@@ -364,21 +395,82 @@ fn apply_partitioned(
                     .iter()
                     .find(|partition| partition.id == selected)
                     .expect("selector was checked during preflight");
-                let expected = manifest
-                    .partitions
-                    .iter()
-                    .find(|entry| entry.partition_id == selected)
-                    .ok_or("selected partition is absent from manifest")?;
                 let mut buckets = current_entries_by_partition(&plan, current)?;
                 let diagnostics = buckets.remove(&selected).unwrap();
                 let bytes =
                     diagnostics_partition_json(partition.identity.clone(), diagnostics.clone())?;
-                validate_set_for_repair(&directory, &plan, &manifest, &selected, &bytes)?;
-                repair_object(&directory, expected, &bytes)?;
+                let (added, generation) = if let Some(expected) =
+                    manifest.partitions.iter().find(|entry| entry.partition_id == selected)
+                {
+                    validate_set_for_repair(&directory, &plan, &manifest, &selected, &bytes, true)?;
+                    repair_object(&directory, expected, &bytes)?;
+                    (0, manifest.generation.clone())
+                } else {
+                    diagnostics_manifest_json(&manifest)?;
+                    if manifest.project_scope_fingerprint != plan.project_scope_fingerprint {
+                        return Err(
+                            "diagnostics baseline scope does not match the current project".into(),
+                        );
+                    }
+                    let hash = blake3::hash(&bytes).to_hex().to_string();
+                    let mut validation_entries = manifest.partitions.clone();
+                    validation_entries.push(DiagnosticsBaselineManifestEntry {
+                        partition_id: selected.clone(),
+                        file: partition_object_path(&partition.id, &partition.key, &hash)?,
+                        blake3: hash,
+                    });
+                    let validation_manifest = diagnostics_manifest(
+                        plan.project_scope_fingerprint.clone(),
+                        validation_entries,
+                    );
+                    validate_set_for_repair(
+                        &directory,
+                        &plan,
+                        &validation_manifest,
+                        &selected,
+                        &bytes,
+                        false,
+                    )?;
+                    let mut prepared = plan
+                        .partitions
+                        .iter()
+                        .filter(|candidate| plan.enabled_partition_ids.contains(&candidate.id))
+                        .map(|candidate| {
+                            if candidate.id == selected {
+                                Ok(PreparedPartition::Write {
+                                    id: candidate.id.clone(),
+                                    key: candidate.key.clone(),
+                                    bytes: bytes.clone(),
+                                })
+                            } else {
+                                let entry = manifest
+                                    .partitions
+                                    .iter()
+                                    .find(|entry| entry.partition_id == candidate.id)
+                                    .ok_or("diagnostics baseline enabled partition is missing")?
+                                    .clone();
+                                Ok(PreparedPartition::Reuse {
+                                    id: candidate.id.clone(),
+                                    key: candidate.key.clone(),
+                                    entry,
+                                })
+                            }
+                        })
+                        .collect::<Result<Vec<_>, Box<dyn Error + Send + Sync>>>()?;
+                    carry_dormant(&plan, &manifest, &mut prepared)?;
+                    let published = publish_set(
+                        &directory,
+                        plan.project_scope_fingerprint.clone(),
+                        prepared,
+                        Some(&manifest.generation),
+                    )?;
+                    (diagnostics.len(), published.manifest.generation)
+                };
                 let snapshot = load_diagnostics_baseline_set(&directory, &plan)?;
                 let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
                 let classified = classify_partitioned_diagnostics(
                     &snapshot,
+                    &plan,
                     resolved.project_path.clone(),
                     current,
                     &coverage,
@@ -388,11 +480,18 @@ fn apply_partitioned(
                     operation: "created",
                     path: resolved.project_path.clone(),
                     success: true,
-                    added: 0,
+                    added,
                     removed: 0,
                     unchanged,
+                    selection: Some(plan.selection),
+                    partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                    partitions_unsuppressed: Some(
+                        plan.partitions.len() - plan.enabled_partition_ids.len(),
+                    ),
+                    unsuppressed: Some(0),
+                    skipped_unsuppressed: None,
                     diagnostics,
-                    generation: Some(manifest.generation),
+                    generation: Some(generation),
                     selected_partition: Some(selected),
                     partitions,
                 });
@@ -407,6 +506,7 @@ fn apply_partitioned(
                 let mut writers: BTreeMap<_, _> = plan
                     .partitions
                     .iter()
+                    .filter(|partition| plan.enabled_partition_ids.contains(&partition.id))
                     .map(|partition| {
                         Ok((partition.id.clone(), PartitionFileWriter::new(&directory, partition)?))
                     })
@@ -414,7 +514,7 @@ fn apply_partitioned(
                         _,
                         ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsBaselineError,
                     >>()?;
-                let added = migrate_v1_reader(
+                let migration = migrate_v1_reader(
                     BufReader::new(project_root.open_file(&source)?),
                     &plan,
                     |owner, entry| writers.get_mut(owner).unwrap().write_entry(entry),
@@ -439,9 +539,16 @@ fn apply_partitioned(
                     operation: "created",
                     path: resolved.project_path.clone(),
                     success: true,
-                    added,
+                    added: migration.migrated,
                     removed: 0,
                     unchanged: 0,
+                    selection: Some(plan.selection),
+                    partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                    partitions_unsuppressed: Some(
+                        plan.partitions.len() - plan.enabled_partition_ids.len(),
+                    ),
+                    unsuppressed: Some(0),
+                    skipped_unsuppressed: Some(migration.skipped_unsuppressed),
                     diagnostics: vec![],
                     generation: Some(published.manifest.generation),
                     selected_partition: None,
@@ -450,6 +557,11 @@ fn apply_partitioned(
             }
             let current = partitioned_candidates(project, &plan, files.iter().enumerate())?;
             let buckets = current_entries_by_partition(&plan, current)?;
+            let unsuppressed = buckets
+                .iter()
+                .filter(|(id, _)| !plan.enabled_partition_ids.contains(id))
+                .map(|(_, entries)| entries.len())
+                .sum();
             let prepared = prepare_all(&plan, buckets)?;
             let published =
                 publish_set(&directory, plan.project_scope_fingerprint.clone(), prepared, None)?;
@@ -465,6 +577,13 @@ fn apply_partitioned(
                 added: diagnostics.len(),
                 removed: 0,
                 unchanged: 0,
+                selection: Some(plan.selection),
+                partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                partitions_unsuppressed: Some(
+                    plan.partitions.len() - plan.enabled_partition_ids.len(),
+                ),
+                unsuppressed: Some(unsuppressed),
+                skipped_unsuppressed: None,
                 diagnostics,
                 generation: Some(published.manifest.generation),
                 selected_partition: None,
@@ -476,6 +595,7 @@ fn apply_partitioned(
             let snapshot = load_diagnostics_baseline_set(&directory, &plan)?;
             let classified = classify_partitioned_diagnostics(
                 &snapshot,
+                &plan,
                 resolved.project_path.clone(),
                 current,
                 &coverage,
@@ -503,7 +623,16 @@ fn apply_partitioned(
                     let old = read_partitioned_manifest(&directory)?
                         .ok_or("diagnostics baseline manifest is missing")?;
                     let buckets = current_entries_by_partition(&plan, current)?;
-                    let diagnostics = buckets.values().flatten().cloned().collect::<Vec<_>>();
+                    let unsuppressed = buckets
+                        .iter()
+                        .filter(|(id, _)| !plan.enabled_partition_ids.contains(id))
+                        .map(|(_, entries)| entries.len())
+                        .sum();
+                    let diagnostics = buckets
+                        .iter()
+                        .filter(|(id, _)| plan.enabled_partition_ids.contains(id))
+                        .flat_map(|(_, entries)| entries.iter().cloned())
+                        .collect::<Vec<_>>();
                     let published = publish_set(
                         &directory,
                         plan.project_scope_fingerprint.clone(),
@@ -517,6 +646,13 @@ fn apply_partitioned(
                         added: diagnostics.len(),
                         removed: 0,
                         unchanged: 0,
+                        selection: Some(plan.selection),
+                        partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                        partitions_unsuppressed: Some(
+                            plan.partitions.len() - plan.enabled_partition_ids.len(),
+                        ),
+                        unsuppressed: Some(unsuppressed),
+                        skipped_unsuppressed: None,
                         diagnostics,
                         generation: Some(published.manifest.generation),
                         selected_partition: None,
@@ -526,8 +662,14 @@ fn apply_partitioned(
                 Err(error) => return Err(error.into()),
             };
             let generation = snapshot.manifest.generation.clone();
+            if selected.is_some()
+                && snapshot.manifest.project_scope_fingerprint != plan.project_scope_fingerprint
+            {
+                return Err("diagnostics baseline scope does not match the current project".into());
+            }
             let classified = classify_partitioned_diagnostics(
                 &snapshot,
+                &plan,
                 resolved.project_path.clone(),
                 current,
                 &coverage,
@@ -543,7 +685,11 @@ fn apply_partitioned(
                 buckets.get_mut(owner).unwrap().push(item.entry.clone());
             }
             let mut prepared = Vec::new();
-            for partition in &plan.partitions {
+            for partition in plan
+                .partitions
+                .iter()
+                .filter(|partition| plan.enabled_partition_ids.contains(&partition.id))
+            {
                 if selected.as_deref().is_none_or(|id| id == partition.id) {
                     prepared.push(PreparedPartition::Write {
                         id: partition.id.clone(),
@@ -567,6 +713,9 @@ fn apply_partitioned(
                         entry,
                     });
                 }
+            }
+            if snapshot.manifest.project_scope_fingerprint == plan.project_scope_fingerprint {
+                carry_dormant(&plan, &snapshot.manifest, &mut prepared)?;
             }
             let published = publish_set(
                 &directory,
@@ -592,6 +741,13 @@ fn apply_partitioned(
                 added,
                 removed,
                 unchanged,
+                selection: Some(plan.selection),
+                partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                partitions_unsuppressed: Some(
+                    plan.partitions.len() - plan.enabled_partition_ids.len(),
+                ),
+                unsuppressed: Some(classified.summary.unsuppressed.unwrap_or_default()),
+                skipped_unsuppressed: None,
                 diagnostics,
                 generation: Some(published.manifest.generation),
                 selected_partition: selected,
@@ -615,6 +771,33 @@ fn cleanup_staged_partitions(
             Err(error) => tracing::warn!(%error, %path, "staged baseline cleanup failed"),
         }
     }
+}
+
+fn carry_dormant(
+    plan: &project_model::DiagnosticsBaselinePartitionPlan,
+    manifest: &DiagnosticsBaselineManifest,
+    prepared: &mut Vec<PreparedPartition>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    for partition in plan
+        .partitions
+        .iter()
+        .filter(|partition| !plan.enabled_partition_ids.contains(&partition.id))
+    {
+        let Some(entry) =
+            manifest.partitions.iter().find(|entry| entry.partition_id == partition.id).cloned()
+        else {
+            continue;
+        };
+        if entry.file != partition_object_path(&partition.id, &partition.key, &entry.blake3)? {
+            return Err(format!("invalid diagnostics baseline object path: {}", entry.file).into());
+        }
+        prepared.push(PreparedPartition::Carry {
+            id: partition.id.clone(),
+            key: partition.key.clone(),
+            entry,
+        });
+    }
+    Ok(())
 }
 
 fn read_partitioned_manifest(
@@ -641,15 +824,16 @@ fn validate_set_for_repair(
     manifest: &DiagnosticsBaselineManifest,
     selected: &str,
     replacement: &[u8],
+    require_repairable: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     diagnostics_manifest_json(manifest)?;
     if manifest.project_scope_fingerprint != plan.project_scope_fingerprint {
         return Err("diagnostics baseline scope does not match the current project".into());
     }
-    if manifest.partitions.len() != plan.partitions.len()
-        || plan.partitions.iter().any(|partition| {
-            !manifest.partitions.iter().any(|entry| entry.partition_id == partition.id)
-        })
+    if plan
+        .enabled_partition_ids
+        .iter()
+        .any(|id| !manifest.partitions.iter().any(|entry| entry.partition_id == *id))
     {
         return Err("diagnostics baseline partition set does not match the current project".into());
     }
@@ -666,12 +850,16 @@ fn validate_set_for_repair(
     };
 
     let mut fingerprints = std::collections::HashSet::new();
-    for entry in &manifest.partitions {
-        let partition = plan
+    for partition in plan
+        .partitions
+        .iter()
+        .filter(|partition| plan.enabled_partition_ids.contains(&partition.id))
+    {
+        let entry = manifest
             .partitions
             .iter()
-            .find(|partition| partition.id == entry.partition_id)
-            .ok_or("diagnostics baseline manifest contains an unknown partition")?;
+            .find(|entry| entry.partition_id == partition.id)
+            .expect("enabled entries were checked above");
         if entry.file != partition_object_path(&partition.id, &partition.key, &entry.blake3)? {
             return Err(format!("invalid diagnostics baseline object path: {}", entry.file).into());
         }
@@ -716,7 +904,7 @@ fn validate_set_for_repair(
             }
         }
     }
-    if !repairable {
+    if require_repairable && !repairable {
         return Err("selected diagnostics baseline object is already valid".into());
     }
     Ok(())
@@ -839,6 +1027,7 @@ fn prepare_all(
 ) -> Result<Vec<PreparedPartition>, Box<dyn Error + Send + Sync>> {
     plan.partitions
         .iter()
+        .filter(|partition| plan.enabled_partition_ids.contains(&partition.id))
         .map(|partition| {
             Ok(PreparedPartition::Write {
                 id: partition.id.clone(),
@@ -859,7 +1048,7 @@ fn selected_counts<T>(
     let summaries = classified.summary.partitions.clone();
     if let Some(selected) = selected {
         let summary = summaries.iter().find(|summary| summary.id == selected).unwrap();
-        (summary.new, summary.resolved, summary.known, summaries)
+        (summary.new, summary.resolved, summary.known, vec![summary.clone()])
     } else {
         (
             classified.summary.new.unwrap_or_default(),
@@ -879,6 +1068,13 @@ fn operation_from_classified<T>(
     plan: &project_model::DiagnosticsBaselinePartitionPlan,
 ) -> Result<DiagnosticsBaselineOperationResult, Box<dyn Error + Send + Sync>> {
     let (added, removed, unchanged, partitions) = selected_counts(&classified, selected.as_deref());
+    let unsuppressed = selected
+        .as_deref()
+        .and_then(|id| partitions.iter().find(|partition| partition.id == id))
+        .map_or_else(
+            || classified.summary.unsuppressed.unwrap_or_default(),
+            |partition| partition.unsuppressed,
+        );
     let selected_id = selected.as_deref();
     let resolved = match selected_id {
         Some(id) => classified.resolved.retain_partition(id),
@@ -888,6 +1084,7 @@ fn operation_from_classified<T>(
         .new
         .into_iter()
         .map(|item| item.entry)
+        .chain(classified.unsuppressed.into_iter().map(|item| item.entry))
         .chain(resolved)
         .filter(|entry| {
             selected_id.is_none_or(|id| plan.owner_for_project_path(&entry.path) == Some(id))
@@ -901,6 +1098,11 @@ fn operation_from_classified<T>(
         added,
         removed,
         unchanged,
+        selection: Some(plan.selection),
+        partitions_enabled: Some(plan.enabled_partition_ids.len()),
+        partitions_unsuppressed: Some(plan.partitions.len() - plan.enabled_partition_ids.len()),
+        unsuppressed: Some(unsuppressed),
+        skipped_unsuppressed: None,
         diagnostics,
         generation: Some(generation),
         selected_partition: selected,
@@ -1006,6 +1208,7 @@ pub fn classify_files_with_loaded(
                 )?;
             let classified = classify_partitioned_diagnostics(
                 baseline,
+                plan,
                 project_path.clone(),
                 current,
                 &per_partition_coverage,

@@ -165,7 +165,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "diagnostics",
         actions: DIAGNOSTICS_ACTIONS,
         note: None,
-        output_schema_version: Some("14"),
+        output_schema_version: Some("15"),
     },
     tool("outline", &[]),
 ];
@@ -1573,8 +1573,8 @@ mod tests {
                           }
                         ],
                         "name": "diagnostics",
-                        "output_schema_fingerprint": "blake3:ceba27f386c5d4dbf51260601a93bd10f2f042a1ce16392b06fe7f5a55158019",
-                        "output_schema_version": "14",
+                        "output_schema_fingerprint": "blake3:efeb864443d7a49accbd6d9fec3c3a25971f4266aa4187b0e3c19097cdaaa581",
+                        "output_schema_version": "15",
                         "params": [
                           {
                             "name": "action",

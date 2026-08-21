@@ -332,6 +332,10 @@ mod tests {
             if state != ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled {
                 results.baseline = ide::diagnostics_baseline::DiagnosticsBaselineSummary {
                     state,
+                    selection: None,
+                    partitions_enabled: None,
+                    partitions_unsuppressed: None,
+                    unsuppressed: None,
                     new: Some(1),
                     known: Some(0),
                     resolved: Some(0),

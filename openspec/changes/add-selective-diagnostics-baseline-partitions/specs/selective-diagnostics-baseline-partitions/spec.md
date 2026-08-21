@@ -16,7 +16,8 @@ PDB-11 изменения non-enabled owners `MUST NOT` давать `orphan_par
 сужать полный owner/topology plan или coverage proof.
 
 **Автоматизированное доказательство Requirement:**
-`cargo test -p project-model selective_baseline_config_contract`.
+`cargo test -p project-model selective_baseline_config_contract` и
+`cargo test -p bsl-analyzer --test selective_diagnostics_baseline_cli check_config_cli`.
 
 #### Scenario: Обратная совместимость без include
 - **WHEN** настроен `directory`, но `include` отсутствует
@@ -31,7 +32,7 @@ PDB-11 изменения non-enabled owners `MUST NOT` давать `orphan_par
 #### Scenario: Невалидный allowlist
 - **WHEN** `include` пуст, содержит duplicate/unknown/case-fold collision, отдельного участника group либо задан вместе с `path`
 - **THEN** `check-config` возвращает точный config error до файлового доступа
-- **AUTOMATED EVIDENCE** `selective_baseline_rejects_empty_duplicate_unknown_and_legacy_include`
+- **AUTOMATED EVIDENCE** `check_config_cli_rejects_invalid_include_before_baseline_io`
 
 ### Requirement: SDBP-02 — Полная topology и один owner
 Selection `MUST NOT` фильтровать source loading, extension dependencies, semantic run
