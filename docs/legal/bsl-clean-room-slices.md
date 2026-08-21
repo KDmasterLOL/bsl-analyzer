@@ -12,8 +12,9 @@ the SDBL programme in full would not move either crate.
 
 ## Status as of 2026-08-21
 
-B1 and B2 are done, and each carries a provenance docstring naming the section
-of Chapter 4 it was re-derived from.
+B1, B2 and B3 are done. B1 and B2 each carry a provenance docstring naming the
+section of Chapter 4 they were re-derived from; B3 attested rather than rewrote,
+and its record is a gated checklist covering every grammar function.
 
 Everywhere else in the BSL layer no provenance marker survives: `843b00ab` and
 `3aa29b99` removed them all, so for the parts still awaiting a slice the
@@ -23,7 +24,7 @@ evidence of what was derived lives only in git history.
 |---|---|---|---|
 | B1 | BSL token inventory (`lexer`) | #233 | **done** — [`bsl-clean-room-slice-b1.md`](bsl-clean-room-slice-b1.md) |
 | B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | **done** — [`bsl-clean-room-slice-b2.md`](bsl-clean-room-slice-b2.md) |
-| B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | not started |
+| B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | **done** — [`bsl-clean-room-slice-b3.md`](bsl-clean-room-slice-b3.md) |
 | B4 | Test material | #236 | not started |
 
 ## Scope: half of what is already done
@@ -232,9 +233,11 @@ omission belongs to B2, not to the closing paperwork.
 
 ## B3 — grammar: attestation, not rewriting
 
-**Subject.** All 77 functions of the four files, enumerated as a checklist:
-the 59 tree-building rules against the language, and the 18 lookahead predicates
-against the recovery architecture. The subject is whether each form is required
+**Subject.** All 77 functions of the four files, enumerated as a checklist: the
+59 tree-building rules and the 18 lookahead predicates, each against whatever
+actually decides it. Most predicates answer to the recovery architecture; not
+all do, and assuming they all did is the group claim this slice had to withdraw
+(see below). The subject is whether each form is required
 by the language, not whether the text is ours. No function is exempt from having
 a verdict recorded; a function nobody assigned a verdict is the failure mode this
 slice exists to prevent.
@@ -277,9 +280,15 @@ member names, the multiline-string handling — get an **A verdict with its reas
 written down**, not an exemption. «It is clearly our own parser work» is the
 expected conclusion for them; it still has to be reached one function at a time
 and recorded, because that is the only thing distinguishing an attested rule
-from one nobody looked at. The 18 lookahead predicates are attested the same way
-and as a group: they encode recovery decisions, have no counterpart in a grammar
-file, and each names the construct it looks for.
+from one nobody looked at. The 18 lookahead predicates are attested the same way,
+**one at a time and not as a group**. Attesting them together on the shared trait
+«they encode recovery decisions with no counterpart in a grammar file» was the
+plan until the trait turned out to be false on one of the eighteen:
+`at_adjacent_string_literal` is asked inside the successful loop of
+`string_literal`, deciding whether the next literal joins the same constant, and
+that is the ordinary syntax of 4.3.6. It carries an R verdict for that reason.
+A group claim would have hidden the one syntactic predicate behind a label the
+attestation itself disproves.
 
 ## B4 — test material
 
@@ -374,24 +383,38 @@ compatibility record stands.
 
 ## Order
 
-1. Retract the discrepancy in `parser-bsl-grammar-audit.md`.
-2. B1.
-3. B2.
-4. J-invariants and harness.
-5. B3.
-6. B4.
-7. Record the compatibility decision.
-8. Update `NOTICE` and `LICENSING.md`.
+1. Retract the discrepancy in `parser-bsl-grammar-audit.md`. **Done.**
+2. B1. **Done.**
+3. B2. **Done.**
+4. B3. **Done.**
+5. B4.
+6. Record the compatibility decision.
+7. Update `NOTICE` and `LICENSING.md`.
 
-Step 1 is done; the rest are separate slices with their own attestations, on the
+The remaining steps are separate slices with their own attestations, on the
 model of `sdbl-clean-room-slice*.md`.
 
-J3, J4 and J5 sit after B2. J1 and J2 turned out to belong to B1 and were
-built there: the reason for deferring them — "a harness built before them would
-be rebuilt after them" — rests on B1 **and** B2 changing the token inventory,
-and only B1 does. B2's subject is
-`crates/ide-diagnostics/src/utils/preprocessor_symbols.rs`, which does not
-touch `TokenKind`, so the harness B1 built survives B2 unchanged.
+**The J-invariants are no longer a step of their own.** They were listed as one
+between B2 and B3, on the reasoning that a harness built before the slices that
+move the inventory would be rebuilt after them. Each turned out to belong to a
+slice:
+
+- J1 and J2 to B1, because only B1 changes `TokenKind`. B2's subject,
+  `crates/ide-diagnostics/src/utils/preprocessor_symbols.rs`, does not touch it,
+  so the harness B1 built survived B2 unchanged.
+- J3 to B3, because issue #235 assigns operator precedence to that slice, and a
+  positive control built apart from the verdict it controls would be rebuilt
+  with it.
+- J4 and J5 to whatever slice first changes behaviour. B3 was that slice: its
+  single code edit removes a form the source does not describe, and an input
+  that parsed clean now errors. Both were built there. J5 compared the two
+  builds over 75 438 files and found no difference in classification, beside a
+  named control the two builds classify differently.
+
+B3 also added invariants the list did not have — every grammar function carries
+a verdict, none is left unresolved, no justification is a placeholder, and the
+attestation's listing does not drift from the checklist. They are stated and
+gated in `crates/parser/tests/grammar_attestation.rs`.
 
 ## What item 10 will not deliver
 

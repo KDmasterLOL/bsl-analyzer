@@ -2973,6 +2973,7 @@ dependencies = [
  "parser-error",
  "smallvec",
  "stdx",
+ "syn",
  "syntax",
  "tracing",
 ]

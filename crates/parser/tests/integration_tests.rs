@@ -109,11 +109,17 @@ fn test_annotation_with_params() {
 }
 
 #[test]
-fn test_annotation_nested() {
-    let input = r#"&До(&Вокруг("Тест"))
+fn test_annotation_does_not_take_another_annotation_as_a_value() {
+    let nested = r#"&Перед(&НаКлиенте)
 Процедура Тест() КонецПроцедуры"#;
-    let result = parse(input);
-    assert!(!result.has_errors());
+    assert!(
+        parse(nested).has_errors(),
+        "значением параметра аннотации служит значение, а не другая аннотация"
+    );
+
+    let value = r#"&Перед("Тест")
+Процедура Тест() КонецПроцедуры"#;
+    assert!(!parse(value).has_errors(), "обычное значение параметра принимается");
 }
 
 #[test]
