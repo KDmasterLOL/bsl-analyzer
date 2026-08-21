@@ -1351,6 +1351,7 @@ mod tests {
     fn file(root: &Path) -> FileAnalysis {
         let path = root.join("module.bsl");
         std::fs::write(&path, "x = 1;\n").unwrap();
+        let path = path.canonicalize().unwrap();
         FileAnalysis {
             path: path.clone(),
             relative_path: PathBuf::from("module.bsl"),
