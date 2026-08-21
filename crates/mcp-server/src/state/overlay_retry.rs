@@ -2,17 +2,19 @@
 //! startup included.
 //!
 //! The rule the driver enforces is an ownership invariant, not a schedule: the right to run
-//! a pass is the CURRENT workspace-lease ownership (checked on every tick, never latched),
+//! a pass is the CURRENT workspace-lease ownership until a live foreign owner is observed,
 //! writes happen only under ownership, and a disarm is reserved for what cannot change
-//! within this process (no embedder, no workspace root, a terminally failed engine init).
-//! Everything else — a failed pass, an incomplete scan, a superseded publication, a lost
-//! lease that later comes back — keeps the obligation alive and is retried under backoff.
+//! within this process (including terminal supersession). Transient refusal, a failed pass,
+//! an incomplete scan, or an internally superseded overlay plan keeps the obligation alive.
 
 use super::types::{OverlayWarmupState, SemanticRuntimeStatus, SharedSearchEngine};
 use crate::workspace_lease::WorkspaceLease;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+#[cfg(test)]
+static RUN_PASS_FINISH_HOOK: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
 
 /// The driver's own tick: how often it re-checks the condition with no kick arriving. A
 /// safety net for a signal that went quiet (a notification lost, a backoff that expired
@@ -42,8 +44,8 @@ struct RetryState {
     /// `Failed` before Phase C leaves no trace in the cache, `Superseded` leaves the
     /// fresher state that may itself be incomplete.
     obligation: bool,
-    /// Terminal: nothing this process can retry into existence (no embedder, no root,
-    /// engine init failed for good). Never set for a lost lease — leases come back.
+    /// Terminal: nothing this process can retry into existence (no embedder/root, terminal
+    /// engine init failure, or an observed live foreign workspace owner).
     disarmed: bool,
 }
 
@@ -103,9 +105,7 @@ impl OverlayRetry {
         self.wake.notify_all();
     }
 
-    /// Terminal disarm: nothing this process can retry into existence. NOT for a lost
-    /// lease — ownership returns after the newer daemon releases, and the condition check
-    /// picks it back up.
+    /// Terminal disarm: nothing this process can retry into existence.
     pub(crate) fn disarm(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.disarmed = true;
@@ -153,6 +153,10 @@ impl OverlayRetry {
                 continue;
             }
             if !self.should_run(state.obligation) {
+                if self.lease.is_superseded() {
+                    self.disarm_superseded(&mut state);
+                    continue;
+                }
                 let (next, _) = match self.wake.wait_timeout(state, TICK) {
                     Ok(pair) => pair,
                     Err(_) => return,
@@ -179,8 +183,8 @@ impl OverlayRetry {
     /// `Skipped` before the async init publishes, a backoff-paced retry after).
     fn should_run(&self, obligation: bool) -> bool {
         if !self.lease.owns_caches_now() {
-            // Not ours to run; NOT a disarm — the lease may return after the newer
-            // daemon exits, and this same check then lets the retries resume.
+            // A transient UNCLAIMED/lock refusal retries; the caller separately disarms only
+            // when this fresh check latched an irreversible foreign-owner observation.
             return false;
         }
         if obligation {
@@ -201,7 +205,15 @@ impl OverlayRetry {
         // flipping it while the engine is absent would mask a terminal init `Failed`.
         let engine_present =
             self.engine.lock().map(|guard| guard.as_ref().is_some()).unwrap_or(false);
-        if engine_present {
+        if engine_present && self.lease.is_superseded() {
+            super::SharedState::set_semantic_runtime_status(
+                &self.semantic_runtime,
+                SemanticRuntimeStatus::Failed(
+                    "workspace cache ownership was superseded; reconnect to use the new daemon"
+                        .to_owned(),
+                ),
+            );
+        } else if engine_present {
             super::SharedState::set_semantic_runtime_status(
                 &self.semantic_runtime,
                 SemanticRuntimeStatus::OverlaySyncing,
@@ -219,7 +231,20 @@ impl OverlayRetry {
             .lock()
             .map(|state| state.clone())
             .unwrap_or(OverlayWarmupState::Pending);
-        if engine_present {
+        #[cfg(test)]
+        if let Some(hook) = RUN_PASS_FINISH_HOOK.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+        {
+            hook();
+        }
+        if engine_present && self.lease.is_superseded() {
+            super::SharedState::set_semantic_runtime_status(
+                &self.semantic_runtime,
+                SemanticRuntimeStatus::Failed(
+                    "workspace cache ownership was superseded; reconnect to use the new daemon"
+                        .to_owned(),
+                ),
+            );
+        } else if engine_present {
             super::SharedState::set_semantic_runtime_status(
                 &self.semantic_runtime,
                 SemanticRuntimeStatus::Ready,
@@ -234,6 +259,10 @@ impl OverlayRetry {
         outcome: OverlayWarmupState,
         epoch_before: u64,
     ) {
+        if self.lease.is_superseded() {
+            self.disarm_superseded(state);
+            return;
+        }
         match outcome {
             OverlayWarmupState::NoLocalDiffs | OverlayWarmupState::Synced { .. } => {
                 state.streak = 0;
@@ -272,6 +301,18 @@ impl OverlayRetry {
             state.streak = 0;
             state.next_allowed = Instant::now();
         }
+    }
+
+    fn disarm_superseded(&self, state: &mut RetryState) {
+        state.disarmed = true;
+        state.obligation = false;
+        super::SharedState::set_semantic_runtime_status(
+            &self.semantic_runtime,
+            SemanticRuntimeStatus::Failed(
+                "workspace cache ownership was superseded; reconnect to use the new daemon"
+                    .to_owned(),
+            ),
+        );
     }
 }
 
@@ -489,10 +530,32 @@ mod tests {
         assert_eq!(retry.pass_count(), 0, "a stopped driver runs nothing");
     }
 
-    /// A lost lease PAUSES the driver (no disarm), and a returned lease resumes it: the
-    /// newer daemon exits, the older one re-claims, and the pending signals get their pass.
     #[test]
-    fn a_lost_lease_pauses_and_a_returned_lease_resumes() {
+    fn temporary_lock_refusal_remains_retryable() {
+        let dir = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+        let (retry, lease) =
+            crate::workspace_lease::WorkspaceLease::while_cache_lock_held(&cache, || {
+                let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+                let retry = driver_over(Arc::new(Mutex::new(None)), lease.clone());
+                retry.kick_fresh();
+                std::thread::sleep(Duration::from_millis(100));
+                assert_eq!(retry.pass_count(), 0, "no pass starts while ownership is unavailable");
+                assert!(!lease.is_superseded(), "lock contention is not terminal");
+                (retry, lease)
+            });
+
+        retry.kick_fresh();
+        assert!(wait_for(5_000, || retry.pass_count() >= 1), "the unclaimed lease retries");
+        assert!(!lease.is_superseded());
+        assert!(!retry.state.lock().unwrap().disarmed);
+        retry.stop();
+    }
+
+    /// Observing a live foreign owner is terminal: releasing that owner and kicking again
+    /// cannot start another pass or report the old daemon semantically ready.
+    #[test]
+    fn observed_supersession_never_resumes() {
         let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
         let _env = mock_embedding_env(&mock);
@@ -505,7 +568,13 @@ mod tests {
         let engine_arc: SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
 
         let mine = crate::workspace_lease::WorkspaceLease::claim(workspace);
-        let retry = driver_over(Arc::clone(&engine_arc), mine.clone());
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
+        let retry = OverlayRetry::spawn(
+            Arc::clone(&engine_arc),
+            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
+            Arc::clone(&runtime),
+            mine.clone(),
+        );
         assert!(wait_for(5_000, || retry.pass_count() >= 1), "the startup pass runs");
 
         // A newer daemon takes the workspace; a pending signal appears meanwhile.
@@ -520,16 +589,55 @@ mod tests {
             .unwrap();
         let before = retry.pass_count();
         retry.kick_fresh();
-        std::thread::sleep(Duration::from_millis(300));
+        assert!(wait_for(5_000, || mine.is_superseded()), "the fresh check observes takeover");
         assert_eq!(retry.pass_count(), before, "a superseded daemon runs no pass");
 
-        // The newer daemon exits cleanly; ownership returns and the retries resume.
+        // The newer daemon exits cleanly; the old process remains terminally read-only.
         newer.release();
         retry.kick_fresh();
-        assert!(
-            wait_for(5_000, || retry.pass_count() > before),
-            "the returned lease resumes the passes"
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(retry.pass_count(), before, "owner release cannot re-arm a terminal driver");
+        assert!(matches!(*runtime.lock().unwrap(), SemanticRuntimeStatus::Failed(_)));
+        retry.stop();
+    }
+
+    #[test]
+    fn takeover_during_a_pass_never_reports_ready() {
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                *RUN_PASS_FINISH_HOOK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+        }
+        let _reset = ResetHook;
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let mut engine =
+            SearchEngine::new(&workspace.join("search.db"), mock_semantic_config(&mock)).unwrap();
+        let (roots, _) = bsl_search::WorkspaceRoots::build(&workspace, &workspace, &[]);
+        engine.set_workspace_roots(roots);
+        let mine = crate::workspace_lease::WorkspaceLease::claim(&workspace);
+        let mine_in_hook = mine.clone();
+        let newer = Arc::new(Mutex::new(None));
+        let newer_in_hook = Arc::clone(&newer);
+        *RUN_PASS_FINISH_HOOK.lock().unwrap() = Some(Box::new(move || {
+            *newer_in_hook.lock().unwrap() =
+                Some(crate::workspace_lease::WorkspaceLease::claim(&workspace));
+            assert!(!mine_in_hook.owns_caches_now());
+        }));
+        let runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
+        let retry = OverlayRetry::spawn(
+            Arc::new(Mutex::new(Some(engine))),
+            Arc::new(Mutex::new(OverlayWarmupState::Pending)),
+            Arc::clone(&runtime),
+            mine.clone(),
         );
+        assert!(wait_for(5_000, || mine.is_superseded()));
+        assert!(matches!(*runtime.lock().unwrap(), SemanticRuntimeStatus::Failed(_)));
+        assert!(newer.lock().unwrap().is_some());
         retry.stop();
     }
 

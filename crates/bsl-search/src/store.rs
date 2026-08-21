@@ -1963,6 +1963,17 @@ impl Store {
         Ok(())
     }
 
+    /// Commit one prepared embedding batch atomically.
+    pub fn set_chunk_embeddings(&self, embeddings: &[(i64, Vec<f32>)]) -> Result<(), SearchError> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (chunk_id, embedding) in embeddings {
+            let blob: Vec<u8> = embedding.iter().flat_map(|value| value.to_le_bytes()).collect();
+            tx.execute("UPDATE chunks SET embedding = ?2 WHERE id = ?1", params![chunk_id, blob])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn text_search(
         &self,
         query: &str,

@@ -45,6 +45,11 @@ pub(super) struct ScanCache {
 /// their own handle, exactly as before pooling.
 const SNAPSHOT_POOL_CAP: usize = 4;
 
+#[cfg(test)]
+type SnapshotOpenHook = Box<dyn FnOnce() + Send>;
+#[cfg(test)]
+static SNAPSHOT_OPEN_HOOK: Mutex<Option<SnapshotOpenHook>> = Mutex::new(None);
+
 /// A pooled idle read handle plus the freshness token it was opened under.
 pub(super) struct PooledSnapshotEntry {
     pub(super) generation: u64,
@@ -147,28 +152,34 @@ impl GraphState {
             }
         }
         let path = self.graph_db_path()?;
-        let graph = GraphDb::open(&path).ok()?;
-        let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
-        // Read from the artefact itself, like the freshness token beside it: an
-        // adoption path that reconstructed this from elsewhere would report "no holes"
-        // for a graph built blind.
-        let unread_files = graph.unread_files();
-        // The file at this path is not necessarily the one WE published: a daemon of another
-        // generation over the same workspace (see [`crate::workspace_lease`]) renames its own
-        // build into place, and a build made under a different extension topology answers
-        // different questions about the same code. Serving it would be a silent wrong answer,
-        // so a foreign topology reads as "no snapshot" instead. The comparison is against our
-        // last publish, so between our own rename and the matching `published` update a
-        // topology-changing build of ours also reads as none — the honest answer while a
-        // publish is in flight.
-        if fingerprint.topology != published_topology {
-            tracing::warn!(
-                file_topology = fingerprint.topology,
-                published_topology,
-                "graph database on disk was built for another extension topology; not serving it"
-            );
-            return None;
-        }
+        let opened = self.lease.with_ownership(|| {
+            #[cfg(test)]
+            if let Some(hook) = SNAPSHOT_OPEN_HOOK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                hook();
+            }
+            let graph = GraphDb::open(&path).ok()?;
+            let (generation, fingerprint, force_stale) = graph.freshness_token().ok()?;
+            // Read from the artefact itself, like the freshness token beside it: an
+            // adoption path that reconstructed this from elsewhere would report "no holes"
+            // for a graph built blind.
+            let unread_files = graph.unread_files();
+            // The file at this path is not necessarily the one WE published: a daemon of another
+            // generation over the same workspace may have renamed its own build into place.
+            if fingerprint.topology != published_topology {
+                tracing::warn!(
+                    file_topology = fingerprint.topology,
+                    published_topology,
+                    "graph database on disk was built for another extension topology; not serving it"
+                );
+                return None;
+            }
+            Some((graph, generation, fingerprint, force_stale, unread_files))
+        })??;
+        let (graph, generation, fingerprint, force_stale, unread_files) = opened;
         Some(GraphSnapshot {
             graph: PooledGraphDb {
                 entry: Some(PooledSnapshotEntry {
@@ -466,6 +477,92 @@ mod tests {
             graph.snapshot().is_none(),
             "a build made under another extension topology is not served as ours",
         );
+    }
+
+    #[test]
+    fn superseded_graph_serves_only_preopened_snapshot() {
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                *SNAPSHOT_OPEN_HOOK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+        }
+        let _reset = ResetHook;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        cache.ensure().unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(old.clone());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let newer = Arc::new(Mutex::new(None));
+        let newer_hook = Arc::clone(&newer);
+        let cache_hook = cache.clone();
+        *SNAPSHOT_OPEN_HOOK.lock().unwrap() = Some(Box::new(move || {
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                started_tx.send(()).unwrap();
+                let claim = crate::workspace_lease::WorkspaceLease::claim_cache(&cache_hook);
+                *newer_hook.lock().unwrap() = Some(claim);
+                done_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "a takeover cannot land between the fenced check and GraphDb::open"
+            );
+        }));
+
+        let held = graph.snapshot().expect("the descriptor opens while ownership is held");
+        let fingerprint = held.fingerprint;
+        for _ in 0..100 {
+            if newer.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(newer.lock().unwrap().is_some());
+        assert!(graph.snapshot().is_none(), "a pool miss observes the foreign owner");
+        assert!(old.is_superseded());
+        newer.lock().unwrap().take().unwrap().release();
+        assert!(graph.snapshot().is_none(), "owner release cannot reopen the shared path");
+
+        drop(held);
+        assert!(graph.snapshot().is_some(), "the returned preopened descriptor remains readable");
+        lock_recover(&graph.snapshot_pool).clear();
+        seed_cache(root, fingerprint);
+        assert!(
+            graph.snapshot().is_none(),
+            "even a same-topology replacement is not reopened after terminal supersession"
+        );
+
+        let transient_dir = tempfile::tempdir().unwrap();
+        let transient_root = transient_dir.path();
+        sample_workspace(transient_root);
+        let transient_cache = crate::cache::WorkspaceCacheLayout::for_workspace(transient_root);
+        transient_cache.ensure().unwrap();
+        let transient_lease = crate::workspace_lease::WorkspaceLease::claim_cache(&transient_cache);
+        let transient = GraphState::for_workspace_with_cache(
+            transient_root.to_path_buf(),
+            transient_cache.clone(),
+        )
+        .with_lease(transient_lease.clone());
+        transient.ensure_loading();
+        wait_ready(&transient);
+        let holder = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &transient_cache,
+            Duration::from_secs(3),
+        );
+        assert!(transient.snapshot().is_none(), "a temporary lock refusal opens nothing");
+        assert!(!transient_lease.is_superseded());
+        holder.join().unwrap();
+        assert!(transient.snapshot().is_some(), "the same daemon retries after contention");
     }
 
     #[test]

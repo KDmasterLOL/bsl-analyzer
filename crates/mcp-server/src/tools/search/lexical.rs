@@ -17,11 +17,9 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
-/// Produce lexical (FTS5) code hits, separated from presentation. Hard policy/terminal
-/// failures are `Err`; a still-warming index is `Pending`. Lexical search is always available
-/// (it is the baseline), so this never returns `Unavailable`.
-pub(super) fn lexical_code_hits(
+pub(super) fn lexical_code_hits_fenced(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    lease: &crate::workspace_lease::WorkspaceLease,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
@@ -36,7 +34,7 @@ pub(super) fn lexical_code_hits(
     )?;
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
-    crate::state::SharedState::prefetch_resident_overlay(engine);
+    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
@@ -109,9 +107,10 @@ pub(super) fn lexical_code_hits(
                             ));
                         }
                         let fallback_start = std::time::Instant::now();
-                        let hits = engine.text_search(query, limit, Some("code")).map_err(|e| {
-                            McpError::internal_error(format!("search error: {e}"), None)
-                        })?;
+                        let hits =
+                            engine.text_search_read_only(query, limit, Some("code")).map_err(
+                                |e| McpError::internal_error(format!("search error: {e}"), None),
+                            )?;
                         tracing::debug!(
                             elapsed_ms = fallback_start.elapsed().as_millis() as u64,
                             query_len = query.len(),
@@ -140,7 +139,7 @@ pub(super) fn lexical_code_hits(
             ));
         };
         engine
-            .text_search(query, limit, Some("code"))
+            .text_search_read_only(query, limit, Some("code"))
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
@@ -196,13 +195,14 @@ fn try_direct_lexical_code(
             return DirectResult::Unavailable;
         }
     };
-    let (overlay_hits, hidden_paths) = match engine.workspace_overlay_lexical_hits(query, limit) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("direct lexical: overlay query failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
+    let (overlay_hits, hidden_paths) =
+        match engine.workspace_overlay_lexical_hits_read_only(query, limit) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("direct lexical: overlay query failed: {e}");
+                return DirectResult::Unavailable;
+            }
+        };
     let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(SearchHit::to_lexical).collect();
     merge_direct_lexical_with_refill(&overlay_lexical, &hidden_paths, limit, |fetch_limit| {
         source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), fetch_limit)

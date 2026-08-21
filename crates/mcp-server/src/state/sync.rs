@@ -7,11 +7,33 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[derive(Default)]
+struct SearchDriftPlan {
+    dirty_paths: Vec<PathBuf>,
+    removed_paths: Vec<PathBuf>,
+    removed_subtrees: Vec<PathBuf>,
+    context_paths: Vec<PathBuf>,
+    mark_all_context: bool,
+    rewalk_paths: Vec<PathBuf>,
+    reconcile_present: Option<std::collections::HashSet<PathBuf>>,
+    dirty_keys: Vec<bsl_search::FileKey>,
+    removed_keys: Vec<bsl_search::FileKey>,
+    context_keys: Vec<bsl_search::FileKey>,
+    roots_epoch: u64,
+    preparation_error: Option<String>,
+    nudge_rebuild: bool,
+    nudge_project_reload: bool,
+}
+
 /// Test seam: force a reconcile walk (the overflow rescan and the boot store reconcile) to count as
 /// errored, so a test can assert the reconcile is skipped (a partial walk must never be treated as
 /// authoritative and delete healthy files) — and, at boot, that a Clean init downgrades to a prime.
 #[cfg(test)]
 pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+static FORCE_DRIFT_APPLY_ERROR: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// One slice of waiting for the watch to arm, and the whole budget for it.
@@ -100,6 +122,7 @@ impl SharedState {
         graph: GraphState,
         overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
         root_drift_epoch: Arc<AtomicU64>,
+        lease: crate::workspace_lease::WorkspaceLease,
     ) -> bool {
         std::thread::Builder::new()
             .name("bsl-search-overlay-watch".to_owned())
@@ -107,49 +130,79 @@ impl SharedState {
                 // Watcher mode is one-way in the store and doubles as "skip the full
                 // rescan", so the only place it can be asked for safely is inside the
                 // consumer that feeds it: a running thread is a feeder that exists.
-                if let Ok(mut guard) = engine.lock() {
-                    if let Some(engine) = guard.as_mut() {
-                        engine.enable_workspace_watcher_mode();
+                loop {
+                    match Self::apply_workspace_search(&engine, &lease, |engine| {
+                        engine.enable_workspace_watcher_mode()
+                    }) {
+                        super::WorkspaceSearchApply::Applied(()) => break,
+                        super::WorkspaceSearchApply::Retry => {
+                            std::thread::sleep(crate::workspace_lease::VERDICT_TTL)
+                        }
+                        super::WorkspaceSearchApply::Terminal => {
+                            hub.unsubscribe(cursor);
+                            return;
+                        }
                     }
                 }
                 tracing::info!("search overlay sink subscribed to workspace change hub");
 
                 let mut cursor = cursor;
                 let mut generation = 0u64;
+                let mut pending = None;
                 loop {
-                    // Wake on new drift; the timeout only bounds how long a shutdown
-                    // takes to be noticed (the daemon detaches this thread).
-                    generation = hub.wait_for_change(generation, Duration::from_secs(30));
-                    let batch = hub.drain(cursor);
-                    cursor = batch.cursor;
-                    let fresh = !batch.entries.is_empty() || batch.rescan_required;
-                    if Self::root_transition_relevant_drift(
-                        &batch.entries,
-                        batch.rescan_required,
-                        &graph,
-                    ) {
-                        // Before applying the batch: if a root transition already owns the
-                        // engine lock, this event will wait and be attributed by the new roots;
-                        // otherwise the transition sees the epoch move and rejects its stale plan.
-                        root_drift_epoch.fetch_add(1, Ordering::SeqCst);
+                    if pending.is_none() {
+                        generation = hub.wait_for_change(generation, Duration::from_secs(30));
+                        let batch = hub.materialize(cursor);
+                        let fresh = !batch.entries.is_empty() || batch.rescan_required;
+                        let root_relevant = Self::root_transition_relevant_drift(
+                            &batch.entries,
+                            batch.rescan_required,
+                            &graph,
+                        );
+                        let plan = Self::prepare_search_drift(
+                            &engine,
+                            &batch.entries,
+                            batch.rescan_required,
+                            &graph,
+                        );
+                        pending = Some((batch, plan, fresh, root_relevant));
                     }
-                    Self::apply_search_drift(
-                        &engine,
-                        &batch.entries,
-                        batch.rescan_required,
-                        &graph,
-                    );
+                    let (batch, plan, fresh, root_relevant) = pending.as_mut().unwrap();
+                    if *root_relevant {
+                        root_drift_epoch.fetch_add(1, Ordering::SeqCst);
+                        *root_relevant = false;
+                    }
+                    match Self::apply_prepared_search_drift(&engine, &lease, plan, &graph) {
+                        super::WorkspaceSearchApply::Applied(()) => {}
+                        super::WorkspaceSearchApply::Retry => {
+                            *plan = Self::prepare_search_drift(
+                                &engine,
+                                &batch.entries,
+                                batch.rescan_required,
+                                &graph,
+                            );
+                            std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
+                            continue;
+                        }
+                        super::WorkspaceSearchApply::Terminal => {
+                            hub.unsubscribe(cursor);
+                            return;
+                        }
+                    }
+                    hub.acknowledge(batch);
+                    cursor = batch.cursor;
                     // Root-transition retry is independent of new file events. This loop
                     // already owns the bounded wake, so no second timer/thread is needed.
                     graph.flush_pending_search_roots_refresh();
                     // Only GENUINE drift kicks the retry driver (and resets its backoff):
                     // this loop also wakes on the bare 30-second timeout with an empty
                     // batch, and an unconditional kick would zero the backoff each tick.
-                    if fresh {
+                    if *fresh {
                         if let Some(retry) = &overlay_retry {
                             retry.kick_fresh();
                         }
                     }
+                    pending = None;
                 }
             })
             .is_ok()
@@ -181,269 +234,205 @@ impl SharedState {
     /// is unit-testable without driving the thread. On overflow (exact paths lost) it
     /// re-walks the whole tree; otherwise it classifies (stateless policy) and applies
     /// each bucket: `.bsl` bodies dirty, deleted `.bsl` removed, `.xml` → affected context.
+    #[cfg(test)]
     pub(super) fn apply_search_drift(
         engine: &SharedSearchEngine,
         entries: &[crate::change_hub::ChangeEntry],
         rescan_required: bool,
         graph: &GraphState,
     ) {
-        // Overflow means the hub dropped detail: the exact changed paths are lost.
-        // Restore parity with the old unbounded watcher (which never lost a `.bsl`) by
-        // re-marking every workspace `.bsl` dirty, so the overlay's incremental refresh
-        // reconsiders them all.
+        let plan = Self::prepare_search_drift(engine, entries, rescan_required, graph);
+        let result = Self::apply_prepared_search_drift(
+            engine,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &plan,
+            graph,
+        );
+        debug_assert!(matches!(result, super::WorkspaceSearchApply::Applied(())));
+    }
+
+    fn prepare_search_drift(
+        engine: &SharedSearchEngine,
+        entries: &[crate::change_hub::ChangeEntry],
+        rescan_required: bool,
+        graph: &GraphState,
+    ) -> SearchDriftPlan {
+        let class =
+            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
+        let mut plan = SearchDriftPlan::default();
+        plan.removed_paths.extend(class.bsl_removed.iter().map(|path| path.raw.clone()));
+        plan.removed_subtrees.extend(
+            entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.kind,
+                        crate::change_hub::ChangeKind::SubtreeRemoved
+                            | crate::change_hub::ChangeKind::MaybeRemoved
+                    )
+                })
+                .map(|entry| entry.raw.clone()),
+        );
+
         if rescan_required {
             tracing::warn!(
                 "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
             );
-            // A demand to reconcile does not make the paths in the SAME batch untrue: the hub
-            // keeps its entries on every input but a channel overflow. Deletions are the one
-            // bucket the re-walk below cannot recover — an incomplete walk skips the reconcile
-            // exactly so it does not evict healthy files, and then nothing removes them.
-            Self::remove_delivered_deletions(engine, entries);
-            Self::rewalk_workspace_bsl_dirty(engine);
-            // The dropped (or re-arm-superseded) detail may have included an
-            // analyzer-config edit no scan of file bodies can reconstruct — treat
-            // the rescan like a config change: conservative whole-collection mark
-            // plus a graph nudge.
-            Self::mark_all_context_dirty(engine);
-            graph.nudge_project_reload();
-            return;
+            plan.mark_all_context = true;
+            plan.nudge_project_reload = true;
+            Self::prepare_search_rewalk(engine, &mut plan);
+            Self::materialize_search_drift(engine, &mut plan);
+            return plan;
         }
 
-        // Search keeps no per-path baseline, so the stateless policy (no baseline, empty
-        // config set) buckets straight from on-disk truth.
-        let class =
-            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
-
-        // Modified `.bsl` bodies: mark dirty for the overlay's incremental refresh.
-        for dp in &class.bsl_modified {
-            Self::mark_search_path_dirty(engine, &dp.raw);
+        plan.dirty_paths.extend(class.bsl_modified.iter().map(|path| path.raw.clone()));
+        if !class.xml_paths.is_empty() {
+            let roots = {
+                let Ok(guard) = engine.lock() else { return plan };
+                guard.as_ref().and_then(|engine| engine.workspace_roots().cloned())
+            };
+            let mut mark_whole = false;
+            for path in &class.xml_paths {
+                if is_root_descriptor(roots.as_ref(), &path.raw) {
+                    mark_whole = true;
+                } else if let Some(subtree) = owned_module_subtree(&path.raw) {
+                    plan.context_paths.extend(walk_bsl_files(&subtree));
+                }
+            }
+            plan.context_paths
+                .extend(Self::resolve_referencing_module_files(graph, &class.xml_paths));
+            plan.mark_all_context |= mark_whole;
+            plan.nudge_rebuild = mark_whole || !plan.context_paths.is_empty();
         }
-
-        // Deleted `.bsl`: drop from the store so it stops appearing in results.
-        if !class.bsl_removed.is_empty() {
-            Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
-        }
-
-        // A vanished directory: the classifier calls it structural and skips it, and the
-        // re-walk below refuses to reconcile when it is incomplete, so without this its
-        // files answer searches until some later clean pass.
-        Self::remove_delivered_subtrees(engine, entries);
-
-        // Changed `.xml` metadata: mark the affected documents' stored context stale, then
-        // nudge the graph to catch up. The context re-render only runs on a graph publish;
-        // without this nudge a user who only calls `search_code` never triggers a rebuild,
-        // so the marks would sit unresolved forever. The nudge is single-flight and never
-        // blocks — it schedules a background rebuild whose publish fires the refresh hook.
-        if !class.xml_paths.is_empty()
-            && Self::mark_xml_affected_context_dirty(engine, &class.xml_paths, graph)
-        {
-            graph.nudge_rebuild();
-        }
-
-        // An analyzer-config change can re-shape the extension topology, and with it the
-        // graph context of EVERY module — with no `.xml` stat moving at all. Mark the
-        // whole collection and nudge; the topology-triggered rebuild's publish then
-        // re-renders exactly these marks (they carry seqs below the build's start).
-        let config_changed = entries.iter().any(|entry| {
+        if entries.iter().any(|entry| {
             graph.is_workspace_config_path(&entry.canonical)
                 || graph.is_workspace_config_path(&entry.raw)
-        });
-        if config_changed {
-            // The nudge must NOT be gated on the marking succeeding: with the
-            // engine not yet published the mark is impossible, but the graph must
-            // still catch up — its topology-changed publish then requests the
-            // whole-collection re-render through the hook.
-            if !Self::mark_all_context_dirty(engine) {
-                tracing::debug!(
-                    "config change before the search engine published; relying on the                      graph's topology-changed publish for the context re-render"
-                );
-            }
-            graph.nudge_project_reload();
+        }) {
+            plan.mark_all_context = true;
+            plan.nudge_project_reload = true;
         }
-
-        // A subtree removal lost the descendant list → reconsider the whole tree.
         if class.structural_rescan {
-            Self::rewalk_workspace_bsl_dirty(engine);
+            Self::prepare_search_rewalk(engine, &mut plan);
         }
+        Self::materialize_search_drift(engine, &mut plan);
+        plan
     }
 
-    /// Mark every workspace document's stored graph context stale. Used for a
-    /// topology-shaping change (an analyzer-config edit) where no per-object
-    /// resolution is possible: any module's visibility chain may have moved.
-    fn mark_all_context_dirty(engine: &SharedSearchEngine) -> bool {
-        let Ok(guard) = engine.lock() else { return false };
-        let Some(engine) = guard.as_ref() else { return false };
-        match engine.mark_workspace_context_dirty() {
-            Ok(count) => count > 0,
-            Err(e) => {
-                tracing::warn!("failed to mark collection context dirty on config change: {e}");
-                false
-            }
-        }
-    }
-
-    /// Apply the deletions a batch delivered, whatever else that batch also demanded.
-    ///
-    /// A vanished directory is applied through the engine's subtree removal rather than as a
-    /// path: the drain names the directory alone, and the files that went with it are exactly
-    /// what no walk can enumerate any more.
-    fn remove_delivered_deletions(
-        engine: &SharedSearchEngine,
-        entries: &[crate::change_hub::ChangeEntry],
-    ) {
-        let class =
-            crate::drift_classify::classify_drift(entries, &std::collections::HashSet::new(), None);
-        if !class.bsl_removed.is_empty() {
-            Self::remove_search_paths(engine, class.bsl_removed.iter().map(|d| d.raw.as_path()));
-        }
-        Self::remove_delivered_subtrees(engine, entries);
-    }
-
-    /// Take the subtrees a batch reported gone out of the index.
-    ///
-    /// Needed on every branch, not just after an overflow: the classifier treats a subtree
-    /// removal as structural and skips it, so nothing else removes the descendants — and
-    /// they are precisely the paths no event ever names.
-    fn remove_delivered_subtrees(
-        engine: &SharedSearchEngine,
-        entries: &[crate::change_hub::ChangeEntry],
-    ) {
-        // EVERY reported removal is a candidate prefix, with no guessing at what the path
-        // was. The hub cannot tell: it calls a vanished path a subtree by the absence of an
-        // extension, because a path that is gone cannot be asked what it used to be — so a
-        // directory named `Расширение.v1` arrives as an ordinary removal, and one named
-        // `Модули.bsl` as a file. Judging by name is what kept losing whole classes.
-        //
-        // Nor is the state of the path itself the question. A directory that is back says
-        // nothing about which of its files came back with it, and an event says only what
-        // was true when it fired. The engine answers the question actually being asked —
-        // whether each indexed file is still there — one key at a time.
-        let removals: Vec<PathBuf> = entries
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e.kind,
-                    crate::change_hub::ChangeKind::SubtreeRemoved
-                        | crate::change_hub::ChangeKind::MaybeRemoved
-                )
-            })
-            .map(|e| e.raw.clone())
-            .collect();
-        if removals.is_empty() {
+    fn materialize_search_drift(engine: &SharedSearchEngine, plan: &mut SearchDriftPlan) {
+        let Ok(guard) = engine.lock() else {
+            plan.preparation_error = Some("search engine lock poisoned".to_owned());
             return;
-        }
-        if let Ok(mut guard) = engine.lock() {
-            if let Some(engine) = guard.as_mut() {
-                match engine.remove_vanished_under(&removals) {
-                    Ok(removed) if removed > 0 => {
-                        tracing::info!(removed, "removed vanished files under reported removals")
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!("failed to remove vanished files: {e}"),
-                }
-            }
-        }
-    }
-
-    /// Remove a batch of deleted `.bsl` files from the workspace store. Each removal
-    /// evicts exactly that file's vectors from the live index incrementally (no full
-    /// rebuild, no sidecar rewrite — the row deletion already invalidates the persisted
-    /// sidecar), so a large deletion no longer stalls under the engine lock. A path that
-    /// is not a workspace `.bsl` is skipped.
-    fn remove_search_paths<'a>(engine: &SharedSearchEngine, paths: impl Iterator<Item = &'a Path>) {
-        if let Ok(mut guard) = engine.lock() {
-            if let Some(engine) = guard.as_mut() {
-                for path in paths {
-                    match engine.remove_workspace_path(path) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!(path = ?path, "failed to remove workspace file: {e}")
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Resolve each changed `.xml` descriptor to the workspace documents it affects and
-    /// mark their stored graph context stale, so a later reindex/embed pass re-renders it
-    /// (marking only — the render is deferred, so it never races the graph's own drift
-    /// catch-up). OWNED modules resolve by path convention: an MDO / common-module /
-    /// service / form descriptor at `<Dir>/<Name>.xml` owns every `.bsl` under the sibling
-    /// `<Dir>/<Name>/` subtree. Any `.xml` directly at the workspace root (a
-    /// configuration-root descriptor, whose change can shift any module's context)
-    /// conservatively marks the whole collection. REFERENCING modules (a module that
-    /// merely READS the changed MDO — its rendered `graph_context` embeds the object's
-    /// metadata reads) are additionally resolved through the persisted graph's inbound read
-    /// edges (see [`Self::resolve_referencing_module_files`]).
-    ///
-    /// The filesystem walk (owned-subtree resolution) and the graph db read (referencing
-    /// resolution) both run OUTSIDE the engine lock; the lock is taken only briefly for the
-    /// store writes. Returns whether it marked at least one path context-dirty (owned,
-    /// referencing, or a whole-collection mark), so the caller can gate the graph catch-up
-    /// nudge on real work having been queued.
-    fn mark_xml_affected_context_dirty(
-        engine: &SharedSearchEngine,
-        xml_paths: &[crate::drift_classify::DriftPath],
-        graph: &GraphState,
-    ) -> bool {
-        // Take the root table once (brief lock), then resolve owned subtrees off-lock.
-        let roots = {
-            let Ok(guard) = engine.lock() else { return false };
-            let Some(engine) = guard.as_ref() else { return false };
-            engine.workspace_roots().cloned()
         };
+        let Some(engine) = guard.as_ref() else { return };
+        plan.roots_epoch = engine.workspace_roots_epoch();
 
-        let mut owned_modules: Vec<PathBuf> = Vec::new();
-        let mut mark_whole_collection = false;
-        for dp in xml_paths {
-            // The root question is asked FIRST and independently: a root descriptor may well
-            // have a namesake subtree beside it, and the collection its change reaches is a
-            // superset of that subtree. Deciding by whichever branch matched first would
-            // leave the rest of the tree serving a stale context.
-            if is_root_descriptor(roots.as_ref(), &dp.raw) {
-                mark_whole_collection = true;
-                continue;
-            }
-            if let Some(subtree) = owned_module_subtree(&dp.raw) {
-                owned_modules.extend(walk_bsl_files(&subtree));
-            }
-        }
+        plan.dirty_keys.extend(
+            plan.dirty_paths
+                .iter()
+                .chain(&plan.rewalk_paths)
+                .filter_map(|path| engine.workspace_file_key(path)),
+        );
+        plan.removed_keys
+            .extend(plan.removed_paths.iter().filter_map(|path| engine.workspace_file_key(path)));
+        plan.context_keys
+            .extend(plan.context_paths.iter().filter_map(|path| engine.workspace_file_key(path)));
 
-        // Referencing modules: resolved off any lock via the persisted graph, BEFORE the
-        // store-write lock below (the graph db read must never nest under the engine lock).
-        let referencing_files = Self::resolve_referencing_module_files(graph, xml_paths);
-
-        if owned_modules.is_empty() && referencing_files.is_empty() && !mark_whole_collection {
-            return false;
-        }
-
-        // Brief lock for the store writes only.
-        let Ok(guard) = engine.lock() else { return false };
-        let Some(engine) = guard.as_ref() else { return false };
-        let mut marked = false;
-        if mark_whole_collection {
-            match engine.mark_workspace_context_dirty() {
-                Ok(count) => marked |= count > 0,
-                Err(e) => tracing::warn!("failed to mark collection context dirty: {e}"),
+        let prepared = (|| -> Result<(), bsl_search::SearchError> {
+            plan.removed_keys.extend(engine.vanished_workspace_keys(&plan.removed_subtrees)?);
+            if let Some(present) = &plan.reconcile_present {
+                let present: std::collections::HashSet<_> =
+                    present.iter().filter_map(|path| engine.workspace_file_key(path)).collect();
+                plan.removed_keys
+                    .extend(engine.known_workspace_keys()?.difference(&present).cloned());
             }
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            plan.preparation_error = Some(error.to_string());
         }
-        for bsl in owned_modules {
-            match engine.mark_workspace_path_context_dirty(&bsl) {
-                Ok(did) => marked |= did,
-                Err(e) => tracing::warn!(path = ?bsl, "failed to mark context dirty: {e}"),
+        plan.removed_keys.sort_unstable();
+        plan.removed_keys.dedup();
+    }
+
+    fn prepare_search_rewalk(engine: &SharedSearchEngine, plan: &mut SearchDriftPlan) {
+        let Some(declared) = Self::registered_roots(engine) else { return };
+        let set = project_model::SourceSet::scan(&declared);
+        let present: std::collections::HashSet<_> = set
+            .files
+            .iter()
+            .filter(|file| file.role == project_model::FileRole::Source)
+            .map(|file| file.walked.clone())
+            .collect();
+        plan.rewalk_paths.extend(present.iter().cloned());
+        let incomplete = !set.clean();
+        #[cfg(test)]
+        let incomplete =
+            incomplete || FORCE_REWALK_WALK_ERROR.load(std::sync::atomic::Ordering::SeqCst);
+        if incomplete {
+            tracing::warn!(
+                unreadable = set.unreadable,
+                canonical_fallbacks = set.canonical_fallbacks,
+                "search rescan walk incomplete; skipping reconcile to avoid deleting healthy files"
+            );
+        } else {
+            plan.reconcile_present = Some(present);
+        }
+    }
+
+    fn apply_prepared_search_drift(
+        shared: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        plan: &SearchDriftPlan,
+        graph: &GraphState,
+    ) -> super::WorkspaceSearchApply<()> {
+        let applied = Self::apply_workspace_search(shared, lease, |engine| {
+            let mut context_marked = false;
+            if engine.workspace_roots_epoch() != plan.roots_epoch {
+                return Err(bsl_search::SearchError::Index(
+                    "workspace roots changed after search drift preparation".to_owned(),
+                ));
             }
-        }
-        for file in referencing_files {
-            match engine.mark_workspace_path_context_dirty(&file) {
-                Ok(did) => marked |= did,
-                Err(e) => {
-                    tracing::warn!(path = ?file, "failed to mark referencing context dirty: {e}")
+            if let Some(error) = &plan.preparation_error {
+                return Err(bsl_search::SearchError::Index(error.clone()));
+            }
+            #[cfg(test)]
+            if FORCE_DRIFT_APPLY_ERROR.load(Ordering::SeqCst) {
+                return Err(bsl_search::SearchError::Index(
+                    "forced drift apply failure".to_owned(),
+                ));
+            }
+            for key in &plan.dirty_keys {
+                engine.mark_workspace_key_dirty(key.clone())?;
+            }
+            if !plan.removed_keys.is_empty() {
+                engine.remove_workspace_keys(plan.removed_keys.clone())?;
+            }
+            if plan.mark_all_context {
+                context_marked |= engine.mark_workspace_context_dirty()? > 0;
+            }
+            for key in &plan.context_keys {
+                engine.mark_workspace_key_context_dirty(key)?;
+                context_marked = true;
+            }
+            Ok::<_, bsl_search::SearchError>(context_marked)
+        });
+        match applied {
+            super::WorkspaceSearchApply::Applied(Ok(context_marked)) => {
+                if plan.nudge_rebuild && context_marked {
+                    graph.nudge_rebuild();
                 }
+                if plan.nudge_project_reload {
+                    graph.nudge_project_reload();
+                }
+                super::WorkspaceSearchApply::Applied(())
             }
+            super::WorkspaceSearchApply::Applied(Err(error)) => {
+                tracing::warn!("search drift apply failed; retaining batch for retry: {error}");
+                super::WorkspaceSearchApply::Retry
+            }
+            super::WorkspaceSearchApply::Retry => super::WorkspaceSearchApply::Retry,
+            super::WorkspaceSearchApply::Terminal => super::WorkspaceSearchApply::Terminal,
         }
-        marked
     }
 
     /// Reverse-look-up the workspace modules that READ any changed MDO, returning the graph's
@@ -504,6 +493,7 @@ impl SharedState {
     /// gone paths. The walk covers EVERY registered root, through the shared source-set walk,
     /// and runs OUTSIDE the engine lock; the reconcile takes the lock only for its bounded
     /// O(stored) store writes.
+    #[cfg(test)]
     fn rewalk_workspace_bsl_dirty(engine: &SharedSearchEngine) {
         let Some(declared) = Self::registered_roots(engine) else { return };
         let set = project_model::SourceSet::scan(&declared);
@@ -575,8 +565,11 @@ impl SharedState {
     /// after a walk error, but a prime never ASSERTS a clean store the way `Clean` does — it only
     /// serves what it can see and hides the rest — so it is the strictly safer degraded default,
     /// matching the pre-existing behavior for a store that could not be reconciled.
-    pub(super) fn reconcile_boot_store_with_disk(engine: &mut SearchEngine) -> bool {
-        let Some(roots) = engine.workspace_roots() else { return false };
+    pub(super) fn reconcile_boot_store_with_disk_fenced(
+        engine: &mut SearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) -> Option<bool> {
+        let Some(roots) = engine.workspace_roots() else { return Some(false) };
         let declared: Vec<PathBuf> =
             roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
         let set = project_model::SourceSet::scan(&declared);
@@ -596,26 +589,30 @@ impl SharedState {
                 canonical_fallbacks = set.canonical_fallbacks,
                 "search boot reconcile walk incomplete; priming the overlay instead of clean-init"
             );
-            return false;
+            return Some(false);
         }
-        match engine.reconcile_workspace_files(&present) {
-            Ok(removed) => {
+        match engine
+            .reconcile_workspace_files_fenced(&present, |apply| Self::startup_apply(lease, apply))
+        {
+            Ok(Some(removed)) => {
                 if removed > 0 {
                     tracing::info!(
                         removed,
                         "search boot reconciled deleted files out of the store"
                     );
                 }
-                true
+                Some(true)
             }
+            Ok(None) => None,
             Err(e) => {
                 tracing::warn!("search boot reconcile failed; priming the overlay instead: {e}");
-                false
+                Some(false)
             }
         }
     }
     /// Mark one path dirty in the search overlay if it is a `.bsl` file. Filtering
     /// on the consumer side keeps the hub itself extension-agnostic.
+    #[cfg(test)]
     fn mark_search_path_dirty(engine: &SharedSearchEngine, path: &Path) {
         if !project_model::is_bsl_source_path(path) {
             return;
@@ -643,7 +640,15 @@ impl SharedState {
 /// lock that only touches the overlay cache (never the resident). A resident that is
 /// absent/loading, or a path it cannot serve, is simply missing from the map and the
 /// reindex disk-reads it — so search never regresses when the resident is unavailable.
-pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
+pub(super) fn prefetch_resident_overlay(
+    engine: &SharedSearchEngine,
+    lease: &crate::workspace_lease::WorkspaceLease,
+) {
+    // Once terminal, every later query is a pure resident-snapshot read. This atomic check avoids
+    // resident work and, importantly, never reopens the lease file after supersession is latched.
+    if lease.is_superseded() || lease.is_released() {
+        return;
+    }
     let (source, roots, dirty) = {
         let Ok(guard) = engine.lock() else { return };
         let Some(engine) = guard.as_ref() else { return };
@@ -700,10 +705,12 @@ pub(super) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
         return;
     }
 
-    let Ok(guard) = engine.lock() else { return };
-    let Some(engine) = guard.as_ref() else { return };
-    if let Err(e) = engine.reindex_dirty_from_snapshots(&snapshots) {
-        tracing::debug!("resident-fed overlay reindex failed: {e}");
+    if let super::WorkspaceSearchApply::Applied(Err(error)) =
+        SharedState::apply_workspace_search(engine, lease, |engine| {
+            engine.reindex_dirty_from_snapshots(&snapshots)
+        })
+    {
+        tracing::debug!("resident-fed overlay reindex failed: {error}");
     }
 }
 
@@ -787,13 +794,161 @@ mod tests {
     use super::super::test_support::{
         write_common_module, write_common_module_tree, EnvVarGuard, ENV_LOCK,
     };
-    use super::{SharedState, FORCE_REWALK_WALK_ERROR, MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY};
+    use super::{
+        SearchDriftPlan, SharedState, FORCE_REWALK_WALK_ERROR,
+        MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY,
+    };
     use crate::state::types::OverlayInit;
     use bsl_search::{IndexedDocument, SearchEngine};
     use std::fs;
     use std::sync::atomic::AtomicU64;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn superseded_daemon_cannot_mutate_shared_search() {
+        struct Provider;
+        impl bsl_search::GraphContextProvider for Provider {
+            fn graph_context(&self, _: &str, _: &str, _: &str) -> Option<String> {
+                Some("graph".to_owned())
+            }
+        }
+
+        #[derive(Clone, Copy, Debug)]
+        enum Family {
+            Watcher,
+            Dirty,
+            Context,
+            Delete,
+            Subtree,
+            Reconcile,
+            Resident,
+            Roots,
+            Provider,
+            ContextRefresh,
+        }
+
+        for family in [
+            Family::Watcher,
+            Family::Dirty,
+            Family::Context,
+            Family::Delete,
+            Family::Subtree,
+            Family::Reconcile,
+            Family::Resident,
+            Family::Roots,
+            Family::Provider,
+            Family::ContextRefresh,
+        ] {
+            let dir = tempdir().unwrap();
+            let source = dir.path().join("Module.bsl");
+            fs::write(&source, "Процедура П()\nКонецПроцедуры").unwrap();
+            let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+            engine.set_workspace_root(dir.path().to_path_buf());
+            engine.index_directory_fts(dir.path()).unwrap();
+            let shared: super::super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+            let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+            let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let calls_in_apply = Arc::clone(&calls);
+            let empty = std::collections::HashSet::new();
+            let prefixes = vec![dir.path().to_path_buf()];
+
+            let outcome = SharedState::apply_workspace_search(&shared, &old, |engine| {
+                calls_in_apply.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                match family {
+                    Family::Watcher => engine.enable_workspace_watcher_mode(),
+                    Family::Dirty => {
+                        engine.mark_workspace_path_dirty(&source).unwrap();
+                    }
+                    Family::Context => {
+                        engine.mark_workspace_context_dirty().unwrap();
+                    }
+                    Family::Delete => {
+                        engine.remove_workspace_path(&source).unwrap();
+                    }
+                    Family::Subtree => {
+                        engine.remove_vanished_under(&prefixes).unwrap();
+                    }
+                    Family::Reconcile => {
+                        engine.reconcile_workspace_files(&empty).unwrap();
+                    }
+                    Family::Resident => {
+                        engine.reindex_dirty_from_snapshots(&Default::default()).unwrap();
+                    }
+                    Family::Roots => {
+                        engine
+                            .initialize_workspace_roots(
+                                bsl_search::WorkspaceRoots::build(dir.path(), dir.path(), &[]).0,
+                            )
+                            .unwrap();
+                    }
+                    Family::Provider => {
+                        engine
+                            .replace_published_graph_context_provider(Arc::new(Provider))
+                            .unwrap();
+                    }
+                    Family::ContextRefresh => {
+                        engine.refresh_dirty_contexts(&Provider, i64::MAX).unwrap();
+                    }
+                }
+            });
+            assert!(matches!(outcome, crate::state::WorkspaceSearchApply::Terminal), "{family:?}");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{family:?}");
+            let guard = shared.lock().unwrap();
+            let engine = guard.as_ref().unwrap();
+            assert_eq!(engine.file_count().unwrap(), 1, "{family:?}");
+            assert!(engine.workspace_overlay_dirty_paths_snapshot().unwrap().is_empty());
+            assert!(engine.context_dirty_paths("code").unwrap().is_empty());
+        }
+
+        let dir = tempdir().unwrap();
+        let shared: super::super::SharedSearchEngine = Arc::new(Mutex::new(Some(
+            SearchEngine::fts_only(&dir.path().join("search.db")).unwrap(),
+        )));
+        let lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let held = lease.hold_file_lock_for_test();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        assert!(matches!(
+            SharedState::apply_workspace_search(&shared, &lease, |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+            crate::state::WorkspaceSearchApply::Retry
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(held);
+        assert!(matches!(
+            SharedState::apply_workspace_search(&shared, &lease, |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+            crate::state::WorkspaceSearchApply::Applied(())
+        ));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let plan = SearchDriftPlan { mark_all_context: true, ..Default::default() };
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &old,
+                &plan,
+                &crate::graph::GraphState::disabled(),
+            ),
+            crate::state::WorkspaceSearchApply::Terminal
+        ));
+
+        let retry_lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        super::FORCE_DRIFT_APPLY_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let failed = SharedState::apply_prepared_search_drift(
+            &shared,
+            &retry_lease,
+            &SearchDriftPlan::default(),
+            &crate::graph::GraphState::disabled(),
+        );
+        super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(failed, crate::state::WorkspaceSearchApply::Retry));
+    }
 
     #[test]
     fn root_transition_epoch_ignores_unrelated_files_and_tracks_keyspace_drift() {
@@ -844,6 +999,78 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn drift_keys_are_replanned_after_workspace_roots_change() {
+        let dir = tempdir().unwrap();
+        let configuration = dir.path().join("cf");
+        let extension = dir.path().join("ext");
+        fs::create_dir_all(&configuration).unwrap();
+        fs::create_dir_all(&extension).unwrap();
+        let file = extension.join("Module.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine
+            .initialize_workspace_roots(
+                bsl_search::WorkspaceRoots::build(dir.path(), &configuration, &[]).0,
+            )
+            .unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let shared: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let entry = crate::change_hub::ChangeEntry {
+            canonical: file.clone(),
+            raw: file.clone(),
+            kind: crate::change_hub::ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        let graph = crate::graph::GraphState::disabled();
+        let plan =
+            SharedState::prepare_search_drift(&shared, std::slice::from_ref(&entry), false, &graph);
+
+        let expected_key = {
+            let mut guard = shared.lock().unwrap();
+            let engine = guard.as_mut().unwrap();
+            engine.set_workspace_roots(
+                bsl_search::WorkspaceRoots::build(
+                    dir.path(),
+                    &configuration,
+                    std::slice::from_ref(&extension),
+                )
+                .0,
+            );
+            engine.workspace_file_key(&file).unwrap()
+        };
+
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+                &plan,
+                &graph,
+            ),
+            crate::state::WorkspaceSearchApply::Retry
+        ));
+        let replanned =
+            SharedState::prepare_search_drift(&shared, std::slice::from_ref(&entry), false, &graph);
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+                &replanned,
+                &graph,
+            ),
+            crate::state::WorkspaceSearchApply::Applied(())
+        ));
+        assert!(shared
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .workspace_overlay_dirty_paths_snapshot()
+            .unwrap()
+            .contains_key(&expected_key));
+    }
+
     /// Entering the event stream costs the overlay nothing. The window a reconcile used to
     /// pay for is not a window any more: the baseline is taken after the watch is up and the
     /// cursor is older than both, so there is nothing for a rescan to recover — and a rescan
@@ -876,6 +1103,7 @@ mod tests {
             crate::graph::GraphState::disabled(),
             None,
             Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
         ));
         std::thread::sleep(Duration::from_millis(500));
 
@@ -924,6 +1152,7 @@ mod tests {
             crate::graph::GraphState::disabled(),
             None,
             Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
         ));
 
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1086,6 +1315,7 @@ mod tests {
             crate::graph::GraphState::disabled(),
             None,
             Arc::new(AtomicU64::new(0)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
         ));
 
         let bsl = workspace.join("Module.bsl");
@@ -3165,7 +3395,10 @@ mod tests {
         );
 
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
-        SharedState::prefetch_resident_overlay(&engine_arc);
+        SharedState::prefetch_resident_overlay_fenced(
+            &engine_arc,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
 
         let fed = engine_arc
             .lock()
@@ -3255,7 +3488,10 @@ mod tests {
         assert!(delivered, "the hub delivered the edit");
 
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
-        SharedState::prefetch_resident_overlay(&engine_arc);
+        SharedState::prefetch_resident_overlay_fenced(
+            &engine_arc,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
 
         let fed = engine_arc
             .lock()
@@ -3307,7 +3543,10 @@ mod tests {
         }
 
         let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
-        SharedState::prefetch_resident_overlay(&engine_arc);
+        SharedState::prefetch_resident_overlay_fenced(
+            &engine_arc,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
 
         let guard = engine_arc.lock().unwrap();
         let engine = guard.as_ref().unwrap();
@@ -3357,7 +3596,11 @@ mod tests {
         fs::remove_dir_all(workspace.join("CommonModules").join("Улетевший")).unwrap();
         fs::remove_file(workspace.join("CommonModules").join("Улетевший.xml")).unwrap();
 
-        let reconciled = SharedState::reconcile_boot_store_with_disk(&mut engine);
+        let reconciled = SharedState::reconcile_boot_store_with_disk_fenced(
+            &mut engine,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        )
+        .expect("the unmanaged reconcile fence cannot refuse");
         assert!(reconciled, "a clean walk proves the store reconciled");
         assert_eq!(
             engine.file_count().unwrap(),
@@ -3407,7 +3650,7 @@ mod tests {
         FORCE_REWALK_WALK_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
         let _reset = ResetWalkErr;
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,

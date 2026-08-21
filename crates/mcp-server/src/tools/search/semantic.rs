@@ -20,8 +20,13 @@ use tracing::warn;
 /// Produce semantic (pgvector) code hits, separated from presentation. Hard policy/terminal
 /// failures are `Err`; a still-warming index is `Pending`; a semantic shortfall that
 /// `hybrid_code` can degrade past is `Unavailable`.
-pub(super) fn semantic_code_hits(
+#[allow(
+    clippy::too_many_arguments,
+    reason = "semantic search has the lexical inputs plus its runtime status; a one-use context struct would only rename them"
+)]
+pub(super) fn semantic_code_hits_fenced(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    lease: &crate::workspace_lease::WorkspaceLease,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -41,7 +46,7 @@ pub(super) fn semantic_code_hits(
         .clone();
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
-    crate::state::SharedState::prefetch_resident_overlay(engine);
+    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
@@ -245,7 +250,7 @@ pub(super) fn semantic_code_hits(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    match engine.search_with_embedding(&query_embedding, limit, Some("code")) {
+    match engine.search_with_embedding_read_only(&query_embedding, limit, Some("code")) {
         Ok(hits) => Ok(CodeHits::Ready { hits, roots }),
         Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
     }
@@ -295,14 +300,15 @@ fn run_direct_semantic(
     query_embedding: &[f32],
     limit: usize,
 ) -> DirectResult {
-    let (overlay_hits, hidden_paths) =
-        match engine.workspace_overlay_semantic_hits_with_embedding(query_embedding, limit) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("direct semantic: overlay query failed: {e}");
-                return DirectResult::Unavailable;
-            }
-        };
+    let (overlay_hits, hidden_paths) = match engine
+        .workspace_overlay_semantic_hits_with_embedding_read_only(query_embedding, limit)
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("direct semantic: overlay query failed: {e}");
+            return DirectResult::Unavailable;
+        }
+    };
     let overlay_semantic: Vec<SemanticHit> =
         overlay_hits.iter().map(SearchHit::to_semantic).collect();
     merge_direct_semantic_with_refill(&overlay_semantic, &hidden_paths, limit, |fetch_limit| {
@@ -378,7 +384,7 @@ where
 mod tests {
     use super::super::test_support::semantic_hit;
     use super::super::types::{CodeHits, DirectResult, SemanticUnavailable};
-    use super::{merge_direct_semantic_with_refill, semantic_code_hits};
+    use super::{merge_direct_semantic_with_refill, semantic_code_hits_fenced};
     use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
     use bsl_search::{EmbedderConfig, SearchConfig, SearchEngine};
     use std::collections::HashSet;
@@ -435,8 +441,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
-        let outcome = semantic_code_hits(
+        let outcome = semantic_code_hits_fenced(
             &engine,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
             WorkspaceSearchMode::SqliteLocal,
             None,
@@ -454,8 +461,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("workspace-search.db");
         let engine = Arc::new(Mutex::new(Some(SearchEngine::fts_only(&db_path).unwrap())));
-        let outcome = semantic_code_hits(
+        let outcome = semantic_code_hits_fenced(
             &engine,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Indexing)),
             WorkspaceSearchMode::SqliteLocal,
             None,
@@ -483,8 +491,9 @@ mod tests {
             ..SearchConfig::default()
         };
         let engine = Arc::new(Mutex::new(Some(SearchEngine::new(&db_path, config).unwrap())));
-        let outcome = semantic_code_hits(
+        let outcome = semantic_code_hits_fenced(
             &engine,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
             WorkspaceSearchMode::SqliteLocal,
             None,

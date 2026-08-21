@@ -1001,7 +1001,7 @@ impl McpServer {
             diag.ensure_loading();
             return Ok(tools::resident::status(
                 &diag.status_report(),
-                !self.state.superseded(),
+                self.state.owns_caches(),
                 self.state.standalone_extension_notice().as_deref(),
             ));
         }
@@ -1227,9 +1227,11 @@ impl McpServer {
                 // can mint form/file `graph_id`s with the same `src/cf/…` prefix the graph uses.
                 let graph_root = self.state.workspace_root().cloned();
                 let index_progress = self.state.index_progress().clone();
+                let workspace_lease = self.state.workspace_lease().clone();
                 tokio::task::spawn_blocking(move || {
-                    tools::search::hybrid_code(
+                    tools::search::hybrid_code_fenced(
                         &engine,
+                        &workspace_lease,
                         &semantic_runtime,
                         workspace_search_mode,
                         configured_baseline.as_ref(),
@@ -1665,6 +1667,7 @@ impl McpServer {
 
         // Lazily trigger the background load on first use.
         graph.ensure_loading();
+        let superseded = graph.is_superseded();
 
         // `resolve` is a name lookup, not a graph traversal: the platform answers it
         // with no index at all and the resident's tables answer it without the graph,
@@ -1679,6 +1682,7 @@ impl McpServer {
         }
 
         match graph.status() {
+            _ if superseded => {}
             GraphStatus::Disabled => {
                 return Err(McpError::invalid_params(
                     "graph is only available in the workspace profile",
@@ -1697,6 +1701,9 @@ impl McpServer {
         }
 
         let Some(snapshot) = graph.snapshot() else {
+            if superseded || graph.is_superseded() {
+                return Err(McpError::internal_error(crate::graph::SUPERSEDED_GRAPH_ERROR, None));
+            }
             return Ok(tools::graph::loading(None));
         };
 
@@ -2156,7 +2163,7 @@ impl McpServer {
                 diag.ensure_loading();
                 Ok(tools::resident::status(
                     &diag.status_report(),
-                    !self.state.superseded(),
+                    self.state.owns_caches(),
                     self.state.standalone_extension_notice().as_deref(),
                 ))
             }
@@ -2888,6 +2895,59 @@ mod surface_guards {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod graph_supersession_contract {
+    use super::*;
+
+    fn params(action: &str, id: Option<&str>) -> Parameters<GraphParams> {
+        Parameters(GraphParams {
+            action: action.to_owned(),
+            id: id.map(str::to_owned),
+            query: None,
+            ids: Vec::new(),
+            max_output_tokens: None,
+            detail: None,
+            dir: None,
+            depth: None,
+            max_nodes: None,
+            provenance: Vec::new(),
+            edge_kinds: Vec::new(),
+            top: None,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_actions_fail_when_superseded_snapshot_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::graph::test_support::sample_workspace(root);
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let state = SharedState::workspace_with_cache(root.to_path_buf(), cache.clone()).unwrap();
+        let graph = state.graph().clone();
+        graph.ensure_loading();
+        crate::graph::test_support::wait_ready(&graph);
+        let held = graph.snapshot().expect("the old daemon owns one open descriptor");
+        let server = McpServer::new(McpProfile::Workspace, state);
+        let newer = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+
+        let schema = server.graph(params("schema", None)).await.expect("schema stays static");
+        assert!(schema.structured_content.is_some());
+
+        for (action, id) in
+            [("overview", None), ("node", Some("method/CommonModule.X.Y")), ("overview", None)]
+        {
+            let error = server.graph(params(action, id)).await.expect_err(action);
+            assert_eq!(error.message, crate::graph::SUPERSEDED_GRAPH_ERROR, "{action}");
+        }
+
+        assert!(graph.is_superseded());
+        drop(held);
+        newer.release();
+        server.shutdown();
     }
 }
 

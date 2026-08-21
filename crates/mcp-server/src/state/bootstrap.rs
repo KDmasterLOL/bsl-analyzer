@@ -413,10 +413,6 @@ impl SharedState {
                 // claim would fail, and one parse pass producing both graph and search chunks
                 // would degrade into two. A warm graph cache makes either start cheap —
                 // `run_load` publishes the cached build instead of rebuilding.
-                if matches!(mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
-                    graph.ensure_loading();
-                }
-
                 // Postgres mode needs the baseline connect's outcome before it can load
                 // the manifest; waiting HERE keeps the wait on this background thread
                 // (never a request path) and off the slot's lock. On timeout the init
@@ -441,29 +437,36 @@ impl SharedState {
                     mode,
                     external_baseline,
                     &graph,
+                    &lease,
                 );
 
-                // Whatever the init decided, the graph must not be left idle: it may have
-                // bailed (invalid project, unopenable store) before reaching the fused claim
-                // at all. A no-op once the build is claimed or published, so the fused and
-                // cached paths above are untouched.
-                graph.ensure_loading();
-
-                let Some(mut init) = init else {
-                    Self::set_semantic_runtime_status(
-                        &semantic_runtime,
-                        SemanticRuntimeStatus::Failed(
-                            "workspace search engine initialization failed".to_owned(),
-                        ),
-                    );
-                    // Terminal for this process: no engine will ever publish, and the
-                    // driver retrying "engine unavailable" forever would only mask the
-                    // failure with an endless OverlaySyncing/backoff cycle.
-                    if let Some(retry) = &overlay_retry {
-                        retry.disarm();
+                let mut init = match init {
+                    Ok(Some(init)) => init,
+                    Ok(None) => {
+                        if let Some(retry) = &overlay_retry {
+                            retry.disarm();
+                        }
+                        tracing::info!(
+                            superseded = lease.is_superseded(),
+                            released = lease.is_released(),
+                            "workspace search initialization stopped without publication"
+                        );
+                        return;
                     }
-                    tracing::warn!("workspace search engine initialization failed");
-                    return;
+                    Err(error) => {
+                        Self::set_semantic_runtime_status(
+                            &semantic_runtime,
+                            SemanticRuntimeStatus::Failed(error.to_string()),
+                        );
+                        // A product failure is not supersession: keep the graph independently
+                        // available, but stop search retries because no engine can publish.
+                        graph.ensure_loading();
+                        if let Some(retry) = &overlay_retry {
+                            retry.disarm();
+                        }
+                        tracing::warn!(%error, "workspace search engine initialization failed");
+                        return;
+                    }
                 };
 
                 let pending_embed = init.pending_embed.take();
@@ -476,21 +479,9 @@ impl SharedState {
                 // could reach `engine.search` on that empty index and return a silent
                 // zero instead of degrading to lexical.
                 let status_after_publish = match &pending_embed {
-                    Some(_) => {
-                        Self::set_semantic_runtime_status(
-                            &semantic_runtime,
-                            SemanticRuntimeStatus::Indexing,
-                        );
-                        None
-                    }
-                    None => Some(Self::semantic_runtime_status_for_mode(&init.engine, &init.mode)),
+                    Some(_) => SemanticRuntimeStatus::Indexing,
+                    None => Self::semantic_runtime_status_for_mode(&init.engine, &init.mode),
                 };
-
-                // Wire the graph's mark-seq source to the store's counter now that the engine
-                // exists (the graph was built before it). From here a build captures a bounded
-                // `build_start_seq`; publishes before this point (the fused/cached boot build)
-                // ran with the unwired `0` bound and cleared nothing.
-                graph.set_mark_seq_source(init.engine.mark_seq_handle());
 
                 // `context_dirty` persists across restarts, so a prior run may have left marks
                 // the boot build's (unwired) publish did not clear. Capture whether any survive
@@ -518,23 +509,76 @@ impl SharedState {
                 // engine, so it holds NO engine lock: `Prime`'s disk scan must not serialize behind
                 // the shared lock (I3), and the cold FTS branch already indexes disk before
                 // publishing, so a warm prime delays publish no differently.
-                match init.overlay_init {
-                    OverlayInit::Clean => {
-                        if let Err(e) = init.engine.initialize_workspace_overlay_clean() {
-                            tracing::warn!("workspace overlay clean-init failed: {e}");
+                let overlay_result = match init.overlay_init {
+                    OverlayInit::Clean => Self::startup_apply_once(&lease, || {
+                        init.engine.initialize_workspace_overlay_clean()
+                    }),
+                    OverlayInit::Prime => init
+                        .engine
+                        .prime_workspace_overlay_fenced(|apply| Self::startup_apply(&lease, apply)),
+                    OverlayInit::RemoteWarmup => Ok(Some(())),
+                };
+                match overlay_result {
+                    Ok(Some(())) => {}
+                    Ok(None) => {
+                        if let Some(retry) = &overlay_retry {
+                            retry.disarm();
                         }
+                        return;
                     }
-                    OverlayInit::Prime => {
-                        if let Err(e) = init.engine.prime_workspace_overlay() {
-                            tracing::warn!("workspace overlay prime failed: {e}");
+                    Err(error) => {
+                        Self::set_semantic_runtime_status(
+                            &semantic_runtime,
+                            SemanticRuntimeStatus::Failed(error.to_string()),
+                        );
+                        graph.ensure_loading();
+                        if let Some(retry) = &overlay_retry {
+                            retry.disarm();
                         }
+                        return;
                     }
-                    OverlayInit::RemoteWarmup => {}
                 }
 
-                if let Ok(mut guard) = search_engine.lock() {
+                // Host publication follows the long-lived order used by incremental mutations:
+                // engine mutex first, then the lease lifecycle mutex and file lock inside the
+                // callback. Status becomes visible in the same admitted group as the engine.
+                let mut guard = match search_engine.lock() {
+                    Ok(guard) => guard,
+                    Err(error) => {
+                        Self::set_semantic_runtime_status(
+                            &semantic_runtime,
+                            SemanticRuntimeStatus::Failed(format!(
+                                "workspace search engine lock error: {error}"
+                            )),
+                        );
+                        return;
+                    }
+                };
+                let published = Self::startup_apply_once(&lease, || {
+                    graph.set_mark_seq_source(init.engine.mark_seq_handle());
                     *guard = Some(init.engine);
+                    Self::set_semantic_runtime_status(&semantic_runtime, status_after_publish);
+                    Ok(())
+                });
+                drop(guard);
+                match published {
+                    Ok(Some(())) => {}
+                    Ok(None) => {
+                        if let Some(retry) = &overlay_retry {
+                            retry.disarm();
+                        }
+                        return;
+                    }
+                    Err(error) => {
+                        Self::set_semantic_runtime_status(
+                            &semantic_runtime,
+                            SemanticRuntimeStatus::Failed(error.to_string()),
+                        );
+                        return;
+                    }
                 }
+
+                graph.ensure_loading();
 
                 // Only now, and only if the watch is up: the sink drains into the published
                 // engine, and a sink started before this point would drop every batch it
@@ -548,6 +592,7 @@ impl SharedState {
                             graph.clone(),
                             overlay_retry.clone(),
                             Arc::clone(&root_drift_epoch),
+                            lease.clone(),
                         ) {
                             sink_lease.handed_over();
                         }
@@ -565,10 +610,6 @@ impl SharedState {
                 // contexts they were given under the old topology.
                 graph.flush_pending_topology_refresh();
                 graph.flush_pending_search_roots_refresh();
-
-                if let Some(status) = status_after_publish {
-                    Self::set_semantic_runtime_status(&semantic_runtime, status);
-                }
 
                 tracing::info!("search engine initialization complete");
 
@@ -742,27 +783,64 @@ impl SharedState {
         Self::open_fts_only_search_engine(db_path)
     }
 
-    fn open_workspace_overlay_search_engine(db_path: &Path) -> Option<SearchEngine> {
-        if let Some(config) = Self::embedding_config() {
-            let model = config.embedder.model.clone();
-            return match SearchEngine::semantic_overlay_only(db_path, config) {
-                Ok(engine) => {
-                    tracing::info!(
-                        files = engine.file_count().unwrap_or(0),
-                        chunks = engine.chunk_count().unwrap_or(0),
-                        vectors = engine.vector_count(),
-                        model,
-                        "workspace overlay engine loaded (remote baseline + local overlay semantic)"
-                    );
-                    Some(engine)
-                }
-                Err(e) => {
-                    tracing::warn!("failed to init overlay-only semantic search engine: {e}");
-                    None
-                }
-            };
+    pub(super) fn startup_apply<T>(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        mut apply: impl FnMut() -> Result<T, bsl_search::SearchError>,
+    ) -> Option<Result<T, bsl_search::SearchError>> {
+        loop {
+            if let Some(result) = lease.with_ownership(&mut apply) {
+                return Some(result);
+            }
+            if lease.is_superseded() || lease.is_released() {
+                return None;
+            }
+            std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
         }
-        Self::open_fts_only_search_engine(db_path)
+    }
+
+    fn startup_apply_once<T>(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        operation: impl FnOnce() -> Result<T, bsl_search::SearchError>,
+    ) -> Result<Option<T>, bsl_search::SearchError> {
+        let mut operation = Some(operation);
+        let mut value = None;
+        let outcome = Self::startup_apply(lease, || {
+            value = Some(operation.take().expect("startup apply runs once")()?);
+            Ok(())
+        });
+        match outcome {
+            Some(Ok(())) => Ok(value),
+            Some(Err(error)) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn open_search_engine_fenced(
+        db_path: &Path,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) -> Result<Option<SearchEngine>, bsl_search::SearchError> {
+        match Self::embedding_config() {
+            Some(config) => {
+                SearchEngine::new_fenced(db_path, config, |apply| Self::startup_apply(lease, apply))
+            }
+            None => {
+                SearchEngine::fts_only_fenced(db_path, |apply| Self::startup_apply(lease, apply))
+            }
+        }
+    }
+
+    fn open_workspace_overlay_search_engine_fenced(
+        db_path: &Path,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) -> Result<Option<SearchEngine>, bsl_search::SearchError> {
+        match Self::embedding_config() {
+            Some(config) => SearchEngine::semantic_overlay_only_fenced(db_path, config, |apply| {
+                Self::startup_apply(lease, apply)
+            }),
+            None => {
+                SearchEngine::fts_only_fenced(db_path, |apply| Self::startup_apply(lease, apply))
+            }
+        }
     }
 
     fn configure_workspace_engine(
@@ -808,8 +886,11 @@ impl SharedState {
     /// A failed Postgres-mode init must not leave a manifest behind that a later boot
     /// could mistake for a valid warm cache. The clear itself failing only costs that
     /// boot a manifest re-download, so it is not worth failing over.
-    fn clear_baseline_manifest_best_effort(store: &bsl_search::Store) {
-        if let Err(error) = store.clear_baseline_manifest() {
+    fn clear_baseline_manifest_best_effort(
+        store: &bsl_search::Store,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) {
+        if let Err(error) = Self::startup_apply_once(lease, || store.clear_baseline_manifest()) {
             tracing::warn!("failed to clear stale workspace baseline manifest: {error}");
         }
     }
@@ -827,7 +908,8 @@ impl SharedState {
         mode: WorkspaceSearchMode,
         external_baseline: Option<Arc<ExternalBaselineService>>,
         graph: &GraphState,
-    ) -> Option<WorkspaceSearchInit> {
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) -> Result<Option<WorkspaceSearchInit>, bsl_search::SearchError> {
         let watch_armed = match watch {
             Some((hub, policy)) => Self::await_watch(hub, policy),
             None => false,
@@ -845,7 +927,7 @@ impl SharedState {
             Ok(project) => project,
             Err(e) => {
                 tracing::error!(error = %e, "invalid project; workspace search stays offline");
-                return None;
+                return Err(bsl_search::SearchError::Index(format!("invalid project: {e}")));
             }
         };
         let source_path = project.source_path().to_path_buf();
@@ -864,31 +946,36 @@ impl SharedState {
                     "Postgres workspace mode is configured but the shared baseline is \
                      unavailable; workspace search stays offline (no local fallback)"
                 );
-                return None;
+                return Err(bsl_search::SearchError::ExternalBaseline(
+                    "workspace baseline is unavailable".to_owned(),
+                ));
             };
-            let mut engine = Self::open_workspace_overlay_search_engine(&db_path)?;
-            if let Err(error) = Self::configure_workspace_engine(
-                &mut engine,
-                Self::roots_of(&project),
-                BaselineHashMode::NormalizedChunks,
-            ) {
-                tracing::warn!("failed to configure workspace search roots: {error}");
-                return None;
-            }
-            if let Err(error) = engine.set_serves_external_baseline(true) {
-                tracing::warn!("failed to declare the external-baseline mode: {error}");
-                return None;
-            }
+            let Some(mut engine) =
+                Self::open_workspace_overlay_search_engine_fenced(&db_path, lease)?
+            else {
+                return Ok(None);
+            };
+            let roots = Self::roots_of(&project);
+            let Some(()) = Self::startup_apply_once(lease, || {
+                Self::configure_workspace_engine(
+                    &mut engine,
+                    roots,
+                    BaselineHashMode::NormalizedChunks,
+                )?;
+                engine.set_serves_external_baseline(true)
+            })?
+            else {
+                return Ok(None);
+            };
 
             let store = engine.store();
-            if let Err(error) = store.clear_collection("code") {
-                tracing::warn!("failed to clear stale local workspace baseline rows: {error}");
-                return None;
-            }
-            if let Err(error) = store.clear_overlay_state("code") {
-                tracing::warn!("failed to clear stale local overlay state: {error}");
-                return None;
-            }
+            let Some(()) = Self::startup_apply_once(lease, || {
+                store.clear_collection("code")?;
+                store.clear_overlay_state("code")
+            })?
+            else {
+                return Ok(None);
+            };
 
             // The persisted manifest is deliberately NOT cleared up front: it is
             // immutable for a given snapshot, so it doubles as a warm-boot disk cache.
@@ -918,26 +1005,33 @@ impl SharedState {
                         }
                         None => match external_baseline.load_baseline_manifest(&snapshot.id.0) {
                             Ok(manifest) => {
-                                if let Err(error) = store.save_baseline_manifest(&manifest) {
-                                    tracing::warn!(
-                                        "failed to persist workspace baseline manifest: {error}"
-                                    );
-                                    Self::clear_baseline_manifest_best_effort(store);
-                                    return None;
+                                let manifest_files = manifest.files.len();
+                                match Self::startup_apply_once(lease, || {
+                                    store.save_baseline_manifest(&manifest)
+                                }) {
+                                    Ok(Some(())) => {}
+                                    Ok(None) => return Ok(None),
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            "failed to persist workspace baseline manifest: {error}"
+                                        );
+                                        Self::clear_baseline_manifest_best_effort(store, lease);
+                                        return Err(error);
+                                    }
                                 }
                                 tracing::info!(
                                     snapshot_id = %snapshot.id.0,
-                                    manifest_files = manifest.files.len(),
+                                    manifest_files,
                                     "workspace baseline manifest loaded and persisted"
                                 );
-                                manifest.files.len()
+                                manifest_files
                             }
                             Err(error) => {
                                 tracing::warn!(
                                     "failed to load workspace baseline manifest: {error}"
                                 );
-                                Self::clear_baseline_manifest_best_effort(store);
-                                return None;
+                                Self::clear_baseline_manifest_best_effort(store, lease);
+                                return Err(error);
                             }
                         },
                     }
@@ -946,13 +1040,15 @@ impl SharedState {
                     tracing::warn!(
                         "workspace baseline manifest unavailable for configured Postgres mode"
                     );
-                    Self::clear_baseline_manifest_best_effort(store);
-                    return None;
+                    Self::clear_baseline_manifest_best_effort(store, lease);
+                    return Err(bsl_search::SearchError::ExternalBaseline(
+                        "workspace baseline manifest is unavailable".to_owned(),
+                    ));
                 }
                 Err(error) => {
                     tracing::warn!("failed to resolve workspace baseline snapshot: {error}");
-                    Self::clear_baseline_manifest_best_effort(store);
-                    return None;
+                    Self::clear_baseline_manifest_best_effort(store, lease);
+                    return Err(error);
                 }
             };
 
@@ -961,16 +1057,18 @@ impl SharedState {
                 "workspace overlay-only baseline initialized; baseline search served from Postgres"
             );
 
-            return Some(WorkspaceSearchInit {
+            return Ok(Some(WorkspaceSearchInit {
                 watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::PostgresRemoteOverlay,
                 pending_embed: None,
                 overlay_init: OverlayInit::RemoteWarmup,
-            });
+            }));
         }
 
-        let mut engine = Self::open_search_engine(&db_path)?;
+        let Some(mut engine) = Self::open_search_engine_fenced(&db_path, lease)? else {
+            return Ok(None);
+        };
 
         // A restart with partially embedded code must resume, not re-embed. The deferred
         // embedding pass already selects exactly the NULL-embedding chunks
@@ -980,23 +1078,19 @@ impl SharedState {
         // embeddings, throwing away vectors already paid for — the opposite of resume.
         // Changed files are still detected and re-embedded via their content-hash mismatch.
 
-        if let Err(error) = Self::configure_workspace_engine(
-            &mut engine,
-            Self::roots_of(&project),
-            BaselineHashMode::RawFileBytes,
-        ) {
-            tracing::warn!("failed to configure workspace search roots: {error}");
-            return None;
-        }
+        let roots = Self::roots_of(&project);
         // Declaring the local mode also clears inherited fingerprint rows: they claim
         // "verified against the manifest", which this mode can neither honour nor refresh —
         // a row surviving the local period would suppress a same-stat edit after a switch
         // back to the same snapshot. A failed clear leaves that lie standing, so the boot
         // fails closed, exactly like the Postgres branch does on its own failed clears.
-        if let Err(error) = engine.set_serves_external_baseline(false) {
-            tracing::warn!("failed to clear inherited overlay fingerprint rows: {error}");
-            return None;
-        }
+        let Some(()) = Self::startup_apply_once(lease, || {
+            Self::configure_workspace_engine(&mut engine, roots, BaselineHashMode::RawFileBytes)?;
+            engine.set_serves_external_baseline(false)
+        })?
+        else {
+            return Ok(None);
+        };
 
         // Fused cold-build: the graph owns the startup build decision. When it builds
         // the graph fresh it streams the search chunks (with graph context) from the
@@ -1016,18 +1110,18 @@ impl SharedState {
             // deleted while the daemon was down. Reconcile the store to disk so the overlay baseline
             // truly == working tree before asserting Clean; a walk that could not prove this
             // downgrades to a prime (which never asserts a false clean).
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
-                OverlayInit::Clean
-            } else {
-                OverlayInit::Prime
+            let Some(reconciled) = Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease)
+            else {
+                return Ok(None);
             };
-            return Some(WorkspaceSearchInit {
+            let overlay_init = if reconciled { OverlayInit::Clean } else { OverlayInit::Prime };
+            return Ok(Some(WorkspaceSearchInit {
                 watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
                 overlay_init,
-            });
+            }));
         }
 
         // Standalone path (warm cache, no embedder, or fused fallback). Enrich semantic
@@ -1071,13 +1165,16 @@ impl SharedState {
             // synchronous `index_directory`. The graph context set above is persisted with
             // the chunks, so the deferred vectors are graph-enriched just as
             // `index_directory` would have produced.
-            match engine.index_directory_deferred(&source_path) {
-                Ok(indexed) => {
+            match engine.index_directory_deferred_fenced(&source_path, |apply| {
+                Self::startup_apply(lease, apply)
+            }) {
+                Ok(Some(indexed)) => {
                     if indexed > 0 {
                         tracing::info!(indexed, "FTS + graph context written; embedding deferred");
                     }
                 }
-                Err(e) => tracing::warn!("failed to write deferred index: {e}"),
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(error),
             }
 
             // Schedule the background pass only when chunks actually lack vectors. A warm
@@ -1093,18 +1190,18 @@ impl SharedState {
             // (incl. edits made while the daemon was down) but did not remove rows for a `.bsl`
             // deleted while down. Reconcile the store to disk so the overlay baseline == working tree
             // before asserting Clean; a walk that could not prove this downgrades to a prime.
-            let overlay_init = if Self::reconcile_boot_store_with_disk(&mut engine) {
-                OverlayInit::Clean
-            } else {
-                OverlayInit::Prime
+            let Some(reconciled) = Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease)
+            else {
+                return Ok(None);
             };
-            return Some(WorkspaceSearchInit {
+            let overlay_init = if reconciled { OverlayInit::Clean } else { OverlayInit::Prime };
+            return Ok(Some(WorkspaceSearchInit {
                 watch_armed,
                 engine,
                 mode: WorkspaceSearchMode::SqliteLocal,
                 pending_embed,
                 overlay_init,
-            });
+            }));
         }
 
         // FTS-only branch (no embedder configured — the common local dev setup). A cold store (no
@@ -1115,11 +1212,18 @@ impl SharedState {
         // rows); only the cold, freshly-ingested-and-reconciled sub-branch may then assert Clean.
         let overlay_init = if engine.chunk_count().unwrap_or(0) == 0 {
             tracing::info!(?source_path, "building FTS index from source files");
-            match engine.index_directory_fts(&source_path) {
-                Ok(indexed) => tracing::info!(indexed, "FTS index built"),
-                Err(e) => tracing::warn!("failed to build FTS index: {e}"),
+            match engine
+                .index_directory_fts_fenced(&source_path, |apply| Self::startup_apply(lease, apply))
+            {
+                Ok(Some(indexed)) => tracing::info!(indexed, "FTS index built"),
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(error),
             }
-            if Self::reconcile_boot_store_with_disk(&mut engine) {
+            let Some(reconciled) = Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease)
+            else {
+                return Ok(None);
+            };
+            if reconciled {
                 OverlayInit::Clean
             } else {
                 OverlayInit::Prime
@@ -1129,27 +1233,51 @@ impl SharedState {
             // files DELETED while down (a prime only hides them lazily and never from the store).
             // A root DECLARED while down is neither: it has no rows to refresh and no rows to
             // remove, so the skip is taken per root and only the unindexed ones are ingested.
-            match engine.index_unindexed_roots_fts() {
-                Ok(indexed) if indexed > 0 => {
+            match engine.index_unindexed_roots_fts_fenced(|apply| Self::startup_apply(lease, apply))
+            {
+                Ok(Some(indexed)) if indexed > 0 => {
                     tracing::info!(
                         indexed,
                         "indexed a source root declared while the daemon was down"
                     )
                 }
-                Ok(_) => {}
-                Err(e) => tracing::warn!("failed to index a newly declared source root: {e}"),
+                Ok(Some(_)) => {}
+                Ok(None) => return Ok(None),
+                Err(error) => return Err(error),
             }
-            Self::reconcile_boot_store_with_disk(&mut engine);
+            if Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease).is_none() {
+                return Ok(None);
+            }
             OverlayInit::Prime
         };
 
-        Some(WorkspaceSearchInit {
+        Ok(Some(WorkspaceSearchInit {
             watch_armed,
             engine,
             mode: WorkspaceSearchMode::SqliteLocal,
             pending_embed: None,
             overlay_init,
-        })
+        }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn init_workspace_search_engine_unmanaged(
+        workspace_root: &std::path::Path,
+        watch: Option<(&WorkspaceChangeHub, super::sync::WatchWaitPolicy)>,
+        mode: WorkspaceSearchMode,
+        external_baseline: Option<Arc<ExternalBaselineService>>,
+        graph: &GraphState,
+    ) -> Option<WorkspaceSearchInit> {
+        Self::init_workspace_search_engine(
+            workspace_root,
+            watch,
+            mode,
+            external_baseline,
+            graph,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        )
+        .ok()
+        .flatten()
     }
 
     fn init_reference_search_engine(
@@ -1341,9 +1469,234 @@ mod tests {
     };
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn startup_constructor_fence_distinguishes_retry_terminal_and_error() {
+        let dir = tempdir().unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let held = lease.hold_file_lock_for_test();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let lease = lease.clone();
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                let mut apply = || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                };
+                SharedState::startup_apply(&lease, &mut apply)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(2100));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "a refused fence does not invoke apply");
+        drop(held);
+        assert!(matches!(worker.join().unwrap(), Some(Ok(()))));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the prepared operation runs once");
+
+        let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let terminal_calls = AtomicUsize::new(0);
+        let mut terminal_apply = || {
+            terminal_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        };
+        assert!(SharedState::startup_apply(&old, &mut terminal_apply).is_none());
+        assert!(old.is_superseded());
+        assert_eq!(terminal_calls.load(Ordering::SeqCst), 0);
+
+        let released_dir = tempdir().unwrap();
+        let released = crate::workspace_lease::WorkspaceLease::claim(released_dir.path());
+        released.release();
+        assert!(SharedState::startup_apply(&released, &mut || Ok(())).is_none());
+
+        let error = SharedState::startup_apply(
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &mut || Err::<(), _>(bsl_search::SearchError::Index("expected".to_owned())),
+        );
+        assert!(matches!(
+            error,
+            Some(Err(bsl_search::SearchError::Index(message))) if message == "expected"
+        ));
+    }
+
+    #[test]
+    fn startup_metadata_fence_stops_after_takeover() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("search.db");
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&bsl_search::WorkspaceBaselineManifest {
+                snapshot_id: "prepared".to_owned(),
+                snapshot_fingerprint: None,
+                files: Vec::new(),
+            })
+            .unwrap();
+
+        let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let prepared = engine.store().load_baseline_manifest().unwrap();
+        assert!(prepared.is_some(), "metadata preparation happens before the fence");
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+
+        let result =
+            SharedState::startup_apply_once(&old, || engine.store().clear_baseline_manifest())
+                .unwrap();
+        assert!(result.is_none());
+        assert!(old.is_superseded());
+        assert!(engine.store().load_baseline_manifest().unwrap().is_some());
+    }
+
+    #[test]
+    fn startup_ingest_fence_does_not_repeat_preparation() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let source = workspace.join("CommonModule.bsl");
+        fs::write(&source, "Процедура Первичная()\nКонецПроцедуры").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("search.db")).unwrap();
+        engine
+            .initialize_workspace_roots(
+                bsl_search::WorkspaceRoots::build(&workspace, &workspace, &[]).0,
+            )
+            .unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim(&workspace);
+        let held = lease.hold_file_lock_for_test();
+        let (prepared_tx, prepared_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut announced = false;
+            let result = engine.index_directory_fts_fenced(&workspace, |apply| {
+                if !announced {
+                    prepared_tx.send(()).unwrap();
+                    announced = true;
+                }
+                SharedState::startup_apply(&lease, apply)
+            });
+            (result, engine)
+        });
+
+        prepared_rx.recv().unwrap();
+        fs::write(&source, "Процедура Измененная()\nКонецПроцедуры").unwrap();
+        drop(held);
+        let (result, engine) = worker.join().unwrap();
+        assert_eq!(result.unwrap(), Some(1));
+        assert_eq!(engine.text_search("Первичная", 10, Some("code")).unwrap().len(), 1);
+        assert!(engine.text_search("Измененная", 10, Some("code")).unwrap().is_empty());
+
+        let partial_dir = tempdir().unwrap();
+        fs::write(partial_dir.path().join("A.bsl"), "Процедура А()\nКонецПроцедуры").unwrap();
+        fs::write(partial_dir.path().join("B.bsl"), "Процедура Б()\nКонецПроцедуры").unwrap();
+        let mut partial = SearchEngine::fts_only(&partial_dir.path().join("search.db")).unwrap();
+        partial
+            .initialize_workspace_roots(
+                bsl_search::WorkspaceRoots::build(partial_dir.path(), partial_dir.path(), &[]).0,
+            )
+            .unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(partial_dir.path());
+        let mut newer = None;
+        let mut admitted = 0;
+        let result = partial
+            .index_directory_fts_fenced(partial_dir.path(), |apply| {
+                if admitted == 1 {
+                    newer = Some(crate::workspace_lease::WorkspaceLease::claim(partial_dir.path()));
+                }
+                let result = SharedState::startup_apply(&old, apply);
+                if matches!(result, Some(Ok(()))) {
+                    admitted += 1;
+                }
+                result
+            })
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(partial.file_count().unwrap(), 1, "the first fenced file survives takeover");
+
+        let present = std::collections::HashSet::new();
+        assert!(partial
+            .reconcile_workspace_files_fenced(&present, |apply| {
+                SharedState::startup_apply(&old, apply)
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(partial.file_count().unwrap(), 1, "terminal reconcile removes nothing");
+        drop(newer);
+    }
+
+    #[test]
+    fn superseded_bootstrap_stops_mutating() {
+        let prime_dir = tempdir().unwrap();
+        fs::write(prime_dir.path().join("Prime.bsl"), "Процедура Подготовленная()\nКонецПроцедуры")
+            .unwrap();
+        let mut prime = SearchEngine::fts_only(&prime_dir.path().join("search.db")).unwrap();
+        prime
+            .initialize_workspace_roots(
+                bsl_search::WorkspaceRoots::build(prime_dir.path(), prime_dir.path(), &[]).0,
+            )
+            .unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(prime_dir.path());
+        let mut newer = None;
+        assert!(prime
+            .prime_workspace_overlay_fenced(|apply| {
+                newer = Some(crate::workspace_lease::WorkspaceLease::claim(prime_dir.path()));
+                SharedState::startup_apply(&old, apply)
+            })
+            .unwrap()
+            .is_none());
+        assert!(!prime.workspace_overlay_retry_signals().unwrap().initialized);
+        drop(newer);
+
+        let overlay_dir = tempdir().unwrap();
+        let mut overlay = SearchEngine::fts_only(&overlay_dir.path().join("search.db")).unwrap();
+        overlay
+            .initialize_workspace_roots(
+                bsl_search::WorkspaceRoots::build(overlay_dir.path(), overlay_dir.path(), &[]).0,
+            )
+            .unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(overlay_dir.path());
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(overlay_dir.path());
+        assert!(SharedState::startup_apply_once(&old, || {
+            overlay.initialize_workspace_overlay_clean()
+        })
+        .unwrap()
+        .is_none());
+        assert!(!overlay.workspace_overlay_retry_signals().unwrap().initialized);
+
+        let publish_dir = tempdir().unwrap();
+        let engine = SearchEngine::fts_only(&publish_dir.path().join("search.db")).unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(publish_dir.path());
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(publish_dir.path());
+        let slot: crate::state::SharedSearchEngine = Arc::new(Mutex::new(None));
+        let mut guard = slot.lock().unwrap();
+        assert!(SharedState::startup_apply_once(&old, || {
+            *guard = Some(engine);
+            Ok(())
+        })
+        .unwrap()
+        .is_none());
+        assert!(guard.is_none(), "terminal refusal publishes neither engine nor status");
+        drop(guard);
+
+        let release_dir = tempdir().unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim(release_dir.path());
+        let held = lease.hold_file_lock_for_test();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = {
+            let lease = lease.clone();
+            let calls = Arc::clone(&calls);
+            std::thread::spawn(move || {
+                SharedState::startup_apply_once(&lease, || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        lease.release();
+        drop(held);
+        assert!(worker.join().unwrap().unwrap().is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 
     fn immediate_bootstrap(backend: &'static str, issue: Option<&str>) -> BaselineBootstrap {
         BaselineBootstrap::Immediate(BaselineRuntime {
@@ -1569,7 +1922,7 @@ mod tests {
             let workspace = workspace.clone();
             let hub = hub.clone();
             std::thread::spawn(move || {
-                SharedState::init_workspace_search_engine(
+                SharedState::init_workspace_search_engine_unmanaged(
                     &workspace,
                     Some((
                         &hub,
@@ -1763,7 +2116,7 @@ mod tests {
             .unwrap(),
         );
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             workspace,
             None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
@@ -1849,7 +2202,7 @@ mod tests {
             .unwrap(),
         );
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             workspace,
             None,
             crate::state::WorkspaceSearchMode::PostgresRemoteOverlay,
@@ -1882,7 +2235,7 @@ mod tests {
 
         // A disabled graph has no workspace root, so the fused path is skipped and the
         // standalone semantic branch runs — the path that previously embedded inline.
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2184,7 +2537,10 @@ mod tests {
         // parse. This proves mark -> prefetch -> resident-fed.
         let deadline = Instant::now() + Duration::from_secs(20);
         let fed = loop {
-            SharedState::prefetch_resident_overlay(state.search_engine());
+            SharedState::prefetch_resident_overlay_fenced(
+                state.search_engine(),
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            );
             let fed = state
                 .search_engine()
                 .lock()
@@ -2243,7 +2599,7 @@ mod tests {
 
         // First (cold) boot: an empty store, so the FTS index is built from v1 disk and the branch
         // reconciles -> Clean. Dropping the init persists the store under the workspace cache dir.
-        let cold = SharedState::init_workspace_search_engine(
+        let cold = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2265,7 +2621,7 @@ mod tests {
 
         // Second (warm) boot: the persisted store already has chunks, so FTS re-indexing is skipped
         // and the store is NOT reconciled with the while-down edit -> this branch must prime.
-        let warm = SharedState::init_workspace_search_engine(
+        let warm = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2333,7 +2689,7 @@ mod tests {
         );
 
         // Cold boot: the deferred branch indexes both modules -> Clean; drop persists the store.
-        let cold = SharedState::init_workspace_search_engine(
+        let cold = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2352,7 +2708,7 @@ mod tests {
 
         // Warm re-boot through the same real init path: the deferred re-index only sees present
         // files, so ONLY the boot reconcile can remove the deleted module's rows.
-        let warm = SharedState::init_workspace_search_engine(
+        let warm = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2474,7 +2830,7 @@ mod tests {
         let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let (_dir, workspace) = workspace_with_two_extensions();
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2670,7 +3026,7 @@ mod tests {
         let project = crate::project::at(&workspace);
         assert!(project.is_ok(), "the fixture project parses: {:?}", project.err());
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2746,7 +3102,7 @@ mod tests {
         )
         .unwrap();
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2816,7 +3172,7 @@ mod tests {
         // First boot: the extension is not declared yet, so the store warms up on the
         // configuration alone.
         fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
-        let cold = SharedState::init_workspace_search_engine(
+        let cold = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2834,7 +3190,7 @@ mod tests {
             "[source]\nroot = \"src/cf\"\nextensions = [{ name = \"a\", path = \"ext-a\" }]\n",
         )
         .unwrap();
-        let warm = SharedState::init_workspace_search_engine(
+        let warm = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2883,7 +3239,7 @@ mod tests {
         let _embedding_model = EnvVarGuard::set("EMBEDDING_MODEL", "test-model");
 
         let (_dir, workspace) = workspace_with_two_extensions();
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
@@ -2916,7 +3272,7 @@ mod tests {
         let (_dir, workspace) = workspace_with_two_extensions();
         fs::write(workspace.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
 
-        let init = SharedState::init_workspace_search_engine(
+        let init = SharedState::init_workspace_search_engine_unmanaged(
             &workspace,
             None,
             crate::state::WorkspaceSearchMode::SqliteLocal,
