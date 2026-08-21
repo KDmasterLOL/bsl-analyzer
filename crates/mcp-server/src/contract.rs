@@ -166,6 +166,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         actions: DIAGNOSTICS_ACTIONS,
         note: None,
         output_schema_version: Some("15"),
+        default_enabled: true,
     },
     tool("outline", &[]),
 ];
