@@ -201,9 +201,13 @@ Upstream acknowledgements
   * bsl-parser — grammar reference used when the SDBL and BSL layers
     were first written — LGPL-3.0-or-later
   * bsl-language-server — deliberate compatibility target for the
-    configuration format and the diagnostic catalogue; also the
-    reference used when crates/cfg and parts of crates/hir-def were
-    first written — LGPL-3.0-or-later
+    configuration format, the diagnostic catalogue and BSL parsing;
+    also the reference used when crates/cfg and parts of crates/hir-def
+    were first written — LGPL-3.0-or-later. Where parsing is concerned
+    the decision is recorded in docs/legal/bsl-compatibility-decision.md:
+    both rules that changed what the parser accepts come out of Chapter 4
+    by section, and that project supplied a corpus-scale cross-check
+    rather than the rule.
   * mdclasses — object-model reference used when crates/bsl-metadata
     was first written — LGPL-3.0
   * v8std.ru — public catalogue of 1C coding standards — CC0

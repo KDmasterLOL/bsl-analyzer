@@ -372,28 +372,32 @@ literal counter that does not agree with the expected order of magnitude.
 J1 and J2 are the pair that makes B1's open cases decidable: a variant that no
 input produces fails J1, and a token that no rule consumes shows up in J2.
 
-## Compatibility: to be recorded as a decision
+## Compatibility: recorded as a decision
 
-`a6f57021` (2026-06-15) is the BSL counterpart of `c7c942a7`: it clears "442
-ParseErrors across 34 files that bsl-language-server 0.29.0 parses cleanly". The
-correctness oracle for BSL parsing, after the markers were removed, was
-somebody else's implementation.
+**Done** — [`bsl-compatibility-decision.md`](bsl-compatibility-decision.md).
 
-As with the diagnostic catalogue, this is lawful and is the point — compatibility
-with the predecessor is a goal. But it has to be **recorded as a decision**,
-otherwise it reads as underivability. The line is the same one: our own code
-behind the same observable interface is fine; obtaining that interface by
-reading their source is not.
+The concern was that `a6f57021` cleared «442 ParseErrors across 34 files that
+bsl-language-server 0.29.0 parses cleanly», which makes another implementation
+the correctness oracle for BSL parsing. Going through every commit that touched
+`parser`, `lexer` or `syntax` and named that project, the picture is narrower
+than the concern:
 
-For this particular commit the record can be stronger than "compatibility".
-Section 4.2.4.6 reserves keywords against use as «имена переменных, реквизитов
-объектов конфигурации и объявляемых процедур и функций» — declaration sites. It
-says nothing about member names after a dot, so `Выборка.Исключение` is valid by
-the source, and the rule the commit implements is derivable from 4.2.4.6
-directly. The other implementation served as a corpus-scale cross-check, not as
-the origin of the rule. Establishing that for the remaining compatibility-driven
-BSL commits is part of this step; where it cannot be established, the plain
-compatibility record stands.
+- two commits changed what the parser accepts, and both rules come out of
+  Chapter 4 by name — 4.2.4.6 for keywords as member names, 4.3.6 for comments
+  between the lines of a multiline literal. The other implementation supplied a
+  corpus-scale cross-check, not the rule;
+- four changed the shape of the tree so a diagnostic could read it, without
+  changing what parses. Their oracle was the diagnostic's behaviour, and that
+  compatibility is already stated in `NOTICE`;
+- six were SDBL and belong to that programme.
+
+The record names its own limit: the search reads commit messages, so a silent
+comparison would not appear in it, and its absence is not evidence.
+
+One finding is worth keeping next to B3. `ad53c893` added `UnaryExpr` to
+`not_expr` alone, because DoubleNegatives needed the node; unary `+` and `-`
+never got one because no diagnostic asked. That is the origin of the asymmetry
+B3 recorded as D9 — nobody chose against it, the occasion simply never arose.
 
 ## Order
 
@@ -402,7 +406,8 @@ compatibility record stands.
 3. B2. **Done.**
 4. B3. **Done.**
 5. B4. **Done.**
-6. Record the compatibility decision.
+6. Record the compatibility decision. **Done** —
+   [`bsl-compatibility-decision.md`](bsl-compatibility-decision.md).
 7. Update `NOTICE` and `LICENSING.md`. B4 wrote the test-material half of this;
    what remains is whatever the compatibility decision adds.
 
