@@ -121,6 +121,29 @@ rule by rule rather than rewritten (b3.md); and the test material, whose
 origin was established where the history establishes it and left stated
 as unestablished where it does not (b4.md).
 
+The compatibility question that ran alongside them is recorded as a
+decision in docs/legal/bsl-compatibility-decision.md. Compatibility with
+bsl-language-server on BSL parsing stays a stated goal of this product;
+what the record establishes is that no parsing rule was adopted on the
+strength of that implementation. Both commits that changed what the
+parser accepts derive their rule from Chapter 4 by section, and the
+other implementation supplied a corpus-scale cross-check of a decision
+already taken. The record names its own limit: it reads commit
+messages, so a silent comparison would not appear in it.
+
+What this does and does not deliver. The BSL half of exit-criteria item
+10 is now complete: the token inventory was re-derived, the preprocessor
+symbols were re-derived, every grammar rule carries a verdict with the
+section it rests on, the test material's origin is recorded, and the
+compatibility decision is written down. It does not by itself relicense
+anything. Three items of the checklist remain open — the SDBL parser
+rule naming, the comparison of sdbl-hir against the upstream lowering,
+and the test corpus — and until they close, the crates named above stay
+under LGPL-3.0-or-later. What has changed is that for crates/parser and
+crates/lexer the only thing standing between them and Tier A is the
+remaining SDBL work, which is a position neither crate has been in
+before.
+
 The current assessment — what is proven, what has diverged, and what is
 still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.
 Until that work completes, the Tier B crates and the final binary remain

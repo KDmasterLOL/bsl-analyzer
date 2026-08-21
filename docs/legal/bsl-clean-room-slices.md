@@ -408,11 +408,15 @@ B3 recorded as D9 — nobody chose against it, the occasion simply never arose.
 5. B4. **Done.**
 6. Record the compatibility decision. **Done** —
    [`bsl-compatibility-decision.md`](bsl-compatibility-decision.md).
-7. Update `NOTICE` and `LICENSING.md`. B4 wrote the test-material half of this;
-   what remains is whatever the compatibility decision adds.
+7. Update `NOTICE` and `LICENSING.md`. **Done.** B4 wrote the test-material
+   half; the compatibility decision added its own, and `NOTICE` now states what
+   the finished item delivers and what it does not — in particular that nothing
+   is relicensed by it, because three checklist items are still open.
 
-The remaining steps are separate slices with their own attestations, on the
-model of `sdbl-clean-room-slice*.md`.
+All seven steps are done. Each slice carries its own attestation, on the model of
+`sdbl-clean-room-slice*.md`; what the programme does **not** deliver is set out
+under «What item 10 will not deliver» below, and it is the part that decides when
+`parser` and `lexer` can leave Tier B.
 
 **The J-invariants are no longer a step of their own.** They were listed as one
 between B2 and B3, on the reasoning that a harness built before the slices that
