@@ -128,4 +128,14 @@ inherits the obligations of the original sources.
 | `crates/parser/tests/fixtures/Module.bsl` | ООО «1С-Софт» | CC BY 4.0 (header preserved in the file) |
 | `crates/bsl-platform/data/platform_data.json` | ООО «1С-Софт» | 1C copyright, see `crates/bsl-platform/data/PROVENANCE.md` — not covered by MIT / Apache-2.0 / LGPL-3.0 |
 
+Test material that came from `bsl-language-server` — the fixture of the
+unknown-preprocessor-symbol diagnostic — is **no longer present**. It was
+replaced on 2026-08-21 with material derived from section 4.8.1.2 of the 1C
+Developer's Guide, so it is not an entry in the table above: the table lists
+third-party content that is still bundled. See
+`docs/legal/bsl-clean-room-slice-b2.md`;
+`crates/ide-diagnostics/tests/retired_material.rs` fails if the retired
+material reappears verbatim in any Git-tracked file of that crate, whatever
+its extension.
+
 See `NOTICE` for upstream acknowledgements.

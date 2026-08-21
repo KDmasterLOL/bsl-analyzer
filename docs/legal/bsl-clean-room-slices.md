@@ -10,16 +10,19 @@ Item 10 blocks Tier A for `parser` and `lexer` independently of how clean SDBL
 becomes, because both crates host a BSL layer with the same origin. Finishing
 the SDBL programme in full would not move either crate.
 
-## Status as of 2026-08-20
+## Status as of 2026-08-21
 
-B1 is done. No provenance marker of any kind survives in the BSL layer —
-`843b00ab` and `3aa29b99` removed them all, so the evidence for what was
-derived lives only in git history.
+B1 and B2 are done, and each carries a provenance docstring naming the section
+of Chapter 4 it was re-derived from.
+
+Everywhere else in the BSL layer no provenance marker survives: `843b00ab` and
+`3aa29b99` removed them all, so for the parts still awaiting a slice the
+evidence of what was derived lives only in git history.
 
 | Slice | Area | Issue | State |
 |---|---|---|---|
 | B1 | BSL token inventory (`lexer`) | #233 | **done** — [`bsl-clean-room-slice-b1.md`](bsl-clean-room-slice-b1.md) |
-| B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | not started |
+| B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | **done** — [`bsl-clean-room-slice-b2.md`](bsl-clean-room-slice-b2.md) |
 | B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | not started |
 | B4 | Test material | #236 | not started |
 

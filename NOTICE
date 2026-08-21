@@ -45,6 +45,23 @@ the working reference:
   * crates/parser/src/grammar/sdbl/  (SDBL grammar)
   * crates/parser/src/grammar/    (BSL grammar layer)
   * crates/lexer/src/lib.rs       (BSL token inventory)
+  * crates/ide-diagnostics/src/utils/preprocessor_symbols.rs
+                                  (preprocessor symbol list; its file
+                                  header named the PREPROC_*_SYMBOL tokens
+                                  of BSLLexer.g4 as the source)
+
+The last path lies outside the parser and lexer crates and was missing
+from this list until 2026-08-21. It is added here because the omission
+was in the record, not in the licensing: ide-diagnostics is a Tier B
+crate for an unrelated reason.
+
+Test material is a provenance class of its own. The commit that
+introduced the diagnostic for unknown preprocessor symbols also recorded
+"Test fixture copied verbatim from bsl-language-server". Deleting the
+fixture file later moved that material into an inline test rather than
+retiring it. It has now been replaced with material derived from section
+4.8.1.2 of the 1C Developer's Guide, and a test in the crate fails if the
+retired material reappears.
 
 These facts are stated here directly, and not left to be discovered in
 the commit history, because the public mirror of this repository does
@@ -67,8 +84,15 @@ The SDBL layer has since been rewritten in bounded slices from official
 1C documentation under the clean-room process described in
 docs/legal/sdbl-clean-room-slices.md, and now diverges from the upstream
 grammar in token inventory, token granularity, rule decomposition and
-operator precedence. That rewrite is not finished, and the BSL layer has
-not been rewritten at all.
+operator precedence. That rewrite is not finished.
+
+The BSL layer is being rewritten the same way, under
+docs/legal/bsl-clean-room-slices.md. Two sub-slices are complete: the BSL
+token inventory (docs/legal/bsl-clean-room-slice-b1.md) and the
+preprocessor symbol list together with its test material
+(docs/legal/bsl-clean-room-slice-b2.md), both re-derived from Chapter 4 of
+the 1C Developer's Guide for 8.3.27. The BSL grammar rules and the
+remaining test material are not done.
 
 The current assessment — what is proven, what has diverged, and what is
 still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.

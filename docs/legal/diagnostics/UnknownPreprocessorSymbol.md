@@ -12,7 +12,9 @@ The idea is therefore not specific to `bsl-language-server`. It is a direct cons
 
 ## Public basis
 
-- BSL preprocessor semantics and the documented set of platform symbols used in conditional compilation.
+- BSL preprocessor semantics and the documented set of platform symbols used in conditional compilation — section 4.8.1.2 of the 1C Developer's Guide for 8.3.27, which lists the symbols in full.
+
+  This wording was accurate for twenty-six of the twenty-nine spellings the list used to hold. The other three — `LINUX`, `WINDOWS`, `MACOS` — were precisely the undocumented ones and were removed by sub-slice B2; see `docs/legal/bsl-clean-room-slice-b2.md`.
 
 ## Implementation audit notes
 

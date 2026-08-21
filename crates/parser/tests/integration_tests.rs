@@ -406,13 +406,13 @@ fn test_preprocessor_not_expression() {
 }
 
 #[test]
-fn test_preprocessor_os_symbols() {
-    let input = r#"#Если Windows Тогда
-    Процедура НаWindows() КонецПроцедуры
-#ИначеЕсли Linux Тогда
-    Процедура НаLinux() КонецПроцедуры
-#ИначеЕсли MacOS Тогда
-    Процедура НаMacOS() КонецПроцедуры
+fn test_preprocessor_unknown_symbol_still_parses() {
+    // Разбор не зависит от того, известен ли символ: список известных живёт
+    // в диагностике, а грамматика принимает в условии любой идентификатор.
+    let input = r#"#Если Мираж Тогда
+    Процедура ПриМираже() КонецПроцедуры
+#ИначеЕсли НЕ Морок Тогда
+    Процедура ПриМороке() КонецПроцедуры
 #КонецЕсли"#;
     let result = parse(input);
     assert!(!result.has_errors());
