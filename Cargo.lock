@@ -2158,8 +2158,8 @@ name = "ide-host-core"
 version = "0.2.70"
 dependencies = [
  "base-db",
- "bsl-conventions",
  "blake3",
+ "bsl-conventions",
  "bsl-metadata",
  "ide",
  "ide-db",

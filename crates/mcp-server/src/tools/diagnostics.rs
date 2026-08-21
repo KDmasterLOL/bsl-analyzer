@@ -1145,7 +1145,7 @@ fn result_id(path: &Path, generation: u64, text: &str) -> String {
     let mut hasher = DefaultHasher::new();
     path.hash(&mut hasher);
     text.hash(&mut hasher);
-    format!("{generation}@{:016x}", hasher.finish())
+    format!("{}@{generation}@{:016x}", path.to_string_lossy(), hasher.finish())
 }
 
 /// The four-bucket severity histogram, always emitted so the agent knows what a
@@ -1657,8 +1657,11 @@ mod tests {
             assert_eq!(disabled["baseline"]["partitions_total"], 0);
             assert_eq!(disabled["baseline"]["partitions_returned"], 0);
             assert_eq!(disabled["baseline"]["partitions_truncated"], false);
-            let response =
-                envelope(Freshness { revision: 1, stale: false, reload: "none" }, disabled);
+            let response = envelope(
+                Freshness { revision: 1, topology: 0, stale: false, reload: "none" },
+                loc::Completeness::complete(),
+                disabled,
+            );
             assert_structured_mirrors_text(&response);
             assert!(body_of(&response)["result"]["baseline"].is_object());
 
@@ -1712,7 +1715,8 @@ mod tests {
             let owner_first = bounded_baseline_value(&summary, Some("extension:z"));
             assert_eq!(owner_first["partitions"][0]["id"], "extension:z");
             let stale = envelope(
-                Freshness { revision: 2, stale: true, reload: "running" },
+                Freshness { revision: 2, topology: 0, stale: true, reload: "running" },
+                loc::Completeness::complete(),
                 json!({"baseline": owner_first.clone()}),
             );
             let stale = &body_of(&stale)["result"]["baseline"];
@@ -2561,6 +2565,6 @@ mod tests {
         let b = result_id(path, 3, "Процедура Б() КонецПроцедуры");
         assert_eq!(a, a_again, "same path+gen+content → same id");
         assert_ne!(a, b, "different content → different id even at the same generation");
-        assert!(a.starts_with("3@"), "id is <gen>@<path+content hash>: {a}");
+        assert!(a.starts_with("/ws/Mod.bsl@3@"), "id is <path>@<gen>@<hash>: {a}");
     }
 }
