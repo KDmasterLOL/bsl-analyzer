@@ -12,6 +12,7 @@ pub struct FoldingRange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldingRangeKind {
     Region,
+    Comment,
 }
 
 pub fn folding_ranges<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<FoldingRange> {
@@ -25,6 +26,7 @@ pub fn folding_ranges<DB: RootDatabase>(db: &DB, file_id: FileId) -> Vec<Folding
     let mut ranges = Vec::new();
     collect_region_ranges(db, file_id, &line_index, &mut ranges);
     collect_syntax_ranges(&root, &line_index, &mut ranges);
+    collect_comment_ranges(&root, &line_index, &mut ranges);
 
     ranges.sort_by_key(|range| (range.range.start(), range.range.end()));
     ranges.dedup_by_key(|range| (range.range.start(), range.range.end(), range.kind));
@@ -51,6 +53,31 @@ fn collect_syntax_ranges(
     for node in root.descendants() {
         if is_foldable_syntax_node(node.kind()) {
             push_multiline_range(ranges, line_index, node.text_range(), None);
+        }
+    }
+}
+
+/// Серия комментариев сворачивается по частям, владеющим своей строкой:
+/// комментарий, стоящий за кодом, свернуть нечем — его строка всё равно
+/// останется видимой, а приклеенный к соседней складке он удлинил бы её на
+/// строку с кодом.
+fn collect_comment_ranges(
+    root: &SyntaxNode,
+    line_index: &LineIndex,
+    ranges: &mut Vec<FoldingRange>,
+) {
+    for run in syntax::comment_runs(root) {
+        let mut owned: Option<TextRange> = None;
+        for line in run.lines() {
+            if line.owns_line {
+                let range = line.token.text_range();
+                owned = Some(owned.map_or(range, |open| open.cover(range)));
+            } else if let Some(open) = owned.take() {
+                push_multiline_range(ranges, line_index, open, Some(FoldingRangeKind::Comment));
+            }
+        }
+        if let Some(open) = owned {
+            push_multiline_range(ranges, line_index, open, Some(FoldingRangeKind::Comment));
         }
     }
 }
@@ -165,6 +192,38 @@ mod tests {
         assert!(ranges.contains(&(1, 2, None)));
         assert!(ranges.contains(&(4, 6, None)));
         assert!(ranges.contains(&(7, 9, None)));
+    }
+
+    #[test]
+    fn folds_only_line_owning_comments() {
+        let code = "А = 1; // хвост\n// своя\n// своя2\n";
+
+        let ranges = ranges_by_lines(code);
+
+        assert_eq!(ranges, vec![(1, 2, Some(FoldingRangeKind::Comment))]);
+    }
+
+    #[test]
+    fn single_comment_line_is_not_folded() {
+        assert!(ranges_by_lines("// один\nА = 1;\n").is_empty());
+        // Контрольный вход: без него пустой ответ выше означал бы и «правило
+        // работает», и «комментарные складки не собираются вовсе».
+        assert_eq!(
+            ranges_by_lines("// один\n// два\nА = 1;\n"),
+            vec![(0, 1, Some(FoldingRangeKind::Comment))]
+        );
+    }
+
+    #[test]
+    fn double_slash_inside_string_literal_is_not_folded() {
+        assert!(ranges_by_lines("А = \"http://a\";\nБ = \"http://b\";\n").is_empty());
+        // Тот же текст комментариями даёт складку, поэтому пустой ответ выше
+        // нельзя спутать с неработающей сборкой складок. Наивный текстовый скан
+        // на `//` свернул бы и первый вход.
+        assert_eq!(
+            ranges_by_lines("// http://a\n// http://b\n"),
+            vec![(0, 1, Some(FoldingRangeKind::Comment))]
+        );
     }
 
     #[test]

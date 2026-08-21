@@ -1899,6 +1899,7 @@ fn convert_document_highlight_kind(kind: IdeDocumentHighlightKind) -> LspDocumen
 fn convert_folding_range_kind(kind: IdeFoldingRangeKind) -> LspFoldingRangeKind {
     match kind {
         IdeFoldingRangeKind::Region => LspFoldingRangeKind::Region,
+        IdeFoldingRangeKind::Comment => LspFoldingRangeKind::Comment,
     }
 }
 
@@ -3367,6 +3368,73 @@ mod tests {
         assert_eq!(result[2].start_line, 2);
         assert_eq!(result[2].end_line, 4);
         assert_eq!(result[2].kind, None);
+    }
+
+    #[test]
+    fn folding_range_reports_comment_kind() {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse("file:///folding_comment.bsl").unwrap();
+        let source = r#"#Область ПрограммныйИнтерфейс
+
+// Возвращает описание физического лица для передачи в ФЭС.
+//
+// Параметры:
+//  ФизическоеЛицо - СправочникСсылка.ФизическиеЛица - лицо, чьи данные собираются.
+//  Дата           - Дата - на какой момент брать историю наименований.
+//
+// Возвращаемое значение:
+//  Структура - состав полей описан в документации подсистемы.
+//
+Функция ОписаниеФизическогоЛица(ФизическоеЛицо, Дата) Экспорт
+
+    // Пустая ссылка сюда доходить не должна: вызывающий код проверяет её сам,
+    // но контракт дешевле продублировать, чем потом искать пустую структуру
+    // в выгрузке.
+    Если НЕ ЗначениеЗаполнено(ФизическоеЛицо) Тогда
+        ВызватьИсключение "Не задано физическое лицо";
+    КонецЕсли;
+
+    Возврат Новый Структура;
+
+КонецФункции
+
+#КонецОбласти"#;
+
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        let result = handle_folding_range(ctx, params).unwrap().unwrap();
+
+        let lines: Vec<(u32, u32, Option<LspFoldingRangeKind>)> =
+            result.iter().map(|r| (r.start_line, r.end_line, r.kind.clone())).collect();
+        assert_eq!(
+            lines,
+            vec![
+                (0, 24, Some(LspFoldingRangeKind::Region)),
+                (2, 10, Some(LspFoldingRangeKind::Comment)),
+                (11, 22, None),
+                (13, 15, Some(LspFoldingRangeKind::Comment)),
+                (16, 18, None),
+            ]
+        );
     }
 
     fn setup_code_action_doc(source: &str) -> (GlobalState, lsp_types::Url) {
