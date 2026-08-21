@@ -28,6 +28,13 @@ pub(crate) use types::{
 /// while covering the common "edit a handful of files, then search" case in one shot.
 const MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY: usize = 64;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceSearchApply<T> {
+    Applied(T),
+    Retry,
+    Terminal,
+}
+
 #[derive(Clone)]
 pub struct SharedState {
     workspace_root: Option<PathBuf>,
@@ -88,6 +95,20 @@ impl OnecConnection {
 }
 
 impl SharedState {
+    pub(super) fn apply_workspace_search<T>(
+        shared: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnOnce(&mut bsl_search::SearchEngine) -> T,
+    ) -> WorkspaceSearchApply<T> {
+        let Ok(mut guard) = shared.lock() else { return WorkspaceSearchApply::Retry };
+        let Some(engine) = guard.as_mut() else { return WorkspaceSearchApply::Retry };
+        match lease.with_ownership(|| apply(engine)) {
+            Some(result) => WorkspaceSearchApply::Applied(result),
+            None if lease.is_superseded() || lease.is_released() => WorkspaceSearchApply::Terminal,
+            None => WorkspaceSearchApply::Retry,
+        }
+    }
+
     pub(crate) fn graph(&self) -> &GraphState {
         &self.graph
     }
@@ -110,7 +131,12 @@ impl SharedState {
     }
 
     pub(crate) fn superseded(&self) -> bool {
-        !self.workspace_lease.owns_caches()
+        let _ = self.workspace_lease.owns_caches();
+        self.workspace_lease.is_superseded()
+    }
+
+    pub(crate) fn owns_caches(&self) -> bool {
+        self.workspace_lease.owns_caches()
     }
 
     /// Start building the diagnostics resident now instead of on the first tool call.
@@ -220,6 +246,10 @@ impl SharedState {
         self.workspace_search_mode.clone()
     }
 
+    pub(crate) fn workspace_lease(&self) -> &crate::workspace_lease::WorkspaceLease {
+        &self.workspace_lease
+    }
+
     /// A single-lock snapshot of the baseline lifecycle — the only read surface for
     /// tool handlers. While the deferred connect is `pending`, gates answer "warming —
     /// retry shortly" instead of a config error; one snapshot per request keeps the
@@ -255,8 +285,51 @@ impl SharedState {
     /// lock that only touches the overlay cache (never the resident). A resident that is
     /// absent/loading, or a path it cannot serve, is simply missing from the map and the
     /// reindex disk-reads it — so search never regresses when the resident is unavailable.
-    pub(crate) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
-        sync::prefetch_resident_overlay(engine);
+    pub(crate) fn prefetch_resident_overlay_fenced(
+        engine: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) {
+        sync::prefetch_resident_overlay(engine, lease);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedState;
+    use std::time::Duration;
+
+    #[test]
+    fn terminal_supersession_is_not_transient_nonownership() {
+        let transient_dir = tempfile::tempdir().unwrap();
+        let transient_cache =
+            crate::cache::WorkspaceCacheLayout::for_workspace(transient_dir.path());
+        let holder = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &transient_cache,
+            Duration::from_secs(6),
+        );
+        let transient = crate::workspace_lease::WorkspaceLease::claim_cache(&transient_cache);
+        let mut state = SharedState::shared();
+        state.workspace_lease = transient.clone();
+        assert!(!state.superseded(), "temporary UNCLAIMED is not terminal");
+        assert!(!transient.is_superseded());
+        holder.join().unwrap();
+
+        let released_dir = tempfile::tempdir().unwrap();
+        let released = crate::workspace_lease::WorkspaceLease::claim(released_dir.path());
+        state.workspace_lease = released.clone();
+        released.release();
+        assert!(!state.superseded(), "normal release is not supersession");
+        assert!(!state.owns_caches());
+
+        let terminal_dir = tempfile::tempdir().unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(terminal_dir.path());
+        state.workspace_lease = old.clone();
+        let newer = crate::workspace_lease::WorkspaceLease::claim(terminal_dir.path());
+        old.invalidate_verdict_for_test();
+        assert!(state.superseded(), "the refreshed live foreign token is terminal");
+        newer.release();
+        assert!(state.superseded(), "owner release cannot clear the terminal flag");
+        assert!(!state.owns_caches());
     }
 }
 

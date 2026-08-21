@@ -17,25 +17,6 @@ pub enum BaselineHashMode {
     NormalizedChunks,
 }
 
-/// How a refresh treats overlay chunks that lack a cached embedding.
-///
-/// [`RefreshMode::Embed`] may call the remote embedder to fill missing vectors;
-/// [`RefreshMode::ReuseOnly`] never embeds inline (no remote round-trip under the engine lock),
-/// so a chunk without a cached vector simply contributes no overlay semantic vector this turn
-/// while remaining lexically searchable.
-///
-/// Every interactive query path is [`RefreshMode::ReuseOnly`]: the engine lock is held there, so
-/// embedding must stay off it. The only embedding path is the background warmup, which runs
-/// lock-free against a standalone store (see
-/// [`crate::SearchEngine::prime_workspace_overlay_standalone`]) rather than through the in-engine
-/// refresh; [`RefreshMode::Embed`] therefore remains available for the no-baseline / test refresh
-/// paths that legitimately embed inline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshMode {
-    Embed,
-    ReuseOnly,
-}
-
 #[derive(Debug, Clone)]
 pub struct OverlayVectorDocument {
     pub document: IndexedDocument,
@@ -173,7 +154,7 @@ pub struct WorkspaceOverlayStats {
     pub pending_dirty_paths: usize,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct WorkspaceOverlayCache {
     entries: HashMap<FileKey, OverlayFileEntry>,
     hidden_paths: HashSet<FileKey>,
@@ -736,7 +717,7 @@ impl WorkspaceOverlayCache {
 
     /// `allow_cold_scan` gates the only expensive operation here: a cold full-tree scan + read +
     /// chunk of every workspace file (`full_refresh_from_manifest`). The background warmup
-    /// (`RefreshMode::Embed`) passes `true`; every interactive query/status path passes `false`
+    /// The embedding refresh passes `true`; status paths pass `false`
     /// so it stays O(cached) under the engine lock and answers from the Postgres baseline until the
     /// warmup (or the watcher's incremental path) populates the overlay. Without this gate a single
     /// query on an unwarmed overlay would block for minutes walking the whole tree.
@@ -790,7 +771,7 @@ impl WorkspaceOverlayCache {
 
     /// `allow_cold_scan` gates the cold full-tree scan + read + chunk (`full_refresh`). See
     /// [`Self::refresh_with_manifest`] for the rationale: only the background warmup
-    /// (`RefreshMode::Embed`) may pay that cost; interactive query/status paths pass `false` and
+    /// An embedding refresh may pay that cost; status paths pass `false` and
     /// stay O(cached).
     pub fn refresh(
         &mut self,
@@ -2683,10 +2664,9 @@ fn build_overlay_documents(
 
 /// Build overlay vectors for a file's chunks.
 ///
-/// In [`RefreshMode::ReuseOnly`] (the interactive query path) `embedder` is `None`: only cached
-/// vectors are attached and chunks without one are dropped from the vector set (they remain
-/// lexical). In [`RefreshMode::Embed`] (the background warmup) `embedder` is `Some` and missing
-/// vectors are embedded inline. Newly embedded vectors are written back to `embedding_cache`.
+/// With no `embedder`, only cached vectors are attached and chunks without one remain lexical.
+/// With an embedder, missing vectors are embedded inline. Newly embedded vectors are written
+/// back to `embedding_cache`.
 fn build_overlay_vectors(
     embedder: Option<&Embedder>,
     batch_size: usize,

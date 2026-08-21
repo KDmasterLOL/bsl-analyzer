@@ -1,6 +1,6 @@
-use super::lexical::lexical_code_hits;
+use super::lexical::lexical_code_hits_fenced;
 use super::render::{format_code_hits, hits_response, no_hits_response, Envelope};
-use super::semantic::semantic_code_hits;
+use super::semantic::semantic_code_hits_fenced;
 use super::status::search_not_ready;
 use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
@@ -35,8 +35,38 @@ fn hits_budget(max_output_tokens: usize, note: Option<&str>) -> usize {
 // per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
 // context struct would not make more obscure than the flat list.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // unmanaged compatibility wrapper
 pub fn hybrid_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
+    workspace_search_mode: WorkspaceSearchMode,
+    configured_baseline: Option<&ConfiguredBaselineStatus>,
+    external_baseline: Option<Arc<ExternalBaselineService>>,
+    graph_root: Option<&Path>,
+    index_progress: &IndexProgress,
+    query: &str,
+    limit: usize,
+    max_output_tokens: usize,
+) -> Result<CallToolResult, McpError> {
+    hybrid_code_fenced(
+        engine,
+        &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        semantic_runtime,
+        workspace_search_mode,
+        configured_baseline,
+        external_baseline,
+        graph_root,
+        index_progress,
+        query,
+        limit,
+        max_output_tokens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hybrid_code_fenced(
+    engine: &Arc<Mutex<Option<SearchEngine>>>,
+    lease: &crate::workspace_lease::WorkspaceLease,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -51,8 +81,9 @@ pub fn hybrid_code(
     // other can still surface after fusion.
     let fetch = limit.saturating_mul(HYBRID_FETCH_MULTIPLIER).max(limit);
 
-    let lexical = lexical_code_hits(
+    let lexical = lexical_code_hits_fenced(
         engine,
+        lease,
         workspace_search_mode.clone(),
         configured_baseline,
         external_baseline.clone(),
@@ -77,8 +108,9 @@ pub fn hybrid_code(
         }
     };
 
-    let semantic = semantic_code_hits(
+    let semantic = semantic_code_hits_fenced(
         engine,
+        lease,
         semantic_runtime,
         workspace_search_mode,
         configured_baseline,
@@ -148,17 +180,146 @@ fn assemble_code_response(
 
 #[cfg(test)]
 mod tests {
+    use super::super::lexical::lexical_code_hits_fenced;
+    use super::super::semantic::semantic_code_hits_fenced;
     use super::super::test_support::{code_hit, retryable_postgres_source};
-    use super::{assemble_code_response, hybrid_code};
+    use super::{assemble_code_response, hybrid_code, hybrid_code_fenced};
     use crate::baseline::ConfiguredBaselineStatus;
     use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
-    use bsl_search::{FusedHit, IndexProgress, Modality, SearchEngine};
+    use bsl_search::{
+        FileKey, FusedHit, IndexProgress, Modality, ModuleSnapshot, ModuleSnapshotSource,
+        SearchEngine, SnapshotFetch,
+    };
     use project_model::{ResolvedWorkspaceBaselineSupport, SearchBaselineSupportState};
     use rmcp::model::ErrorCode;
     use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn search_code_does_not_write_after_supersession() {
+        struct TakeoverSource {
+            workspace: PathBuf,
+            newer: Mutex<Option<crate::workspace_lease::WorkspaceLease>>,
+        }
+
+        impl ModuleSnapshotSource for TakeoverSource {
+            fn text_and_parse(&self, path: &str) -> SnapshotFetch {
+                let text = fs::read_to_string(path).unwrap();
+                *self.newer.lock().unwrap() =
+                    Some(crate::workspace_lease::WorkspaceLease::claim(&self.workspace));
+                SnapshotFetch::Fetched(ModuleSnapshot {
+                    root: parser::parse(&text).syntax_node(),
+                    text: text.into(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let file = workspace.join("CommonModule.bsl");
+        fs::write(&file, "Процедура Базовая()\nКонецПроцедуры").unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace);
+        cache.ensure().unwrap();
+        let mut engine = SearchEngine::fts_only(&cache.search_db_path()).unwrap();
+        engine.index_directory_fts(workspace).unwrap();
+        engine.set_workspace_root(workspace);
+        engine.initialize_workspace_overlay_clean().unwrap();
+        engine.enable_workspace_watcher_mode();
+
+        let key = FileKey::configuration("CommonModule.bsl");
+        fs::write(&file, "Процедура Предыдущая()\nКонецПроцедуры").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        let text = fs::read_to_string(&file).unwrap();
+        engine
+            .reindex_dirty_from_snapshots(&std::collections::HashMap::from([(
+                key.clone(),
+                ModuleSnapshot { root: parser::parse(&text).syntax_node(), text: text.into() },
+            )]))
+            .unwrap();
+        let before_hash = engine.store().file_hash(&key.root_id, &key.path).unwrap();
+
+        let old = crate::workspace_lease::WorkspaceLease::claim(workspace);
+        engine.set_module_snapshot_source(Arc::new(TakeoverSource {
+            workspace: workspace.to_path_buf(),
+            newer: Mutex::new(None),
+        }));
+        let shared = Arc::new(Mutex::new(Some(engine)));
+        let failed = Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("test".to_owned())));
+
+        fs::remove_file(cache.lease_path()).unwrap();
+        let clean = lexical_code_hits_fenced(
+            &shared,
+            &old,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "Предыдущая",
+            10,
+        )
+        .unwrap();
+        assert!(matches!(clean, super::super::types::CodeHits::Ready { .. }));
+        assert!(!cache.lease_path().exists(), "a clean snapshot read never opens the lease file");
+
+        fs::write(&file, "Процедура Новая()\nКонецПроцедуры").unwrap();
+        shared.lock().unwrap().as_ref().unwrap().mark_workspace_path_dirty(&file).unwrap();
+
+        let lexical = lexical_code_hits_fenced(
+            &shared,
+            &old,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "Предыдущая",
+            10,
+        )
+        .unwrap();
+        let semantic = semantic_code_hits_fenced(
+            &shared,
+            &old,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            "Предыдущая",
+            10,
+        )
+        .unwrap();
+        let hybrid = hybrid_code_fenced(
+            &shared,
+            &old,
+            &failed,
+            WorkspaceSearchMode::SqliteLocal,
+            None,
+            None,
+            None,
+            &IndexProgress::new(),
+            "Предыдущая",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let super::super::types::CodeHits::Ready { hits, .. } = lexical else {
+            panic!("lexical search must serve the resident snapshot")
+        };
+        assert!(hits.iter().any(|hit| hit.symbol_name == "Предыдущая"));
+        assert!(matches!(semantic, super::super::types::CodeHits::Unavailable(_)));
+        let hybrid_text = hybrid.content[0].raw.as_text().unwrap().text.as_str();
+        assert!(hybrid_text.contains("Предыдущая"), "{hybrid_text}");
+        assert!(!hybrid_text.contains("Новая"), "{hybrid_text}");
+        assert!(old.is_superseded());
+
+        let guard = shared.lock().unwrap();
+        let engine = guard.as_ref().unwrap();
+        assert!(engine.workspace_overlay_dirty_paths().unwrap().contains(&key));
+        assert_eq!(engine.store().file_hash(&key.root_id, &key.path).unwrap(), before_hash);
+        let snapshot = engine.workspace_overlay_snapshot().unwrap();
+        assert!(snapshot.lexical_documents.iter().any(|doc| doc.symbol_name == "Предыдущая"));
+        assert!(!snapshot.lexical_documents.iter().any(|doc| doc.symbol_name == "Новая"));
+    }
 
     #[test]
     fn hybrid_serves_lexical_while_semantic_indexing() {

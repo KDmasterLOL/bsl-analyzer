@@ -360,7 +360,7 @@ pub(super) fn search_status_with_cap(
         let _ = writeln!(out, "  Collections: code, platform");
         let overlay_stats_start = std::time::Instant::now();
         let workspace_overlay = engine
-            .workspace_overlay_stats()
+            .workspace_overlay_stats_read_only()
             .map_err(|e| McpError::internal_error(format!("overlay status error: {e}"), None))?;
         tracing::debug!(
             elapsed_ms = overlay_stats_start.elapsed().as_millis() as u64,
@@ -857,6 +857,45 @@ mod tests {
 
         assert_eq!(result.code, ErrorCode::INTERNAL_ERROR);
         assert!(result.message.contains("semantic runtime lock error"));
+    }
+
+    #[test]
+    fn search_status_does_not_consume_overlay_dirty_state() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("Module.bsl");
+        fs::write(&file, "Процедура П()\nКонецПроцедуры").unwrap();
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_workspace_root(dir.path().to_path_buf());
+        engine.initialize_workspace_overlay_clean().unwrap();
+        assert!(engine.mark_workspace_path_dirty(&file).unwrap());
+        assert_eq!(engine.workspace_overlay_retry_signals().unwrap().pending_dirty_paths, 1);
+        let shared = Arc::new(Mutex::new(Some(engine)));
+
+        search_status(
+            crate::McpProfile::Workspace,
+            &shared,
+            &Arc::new(IndexProgress::default()),
+            &Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            WorkspaceSearchMode::SqliteLocal,
+            OverlayWarmupState::Pending,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_retry_signals()
+                .unwrap()
+                .pending_dirty_paths,
+            1,
+            "status is a pure snapshot even when a refresh could consume the mark"
+        );
     }
 
     #[test]

@@ -13,6 +13,9 @@ pub(crate) enum GraphStatus {
     Failed(String),
 }
 
+pub(crate) const SUPERSEDED_GRAPH_ERROR: &str =
+    "another daemon generation superseded this graph; reconnect to use the current cache";
+
 /// What the graph hands its publish hook after a build publishes.
 #[derive(Clone, Debug)]
 pub(crate) struct GraphPublishSignal {

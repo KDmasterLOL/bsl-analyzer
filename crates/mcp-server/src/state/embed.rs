@@ -164,6 +164,17 @@ type EmbedPostPassHook = Box<dyn FnMut(&Path) + Send>;
 #[cfg(test)]
 static EMBED_POST_PASS_HOOK: Mutex<Option<EmbedPostPassHook>> = Mutex::new(None);
 
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EmbedFencePoint {
+    Apply(usize),
+    Swap,
+}
+#[cfg(test)]
+type EmbedFenceHook = Box<dyn FnMut(EmbedFencePoint) + Send>;
+#[cfg(test)]
+static EMBED_FENCE_HOOK: Mutex<Option<EmbedFenceHook>> = Mutex::new(None);
+
 // Test observer bracketing the expensive root-plan validation. Thread-local so parallel graph
 // tests cannot report their own transitions into this test's deterministic assertion.
 #[cfg(test)]
@@ -204,6 +215,7 @@ impl SharedState {
                     &search_engine,
                     &cache,
                     &root_drift_epoch,
+                    &lease,
                     &signal,
                 );
             let topology_handled = Self::refresh_search_contexts_after_graph_with_cache(
@@ -242,6 +254,7 @@ impl SharedState {
         engine: &SharedSearchEngine,
         cache: &crate::cache::WorkspaceCacheLayout,
         root_drift_epoch: &AtomicU64,
+        lease: &crate::workspace_lease::WorkspaceLease,
         signal: &crate::graph::GraphPublishSignal,
     ) -> (bool, bool, bool) {
         if !signal.roots_refresh_requested {
@@ -275,23 +288,30 @@ impl SharedState {
             // It still installs the new artifact provider: otherwise a later watcher point
             // refresh would keep querying the graph file that was open at daemon boot.
             if engine.workspace_roots() == Some(&roots) {
-                return match engine.replace_published_graph_context_provider(provider) {
-                    Ok(()) => (true, false, false),
+                None
+            } else {
+                match engine.workspace_roots_transition_seed(roots) {
+                    Ok(seed) => Some(seed),
                     Err(error) => {
-                        tracing::warn!(
-                            "could not install published graph context provider: {error}"
-                        );
-                        (false, false, false)
+                        tracing::warn!("could not capture search root transition: {error}");
+                        return (false, false, false);
                     }
-                };
-            }
-            match engine.workspace_roots_transition_seed(roots) {
-                Ok(seed) => seed,
-                Err(error) => {
-                    tracing::warn!("could not capture search root transition: {error}");
-                    return (false, false, false);
                 }
             }
+        };
+        let Some(seed) = seed else {
+            return match Self::apply_workspace_search(engine, lease, |engine| {
+                engine.replace_published_graph_context_provider(provider)
+            }) {
+                super::WorkspaceSearchApply::Applied(Ok(())) => (true, false, false),
+                super::WorkspaceSearchApply::Applied(Err(error)) => {
+                    tracing::warn!("could not install published graph context provider: {error}");
+                    (false, false, false)
+                }
+                super::WorkspaceSearchApply::Retry | super::WorkspaceSearchApply::Terminal => {
+                    (false, false, false)
+                }
+            };
         };
         // Fence the complete off-lock preparation, not only its second validation pass. Metadata
         // is intentionally absent from the BSL file identity set, so only the sink epoch can say
@@ -338,19 +358,12 @@ impl SharedState {
                 return (false, false, false);
             }
         };
-        let outcome = {
-            let Ok(mut guard) = engine.lock() else {
-                tracing::warn!("search engine lock poisoned while applying root transition");
-                return (false, false, false);
-            };
-            let Some(engine) = guard.as_mut() else {
-                return (false, false, false);
-            };
+        let outcome = match Self::apply_workspace_search(engine, lease, |engine| {
             if root_drift_epoch.load(Ordering::SeqCst) != validation_epoch {
                 tracing::debug!(
                     "root-relevant drift was processed across validation; keeping retry obligation"
                 );
-                return (false, false, false);
+                return Ok(WorkspaceRootsTransitionOutcome::Superseded);
             }
             let applied = engine.apply_validated_workspace_roots_transition(validated);
             match applied {
@@ -368,6 +381,11 @@ impl SharedState {
                     Ok(outcome)
                 }
                 other => other,
+            }
+        }) {
+            super::WorkspaceSearchApply::Applied(outcome) => outcome,
+            super::WorkspaceSearchApply::Retry | super::WorkspaceSearchApply::Terminal => {
+                return (false, false, false)
             }
         };
         match outcome {
@@ -550,6 +568,7 @@ impl SharedState {
             warm_cache,
             graph_provider,
             &should_continue,
+            |operation| lease.with_ownership(operation),
             dirty_before.distrusted(),
         );
         let (plan, new_embeddings) = match primed {
@@ -781,52 +800,56 @@ impl SharedState {
             }
         }
         let provider = crate::graph_query::GraphDbContextProvider::new(graph_db);
-        let (cleared_embeddings, topology_handled) = {
-            let Ok(guard) = engine.lock() else { return !topology_changed };
-            let Some(engine) = guard.as_ref() else { return !topology_changed };
-            // A topology change re-shapes visibility for EVERY document, with no
-            // per-object mark to go by: mark the whole collection and widen the
-            // consume bound to exactly that batch's shared seq. Anything marked
-            // after (a concurrent xml drift) carries a higher seq, stays dirty,
-            // and is guaranteed its own nudge -> publish cycle.
-            let seq_bound = build_start_seq;
-            if topology_changed {
-                // Stamped AT the build's bound, not above it. The batch is dirty because of a
-                // topology this build already reflects, so the build's own bound is the honest
-                // stamp — and it leaves a file whose own drift landed after the build (a higher
-                // seq) out of both the batch and the clear, instead of re-rendering it against
-                // a graph that predates its change and then dropping the mark that said so.
-                match engine.mark_workspace_context_dirty_at(seq_bound) {
-                    Ok(count) => tracing::info!(
-                        count,
-                        "topology changed; re-rendering every document's graph context"
-                    ),
-                    Err(e) => {
-                        tracing::warn!("failed to mark collection for topology refresh: {e}");
-                        return false;
+        let (cleared_embeddings, topology_handled) =
+            match Self::apply_workspace_search(engine, lease, |engine| {
+                // A topology change re-shapes visibility for EVERY document, with no
+                // per-object mark to go by: mark the whole collection and widen the
+                // consume bound to exactly that batch's shared seq. Anything marked
+                // after (a concurrent xml drift) carries a higher seq, stays dirty,
+                // and is guaranteed its own nudge -> publish cycle.
+                let seq_bound = build_start_seq;
+                if topology_changed {
+                    // Stamped AT the build's bound, not above it. The batch is dirty because of a
+                    // topology this build already reflects, so the build's own bound is the honest
+                    // stamp — and it leaves a file whose own drift landed after the build (a higher
+                    // seq) out of both the batch and the clear, instead of re-rendering it against
+                    // a graph that predates its change and then dropping the mark that said so.
+                    match engine.mark_workspace_context_dirty_at(seq_bound) {
+                        Ok(count) => tracing::info!(
+                            count,
+                            "topology changed; re-rendering every document's graph context"
+                        ),
+                        Err(e) => {
+                            tracing::warn!("failed to mark collection for topology refresh: {e}");
+                            return (0, false);
+                        }
                     }
                 }
-            }
-            let cleared = match engine.refresh_dirty_contexts(&provider, seq_bound) {
-                Ok(stats) if stats.paths_cleared > 0 => {
-                    tracing::info!(
-                        paths = stats.paths_cleared,
-                        chunks = stats.chunks_updated,
-                        cleared_embeddings = stats.cleared_embeddings,
-                        "search graph context refreshed after graph publish"
-                    );
-                    stats.cleared_embeddings
-                }
-                Ok(_) => 0,
-                Err(e) => {
-                    tracing::warn!("search context refresh failed: {e}");
-                    // The marks persist; the topology request is satisfied by them
-                    // staying dirty for the next publish's bounded consume.
-                    0
+                let cleared = match engine.refresh_dirty_contexts(&provider, seq_bound) {
+                    Ok(stats) if stats.paths_cleared > 0 => {
+                        tracing::info!(
+                            paths = stats.paths_cleared,
+                            chunks = stats.chunks_updated,
+                            cleared_embeddings = stats.cleared_embeddings,
+                            "search graph context refreshed after graph publish"
+                        );
+                        stats.cleared_embeddings
+                    }
+                    Ok(_) => 0,
+                    Err(e) => {
+                        tracing::warn!("search context refresh failed: {e}");
+                        // The marks persist; the topology request is satisfied by them
+                        // staying dirty for the next publish's bounded consume.
+                        0
+                    }
+                };
+                (cleared, true)
+            }) {
+                super::WorkspaceSearchApply::Applied(result) => result,
+                super::WorkspaceSearchApply::Retry | super::WorkspaceSearchApply::Terminal => {
+                    return !topology_changed
                 }
             };
-            (cleared, true)
-        };
         // Re-rendered chunks had their live embedding NULLed; without a re-embed they serve
         // the OLD vector in-process and vanish from semantic results after a restart until
         // the boot pass. Kick the same background embed machinery workspace init uses.
@@ -901,7 +924,8 @@ impl SharedState {
         // unequal ones (a non-NULL row is never re-embedded). Chunks and FTS text stay ungated:
         // both generations derive them from the same files, so duplicating them costs work, not
         // correctness.
-        if !lease.owns_caches() {
+        let _ = lease.owns_caches();
+        if lease.is_superseded() || lease.is_released() {
             tracing::debug!(
                 "another daemon generation owns this workspace's derived caches; \
                  skipping the embedding pass"
@@ -923,7 +947,11 @@ impl SharedState {
         // finding this daemon's vectors — from a possibly different model — arriving in its
         // index. Uncached, because a batch is seconds and the cached verdict's two-second
         // "yes" is most of one.
-        let keep_writing = move || lease.owns_caches_now();
+        let worker_lease = lease.clone();
+        let keep_running = {
+            let lease = lease.clone();
+            move || !lease.is_superseded() && !lease.is_released()
+        };
         let spawned =
             std::thread::Builder::new().name("bsl-search-embed".to_owned()).spawn(move || {
                 // Restore the flight claim on any abnormal exit; a clean release calls
@@ -931,6 +959,8 @@ impl SharedState {
                 let mut claim_guard = EmbedClaimGuard::new(Arc::clone(&flight));
                 // Restore the runtime status on any abnormal exit so it never sticks `Indexing`.
                 let mut status_guard = EmbedStatusGuard::new(Arc::clone(&runtime));
+                #[cfg(test)]
+                let mut apply_count = 0usize;
                 tracing::info!("background embedding pass started");
                 loop {
                     flight.begin_pass();
@@ -938,39 +968,90 @@ impl SharedState {
                     if FORCE_EMBED_PASS_PANIC.load(Ordering::SeqCst) {
                         panic!("forced embedding pass panic");
                     }
-                    match SearchEngine::embed_pending_chunks_standalone(
+                    let mut retry_refusal = false;
+                    match SearchEngine::embed_pending_chunks_fenced(
                         &db_path,
                         &config,
                         Some(&index_progress),
-                        Some(&keep_writing),
-                    ) {
-                        Ok(index) => {
-                            let swapped = match engine.lock() {
-                                Ok(mut guard) => match guard.as_mut() {
-                                    Some(engine) => {
-                                        engine.set_vector_index(index);
-                                        true
-                                    }
-                                    None => false,
-                                },
-                                Err(e) => {
-                                    tracing::warn!("embedding pass: engine lock error: {e}");
-                                    false
-                                }
-                            };
-                            if !swapped {
-                                // The engine is gone (daemon shutting down); stop and let the
-                                // status guard record the pass did not complete.
-                                break;
-                            }
+                        Some(&keep_running),
+                        |operation| {
                             #[cfg(test)]
                             {
-                                let mut hook =
-                                    EMBED_POST_PASS_HOOK.lock().unwrap_or_else(|p| p.into_inner());
-                                if let Some(h) = hook.as_mut() {
-                                    h(&db_path);
+                                apply_count += 1;
+                                if let Some(hook) = EMBED_FENCE_HOOK
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .as_mut()
+                                {
+                                    hook(EmbedFencePoint::Apply(apply_count));
                                 }
                             }
+                            worker_lease.with_ownership(operation)
+                        },
+                    ) {
+                        Ok(Some(index)) => {
+                            #[cfg(test)]
+                            if let Some(hook) = EMBED_FENCE_HOOK
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .as_mut()
+                            {
+                                hook(EmbedFencePoint::Swap);
+                            }
+                            let swapped = match engine.lock() {
+                                Ok(mut guard) => guard.as_mut().map(|engine| {
+                                    worker_lease
+                                        .with_ownership(|| engine.set_vector_index(index))
+                                        .is_some()
+                                }),
+                                Err(e) => {
+                                    tracing::warn!("embedding pass: engine lock error: {e}");
+                                    None
+                                }
+                            };
+                            if swapped.is_none() {
+                                break;
+                            }
+                            if swapped == Some(false) {
+                                if worker_lease.is_superseded() || worker_lease.is_released() {
+                                    Self::set_semantic_runtime_status(
+                                        &runtime,
+                                        SemanticRuntimeStatus::Failed(
+                                            "embedding stopped after workspace ownership was superseded"
+                                                .to_owned(),
+                                        ),
+                                    );
+                                    status_guard.finish();
+                                    return;
+                                }
+                                let _ = flight.claim();
+                                retry_refusal = true;
+                            } else {
+                                #[cfg(test)]
+                                {
+                                    let mut hook = EMBED_POST_PASS_HOOK
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner());
+                                    if let Some(h) = hook.as_mut() {
+                                        h(&db_path);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            if worker_lease.is_superseded() || worker_lease.is_released() {
+                                Self::set_semantic_runtime_status(
+                                    &runtime,
+                                    SemanticRuntimeStatus::Failed(
+                                        "embedding stopped after workspace ownership was superseded"
+                                            .to_owned(),
+                                    ),
+                                );
+                                status_guard.finish();
+                                return;
+                            }
+                            let _ = flight.claim();
+                            retry_refusal = true;
                         }
                         Err(e) => {
                             tracing::warn!("background embedding pass failed: {e}");
@@ -993,6 +1074,9 @@ impl SharedState {
                         return;
                     }
                     // A rerun was requested during the pass; loop again for its NULL chunks.
+                    if retry_refusal {
+                        std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
+                    }
                 }
             });
         if let Err(e) = spawned {
@@ -1229,6 +1313,7 @@ mod tests {
             &engine,
             &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             &AtomicU64::new(0),
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             &signal,
         );
         super::ROOT_VALIDATION_HOOK.with(|hook| *hook.borrow_mut() = None);
@@ -1287,6 +1372,7 @@ mod tests {
             &engine,
             &crate::cache::WorkspaceCacheLayout::for_workspace(&workspace),
             root_drift_epoch.as_ref(),
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
             &signal,
         );
         super::ROOT_VALIDATION_HOOK.with(|hook| *hook.borrow_mut() = None);
@@ -2576,6 +2662,149 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(both, "the rerun loop embedded the chunk created after the pass started");
+    }
+
+    #[test]
+    fn embedding_fence_distinguishes_retry_from_supersession() {
+        use bsl_search::{Chunk, ChunkKind, Store};
+        use std::time::Instant;
+
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let mock = spawn_mock_embedding_server(vec![1.0, 0.0, 0.0]);
+        let _env = mock_embedding_env(&mock);
+
+        struct ResetHook;
+        impl Drop for ResetHook {
+            fn drop(&mut self) {
+                *super::EMBED_FENCE_HOOK.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+        }
+        let _reset = ResetHook;
+
+        let seed = |path: &std::path::Path| {
+            let mut store = Store::open(path).unwrap();
+            store
+                .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    "A.bsl",
+                    b"h",
+                    &[Chunk {
+                        kind: ChunkKind::Procedure,
+                        name: "Альфа".to_owned(),
+                        is_export: true,
+                        annotations: Vec::new(),
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Процедура Альфа()\nКонецПроцедуры".to_owned(),
+                    }],
+                    None,
+                    Some(&[None]),
+                )
+                .unwrap();
+        };
+        let sidecar = |path: &std::path::Path| {
+            let mut value = path.as_os_str().to_os_string();
+            value.push(".usearch.json");
+            std::path::PathBuf::from(value)
+        };
+
+        for point in [
+            super::EmbedFencePoint::Apply(1),
+            super::EmbedFencePoint::Apply(2),
+            super::EmbedFencePoint::Swap,
+        ] {
+            let dir = tempdir().unwrap();
+            let cache = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+            cache.ensure().unwrap();
+            let db_path = cache.search_db_path();
+            seed(&db_path);
+            let engine = SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap();
+            let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+            let old = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+            let newer = Arc::new(Mutex::new(None));
+            let newer_hook = Arc::clone(&newer);
+            let cache_hook = cache.clone();
+            *super::EMBED_FENCE_HOOK.lock().unwrap() = Some(Box::new(move |seen| {
+                if seen == point && newer_hook.lock().unwrap().is_none() {
+                    *newer_hook.lock().unwrap() =
+                        Some(crate::workspace_lease::WorkspaceLease::claim_cache(&cache_hook));
+                }
+            }));
+            let runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
+            let flight = super::EmbedFlight::new();
+            SharedState::spawn_embed_pass(
+                Arc::clone(&engine_arc),
+                Arc::clone(&runtime),
+                bsl_search::IndexProgress::new(),
+                Arc::clone(&flight),
+                old.clone(),
+                db_path.clone(),
+                mock_semantic_config(&mock),
+            );
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while (!old.is_superseded() || flight.is_in_flight()) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(old.is_superseded(), "takeover was observed at the requested fence");
+            assert!(!flight.is_in_flight());
+            assert!(matches!(
+                *runtime.lock().unwrap(),
+                crate::state::SemanticRuntimeStatus::Failed(_)
+            ));
+            let pending = Store::open_existing(&db_path)
+                .unwrap()
+                .load_pending_embedding_documents("code")
+                .unwrap()
+                .len();
+            assert_eq!(pending, usize::from(point == super::EmbedFencePoint::Apply(1)));
+            assert_eq!(
+                sidecar(&db_path).exists(),
+                point == super::EmbedFencePoint::Swap,
+                "only takeover after persist may leave the admitted sidecar"
+            );
+            assert_eq!(engine_arc.lock().unwrap().as_ref().unwrap().vector_count(), 0);
+            newer.lock().unwrap().take().unwrap().release();
+        }
+        *super::EMBED_FENCE_HOOK.lock().unwrap() = None;
+
+        let dir = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+        cache.ensure().unwrap();
+        let db_path = cache.search_db_path();
+        seed(&db_path);
+        let engine = Arc::new(Mutex::new(Some(
+            SearchEngine::new(&db_path, mock_semantic_config(&mock)).unwrap(),
+        )));
+        let runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Indexing));
+        let flight = super::EmbedFlight::new();
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let holder = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &cache,
+            Duration::from_secs(3),
+        );
+        SharedState::spawn_embed_pass(
+            Arc::clone(&engine),
+            Arc::clone(&runtime),
+            bsl_search::IndexProgress::new(),
+            Arc::clone(&flight),
+            lease.clone(),
+            db_path.clone(),
+            mock_semantic_config(&mock),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !matches!(*runtime.lock().unwrap(), crate::state::SemanticRuntimeStatus::Ready)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!lease.is_superseded());
+        let final_runtime = runtime.lock().unwrap().clone();
+        assert!(
+            matches!(final_runtime, crate::state::SemanticRuntimeStatus::Ready),
+            "transient refusal must retry to Ready, got {final_runtime:?}"
+        );
+        assert_eq!(engine.lock().unwrap().as_ref().unwrap().vector_count(), 1);
+        holder.join().unwrap();
     }
 
     /// A panicking embed pass leaves the runtime `Failed`, never stuck `Indexing`, and releases

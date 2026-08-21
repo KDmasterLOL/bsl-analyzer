@@ -21,6 +21,12 @@ use super::types::GraphStatus;
 /// while the resident method index resolves cross-batch calls.
 pub(super) const GRAPH_BUILD_BATCH: usize = 500;
 
+#[cfg(test)]
+thread_local! {
+    static FUSED_FILE_COMMITTED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 impl GraphState {
     pub(super) fn run_fused_cold_build(
         &self,
@@ -35,7 +41,7 @@ impl GraphState {
             lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
 
         let source_path = source_path.to_path_buf();
-        let mut sink = FusedChunkWriter::new(engine, source_path);
+        let mut sink = FusedChunkWriter::new(engine, source_path, self.lease.clone());
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             build_and_publish_graph_file(&workspace_root, generation, self, Some(&mut sink))
         }));
@@ -83,6 +89,10 @@ impl GraphState {
     /// from a drift-triggered reload (bumps the generation, keeps the old snapshot
     /// served on failure).
     pub(super) fn run_load(&self, is_reload: bool) {
+        if self.is_superseded() {
+            self.record_load_failure(is_reload, super::types::SUPERSEDED_GRAPH_ERROR.to_owned());
+            return;
+        }
         let Some(workspace_root) = self.workspace_root.clone() else {
             return;
         };
@@ -124,12 +134,8 @@ impl GraphState {
             return;
         }
 
-        // Everything below WRITES the shared graph database. A daemon superseded by a newer
-        // generation (see [`crate::workspace_lease`]) may still PUBLISH what is already on
-        // disk — both reads above — but never builds: the owner is maintaining that same file,
-        // and a second builder would only race its rename. Placed after the stale publish on
-        // purpose, so a superseded daemon still serves the stale snapshot (with the reason on
-        // its `reload` slot) instead of answering nothing at all.
+        // Everything below writes the shared graph database. Transient non-ownership may re-arm
+        // later; terminal supersession was rejected before either cache-adoption path above.
         if !self.may_build() {
             self.record_load_failure(
                 is_reload,
@@ -418,6 +424,9 @@ impl GraphState {
     /// transitions to `Ready`) when the cache was reused; `false` to fall through to
     /// a full build. The fingerprint scan it runs is the same one the build would do.
     pub(super) fn try_publish_cached(&self, workspace_root: &Path, build_start_seq: i64) -> bool {
+        if self.is_superseded() {
+            return false;
+        }
         let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
             return false; // missing, truncated, or stale-schema → rebuild
@@ -465,6 +474,9 @@ impl GraphState {
     /// `notify_published`: the publish hook must only run against a build that
     /// reflects current disk.
     pub(super) fn try_publish_stale_and_catch_up(&self, workspace_root: &Path) -> bool {
+        if self.is_superseded() {
+            return false;
+        }
         let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
             return false; // missing, truncated, or stale-schema → full rebuild
@@ -530,13 +542,10 @@ impl GraphState {
     /// previous snapshot but flags `reload="failed"` so the agent sees it. A
     /// later drift check retries the reload (the throttle bounds the retry rate).
     ///
-    /// A load that stopped because the workspace is no longer ours is recorded as a failure
-    /// like any other, but flagged so it can be retried when the workspace comes back — see
-    /// [`GraphState::withheld_build`]. Both shapes count: the load that never started, and the
-    /// one that built for minutes and then lost the workspace at its publish. A genuinely
-    /// failed build (we still own the workspace) stays terminal as before.
+    /// A transient ownership refusal is flagged for retry. Terminal supersession and genuine
+    /// build failures stay terminal.
     fn record_load_failure(&self, is_reload: bool, msg: String) {
-        if !self.may_build() {
+        if !self.is_superseded() && !self.may_build() {
             self.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let mut inner = lock_recover(&self.inner);
@@ -599,7 +608,7 @@ fn build_and_publish_scanned(
         files: 0,
         built_at,
     };
-    let summary = match chunk_sink {
+    let summary = match match chunk_sink {
         Some(sink) => crate::graph_db::build_graph_database_fused(
             project,
             pre,
@@ -607,14 +616,16 @@ fn build_and_publish_scanned(
             GRAPH_BUILD_BATCH,
             &meta,
             sink,
-        )?,
-        None => crate::graph_db::build_graph_database(
-            project,
-            pre,
-            &tmp_path,
-            GRAPH_BUILD_BATCH,
-            &meta,
-        )?,
+        ),
+        None => {
+            crate::graph_db::build_graph_database(project, pre, &tmp_path, GRAPH_BUILD_BATCH, &meta)
+        }
+    } {
+        Ok(summary) => summary,
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(error);
+        }
     };
     // The post-scan derives a FRESH project snapshot AND a fresh walk: the straddle
     // check must see the world as it is now, or a topology/root change landing
@@ -721,6 +732,7 @@ struct PublishedBuild {
 /// files.
 struct FusedChunkWriter<'e> {
     engine: &'e mut SearchEngine,
+    lease: crate::workspace_lease::WorkspaceLease,
     /// The engine's root table, cloned so writing through `engine` stays possible while
     /// attributing paths. Every registered root is indexed, and a file's key is decided by the
     /// same longest-prefix attribution the rest of the index uses.
@@ -731,11 +743,15 @@ struct FusedChunkWriter<'e> {
 }
 
 impl<'e> FusedChunkWriter<'e> {
-    fn new(engine: &'e mut SearchEngine, source_path: PathBuf) -> Self {
+    fn new(
+        engine: &'e mut SearchEngine,
+        source_path: PathBuf,
+        lease: crate::workspace_lease::WorkspaceLease,
+    ) -> Self {
         let roots = engine.workspace_roots().cloned();
         let source_prefix =
             source_path.canonicalize().unwrap_or(source_path).to_string_lossy().replace('\\', "/");
-        Self { engine, roots, source_prefix }
+        Self { engine, lease, roots, source_prefix }
     }
 
     /// The store key of one emitted module, or `None` when it belongs to no registered root.
@@ -810,7 +826,24 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             {
                 continue;
             }
-            self.engine.ingest_fused_file(&key, &hash, chunks, ctxs)?;
+            match self
+                .lease
+                .with_ownership(|| self.engine.ingest_fused_file(&key, &hash, chunks, ctxs))
+            {
+                Some(result) => result?,
+                None => {
+                    return Err(std::io::Error::other(
+                        "workspace cache ownership was refused during fused ingest",
+                    )
+                    .into())
+                }
+            }
+            #[cfg(test)]
+            FUSED_FILE_COMMITTED_HOOK.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
         }
         Ok(())
     }
@@ -958,7 +991,11 @@ mod tests {
             graph_context: None,
         };
         {
-            let mut writer = FusedChunkWriter::new(&mut engine, configuration.clone());
+            let mut writer = FusedChunkWriter::new(
+                &mut engine,
+                configuration.clone(),
+                crate::workspace_lease::WorkspaceLease::unmanaged(),
+            );
             ide::FusedChunkSink::emit_chunks(
                 &mut writer,
                 &[
@@ -989,6 +1026,90 @@ mod tests {
             !rows.iter().any(|(_, path)| path.ends_with("C.bsl")),
             "a module under no registered root is still not this index's business: {rows:?}",
         );
+    }
+
+    #[test]
+    fn superseded_fused_writer_stops_mutating() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        cache.ensure().unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(lease.owns_caches_now());
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(lease.clone());
+        let mut engine = bsl_search::SearchEngine::fts_only(&cache.search_db_path()).unwrap();
+
+        let newer = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let newer_from_hook = std::sync::Arc::clone(&newer);
+        let cache_from_hook = cache.clone();
+        FUSED_FILE_COMMITTED_HOOK.with(|hook| {
+            hook.replace(Some(Box::new(move || {
+                let claim = crate::workspace_lease::WorkspaceLease::claim_cache(&cache_from_hook);
+                assert!(claim.owns_caches_now());
+                *newer_from_hook.lock().unwrap() = Some(claim);
+            })));
+        });
+
+        let error = graph
+            .run_fused_cold_build(&mut engine, root, 0)
+            .expect_err("takeover after the first file must stop fused ingest");
+        assert!(error.to_string().contains("ownership was refused"), "{error}");
+        assert!(lease.is_superseded(), "the second file's fence observes the new owner");
+        assert_eq!(
+            engine.store().all_files_in_collection("code").unwrap().len(),
+            1,
+            "the first fenced file stays committed and the second is not written",
+        );
+
+        let graph_path = cache.graph_db_path();
+        let tmp_path = graph_path.with_extension(format!("db.building.{}", std::process::id()));
+        assert!(!graph_path.exists(), "the rejected build never replaces the canonical graph");
+        assert!(!tmp_path.exists(), "the rejected build removes only its current temp graph");
+
+        newer.lock().unwrap().take().unwrap().release();
+    }
+
+    #[test]
+    fn superseded_build_is_discarded_after_owner_release() {
+        struct RefusingSink;
+        impl ide::FusedChunkSink for RefusingSink {
+            fn emit_chunks(
+                &mut self,
+                _chunks: &[ide::ChunkRow],
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                Err(std::io::Error::other("ownership was refused").into())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        cache.ensure().unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(old.clone());
+        let canonical = cache.graph_db_path();
+        let temp = canonical.with_extension(format!("db.building.{}", std::process::id()));
+
+        fs::write(&canonical, b"new-owner-graph").unwrap();
+        fs::write(&temp, b"old-daemon-graph").unwrap();
+        let newer = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(!old.owns_caches_now());
+        assert!(old.is_superseded());
+        newer.release();
+
+        publish_or_discard(&graph, &temp, &canonical).unwrap_err();
+        assert_eq!(fs::read(&canonical).unwrap(), b"new-owner-graph");
+        assert!(!temp.exists(), "normal refusal removes only this build's temp file");
+
+        let mut sink = RefusingSink;
+        assert!(build_and_publish_graph_file(root, 1, &graph, Some(&mut sink)).is_err());
+        assert_eq!(fs::read(&canonical).unwrap(), b"new-owner-graph");
+        assert!(!temp.exists(), "fused failure before publication removes its temp file");
     }
 
     /// End-to-end through `GraphState`: a first use builds the SQLite graph off
@@ -1074,6 +1195,32 @@ mod tests {
         assert_eq!(snap.generation, 7, "served the cached revision, not a fresh build");
         // The file was not rewritten — its build timestamp is untouched.
         assert_eq!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
+    }
+
+    #[test]
+    fn fresh_generation_reuses_completed_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        seed_cache(root, workspace_fingerprint(root));
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let path = cache.graph_db_path();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let previous = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        previous.release();
+        let fresh = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(fresh.owns_caches_now(), "the new process claims the released workspace");
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache)
+            .with_lease(fresh.clone());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let snapshot = graph.snapshot().expect("the completed compatible cache is adopted");
+        assert_eq!(snapshot.generation, 7, "no builder reset the cached revision");
+        assert_eq!(meta_string(&path, "built_at"), "cached-build-sentinel");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        fresh.release();
     }
 
     /// Test shorthand for the profile recompute: pairs the enumeration with the
@@ -2504,7 +2651,11 @@ mod tests {
         };
 
         {
-            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            let mut writer = FusedChunkWriter::new(
+                &mut engine,
+                source.to_path_buf(),
+                crate::workspace_lease::WorkspaceLease::unmanaged(),
+            );
             writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
         }
 
@@ -2522,7 +2673,11 @@ mod tests {
 
         // Re-run the fused writer over the UNCHANGED file: the embedding must survive.
         {
-            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            let mut writer = FusedChunkWriter::new(
+                &mut engine,
+                source.to_path_buf(),
+                crate::workspace_lease::WorkspaceLease::unmanaged(),
+            );
             writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
         }
         assert!(
@@ -2535,7 +2690,11 @@ mod tests {
         // embedding, so only the changed file is recomputed.
         fs::write(&file, "Процедура Делать() Экспорт\nВыполнить();\nКонецПроцедуры").unwrap();
         {
-            let mut writer = FusedChunkWriter::new(&mut engine, source.to_path_buf());
+            let mut writer = FusedChunkWriter::new(
+                &mut engine,
+                source.to_path_buf(),
+                crate::workspace_lease::WorkspaceLease::unmanaged(),
+            );
             writer.emit_chunks(std::slice::from_ref(&row)).unwrap();
         }
         assert_eq!(

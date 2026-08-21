@@ -51,5 +51,5 @@ pub(crate) use state::GraphState;
 )]
 pub(crate) use types::{
     Freshness, FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus,
-    GraphStatusReport, NudgeOutcome,
+    GraphStatusReport, NudgeOutcome, SUPERSEDED_GRAPH_ERROR,
 };

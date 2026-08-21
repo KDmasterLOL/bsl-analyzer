@@ -109,6 +109,107 @@ async fn backend_survives_client_disconnect_and_stays_reusable() {
     backend.abort();
 }
 
+#[cfg(unix)]
+fn hold_lease_lock(cache: &mcp_server::WorkspaceCacheLayout) -> std::fs::File {
+    use std::os::fd::AsRawFd;
+
+    cache.ensure().unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.lease_lock_path())
+        .unwrap();
+    assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
+    file
+}
+
+#[cfg(windows)]
+fn hold_lease_lock(cache: &mcp_server::WorkspaceCacheLayout) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    cache.ensure().unwrap();
+    std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(cache.lease_lock_path())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[cfg(any(unix, windows))]
+async fn superseded_backend_lifecycle() {
+    let src = TempDir::new().unwrap();
+    let root = src.path().to_path_buf();
+    let cache = mcp_server::WorkspaceCacheLayout::for_workspace(&root);
+    let backend_root = root.clone();
+    let backend_cache = cache.clone();
+    let backend = tokio::spawn(broker::daemon::run(
+        move || {
+            Ok(McpServer::new(
+                McpProfile::Workspace,
+                SharedState::workspace_with_cache(backend_root, backend_cache)?,
+            ))
+        },
+        key_for(&src),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    ));
+    let stream = connect_within(&key_for(&src), Duration::from_secs(10)).await;
+    let client = ().serve(stream).await.expect("active client initializes");
+
+    let newer = SharedState::workspace_with_cache(root.clone(), cache.clone()).unwrap();
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    let mut status = serde_json::Map::new();
+    status.insert("action".to_owned(), serde_json::Value::String("status".to_owned()));
+    client
+        .call_tool(CallToolRequestParams::new("metadata").with_arguments(status))
+        .await
+        .expect("the active session survives takeover and observes it");
+    newer.shutdown();
+
+    let mut schema = serde_json::Map::new();
+    schema.insert("action".to_owned(), serde_json::Value::String("schema".to_owned()));
+    client
+        .call_tool(CallToolRequestParams::new("graph").with_arguments(schema))
+        .await
+        .expect("owner release still cannot sever the active session");
+    client.cancel().await.ok();
+    tokio::time::timeout(Duration::from_secs(6), backend)
+        .await
+        .expect("terminal backend exits before its ten-second idle TTL")
+        .expect("backend task joined")
+        .expect("backend exits cleanly");
+
+    let transient_src = TempDir::new().unwrap();
+    let transient_root = transient_src.path().to_path_buf();
+    let transient_cache = mcp_server::WorkspaceCacheLayout::for_workspace(&transient_root);
+    let lock = hold_lease_lock(&transient_cache);
+    let build_root = transient_root.clone();
+    let build_cache = transient_cache.clone();
+    let transient_backend = tokio::spawn(broker::daemon::run(
+        move || {
+            Ok(McpServer::new(
+                McpProfile::Workspace,
+                SharedState::workspace_with_cache(build_root, build_cache)?,
+            ))
+        },
+        key_for(&transient_src),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    ));
+    let probe = connect_within(&key_for(&transient_src), Duration::from_secs(10)).await;
+    drop(probe);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(!transient_backend.is_finished(), "temporary UNCLAIMED must not terminate early");
+    drop(lock);
+    transient_backend.abort();
+}
+
 /// Once a backend has served real traffic, it stays warm only for `idle_ttl` after its
 /// last session leaves, then exits on its own.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
