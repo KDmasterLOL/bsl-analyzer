@@ -164,13 +164,13 @@ impl Watch {
 /// spelling it was declared with, and a refusal keyed by a different spelling of the same
 /// directory would silently never fire — a seam that cannot refuse is worse than none,
 /// because the tests built on it go green over the behaviour they meant to pin.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default)]
 pub(crate) struct RefusedWatches {
     paths: Mutex<Vec<PathBuf>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl RefusedWatches {
     /// Declared before the hub starts, for a root that must never arm in the first place.
     pub(crate) fn refusing(paths: Vec<PathBuf>) -> Arc<Self> {
@@ -1273,7 +1273,7 @@ impl WorkspaceChangeHub {
     /// watches. The refusal is declared BEFORE the thread starts: an ordinary hub arms
     /// within milliseconds, so a refusal installed afterwards would race the arming it is
     /// meant to prevent.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn start_targets_refusing(
         targets: Vec<WatchTarget>,
         period: Duration,
@@ -2367,10 +2367,11 @@ fn apply_rearm(
 /// standing-degraded, and that stand can only be built here, next to what it exercises.
 #[cfg(test)]
 pub(crate) mod test_support {
+    #[cfg(unix)]
     use super::{RefusedWatches, WatchTarget, WorkspaceChangeHub};
-    use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
+    #[cfg(unix)]
+    use std::{path::PathBuf, sync::Arc};
 
     pub(crate) fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
@@ -2391,6 +2392,7 @@ pub(crate) mod test_support {
     /// and the only thing wrong with it is that nothing watches it — which is the branch
     /// these tests are about. The root that cannot even be described is a different branch
     /// with a test of its own.
+    #[cfg(unix)]
     pub(crate) fn partly_blind_hub(
     ) -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub, Arc<RefusedWatches>) {
         let dir = tempfile::tempdir().unwrap();
@@ -2471,6 +2473,7 @@ mod tests {
 
     /// A workspace whose scan root is reached through a symlink, so the root can be
     /// retargeted in place — the move that produces no filesystem event at all.
+    #[cfg(unix)]
     struct LinkedRoot {
         _dir: tempfile::TempDir,
         workspace: PathBuf,
@@ -3778,6 +3781,7 @@ mod tests {
         assert_eq!(batch.entries[0].kind, ChangeKind::MaybeRemoved);
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_then_remove_coalesce_under_symlinked_root() {
         // A symlinked directory component makes the raw and canonical spellings
