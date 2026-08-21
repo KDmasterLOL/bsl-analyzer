@@ -9,7 +9,7 @@
 //! Соседство выражается через токены `NEWLINE`, а не через индекс строк: обход
 //! дерева и так идёт по тексту, и номера строк тут ничего не добавляют.
 
-use crate::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
+use crate::{Direction, NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
 
 /// Одна строка серии.
 #[derive(Debug, Clone)]
@@ -60,7 +60,7 @@ pub fn comment_runs(root: &SyntaxNode) -> Vec<CommentRun> {
                 // отдаёт токеном комментария; комментарием она от этого не
                 // становится. Счётчик строк не сбрасываем — иначе серия
                 // перепрыгнула бы через такую строку.
-                if token.parent().map(|parent| parent.kind()) == Some(SyntaxKind::LITERAL) {
+                if is_string_text(&token) {
                     at_line_start = false;
                     continue;
                 }
@@ -81,6 +81,34 @@ pub fn comment_runs(root: &SyntaxNode) -> Vec<CommentRun> {
 
     push_run(&mut runs, current);
     runs
+}
+
+/// Комментарий внутри узла `LITERAL` — текст строки лишь пока строка открыта.
+///
+/// Соседние строковые литералы парсер складывает в один `LITERAL`, и тривия
+/// между ними достаётся общему предку — тому же узлу. Отличает случаи вид
+/// ближайшего строкового токена слева: `STRING_START` и `STRING_PART` означают
+/// незакрытую строку, а `STRING` и `STRING_TAIL` — что строка уже кончилась и
+/// дальше идёт настоящий комментарий.
+fn is_string_text(token: &SyntaxToken) -> bool {
+    if token.parent().map(|parent| parent.kind()) != Some(SyntaxKind::LITERAL) {
+        return false;
+    }
+    token
+        .siblings_with_tokens(Direction::Prev)
+        .skip(1)
+        .filter_map(|element| element.into_token())
+        .map(|sibling| sibling.kind())
+        .find(|kind| {
+            matches!(
+                kind,
+                SyntaxKind::STRING
+                    | SyntaxKind::STRING_START
+                    | SyntaxKind::STRING_PART
+                    | SyntaxKind::STRING_TAIL
+            )
+        })
+        .is_some_and(|kind| matches!(kind, SyntaxKind::STRING_START | SyntaxKind::STRING_PART))
 }
 
 fn push_run(runs: &mut Vec<CommentRun>, lines: Vec<CommentLine>) {

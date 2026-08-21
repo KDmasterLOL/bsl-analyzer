@@ -107,6 +107,18 @@ fn comment_inside_multiline_literal_is_not_a_run() {
 }
 
 #[test]
+fn comments_between_adjacent_string_literals_are_a_run() {
+    // Соседние строковые литералы парсер держит одним узлом LITERAL, и тривия
+    // между ними достаётся тому же узлу — текстом строки она не становится.
+    assert_eq!(run_lines("А = \"один\"\n// Возврат 1;\n// Возврат 2;\n\"два\";"), vec![(1, 2)]);
+    // Тот же разряд, когда слева закрылся многострочный литерал.
+    assert_eq!(
+        run_lines("А = \"ВЫБРАТЬ\n|*\"\n// Возврат 1;\n// Возврат 2;\n\"два\";"),
+        vec![(2, 3)]
+    );
+}
+
+#[test]
 fn bom_does_not_hide_the_first_comment() {
     let code = "\u{FEFF}// один\n// два\n";
 
