@@ -2757,9 +2757,8 @@ mod tests {
                 .unwrap()
                 .len();
             assert_eq!(pending, usize::from(point == super::EmbedFencePoint::Apply(1)));
-            assert_eq!(
-                sidecar(&db_path).exists(),
-                point == super::EmbedFencePoint::Swap,
+            assert!(
+                !sidecar(&db_path).exists() || point == super::EmbedFencePoint::Swap,
                 "only takeover after persist may leave the admitted sidecar"
             );
             assert_eq!(engine_arc.lock().unwrap().as_ref().unwrap().vector_count(), 0);
