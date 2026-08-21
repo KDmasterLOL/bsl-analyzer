@@ -4454,6 +4454,7 @@ mod tests {
     /// Runs `f` under a thread-local subscriber capturing WARN-and-up output; returns the
     /// closure's result and the captured lines. `bsl-search` sets no global dispatcher, so the
     /// scoped default reliably owns every event the closure emits.
+    #[cfg(unix)]
     fn warns_during<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
         use std::sync::{Arc, Mutex};
         #[derive(Clone, Default)]
