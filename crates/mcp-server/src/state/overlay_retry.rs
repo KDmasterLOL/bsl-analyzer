@@ -520,11 +520,14 @@ mod tests {
     /// `stop()` freezes the driver before the lease handover: no pass starts after it.
     #[test]
     fn stop_freezes_the_driver() {
-        let retry = driver_over(
-            Arc::new(Mutex::new(None)),
-            crate::workspace_lease::WorkspaceLease::unmanaged(),
-        );
-        retry.stop();
+        let dir = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+        let retry = crate::workspace_lease::WorkspaceLease::while_cache_lock_held(&cache, || {
+            let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+            let retry = driver_over(Arc::new(Mutex::new(None)), lease);
+            retry.stop();
+            retry
+        });
         retry.kick_fresh();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(retry.pass_count(), 0, "a stopped driver runs nothing");
