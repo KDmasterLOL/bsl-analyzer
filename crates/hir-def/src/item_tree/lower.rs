@@ -200,39 +200,43 @@ impl Ctx {
         annotations
             .filter_map(|ann| {
                 let token = ann.kind_token()?;
-                let text = token.text();
                 let range = ann.syntax().text_range();
 
-                let kind = match text {
-                    "НаКлиенте" | "AtClient" | "&НаКлиенте" | "&AtClient" => {
-                        AnnotationKind::AtClient
+                // Написание приводится к одному виду, потому что регистр во
+                // встроенном языке не значим, а лексер отдаёт текст как есть.
+                // Сравнение по сырому тексту роняло бы `&НАКЛИЕНТЕ` и `&around`
+                // в неизвестные: разбор их принимает, а семантики они не
+                // получают.
+                //
+                // Подъём регистра перед спуском — не описка: он складывает
+                // регистр по Unicode так же, как `(?i)` в лексере, где `ſ`
+                // равна `s`. Один лишь спуск `ſ` не трогает, и слой написаний
+                // расходился бы с тем, что лексер уже принял.
+                let spelling = token.text().trim_start_matches('&').to_uppercase().to_lowercase();
+
+                let kind = match spelling.as_str() {
+                    "наклиенте" | "atclient" => AnnotationKind::AtClient,
+                    "насервере" | "atserver" => AnnotationKind::AtServer,
+                    "наклиентенасервере" | "atclientatserver" => {
+                        AnnotationKind::AtClientAtServer
                     }
-                    "НаСервере" | "AtServer" | "&НаСервере" | "&AtServer" => {
-                        AnnotationKind::AtServer
+                    "наклиентенасерверебезконтекста" | "atclientatservernocontext" => {
+                        AnnotationKind::AtClientAtServerNoContext
                     }
-                    "НаКлиентеНаСервере"
-                    | "AtClientAtServer"
-                    | "&НаКлиентеНаСервере"
-                    | "&AtClientAtServer" => AnnotationKind::AtClientAtServer,
-                    "НаКлиентеНаСервереБезКонтекста"
-                    | "AtClientAtServerNoContext"
-                    | "&НаКлиентеНаСервереБезКонтекста"
-                    | "&AtClientAtServerNoContext" => AnnotationKind::AtClientAtServerNoContext,
-                    "НаСервереБезКонтекста"
-                    | "AtServerNoContext"
-                    | "&НаСервереБезКонтекста"
-                    | "&AtServerNoContext" => AnnotationKind::AtServerNoContext,
-                    "Перед" | "Before" | "&Перед" | "&Before" => AnnotationKind::Before,
-                    "После" | "After" | "&После" | "&After" => AnnotationKind::After,
-                    "Вместо" | "Instead" | "&Вместо" | "&Instead" => {
-                        AnnotationKind::Instead
+                    "насерверебезконтекста" | "atservernocontext" => {
+                        AnnotationKind::AtServerNoContext
                     }
-                    "ИзменениеИКонтроль"
-                    | "ChangeAndValidate"
-                    | "&ИзменениеИКонтроль"
-                    | "&ChangeAndValidate" => AnnotationKind::ChangeAndValidate,
+                    "перед" | "before" => AnnotationKind::Before,
+                    "после" | "after" => AnnotationKind::After,
+                    // `instead` источником не задан и принимается разрешением
+                    // совместимости: 4.8.2 даёт английское имя `Вместо` как
+                    // `Around`.
+                    "вместо" | "around" | "instead" => AnnotationKind::Instead,
+                    "изменениеиконтроль" | "changeandvalidate" => {
+                        AnnotationKind::ChangeAndValidate
+                    }
                     _ => {
-                        debug!(text = %text, "unknown annotation kind, skipping");
+                        debug!(text = %token.text(), "unknown annotation kind, skipping");
                         return None;
                     }
                 };
@@ -884,5 +888,48 @@ Var Alpha, Beta Export;
         assert_eq!(proc.name.as_str(), "РасширениеМетода");
         assert_eq!(proc.annotations.len(), 1);
         assert!(matches!(proc.annotations[0].kind, AnnotationKind::Instead));
+    }
+
+    /// Английское имя `Вместо` — `Around` (4.8.2 руководства разработчика).
+    #[test]
+    fn around_is_the_english_name_of_instead() {
+        let tree = lower("&Around(\"М\")\nПроцедура Р()\nКонецПроцедуры");
+        let proc = tree.procedure(match tree.top_level_items()[0] {
+            ModItem::Procedure(idx) => idx,
+            _ => panic!("expected procedure"),
+        });
+        assert_eq!(proc.annotations.len(), 1, "аннотация &Around потеряна при lowering");
+        assert!(matches!(proc.annotations[0].kind, AnnotationKind::Instead));
+    }
+
+    /// Слой написаний согласован с лексером, а не только с обычным регистром.
+    ///
+    /// `(?i)` в logos складывает регистр по Unicode, и `ſ` (U+017F) там равна
+    /// `s`. Простое приведение к нижнему регистру этого не делает, поэтому
+    /// написание, которое лексер принял, теряло бы семантику.
+    #[test]
+    fn annotation_spelling_folds_case_the_way_the_lexer_does() {
+        let tree = lower("&At\u{017F}erver\nПроцедура Р()\nКонецПроцедуры");
+        let proc = tree.procedure(match tree.top_level_items()[0] {
+            ModItem::Procedure(idx) => idx,
+            _ => panic!("expected procedure"),
+        });
+        assert_eq!(
+            proc.annotations.len(),
+            1,
+            "написание, принятое лексером, потеряно при lowering"
+        );
+        assert!(matches!(proc.annotations[0].kind, AnnotationKind::AtServer));
+    }
+
+    /// Регистр во встроенном языке не значим — 4.2.4.5.
+    #[test]
+    fn annotation_spelling_is_case_insensitive() {
+        let tree = lower("&вместо(\"М\")\nПроцедура Р()\nКонецПроцедуры");
+        let proc = tree.procedure(match tree.top_level_items()[0] {
+            ModItem::Procedure(idx) => idx,
+            _ => panic!("expected procedure"),
+        });
+        assert_eq!(proc.annotations.len(), 1, "строчное написание потеряно при lowering");
     }
 }

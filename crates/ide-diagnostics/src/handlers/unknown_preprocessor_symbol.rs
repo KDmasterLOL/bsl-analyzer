@@ -60,36 +60,49 @@ mod tests {
     use super::*;
     use crate::test_utils::check_diagnostics_snapshot_for;
     use expect_test::expect;
+    /// Классы входов, выведенные из грамматики условия в разделе 4.8.1.2:
+    /// условие есть логическое выражение над символами с операциями
+    /// `НЕ`, `И`, `Или`, а инструкция начинается с `#`.
+    ///
+    /// Проверяются разом: символ из таблицы, написание вне её, оба операнда
+    /// булевой операции, собственное выражение у `#ИначеЕсли` и обычный
+    /// `Если`, который препроцессором не является.
     #[test]
-    fn test_comprehensive() {
-        let code = r#"#Если Нечто Тогда
-
+    fn every_class_of_condition_is_covered() {
+        let code = r#"#Если ВебКлиент И Мираж Тогда
+#ИначеЕсли НЕ Морок Тогда
+#Иначе
 #КонецЕсли
 
-#Если _ Тогда
-
-#КонецЕсли
-
-#Если Сервер Тогда
-
-#КонецЕсли
-
-Если Нечто Тогда
-
+Если Мираж Тогда
 КонецЕсли;
+"#;
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnknownPreprocessorSymbol,
+            expect![[r#"
+                UnknownPreprocessorSymbol @ 1:19..1:24
+                  message: Неизвестный символ препроцессора 'Мираж'
+                  severity: Critical
+                UnknownPreprocessorSymbol @ 2:15..2:20
+                  message: Неизвестный символ препроцессора 'Морок'
+                  severity: Critical"#]],
+        );
+    }
 
-#Если НЕ МобильныйАвтономныйСервер Тогда
-
-#КонецЕсли"#;
+    /// Написание, которого раздел 4.8.1.2 не определяет, диагностируется.
+    ///
+    /// Рядом стоит известный символ, который обязан молчать: без него
+    /// проверка зелена и у реализации, не признающей ни одного написания.
+    #[test]
+    fn a_spelling_absent_from_the_source_is_reported() {
+        let code = "#Если Linux Тогда\n#КонецЕсли\n\n#Если Сервер Тогда\n#КонецЕсли\n";
         check_diagnostics_snapshot_for(
             code,
             DiagnosticCode::UnknownPreprocessorSymbol,
             expect![[r#"
                 UnknownPreprocessorSymbol @ 1:7..1:12
-                  message: Неизвестный символ препроцессора 'Нечто'
-                  severity: Critical
-                UnknownPreprocessorSymbol @ 5:7..5:8
-                  message: Неизвестный символ препроцессора '_'
+                  message: Неизвестный символ препроцессора 'Linux'
                   severity: Critical"#]],
         );
     }
@@ -150,25 +163,6 @@ mod tests {
 
 #If Server Then
 #EndIf
-"#;
-        check_diagnostics_snapshot_for(
-            code,
-            DiagnosticCode::UnknownPreprocessorSymbol,
-            expect![[r#""#]],
-        );
-    }
-
-    #[test]
-    fn test_os_symbols() {
-        let code = r#"
-#Если Linux Тогда
-#КонецЕсли
-
-#Если Windows Тогда
-#КонецЕсли
-
-#Если MacOS Тогда
-#КонецЕсли
 "#;
         check_diagnostics_snapshot_for(
             code,

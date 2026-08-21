@@ -133,6 +133,16 @@ fn multiplicative_expr(p: &mut Parser) {
     lhs.complete(p, NodeKind::Expr);
 }
 
+/// Unary `+` and `-` bind at the level 4.5.4 gives them and build no node.
+///
+/// The precedence is the source's: the seventh row of the table binds tighter
+/// than multiplication and looser than dereference. The absent node is not —
+/// `Не а` completes a `UnaryExpr` while `-а` leaves the sign a sibling of its
+/// operand. Kept as it stands: the shape of the tree is not the language, both
+/// tokens are present, and wrapping them would change the tree for every unary
+/// sign in every module and everything that lowers one.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D9.
 fn unary_expr(p: &mut Parser) {
     match p.current() {
         Some(T![Plus]) | Some(T![Minus]) => {
@@ -147,6 +157,15 @@ fn postfix_expr(p: &mut Parser) {
     postfix_expr_with_call_info(p);
 }
 
+/// `[]` is placed with `.` and `()`, which the precedence table does not do.
+///
+/// Section 4.5.4 puts dereference and call at the top of the ladder and never
+/// mentions the bracket. The form is given three times — 4.2.5, 4.7.1
+/// (`<Объект>[<Имя свойства>]`) and 4.7.5 (`[<Аргумент>]`) — and its precedence
+/// nowhere. Grouping it here is a decision, not a reading: it is the only
+/// placement under which `а.б[0].в` binds left to right as written.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D10.
 fn postfix_expr_with_call_info(p: &mut Parser) -> bool {
     let Some(mut lhs) = primary_expr(p) else {
         return false;
@@ -309,6 +328,15 @@ fn await_expr(p: &mut Parser) -> CompletedMarker {
     m.complete(p, NodeKind::AwaitExpr)
 }
 
+/// `Новый` alone is taken, and 4.6.2 has no such variant.
+///
+/// The section gives two: `Новый <Имя типа>[(…)]` and the functional
+/// `Новый(<Тип>[, <Параметры>])` — hence both the optional type name and the
+/// optional argument list. Bare `Новый` with neither is what stands in the
+/// editor before the type name is typed, and refusing it would cost the
+/// assignment around it.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D10.
 fn new_expr(p: &mut Parser) -> CompletedMarker {
     let m = p.start();
     p.bump();

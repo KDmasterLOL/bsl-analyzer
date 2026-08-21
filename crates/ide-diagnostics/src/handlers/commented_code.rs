@@ -459,7 +459,7 @@ fn assignment_index(toks: &[Token]) -> Option<usize> {
         }
         let prev = toks[idx - 1].kind;
         let next = toks[idx + 1].kind;
-        if matches!(prev, TokenKind::Lt | TokenKind::Gt | TokenKind::Eq | TokenKind::Exclamation) {
+        if matches!(prev, TokenKind::Lt | TokenKind::Gt | TokenKind::Eq) {
             continue;
         }
         if matches!(next, TokenKind::Eq | TokenKind::Gt) {
@@ -1133,6 +1133,24 @@ mod tests {
         let code = "Процедура Тест()\n    // .\n    // ..\nКонецПроцедуры";
         let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// `!=` в теле комментария — сравнение, а не присваивание.
+    ///
+    /// Пара входов обязательна: на одном лишь `!=` проверка зелена при любой
+    /// реализации `assignment_index`, включая ту, что не находит присваиваний
+    /// вовсе. `а = 1;` рядом показывает, что мерка вообще способна их видеть.
+    #[test]
+    fn bang_equals_is_not_an_assignment() {
+        let index = |text: &str| super::assignment_index(&super::code_tokens(text));
+
+        assert_eq!(index("а != 1"), None);
+        assert_eq!(index("Массив[0] != 1"), None);
+        assert_eq!(index("Функция() != 1"), None);
+
+        assert!(index("а = 1;").is_some(), "мерка не видит присваивания и потому ничего не пиннит");
+        assert!(index("Массив[0] = 1;").is_some());
+        assert!(index("Функция() = 1;").is_some());
     }
 
     #[test]

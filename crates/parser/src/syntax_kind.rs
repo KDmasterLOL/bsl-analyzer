@@ -179,7 +179,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::PreEndIf => SK::PRE_END_IF,
         TokenKind::PreRegion => SK::PRE_REGION,
         TokenKind::PreEndRegion => SK::PRE_END_REGION,
-        TokenKind::PreUse => SK::PRE_USE,
         TokenKind::PreInsert => SK::PRE_INSERT,
         TokenKind::PreEndInsert => SK::PRE_END_INSERT,
         TokenKind::PreDelete => SK::PRE_DELETE,
@@ -223,7 +222,6 @@ pub fn token_kind_to_syntax(kind: TokenKind) -> syntax::SyntaxKind {
         TokenKind::Bar => SK::BAR,
         TokenKind::Hash => SK::HASH,
         TokenKind::Ampersand => SK::AMPERSAND,
-        TokenKind::Exclamation => SK::EXCLAMATION,
 
         TokenKind::Float => SK::FLOAT,
         TokenKind::Decimal => SK::DECIMAL,

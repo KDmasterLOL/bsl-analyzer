@@ -10,26 +10,32 @@ Item 10 blocks Tier A for `parser` and `lexer` independently of how clean SDBL
 becomes, because both crates host a BSL layer with the same origin. Finishing
 the SDBL programme in full would not move either crate.
 
-## Status as of 2026-08-20
+## Status as of 2026-08-21
 
-Nothing is done. No slice has ever touched the BSL layer, and no provenance
-marker of any kind survives in it — `843b00ab` and `3aa29b99` removed them all,
-so the evidence lives only in git history.
+All four slices are done. B1 and B2 each carry a provenance docstring naming the
+section of Chapter 4 they were re-derived from; B3 attested rather than rewrote,
+and its record is a gated checklist covering every grammar function; B4 recorded
+the origin of the test material, and what the history does not establish it says
+so about, separately.
+
+Everywhere else in the BSL layer no provenance marker survives: `843b00ab` and
+`3aa29b99` removed them all, so for the parts still awaiting a slice the
+evidence of what was derived lives only in git history.
 
 | Slice | Area | Issue | State |
 |---|---|---|---|
-| B1 | BSL token inventory (`lexer`) | #233 | not started |
-| B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | not started |
-| B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | not started |
-| B4 | Test material | #236 | not started |
+| B1 | BSL token inventory (`lexer`) | #233 | **done** — [`bsl-clean-room-slice-b1.md`](bsl-clean-room-slice-b1.md) |
+| B2 | Preprocessor symbols (`ide-diagnostics`) | #234 | **done** — [`bsl-clean-room-slice-b2.md`](bsl-clean-room-slice-b2.md) |
+| B3 | Grammar rules — attestation, not rewrite (`parser`) | #235 | **done** — [`bsl-clean-room-slice-b3.md`](bsl-clean-room-slice-b3.md) |
+| B4 | Test material | #236 | **done** — [`bsl-clean-room-slice-b4.md`](bsl-clean-room-slice-b4.md) |
 
 ## Scope: half of what is already done
 
-Measured 2026-08-20 on `develop`.
+Measured 2026-08-20 on `develop`, before B1 landed.
 
 | What | Lines | Units |
 |---|---:|---|
-| BSL lexer, `crates/lexer/src/lib.rs` | 945 | 101 `TokenKind` variants |
+| BSL lexer, `crates/lexer/src/lib.rs` | 945 | 101 `TokenKind` variants — B1 left 99 |
 | BSL grammar, `grammar.rs` + `grammar/{items,statements,expressions}.rs` | 1462 | 77 functions, of which 59 build tree nodes |
 | Preprocessor symbols, `crates/ide-diagnostics/src/utils/preprocessor_symbols.rs` | 89 | 29 spellings |
 | For comparison: SDBL, already attested | 4891 | |
@@ -229,9 +235,11 @@ omission belongs to B2, not to the closing paperwork.
 
 ## B3 — grammar: attestation, not rewriting
 
-**Subject.** All 77 functions of the four files, enumerated as a checklist:
-the 59 tree-building rules against the language, and the 18 lookahead predicates
-against the recovery architecture. The subject is whether each form is required
+**Subject.** All 77 functions of the four files, enumerated as a checklist: the
+59 tree-building rules and the 18 lookahead predicates, each against whatever
+actually decides it. Most predicates answer to the recovery architecture; not
+all do, and assuming they all did is the group claim this slice had to withdraw
+(see below). The subject is whether each form is required
 by the language, not whether the text is ours. No function is exempt from having
 a verdict recorded; a function nobody assigned a verdict is the failure mode this
 slice exists to prevent.
@@ -274,29 +282,47 @@ member names, the multiline-string handling — get an **A verdict with its reas
 written down**, not an exemption. «It is clearly our own parser work» is the
 expected conclusion for them; it still has to be reached one function at a time
 and recorded, because that is the only thing distinguishing an attested rule
-from one nobody looked at. The 18 lookahead predicates are attested the same way
-and as a group: they encode recovery decisions, have no counterpart in a grammar
-file, and each names the construct it looks for.
+from one nobody looked at. The 18 lookahead predicates are attested the same way,
+**one at a time and not as a group**. Attesting them together on the shared trait
+«they encode recovery decisions with no counterpart in a grammar file» was the
+plan until the trait turned out to be false on one of the eighteen:
+`at_adjacent_string_literal` is asked inside the successful loop of
+`string_literal`, deciding whether the next literal joins the same constant, and
+that is the ordinary syntax of 4.3.6. It carries an R verdict for that reason.
+A group claim would have hidden the one syntactic predicate behind a label the
+attestation itself disproves.
 
 ## B4 — test material
 
 `crates/parser/tests/fixtures/Module.bsl`, 15 157 lines with no terminating
-newline (`wc -l` reports 15 156 for that reason), is a verbatim copy of a
-`bsl-parser` test resource (`16c5db20`, 2025-12-29). The content is clean: the
+newline (`wc -l` reports 15 156 for that reason), came from a `bsl-parser` test
+resource (`16c5db20`, 2025-12-29). It was described here as a verbatim copy; B4
+established that it is not. `f1fc00ff` (2026-05-13) changed two lines of the
+body, correcting an event-handler statement to the syntax 4.6.11.1 gives. The
+licence header has never been touched. The content is clean: the
 file carries an ООО «1С-Софт» header under CC BY 4.0, so it belongs to 1C and is
 free to use with attribution; `bsl-parser` was only the delivery channel.
 
 There is nothing to rewrite, and the attribution is **already in place**:
-`NOTICE` (lines 159–163) names the copyright holder, CC BY 4.0, the intact
+`NOTICE` names the copyright holder, CC BY 4.0, the intact
 licence header, and the acquisition channel through `bsl-parser`; `LICENSING.md`
 names the file and its licence in its third-party table. What `843b00ab` removed
 was six in-code comments of the form
 `Source: bsl-parser/src/test/resources/Module.bsl`, and the `NOTICE` record
 postdates them.
 
-B4 is therefore a verification, not a repair: confirm that the licence header in
-the file is intact and unmodified, that the `NOTICE` statement matches it, and
-that no other BSL test input carries an origin nobody recorded.
+B4 was framed as a verification rather than a repair. Two of its three questions
+answered that way: the licence header is intact, and the `NOTICE` statement
+matches it once the body modification above is added to it. The third did not.
+Sweeping every BSL test input found that the fixture B2 replaced was one case of
+a class: the commits that introduced diagnostic fixtures record, in their own
+words, that test files were copied from `bsl-language-server` and from
+`bsl-language-server-rust`, and `07d2b977` moved 187 of them inline. B4 records
+that class rather than a per-file map — four ways of building such a map were
+tried and each failed in its own direction, which the attestation sets out.
+Thirty-six live fixtures in `crates/bsl-metadata` that no document mentioned are
+now listed file by file, as is `Module.bsl`. Replacing the material with derived
+equivalents is tracked apart from this programme.
 
 B4 also covers the fixture material B2 identifies, and any other BSL test input
 whose origin the same review finds.
@@ -346,46 +372,73 @@ literal counter that does not agree with the expected order of magnitude.
 J1 and J2 are the pair that makes B1's open cases decidable: a variant that no
 input produces fails J1, and a token that no rule consumes shows up in J2.
 
-## Compatibility: to be recorded as a decision
+## Compatibility: recorded as a decision
 
-`a6f57021` (2026-06-15) is the BSL counterpart of `c7c942a7`: it clears "442
-ParseErrors across 34 files that bsl-language-server 0.29.0 parses cleanly". The
-correctness oracle for BSL parsing, after the markers were removed, was
-somebody else's implementation.
+**Done** — [`bsl-compatibility-decision.md`](bsl-compatibility-decision.md).
 
-As with the diagnostic catalogue, this is lawful and is the point — compatibility
-with the predecessor is a goal. But it has to be **recorded as a decision**,
-otherwise it reads as underivability. The line is the same one: our own code
-behind the same observable interface is fine; obtaining that interface by
-reading their source is not.
+The concern was that `a6f57021` cleared «442 ParseErrors across 34 files that
+bsl-language-server 0.29.0 parses cleanly», which makes another implementation
+the correctness oracle for BSL parsing. Going through every commit that touched
+`parser`, `lexer` or `syntax` and named that project, the picture is narrower
+than the concern:
 
-For this particular commit the record can be stronger than "compatibility".
-Section 4.2.4.6 reserves keywords against use as «имена переменных, реквизитов
-объектов конфигурации и объявляемых процедур и функций» — declaration sites. It
-says nothing about member names after a dot, so `Выборка.Исключение` is valid by
-the source, and the rule the commit implements is derivable from 4.2.4.6
-directly. The other implementation served as a corpus-scale cross-check, not as
-the origin of the rule. Establishing that for the remaining compatibility-driven
-BSL commits is part of this step; where it cannot be established, the plain
-compatibility record stands.
+- two commits changed what the parser accepts, and both rules come out of
+  Chapter 4 by name — 4.2.4.6 for keywords as member names, 4.3.6 for comments
+  between the lines of a multiline literal. The other implementation supplied a
+  corpus-scale cross-check, not the rule;
+- four changed the shape of the tree so a diagnostic could read it, without
+  changing what parses. Their oracle was the diagnostic's behaviour, and that
+  compatibility is already stated in `NOTICE`;
+- six were SDBL and belong to that programme.
+
+The record names its own limit: the search reads commit messages, so a silent
+comparison would not appear in it, and its absence is not evidence.
+
+One finding is worth keeping next to B3. `ad53c893` added `UnaryExpr` to
+`not_expr` alone, because DoubleNegatives needed the node; unary `+` and `-`
+never got one because no diagnostic asked. That is the origin of the asymmetry
+B3 recorded as D9 — nobody chose against it, the occasion simply never arose.
 
 ## Order
 
-1. Retract the discrepancy in `parser-bsl-grammar-audit.md`.
-2. B1.
-3. B2.
-4. J-invariants and harness.
-5. B3.
-6. B4.
-7. Record the compatibility decision.
-8. Update `NOTICE` and `LICENSING.md`.
+1. Retract the discrepancy in `parser-bsl-grammar-audit.md`. **Done.**
+2. B1. **Done.**
+3. B2. **Done.**
+4. B3. **Done.**
+5. B4. **Done.**
+6. Record the compatibility decision. **Done** —
+   [`bsl-compatibility-decision.md`](bsl-compatibility-decision.md).
+7. Update `NOTICE` and `LICENSING.md`. **Done.** B4 wrote the test-material
+   half; the compatibility decision added its own, and `NOTICE` now states what
+   the finished item delivers and what it does not — in particular that nothing
+   is relicensed by it, because three checklist items are still open.
 
-Step 1 is done; the rest are separate slices with their own attestations, on the
-model of `sdbl-clean-room-slice*.md`.
+All seven steps are done. Each slice carries its own attestation, on the model of
+`sdbl-clean-room-slice*.md`; what the programme does **not** deliver is set out
+under «What item 10 will not deliver» below, and it is the part that decides when
+`parser` and `lexer` can leave Tier B.
 
-The invariants sit after B2 rather than first because J1 and J2 are cheap to
-state and expensive to satisfy: B1 and B2 change the token inventory, and a
-harness built before them would be rebuilt after them.
+**The J-invariants are no longer a step of their own.** They were listed as one
+between B2 and B3, on the reasoning that a harness built before the slices that
+move the inventory would be rebuilt after them. Each turned out to belong to a
+slice:
+
+- J1 and J2 to B1, because only B1 changes `TokenKind`. B2's subject,
+  `crates/ide-diagnostics/src/utils/preprocessor_symbols.rs`, does not touch it,
+  so the harness B1 built survived B2 unchanged.
+- J3 to B3, because issue #235 assigns operator precedence to that slice, and a
+  positive control built apart from the verdict it controls would be rebuilt
+  with it.
+- J4 and J5 to whatever slice first changes behaviour. B3 was that slice: its
+  single code edit removes a form the source does not describe, and an input
+  that parsed clean now errors. Both were built there. J5 compared the two
+  builds over 75 438 files and found no difference in classification, beside a
+  named control the two builds classify differently.
+
+B3 also added invariants the list did not have — every grammar function carries
+a verdict, none is left unresolved, no justification is a placeholder, and the
+attestation's listing does not drift from the checklist. They are stated and
+gated in `crates/parser/tests/grammar_attestation.rs`.
 
 ## What item 10 will not deliver
 
