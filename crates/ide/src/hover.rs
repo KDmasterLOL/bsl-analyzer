@@ -835,6 +835,7 @@ fn hover_keyword(token: &SyntaxToken) -> Option<HoverResult> {
 
     let keyword_text = token.text();
 
+    // allow: keyword docs (M3 exception)
     let keyword_docs = bsl_platform::PlatformData::instance().get_keyword_docs(keyword_text)?;
 
     let mut markup = String::new();

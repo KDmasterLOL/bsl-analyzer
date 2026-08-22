@@ -65,7 +65,7 @@ pub fn hybrid_code(
         // structured not-ready envelope (machine status + live counters + retry hint),
         // matching the graph tool, rather than a bare sentence a poller must parse.
         CodeHits::Pending(message) => {
-            return Ok(search_not_ready(&message, index_progress));
+            return Ok(search_not_ready(&message, index_progress, "search_code"));
         }
         // Lexical search is always available, so it never reports a semantic shortfall; treat
         // it defensively as "still building".
@@ -73,6 +73,7 @@ pub fn hybrid_code(
             return Ok(search_not_ready(
                 "Search index is being built, please try again in a moment.",
                 index_progress,
+                "search_code",
             ));
         }
     };
@@ -106,7 +107,7 @@ pub fn hybrid_code(
         // The text stays the bare sentence it has always been; the degradation reaches a
         // machine consumer through the envelope, where an empty list plus `degraded` reads as
         // "half the search was down" rather than "there is nothing".
-        return Ok(no_hits_response(note.as_deref(), Envelope::Yes));
+        return Ok(no_hits_response(note.as_deref(), Envelope::Yes, "search_code"));
     }
 
     Ok(assemble_code_response(
@@ -143,7 +144,7 @@ fn assemble_code_response(
         // positionally is not shifted.
         let _ = writeln!(out, "-- {note} --");
     }
-    hits_response(out, rendered, note, Envelope::Yes)
+    hits_response(out, rendered, note, Envelope::Yes, "search_code")
 }
 
 #[cfg(test)]
@@ -407,7 +408,8 @@ mod tests {
         assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
-        assert_eq!(body["schema_version"], "3");
+        assert_eq!(body["schema_version"], "4");
+        assert_eq!(body["action"], "search_code");
         let hits = body["hits"].as_array().expect("hits array");
         assert_eq!(hits.len(), body["shown"].as_u64().unwrap() as usize);
         assert_eq!(body["total"], serde_json::json!(hits.len()));

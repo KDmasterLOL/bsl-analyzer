@@ -1,4 +1,3 @@
-use bsl_platform::PlatformDataInner;
 use bsl_search::{
     fingerprint_documents, BaselineRef, CorpusId, Document, ExternalBaselineAdapter,
     ExternalBaselineBackend, ExternalBaselineConfig, IndexedDocument, ResolvedView,
@@ -133,6 +132,11 @@ impl DeferredBaselineRuntime {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn pending_for_test() -> Self {
+        Self::with_slot(BaselineSlot::Pending)
+    }
+
     /// Run the plan's network connect on a background thread and publish the outcome.
     ///
     /// The thread is deliberately detached (its `JoinHandle` is dropped): it performs
@@ -210,7 +214,7 @@ impl DeferredBaselineRuntime {
     pub(crate) fn wait_ready(&self, timeout: Duration) -> bool {
         let deadline = std::time::Instant::now() + timeout;
         let mut slot = self.inner.slot.lock().unwrap_or_else(|e| e.into_inner());
-        while matches!(*slot, BaselineSlot::Pending) {
+        while matches!(*slot, BaselineSlot::Pending) && !self.inner.closed.load(Ordering::Acquire) {
             let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 return false;
             };
@@ -218,13 +222,17 @@ impl DeferredBaselineRuntime {
                 self.inner.ready.wait_timeout(slot, remaining).unwrap_or_else(|e| e.into_inner());
             slot = guard;
         }
-        true
+        matches!(*slot, BaselineSlot::Ready(_))
     }
 
     /// Close the slot: a ready service shuts down now; a still-connecting one is shut
     /// down by [`Self::publish`] the moment it lands.
     pub(crate) fn shutdown(&self) {
-        self.inner.closed.store(true, Ordering::SeqCst);
+        {
+            let _slot = self.inner.slot.lock().unwrap_or_else(|e| e.into_inner());
+            self.inner.closed.store(true, Ordering::Release);
+        }
+        self.inner.ready.notify_all();
         if let Some(service) = self.external() {
             service.shutdown();
         }
@@ -1780,80 +1788,7 @@ fn resolve_env_value(keys: &[&str]) -> Option<String> {
 }
 
 fn platform_reference_documents() -> Vec<Document> {
-    let platform = PlatformDataInner::instance();
-    let mut documents = Vec::new();
-
-    for ty in platform.all_types() {
-        let methods = platform.get_type_methods(&ty.name);
-        let method_list: String = methods
-            .iter()
-            .map(|method| format!("{} / {}", method.name, method.english_name))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        documents.push(Document {
-            title: format!("{} / {}", ty.name, ty.english_name),
-            body: format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name),
-            kind: "type".to_owned(),
-        });
-    }
-
-    for method in platform.all_methods() {
-        let mut body = format!(
-            "Тип: {}\nМетод: {} / {}\n",
-            method.type_name, method.name, method.english_name
-        );
-        if let Some(ref ret) = method.return_type {
-            body.push_str(&format!("Возвращает: {ret}\n"));
-        }
-        if let Some(docs) = platform.get_method_docs(method.id) {
-            if !docs.syntax.is_empty() {
-                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
-            }
-            if !docs.description.is_empty() {
-                body.push_str(&format!("Описание: {}\n", docs.description));
-            }
-            for param in &docs.params {
-                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
-            }
-            for example in &docs.examples {
-                body.push_str(&format!("Пример: {}\n", example.code));
-            }
-        }
-        documents.push(Document {
-            title: format!(
-                "{}.{} / {}.{}",
-                method.type_name, method.name, method.type_name, method.english_name
-            ),
-            body,
-            kind: "method".to_owned(),
-        });
-    }
-
-    for func in platform.all_global_functions() {
-        let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name);
-        if let Some(ref ret) = func.return_type {
-            body.push_str(&format!("Возвращает: {ret}\n"));
-        }
-        if let Some(docs) = platform.get_global_function_docs(func.id) {
-            if !docs.syntax.is_empty() {
-                body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
-            }
-            if !docs.description.is_empty() {
-                body.push_str(&format!("Описание: {}\n", docs.description));
-            }
-            for param in &docs.params {
-                body.push_str(&format!("Параметр {}: {}\n", param.name, param.description));
-            }
-        }
-        documents.push(Document {
-            title: format!("{} / {}", func.name, func.english_name),
-            body,
-            kind: "global_function".to_owned(),
-        });
-    }
-
-    documents
+    crate::build_reference_documents()
 }
 
 #[cfg(test)]
@@ -1966,6 +1901,32 @@ mod tests {
         let view = deferred.view();
         assert!(!view.pending);
         assert_eq!(view.configured.map(|status| status.backend), Some("postgres"));
+    }
+
+    #[test]
+    fn deferred_slot_shutdown_wakes_a_pending_waiter() {
+        let deferred = DeferredBaselineRuntime::pending_for_test();
+        let waiter = deferred.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            tx.send(waiter.wait_ready(Duration::from_secs(5))).unwrap();
+        });
+        std::thread::sleep(Duration::from_millis(20));
+
+        deferred.shutdown();
+        let result = rx.recv_timeout(Duration::from_millis(200));
+        deferred.publish(BaselineRuntime {
+            configured_baseline: ConfiguredBaselineStatus {
+                backend: "postgres",
+                selection: "test".to_owned(),
+                issue: None,
+                support: None,
+            },
+            external_baseline: None,
+        });
+        handle.join().unwrap();
+
+        assert!(!result.unwrap());
     }
 
     #[test]

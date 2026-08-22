@@ -2,7 +2,9 @@ use std::sync::Arc;
 use stdx::case::CaseExt;
 
 use bsl_config::VisibleConfig;
-use bsl_metadata::{AttributeType, MdoType, MetadataObject, MetadataResolver, Register};
+use bsl_metadata::{
+    AttributeType, MdoType, MetadataObject, MetadataResolver, ModuleType, Register,
+};
 use bsl_types::kind::MetadataReferenceKind;
 use hir_def::ConfigsDatabase;
 use hir_def::Name;
@@ -32,6 +34,14 @@ pub trait ObjectResolver {
     /// manager methods this way — without it a config-less project types the
     /// same chain as `Unknown` while its methods resolve.
     fn manager_module_without_config(&self, mdo_type: MdoType, name: &str) -> bool;
+
+    fn has_effective_module_variable(
+        &self,
+        module_type: ModuleType,
+        mdo_type: MdoType,
+        object_name: &str,
+        variable_name: &str,
+    ) -> bool;
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name>;
 
@@ -98,6 +108,22 @@ impl<D: ConfigsDatabase + ?Sized> ObjectResolver for DbObjectResolver<'_, D> {
             .module_index(source_root_id)
             .resolve_manager(manager_type, &Name::new(name))
             .is_some()
+    }
+
+    fn has_effective_module_variable(
+        &self,
+        module_type: ModuleType,
+        mdo_type: MdoType,
+        object_name: &str,
+        variable_name: &str,
+    ) -> bool {
+        self.db.has_effective_module_variable(
+            self.file_id,
+            module_type,
+            mdo_type,
+            object_name,
+            variable_name,
+        )
     }
 
     fn resolve_metadata_reference(&self, kind: MetadataReferenceKind, name: &str) -> Option<Name> {
@@ -248,6 +274,16 @@ impl ObjectResolver for ConfigsObjectResolver<'_> {
     fn manager_module_without_config(&self, _mdo_type: MdoType, _name: &str) -> bool {
         // Configs are this resolver's whole world; it has neither a file nor a
         // module index, so it never holds the config-less evidence.
+        false
+    }
+
+    fn has_effective_module_variable(
+        &self,
+        _module_type: ModuleType,
+        _mdo_type: MdoType,
+        _object_name: &str,
+        _variable_name: &str,
+    ) -> bool {
         false
     }
 

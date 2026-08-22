@@ -1,6 +1,7 @@
 //! Response-shaping helpers shared by the agent-facing tools.
 
 use rmcp::model::{CallToolResult, Content};
+use serde::Serialize;
 use serde_json::Value;
 
 /// Emit `body` as the MCP `structuredContent` field. rmcp mirrors the value as a
@@ -15,6 +16,10 @@ pub fn structured(body: Value) -> CallToolResult {
 /// explicit per-action default, mirroring `graph`'s body budget. A small `limit` keeps most
 /// responses well under this, so the default rarely bites; it is a ceiling, not a target.
 pub const DEFAULT_OUTPUT_BUDGET_TOKENS: usize = 6000;
+
+pub(crate) fn serialized_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
+}
 
 /// The output-budget convention shared by the list-returning tools, mirroring `graph`'s
 /// body budget. Callers sort `items` into a stable order first, then drop trailing items

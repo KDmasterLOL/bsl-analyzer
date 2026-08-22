@@ -3,7 +3,7 @@ use super::types::{
     OverlayInit, OverlayWarmupState, PendingEmbed, SemanticRuntimeStatus, SharedSearchEngine,
     WorkspaceSearchInit, WorkspaceSearchMode,
 };
-use super::SharedState;
+use super::{ReferenceSearchLifecycle, ReferenceSearchState, SharedState};
 use crate::baseline::{
     BaselineBootstrap, BaselineRuntime, DeferredBaselineRuntime, ExternalBaselineService,
 };
@@ -11,8 +11,8 @@ use crate::change_hub::WorkspaceChangeHub;
 use crate::diagnostics_state::DiagnosticsState;
 use crate::graph::GraphState;
 use bsl_platform::PlatformDataInner;
-use bsl_search::{BaselineHashMode, CorpusId, Document, IndexProgress, SearchEngine};
-use std::sync::atomic::{AtomicU64, Ordering};
+use bsl_search::{BaselineHashMode, CorpusId, IndexProgress, SearchEngine, SearchError};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
     env,
@@ -24,6 +24,150 @@ use std::{
 /// only unusually slow networks ever reach it; the connect itself typically lands in
 /// seconds and wakes the waiter through the slot's condvar immediately.
 const BASELINE_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn search_failure(error: SearchError) -> (String, String) {
+    let reason = error.reason_code().unwrap_or("search_error").to_owned();
+    (error.to_string(), reason)
+}
+
+impl ReferenceSearchState {
+    fn new(project_root: Option<&Path>) -> Self {
+        let (project_config, lifecycle) = match project_root {
+            Some(root) => match project_model::ProjectConfig::load(root) {
+                Ok(config) => (config, ReferenceSearchLifecycle::Uninitialized),
+                Err(error) => {
+                    tracing::error!(%error, "reference search rejects unreadable project config");
+                    (
+                        None,
+                        ReferenceSearchLifecycle::Failed {
+                            message: error.to_string(),
+                            reason_code: "project_config_error".to_owned(),
+                        },
+                    )
+                }
+            },
+            None => (None, ReferenceSearchLifecycle::Uninitialized),
+        };
+        let baseline = match &lifecycle {
+            ReferenceSearchLifecycle::Failed { .. } => DeferredBaselineRuntime::absent(),
+            _ => match BaselineRuntime::reference_bootstrap(project_config.as_ref()) {
+                BaselineBootstrap::Immediate(runtime) => DeferredBaselineRuntime::ready(runtime),
+                BaselineBootstrap::Connect(plan) => DeferredBaselineRuntime::spawn(*plan),
+            },
+        };
+        Self {
+            engine: Arc::new(Mutex::new(None)),
+            progress: IndexProgress::new(),
+            semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
+            baseline,
+            lifecycle: Arc::new(Mutex::new(lifecycle)),
+            stopped: Arc::new(AtomicBool::new(false)),
+            worker: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn ensure_loading(&self) {
+        self.ensure_loading_with_wait(BASELINE_CONNECT_WAIT);
+    }
+
+    fn ensure_loading_with_wait(&self, baseline_wait: std::time::Duration) {
+        let mut lifecycle = self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !matches!(*lifecycle, ReferenceSearchLifecycle::Uninitialized) {
+            return;
+        }
+        *lifecycle = ReferenceSearchLifecycle::Loading;
+        drop(lifecycle);
+
+        let state = self.clone();
+        let spawn = std::thread::Builder::new().name("bsl-search-reference-init".to_owned()).spawn(
+            move || {
+                while !state.baseline.wait_ready(baseline_wait) {
+                    if state.stopped.load(Ordering::Acquire) {
+                        return;
+                    }
+                    tracing::debug!(
+                        timeout_ms = baseline_wait.as_millis(),
+                        "reference search still waits for configured baseline"
+                    );
+                }
+                let baseline = state.baseline.view();
+                let initialization = if baseline
+                    .configured
+                    .as_ref()
+                    .is_some_and(|configured| configured.backend == "postgres")
+                    && baseline.external.is_none()
+                {
+                    Err((
+                        baseline
+                            .configured
+                            .as_ref()
+                            .and_then(|configured| configured.issue.clone())
+                            .unwrap_or_else(|| {
+                                "configured reference baseline is unavailable".to_owned()
+                            }),
+                        "baseline_unavailable".to_owned(),
+                    ))
+                } else {
+                    SharedState::init_reference_search_engine(&state.progress, baseline.external)
+                };
+                if state.stopped.load(Ordering::Acquire) {
+                    return;
+                }
+                let mut lifecycle =
+                    state.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                match initialization {
+                    Ok(engine) => {
+                        let status = SharedState::semantic_runtime_status_for_mode(
+                            &engine,
+                            &WorkspaceSearchMode::SqliteLocal,
+                        );
+                        if let Ok(mut slot) = state.engine.lock() {
+                            *slot = Some(engine);
+                        }
+                        SharedState::set_semantic_runtime_status(&state.semantic_runtime, status);
+                        *lifecycle = ReferenceSearchLifecycle::Ready;
+                    }
+                    Err((message, reason_code)) => {
+                        SharedState::set_semantic_runtime_status(
+                            &state.semantic_runtime,
+                            SemanticRuntimeStatus::Failed(message.clone()),
+                        );
+                        *lifecycle = ReferenceSearchLifecycle::Failed { message, reason_code };
+                    }
+                }
+            },
+        );
+        match spawn {
+            Ok(handle) => {
+                *self.worker.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(handle);
+            }
+            Err(error) => {
+                *self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    ReferenceSearchLifecycle::Failed {
+                        message: error.to_string(),
+                        reason_code: "worker_spawn_failed".to_owned(),
+                    };
+            }
+        }
+    }
+
+    pub(crate) fn lifecycle(&self) -> ReferenceSearchLifecycle {
+        self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    pub(super) fn shutdown(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.baseline.shutdown();
+        if let Some(worker) =
+            self.worker.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+        {
+            let _ = worker.join();
+        }
+        if let Ok(mut engine) = self.engine.lock() {
+            *engine = None;
+        }
+    }
+}
 
 impl SharedState {
     /// The workspace search mode implied by the baseline bootstrap: configured INTENT,
@@ -208,6 +352,7 @@ impl SharedState {
             Arc::clone(&root_drift_epoch),
         );
 
+        let reference_search = ReferenceSearchState::new(Some(&source_dir));
         Ok(Self {
             workspace_root: Some(source_dir),
             source_root: Some(source_root),
@@ -220,6 +365,7 @@ impl SharedState {
             overlay_warmup,
             workspace_search_mode,
             baseline,
+            reference_search,
             graph,
             diagnostics,
             change_hub: Some(change_hub),
@@ -460,69 +606,8 @@ impl SharedState {
     }
 
     pub fn reference(project_root: Option<PathBuf>) -> Self {
-        let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
-        let index_progress = IndexProgress::new();
-        let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
-        let project_config = project_root.as_deref().and_then(|root| {
-            match project_model::ProjectConfig::load(root) {
-                Ok(config) => config,
-                Err(e) => {
-                    // The reference profile only mines the config for baseline
-                    // settings; a broken file loses those settings but must not
-                    // keep the reference daemon from serving.
-                    tracing::error!(error = %e, "reference profile ignores unreadable project config");
-                    None
-                }
-            }
-        });
-        // Same deferral as the workspace profile: the PG/Vault connect runs off-thread
-        // so a reference daemon's socket comes up immediately.
-        let baseline = match BaselineRuntime::reference_bootstrap(project_config.as_ref()) {
-            BaselineBootstrap::Immediate(runtime) => DeferredBaselineRuntime::ready(runtime),
-            BaselineBootstrap::Connect(plan) => DeferredBaselineRuntime::spawn(*plan),
-        };
-
-        {
-            let engine_arc = Arc::clone(&search_engine);
-            let progress_arc = Arc::clone(&index_progress);
-            let semantic_runtime_arc = Arc::clone(&semantic_runtime);
-            let baseline = baseline.clone();
-            std::thread::Builder::new()
-                .name("bsl-search-reference-init".to_owned())
-                .spawn(move || {
-                    tracing::info!("reference search engine initialization started in background");
-                    // Wait for the deferred connect before deciding shared-vs-local:
-                    // a still-pending baseline read as `None` would rebuild the local
-                    // platform docs cache instead of serving the shared snapshot.
-                    if !baseline.wait_ready(BASELINE_CONNECT_WAIT) {
-                        tracing::warn!(
-                            timeout_secs = BASELINE_CONNECT_WAIT.as_secs(),
-                            "baseline connect still pending; reference search init proceeds degraded"
-                        );
-                    }
-                    let engine =
-                        Self::init_reference_search_engine(&progress_arc, baseline.external());
-                    let semantic_status = engine
-                        .as_ref()
-                        .map(|engine| {
-                            Self::semantic_runtime_status_for_mode(
-                                engine,
-                                &WorkspaceSearchMode::SqliteLocal,
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            SemanticRuntimeStatus::Failed(
-                                "reference search engine initialization failed".to_owned(),
-                            )
-                        });
-                    if let Ok(mut guard) = engine_arc.lock() {
-                        *guard = engine;
-                    }
-                    Self::set_semantic_runtime_status(&semantic_runtime_arc, semantic_status);
-                    tracing::info!("reference search engine initialization complete");
-                })
-                .ok();
-        }
+        let reference_search = ReferenceSearchState::new(project_root.as_deref());
+        reference_search.ensure_loading();
 
         Self {
             workspace_root: None,
@@ -530,12 +615,13 @@ impl SharedState {
             onec_client: None,
             onec_connections: Default::default(),
             debug_session: Arc::new(Mutex::new(None)),
-            search_engine,
-            index_progress,
-            semantic_runtime,
+            search_engine: Arc::clone(&reference_search.engine),
+            index_progress: Arc::clone(&reference_search.progress),
+            semantic_runtime: Arc::clone(&reference_search.semantic_runtime),
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
-            baseline,
+            baseline: reference_search.baseline.clone(),
+            reference_search,
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
@@ -545,6 +631,7 @@ impl SharedState {
     }
 
     pub fn shared() -> Self {
+        let reference_search = ReferenceSearchState::new(None);
         Self {
             workspace_root: None,
             source_root: None,
@@ -557,6 +644,7 @@ impl SharedState {
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             workspace_search_mode: WorkspaceSearchMode::SqliteLocal,
             baseline: DeferredBaselineRuntime::absent(),
+            reference_search,
             graph: GraphState::disabled(),
             diagnostics: DiagnosticsState::disabled(),
             change_hub: None,
@@ -1067,8 +1155,10 @@ impl SharedState {
     fn init_reference_search_engine(
         progress: &Arc<IndexProgress>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
-    ) -> Option<SearchEngine> {
-        let db_path = Self::reference_search_db_path()?;
+    ) -> Result<SearchEngine, (String, String)> {
+        let db_path = Self::reference_search_db_path().ok_or_else(|| {
+            ("reference cache path is unavailable".to_owned(), "storage_error".to_owned())
+        })?;
         Self::init_reference_search_engine_at(&db_path, progress, external_baseline)
     }
 
@@ -1076,12 +1166,15 @@ impl SharedState {
         db_path: &Path,
         progress: &Arc<IndexProgress>,
         external_baseline: Option<Arc<ExternalBaselineService>>,
-    ) -> Option<SearchEngine> {
+    ) -> Result<SearchEngine, (String, String)> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).ok();
+            std::fs::create_dir_all(parent)
+                .map_err(|error| (error.to_string(), "storage_error".to_owned()))?;
         }
 
-        let mut engine = Self::open_search_engine(db_path)?;
+        let mut engine = Self::open_search_engine(db_path).ok_or_else(|| {
+            ("failed to open reference search engine".to_owned(), "storage_error".to_owned())
+        })?;
         if external_baseline
             .as_ref()
             .is_some_and(|baseline| matches!(baseline.corpus(), CorpusId::Reference))
@@ -1104,22 +1197,20 @@ impl SharedState {
                                 );
                             }
                         }
-                        if let Err(error) = engine.remove_file("platform://docs", "platform") {
-                            tracing::warn!("failed to clear local reference docs cache before external baseline mode: {error}");
-                        }
-                        Self::index_external_reference_docs(&mut engine, progress, snapshot);
+                        engine
+                            .remove_file("platform://docs", "platform")
+                            .map_err(search_failure)?;
+                        Self::index_external_reference_docs(&mut engine, progress, snapshot)
+                            .map_err(search_failure)?;
                     }
                     Ok(None) => {
-                        tracing::warn!(
-                            "external reference baseline is configured but no snapshot was resolved; rebuilding local reference docs cache"
-                        );
-                        Self::rebuild_local_reference_docs_cache(&mut engine, progress);
+                        return Err((
+                            "external reference baseline has no resolved snapshot".to_owned(),
+                            "baseline_unavailable".to_owned(),
+                        ));
                     }
                     Err(error) => {
-                        tracing::warn!(
-                            "failed to load external reference baseline snapshot for local semantic cache: {error}; rebuilding local reference docs cache"
-                        );
-                        Self::rebuild_local_reference_docs_cache(&mut engine, progress);
+                        return Err(search_failure(error));
                     }
                 }
             }
@@ -1127,16 +1218,16 @@ impl SharedState {
                 "external reference baseline is configured; lexical search uses the shared snapshot and semantic cache is synchronized locally"
             );
         } else {
-            Self::index_platform_docs(&mut engine, progress);
+            Self::index_platform_docs(&mut engine, progress).map_err(search_failure)?;
         }
-        Some(engine)
+        Ok(engine)
     }
 
     fn index_external_reference_docs(
         engine: &mut SearchEngine,
         progress: &Arc<IndexProgress>,
         snapshot: crate::baseline::BaselineSnapshotDocuments,
-    ) {
+    ) -> Result<(), SearchError> {
         let version = snapshot.fingerprint.unwrap_or(snapshot.snapshot_id);
 
         tracing::info!(
@@ -1146,33 +1237,21 @@ impl SharedState {
             "synchronizing external reference snapshot into local semantic cache"
         );
 
-        match engine.sync_indexed_documents_in_collection_with_embeddings(
+        let indexed_files = engine.sync_indexed_documents_in_collection_with_embeddings(
             "platform",
             &snapshot.documents,
             Some(&snapshot.shared_embeddings),
             Some(progress),
-        ) {
-            Ok(indexed_files) => {
-                if indexed_files > 0 {
-                    tracing::info!(indexed_files, "external reference docs cached locally");
-                } else {
-                    tracing::info!("external reference docs cache is up to date");
-                }
-            }
-            Err(error) => {
-                tracing::warn!("failed to cache external reference docs locally: {error}");
-            }
+        )?;
+        if indexed_files > 0 {
+            tracing::info!(indexed_files, "external reference docs cached locally");
+        } else {
+            tracing::info!("external reference docs cache is up to date");
         }
+        Ok(())
     }
 
-    fn rebuild_local_reference_docs_cache(
-        engine: &mut SearchEngine,
-        progress: &Arc<IndexProgress>,
-    ) {
-        Self::clear_reference_docs_cache(engine);
-        Self::index_platform_docs(engine, progress);
-    }
-
+    #[cfg(test)]
     fn clear_reference_docs_cache(engine: &mut SearchEngine) {
         match engine.sync_indexed_documents_in_collection(
             "platform",
@@ -1190,87 +1269,19 @@ impl SharedState {
         }
     }
 
-    fn index_platform_docs(engine: &mut SearchEngine, progress: &Arc<IndexProgress>) {
+    fn index_platform_docs(
+        engine: &mut SearchEngine,
+        progress: &Arc<IndexProgress>,
+    ) -> Result<(), SearchError> {
         let platform = PlatformDataInner::instance();
         if platform.all_types().is_empty() {
             tracing::debug!("no platform data available, skipping docs indexing");
-            return;
+            return Ok(());
         }
 
-        let mut documents = Vec::new();
+        let documents = crate::build_reference_documents();
 
-        for ty in platform.all_types() {
-            let methods = platform.get_type_methods(&ty.name);
-            let method_list: String = methods
-                .iter()
-                .map(|m| format!("{} / {}", m.name, m.english_name))
-                .collect::<Vec<_>>()
-                .join(", ");
-
-            let body = format!("Тип: {} / {}\nМетоды: {method_list}", ty.name, ty.english_name,);
-            documents.push(Document {
-                title: format!("{} / {}", ty.name, ty.english_name),
-                body,
-                kind: "type".to_owned(),
-            });
-        }
-
-        for method in platform.all_methods() {
-            let mut body = format!(
-                "Тип: {}\nМетод: {} / {}\n",
-                method.type_name, method.name, method.english_name,
-            );
-            if let Some(ref ret) = method.return_type {
-                body.push_str(&format!("Возвращает: {ret}\n"));
-            }
-            if let Some(docs) = platform.get_method_docs(method.id) {
-                if !docs.syntax.is_empty() {
-                    body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
-                }
-                if !docs.description.is_empty() {
-                    body.push_str(&format!("Описание: {}\n", docs.description));
-                }
-                for p in &docs.params {
-                    body.push_str(&format!("Параметр {}: {}\n", p.name, p.description));
-                }
-                for ex in &docs.examples {
-                    body.push_str(&format!("Пример: {}\n", ex.code));
-                }
-            }
-            documents.push(Document {
-                title: format!(
-                    "{}.{} / {}.{}",
-                    method.type_name, method.name, method.type_name, method.english_name
-                ),
-                body,
-                kind: "method".to_owned(),
-            });
-        }
-
-        for func in platform.all_global_functions() {
-            let mut body = format!("Глобальная функция: {} / {}\n", func.name, func.english_name,);
-            if let Some(ref ret) = func.return_type {
-                body.push_str(&format!("Возвращает: {ret}\n"));
-            }
-            if let Some(docs) = platform.get_global_function_docs(func.id) {
-                if !docs.syntax.is_empty() {
-                    body.push_str(&format!("Синтаксис: {}\n", docs.syntax));
-                }
-                if !docs.description.is_empty() {
-                    body.push_str(&format!("Описание: {}\n", docs.description));
-                }
-                for p in &docs.params {
-                    body.push_str(&format!("Параметр {}: {}\n", p.name, p.description));
-                }
-            }
-            documents.push(Document {
-                title: format!("{} / {}", func.name, func.english_name),
-                body,
-                kind: "global_function".to_owned(),
-            });
-        }
-
-        let version_bytes = env!("CARGO_PKG_VERSION").as_bytes();
+        let fingerprint = crate::reference_documents_fingerprint(&documents);
 
         tracing::info!(
             types = platform.all_types().len(),
@@ -1280,24 +1291,19 @@ impl SharedState {
             "indexing platform reference documentation"
         );
 
-        match engine.index_documents(
+        let outcome = engine.replace_reference_collection_if_stale(
             "platform",
             "platform://docs",
-            version_bytes,
+            &fingerprint,
             &documents,
             Some(progress),
-        ) {
-            Ok(count) => {
-                if count > 0 {
-                    tracing::info!(count, "platform docs indexed");
-                } else {
-                    tracing::info!("platform docs unchanged, skipped");
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to index platform docs: {e}");
-            }
+        )?;
+        if outcome.written {
+            tracing::info!(count = documents.len(), "platform docs indexed");
+        } else {
+            tracing::info!("platform docs unchanged, skipped");
         }
+        Ok(())
     }
 
     fn reference_search_db_path() -> Option<PathBuf> {
@@ -1941,6 +1947,103 @@ mod tests {
             .text_search("СтарыйВнешнийДокумент", 10, Some("platform"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn reference_search_loading_is_single_flight_and_shutdown_joins_worker() {
+        let _env = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempdir().unwrap();
+        let _cache = EnvVarGuard::set("XDG_CACHE_HOME", dir.path().to_str().unwrap());
+        let _embedding_url = EnvVarGuard::unset("EMBEDDING_URL");
+        let _embedding_model = EnvVarGuard::unset("EMBEDDING_MODEL");
+        let state = super::ReferenceSearchState::new(None);
+        assert_eq!(state.lifecycle(), super::ReferenceSearchLifecycle::Uninitialized);
+
+        state.ensure_loading();
+        let first_worker = state
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(std::thread::JoinHandle::thread)
+            .map(std::thread::Thread::id)
+            .expect("first ensure starts a worker");
+        state.ensure_loading();
+        let second_worker = state
+            .worker
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(std::thread::JoinHandle::thread)
+            .map(std::thread::Thread::id)
+            .expect("worker remains registered");
+        assert_eq!(first_worker, second_worker);
+        assert!(matches!(state.lifecycle(), super::ReferenceSearchLifecycle::Loading));
+
+        state.shutdown();
+        assert!(state.worker.lock().unwrap().is_none());
+        assert!(state.engine.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn reference_search_invalid_project_config_is_terminal() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("bsl-analyzer.toml"), "invalid {{{{ toml").unwrap();
+
+        let state = super::ReferenceSearchState::new(Some(dir.path()));
+
+        assert!(matches!(
+            state.lifecycle(),
+            super::ReferenceSearchLifecycle::Failed { ref reason_code, .. }
+                if reason_code == "project_config_error"
+        ));
+        assert!(state.engine.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn reference_search_keeps_pending_external_baseline_loading_until_shutdown() {
+        let mut state = super::ReferenceSearchState::new(None);
+        state.baseline = DeferredBaselineRuntime::pending_for_test();
+
+        state.ensure_loading_with_wait(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(35));
+
+        assert_eq!(state.lifecycle(), super::ReferenceSearchLifecycle::Loading);
+        assert!(state.engine.lock().unwrap().is_none());
+        let started = std::time::Instant::now();
+        state.shutdown();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(state.worker.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn reference_search_does_not_fall_back_for_unavailable_postgres_intent() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            "[search.baseline]\nbackend = \"postgres\"\n",
+        )
+        .unwrap();
+        let state = super::ReferenceSearchState::new(Some(dir.path()));
+
+        state.ensure_loading();
+        for _ in 0..100 {
+            if matches!(state.lifecycle(), super::ReferenceSearchLifecycle::Failed { .. }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(matches!(
+            state.lifecycle(),
+            super::ReferenceSearchLifecycle::Failed { ref reason_code, .. }
+                if reason_code == "baseline_unavailable"
+        ));
+        assert!(state.engine.lock().unwrap().is_none());
+        state.shutdown();
     }
     /// `metadata form` in a nested layout — config root `<ws>/src/cf`, workspace root one
     /// level up — resolves object form directories relative to the CONFIG root. That root

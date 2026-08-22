@@ -73,6 +73,7 @@ pub(crate) fn enumerate_fields_inner(
         Union(Vec<TypeId>),
         MetadataRef { kind: MetadataKind, name: Name, config_id: ConfigId },
         MetadataReferenceCollection(MetadataReferenceKind),
+        PlatformObject(Name),
         Other,
     }
     let shape = match db.lookup_type(ty) {
@@ -88,6 +89,7 @@ pub(crate) fn enumerate_fields_inner(
             config_id: facet.config_id.clone(),
         },
         TypeKind::MetadataReferenceCollection(kind) => Shape::MetadataReferenceCollection(*kind),
+        TypeKind::PlatformObject(facet) => Shape::PlatformObject(Name::new(&facet.name)),
         _ => Shape::Other,
     };
 
@@ -132,8 +134,27 @@ pub(crate) fn enumerate_fields_inner(
         Shape::MetadataReferenceCollection(kind) => {
             enumerate_metadata_reference_collection(db, resolver, kind)
         }
+        Shape::PlatformObject(name) => enumerate_platform_object_fields(db, &name),
         Shape::Other => Vec::new(),
     }
+}
+
+fn enumerate_platform_object_fields(db: &dyn TypeKernelDb, type_name: &Name) -> Vec<FieldInfo> {
+    PlatformData::instance()
+        .get_type_properties(type_name.as_str())
+        .into_iter()
+        .map(|property| {
+            let resolution = crate::platform_property_lookup::to_resolution(db, property);
+            FieldInfo {
+                name: Name::new(&property.name),
+                name_en: Some(Name::new(&property.english_name)),
+                ty: resolution.return_ty,
+                value_ty: None,
+                is_readonly: resolution.is_readonly,
+                origin: FieldOrigin::PlatformProperty { env: resolution.env },
+            }
+        })
+        .collect()
 }
 
 fn enumerate_metadata_reference_collection(
@@ -975,6 +996,13 @@ mod tests {
         TypeFixture::new("Boolean", |db| db.boolean())
     }
 
+    fn platform_object(name: &str) -> TypeFixture {
+        let name = name.to_string();
+        TypeFixture::new(format!("PlatformObject({name})"), move |db| {
+            db.platform_object(name.clone())
+        })
+    }
+
     fn date() -> TypeFixture {
         TypeFixture::new("Date", |db| db.date(DateComponent::DateTime))
     }
@@ -1014,6 +1042,20 @@ mod tests {
             attribute_type_to_typeid(&db, &attr_type, &ConfigsObjectResolver(&configs)),
             db.number(None, None)
         );
+    }
+
+    #[test]
+    fn platform_object_fields_include_form_extension_properties() {
+        let fields = enumerate_fields(
+            &[],
+            &platform_object("Расширение формы клиентского приложения для документа"),
+        );
+        let repost = fields
+            .iter()
+            .find(|field| field.name.as_str() == "ПриЗаписиПерепроводить")
+            .expect("document-form extension property");
+        assert_eq!(repost.ty, boolean());
+        assert!(matches!(repost.origin, FieldOrigin::PlatformProperty { .. }));
     }
 
     fn wrap(config: Configuration) -> Vec<VisibleConfig> {

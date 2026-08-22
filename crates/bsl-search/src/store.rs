@@ -2,7 +2,7 @@ use crate::document::Document;
 use crate::error::SearchError;
 use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
 use code_chunk::Chunk;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -27,6 +27,11 @@ pub struct Store {
     /// a mark leaves that mark pending for a later publish instead of clearing it against a
     /// graph that predates it.
     mark_seq: Arc<AtomicI64>,
+}
+
+pub(crate) struct CollectionReplaceOutcome {
+    pub(crate) committed_fingerprint: String,
+    pub(crate) written: bool,
 }
 
 /// One chunk's `(id, symbol_name, kind, graph_context)` as read for a context re-render.
@@ -79,6 +84,17 @@ pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 /// already current — the additive migrations keep it compatible — so upgrading does not
 /// trigger a needless full re-index.
 const SCHEMA_VERSION: i64 = 2;
+
+fn sqlite_bootstrap_busy(error: &SearchError) -> bool {
+    matches!(
+        error,
+        SearchError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+            if matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
 
 /// The tables whose row identity is the pair `(root_id, path)` rather than the
 /// path alone, and the body each is created with.
@@ -179,7 +195,24 @@ impl RootKeyedTable {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, SearchError> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match Self::open_once(path) {
+                Err(error)
+                    if sqlite_bootstrap_busy(&error) && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn open_once(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
+        // Set this before `journal_mode=WAL`: on a brand-new shared cache, changing journal
+        // mode is itself the first contended write and must wait for the peer bootstrap.
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         store.migrate_root_keyed_tables()?;
@@ -214,6 +247,7 @@ impl Store {
         // path — a side effect the "existing" contract (and the ownership discipline of the
         // standalone pass) forbids.
         let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         let stored: Option<String> = store
@@ -237,7 +271,6 @@ impl Store {
         self.conn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
-             PRAGMA busy_timeout = 30000;
              PRAGMA foreign_keys = ON;",
         )?;
         Ok(())
@@ -358,7 +391,10 @@ impl Store {
     /// data must be kept). Distinct from [`Self::migrate_embed_text_version`], a soft
     /// re-embed that leaves the schema intact.
     fn migrate_structural_schema(&self) -> Result<(), SearchError> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Two processes may bootstrap the same derived cache. Taking the writer reservation
+        // before reading the version prevents both from observing the same pre-migration state
+        // and then racing a deferred read transaction's upgrade to writer.
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if let Some(stored) = Self::stored_schema_version(&tx)? {
             if stored != SCHEMA_VERSION {
                 tracing::info!(
@@ -502,6 +538,7 @@ impl Store {
     #[cfg(test)]
     pub fn in_memory() -> Result<Self, SearchError> {
         let conn = Connection::open_in_memory()?;
+        conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let store =
             Self { conn, path: PathBuf::from(":memory:"), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
@@ -1407,6 +1444,93 @@ impl Store {
 
         tx.commit()?;
         Ok(file_id)
+    }
+
+    pub(crate) fn replace_reference_collection_if_stale(
+        &mut self,
+        collection: &str,
+        virtual_path: &str,
+        fingerprint: &str,
+        documents: &[Document],
+        embeddings: Option<&[Vec<f32>]>,
+    ) -> Result<CollectionReplaceOutcome, SearchError> {
+        let key = format!("reference_collection_fingerprint:{collection}");
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let committed = tx
+            .query_row("SELECT value FROM meta WHERE key = ?1", [&key], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()?;
+        if committed.as_deref() == Some(fingerprint) {
+            tx.commit()?;
+            return Ok(CollectionReplaceOutcome {
+                committed_fingerprint: fingerprint.to_owned(),
+                written: false,
+            });
+        }
+
+        tx.execute(
+            "DELETE FROM chunks_fts WHERE rowid IN (
+                 SELECT c.id FROM chunks c JOIN files f ON f.id = c.file_id
+                 WHERE f.collection = ?1
+             )",
+            [collection],
+        )?;
+        tx.execute("DELETE FROM files WHERE collection = ?1", [collection])?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        tx.execute(
+            "INSERT INTO files (root_id, path, hash, indexed_at, collection)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![CONFIGURATION_ROOT_ID, virtual_path, fingerprint.as_bytes(), now, collection],
+        )?;
+        let file_id = tx.last_insert_rowid();
+        {
+            let mut chunks = tx.prepare(
+                "INSERT INTO chunks (file_id, kind, symbol_name, is_export, annotations,
+                                     line_start, line_end, text, embedding)
+                 VALUES (?1, ?2, ?3, 0, NULL, 0, 0, ?4, ?5)",
+            )?;
+            let mut fts =
+                tx.prepare("INSERT INTO chunks_fts(rowid, symbol_name, text) VALUES (?1, ?2, ?3)")?;
+            for (index, document) in documents.iter().enumerate() {
+                let embedding: Option<Vec<u8>> = embeddings
+                    .and_then(|items| items.get(index))
+                    .map(|values| values.iter().flat_map(|value| value.to_le_bytes()).collect());
+                chunks.execute(params![
+                    file_id,
+                    document.kind,
+                    document.title,
+                    document.body,
+                    embedding,
+                ])?;
+                fts.execute(params![tx.last_insert_rowid(), document.title, document.body])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, fingerprint],
+        )?;
+        tx.commit()?;
+        Ok(CollectionReplaceOutcome {
+            committed_fingerprint: fingerprint.to_owned(),
+            written: true,
+        })
+    }
+
+    pub(crate) fn reference_collection_fingerprint(
+        &self,
+        collection: &str,
+    ) -> Result<Option<String>, SearchError> {
+        let key = format!("reference_collection_fingerprint:{collection}");
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0))
+            .optional()?)
     }
 
     pub fn reindex_indexed_documents_in_collection(

@@ -107,9 +107,9 @@ impl RenderedHits {
     ///
     /// Used by the `reference` profile's documentation actions only, which are outside the
     /// location contract — hence no envelope.
-    pub(super) fn into_response(mut self) -> CallToolResult {
+    pub(super) fn into_response(mut self, action: &str) -> CallToolResult {
         let text = std::mem::take(&mut self.text);
-        hits_response(text, self, None, Envelope::No)
+        hits_response(text, self, None, Envelope::No, action)
     }
 }
 
@@ -166,8 +166,8 @@ fn display_name(symbol_name: &str) -> &str {
 ///
 /// The budget covers the text and the JSON array together: the response carries both, so
 /// charging only the text would overshoot the caller's ceiling by roughly the JSON's size.
-/// At least one hit is always kept — a single oversized hit is delivered and flagged by
-/// `budget_exhausted` rather than dropped into an empty-looking answer.
+/// A hit is kept only when the text+JSON pair fits. If even the first does not, the caller
+/// emits the published empty budget envelope rather than an oversized partial entity.
 fn budgeted_hits(
     blocks: Vec<HitBlock>,
     max_output_tokens: usize,
@@ -187,7 +187,7 @@ fn budgeted_hits(
         let json_len = serde_json::to_string(&block.json).map(|s| s.len()).unwrap_or(0);
         let sep = usize::from(i > 0); // comma between JSON items
         let next = used + block.text.len() + json_len + sep;
-        if next > budget && shown > 0 {
+        if next > budget {
             break;
         }
         used = next;
@@ -228,8 +228,10 @@ pub(super) fn hits_response(
     rendered: RenderedHits,
     degraded: Option<&str>,
     envelope: Envelope,
+    action: &str,
 ) -> CallToolResult {
     let mut body = json!({
+        "action": action,
         "schema_version": SEARCH_SCHEMA_VERSION,
         "hits": rendered.hits,
         "shown": rendered.shown,
@@ -237,6 +239,7 @@ pub(super) fn hits_response(
     });
     if rendered.budget_exhausted {
         body["budget_exhausted"] = json!(true);
+        body["budget_hint"] = json!("increase max_output_tokens or narrow the query");
     }
     if let Some(reason) = degraded {
         body["degraded"] = json!(reason);
@@ -274,7 +277,11 @@ pub(super) enum Envelope {
 
 /// The empty-listing result, with the same envelope a populated one carries so a consumer
 /// never has to tell "no hits" from "no structured output" by absence.
-pub(super) fn no_hits_response(degraded: Option<&str>, envelope: Envelope) -> CallToolResult {
+pub(super) fn no_hits_response(
+    degraded: Option<&str>,
+    envelope: Envelope,
+    action: &str,
+) -> CallToolResult {
     hits_response(
         NO_HITS_TEXT.to_owned(),
         RenderedHits {
@@ -286,6 +293,7 @@ pub(super) fn no_hits_response(degraded: Option<&str>, envelope: Envelope) -> Ca
         },
         degraded,
         envelope,
+        action,
     )
 }
 
@@ -316,6 +324,18 @@ fn hit_location(hit: &SearchHit) -> Result<loc::Location, loc::LocationUnavailab
         end_line: hit.line_end,
         end_character: 0,
     })))
+}
+
+fn enrich_platform_reference(json: &mut Value, kind: &str, title: &str) {
+    let Some(reference) = crate::tools::platform::platform_reference_for_document(kind, title)
+    else {
+        return;
+    };
+    json["reference_id"] = json!(reference.reference_id);
+    json["owner"] = json!(reference.owner);
+    json["name"] = json!(reference.name);
+    json["english_name"] = json!(reference.english_name);
+    json["description"] = json!(reference.description);
 }
 
 pub(super) fn format_code_hits(
@@ -362,6 +382,7 @@ pub(super) fn format_code_hits(
             if !hit.symbol_name.is_empty() {
                 json["symbol"] = json!(hit.symbol_name);
             }
+            enrich_platform_reference(&mut json, &hit.kind, &hit.symbol_name);
             if let Some(id) = graph_id_for_hit(hit, roots, graph_root) {
                 let _ = writeln!(text, "  graph_id: {id}");
                 json["graph_id"] = json!(id);
@@ -402,6 +423,7 @@ pub(super) fn format_doc_hits(hits: &[SearchHit], max_output_tokens: usize) -> R
             if !hit.symbol_name.is_empty() {
                 json["symbol"] = json!(hit.symbol_name);
             }
+            enrich_platform_reference(&mut json, &hit.kind, &hit.symbol_name);
             push_snippet(&mut text, &mut json, &hit.text);
             text.push('\n');
             HitBlock { text, json }
@@ -442,6 +464,7 @@ pub(super) fn format_lexical_doc_hits(
             if !hit.symbol_name.is_empty() {
                 json["symbol"] = json!(hit.symbol_name);
             }
+            enrich_platform_reference(&mut json, &hit.kind, &hit.symbol_name);
             push_snippet(&mut text, &mut json, &hit.text);
             text.push('\n');
             HitBlock { text, json }
@@ -685,12 +708,13 @@ mod tests {
     }
 
     #[test]
-    fn one_oversized_hit_is_delivered_and_flagged() {
+    fn one_oversized_hit_returns_the_empty_budget_envelope() {
         let hits = vec![fused("Процедура", Modality::Lexical)];
 
         let out = format_code_hits(&hits, None, None, 1);
 
-        assert_eq!((out.shown, out.total), (1, 1));
+        assert_eq!((out.shown, out.total), (0, 1));
+        assert!(out.hits.is_empty());
         assert!(out.budget_exhausted, "an over-budget single hit must still say so");
     }
 
@@ -743,6 +767,7 @@ mod tests {
         let result = no_hits_response(
             Some("semantic skipped: runtime initialization failed"),
             Envelope::Yes,
+            "search_code",
         );
 
         assert_eq!(result.content[0].raw.as_text().expect("text").text, "No results found.");

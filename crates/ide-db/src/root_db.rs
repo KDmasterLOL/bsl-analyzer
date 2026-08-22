@@ -33,6 +33,14 @@ pub trait RootDatabase:
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
 
+    /// Topological rank and extension label of the root owning `file_id`, using
+    /// the same configured/canonical longest-prefix rule as visibility.
+    fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)>;
+
+    /// Topological ranks of roots visible to `file_id`, or `None` when the
+    /// workspace has no configured root visibility.
+    fn visible_config_root_ranks(&self, file_id: FileId) -> Option<Vec<usize>>;
+
     /// The common module that owns the `Ext/Module.bsl` whose id is `module_file_id`
     /// (typically the file being analysed), or `None` if it is not a common module's
     /// body. Per-common-module Salsa granularity when the substrate is populated.

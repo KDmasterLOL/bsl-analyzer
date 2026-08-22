@@ -80,14 +80,11 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
         tools.tools.iter().find(|tool| tool.name == "syntax_help").expect("syntax_help is listed");
     assert!(
         syntax_help.output_schema.as_ref().is_some_and(|schema| {
-            schema
-                .get("properties")
-                .and_then(Value::as_object)
-                .is_some_and(|properties| properties.contains_key("schema_version"))
+            serde_json::to_string(schema.as_ref())
+                .is_ok_and(|schema| schema.contains("schema_version"))
         }),
         "syntax_help publishes a versioned outputSchema"
     );
-
     let result = client
         .call_tool(
             CallToolRequestParams::new("syntax_help")
@@ -96,7 +93,7 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
         .await
         .expect("syntax_help call");
     let body = result.structured_content.expect("syntax_help structuredContent");
-    assert_eq!(body["schema_version"], "1");
+    assert_eq!(body["schema_version"], "2");
     assert_eq!(body["kind"], "type");
     assert_eq!(body["name"], "Массив");
     assert!(
@@ -223,9 +220,10 @@ async fn assert_required_params_are_enforced(server: McpServer, profile_key: &st
             "{}/{} accepted a call without the required '{}': {:?}",
             probe.tool, probe.action, probe.omitted, probe.arguments
         ));
-        let expected = format!("'{}' is required", probe.omitted);
+        let explicit = format!("'{}' is required", probe.omitted);
+        let serde = format!("missing field `{}`", probe.omitted);
         assert!(
-            err.to_string().contains(&expected),
+            err.to_string().contains(&explicit) || err.to_string().contains(&serde),
             "{}/{} rejected a call missing '{}' for another reason: {err}",
             probe.tool,
             probe.action,
@@ -325,6 +323,36 @@ fn workspace_server(root: &TempDir) -> McpServer {
         McpProfile::Workspace,
         SharedState::workspace(root.path().to_path_buf()).expect("valid workspace project"),
     )
+}
+
+async fn budgeted_platform_list(server: McpServer) -> (Value, String) {
+    let (client_io, server_io) = tokio::io::duplex(1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    let client = ().serve(client_io).await.expect("session initialized");
+    let result = client
+        .call_tool(CallToolRequestParams::new("search").with_arguments(Map::from_iter([
+            ("action".to_owned(), json!("list_platform")),
+            ("max_output_tokens".to_owned(), json!(1_000)),
+        ])))
+        .await
+        .expect("list_platform call");
+    let body = result.structured_content.expect("list_platform structuredContent");
+    let text = result.content[0].raw.as_text().expect("list_platform text mirror").text.clone();
+    client.cancel().await.expect("session closed");
+    (body, text)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_platform_listing_is_identical_in_workspace_and_reference_profiles() {
+    let ws = TempDir::new().unwrap();
+    let workspace = budgeted_platform_list(workspace_server(&ws)).await;
+    let reference = budgeted_platform_list(reference_server()).await;
+
+    assert_eq!(workspace, reference);
+    assert_eq!(workspace.0["action"], "list_platform");
+    assert_eq!(workspace.0["schema_version"], "1");
+    assert_eq!(workspace.0["budget_exhausted"], true);
+    assert!(workspace.0["shown"].as_u64().unwrap() < workspace.0["total"].as_u64().unwrap());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

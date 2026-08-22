@@ -8,9 +8,7 @@
 //! ВебКлиент` or unchecking the web client in `bsl-analyzer.toml` restores
 //! the corresponding suggestions.
 
-use hir::bare_root::method_item_at;
 use hir::execution_env::{self, EnvFlags};
-use hir::{AnnotationKind, ModItem};
 use ide_db::RootDatabase;
 use syntax::TextSize;
 use vfs::FileId;
@@ -29,45 +27,7 @@ impl EnvFilter {
 
     pub(super) fn at<DB: RootDatabase>(db: &DB, file_id: FileId, offset: TextSize) -> Self {
         let opts = db.env_options();
-        let metadata = db.module_metadata(hir::ModuleId::new(file_id));
-        let item_tree = db.item_tree(file_id);
-        let method_at_cursor = method_item_at(&item_tree, offset);
-        // A weaving interceptor's effective directive comes from the method it
-        // intercepts, unknown here — never judge availability inside one
-        // (mirrors inference disabling the checks for weaving bodies).
-        if let Some((_, item)) = method_at_cursor {
-            let annotations = match item {
-                ModItem::Procedure(idx) => &item_tree.procedure(*idx).annotations,
-                ModItem::Function(idx) => &item_tree.function(*idx).annotations,
-                ModItem::Variable(_) => unreachable!("variables are filtered out above"),
-            };
-            let weaving = annotations.iter().any(|a| {
-                matches!(
-                    a.kind,
-                    AnnotationKind::Before
-                        | AnnotationKind::After
-                        | AnnotationKind::Instead
-                        | AnnotationKind::ChangeAndValidate
-                )
-            });
-            if weaving {
-                return Self { body_env: EnvFlags::EMPTY, checked_env: opts.checked_environments };
-            }
-        }
-        let mut body_env = match method_at_cursor {
-            Some((local_id, _)) => {
-                execution_env::method_env(&item_tree, local_id, &metadata, &opts)
-            }
-            None => execution_env::module_code_env(&metadata, &opts),
-        };
-        if !body_env.is_empty() {
-            let conditionals = db.conditional_tree(file_id);
-            if !conditionals.is_empty() {
-                // One containment walk covers both statement-level `#Если`
-                // around the cursor and module-level regions around the method.
-                body_env = body_env & execution_env::conditional_env_at(&conditionals, offset);
-            }
-        }
+        let body_env = hir::execution_environment_at(db, file_id, offset);
         Self { body_env, checked_env: opts.checked_environments }
     }
 

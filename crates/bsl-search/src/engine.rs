@@ -82,6 +82,12 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceCollectionReplaceOutcome {
+    pub committed_fingerprint: String,
+    pub written: bool,
+}
+
 impl SearchHit {
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
         Self {
@@ -395,6 +401,7 @@ pub struct SearchEngine {
     embedder: Option<Embedder>,
     index: VectorIndex,
     dim: usize,
+    loaded_reference_fingerprint: Option<String>,
     batch_size: usize,
     concurrency: usize,
     workspace_roots: Option<WorkspaceRoots>,
@@ -465,6 +472,7 @@ impl SearchEngine {
         let embedder = Embedder::new(embedder_config);
 
         let index = Self::load_or_build_index(&store, dim, Some(&embedder))?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
         info!(vectors = index.len(), dim, "search index loaded");
 
         Self::ensure_fts(&store)?;
@@ -474,6 +482,7 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
@@ -559,6 +568,7 @@ impl SearchEngine {
         let store = Store::open(db_path)?;
         let dim = 1024;
         let index = VectorIndex::new(dim)?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
         Self::ensure_fts(&store)?;
 
@@ -567,6 +577,7 @@ impl SearchEngine {
             embedder: None,
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: EmbeddingExecutionPolicy::default().batch_size(),
             concurrency: EmbeddingExecutionPolicy::default().concurrency(),
             workspace_roots: None,
@@ -588,6 +599,7 @@ impl SearchEngine {
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
         let index = VectorIndex::new(dim)?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
         Self::ensure_fts(&store)?;
 
@@ -596,6 +608,7 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
@@ -1411,105 +1424,147 @@ impl SearchEngine {
 
         info!(collection, documents = documents.len(), "indexing documents");
 
-        if let Some(embedder) = &self.embedder {
-            let texts: Vec<String> = documents.iter().map(|d| d.body.clone()).collect();
-            let batch_size = self.batch_size;
-            let total_batches = texts.len().div_ceil(batch_size);
-
-            if let Some(p) = progress {
-                p.active.store(true, Ordering::Relaxed);
-                p.total_files.store(1, Ordering::Relaxed);
-                p.total_chunks.store(texts.len(), Ordering::Relaxed);
-                p.total_batches.store(total_batches, Ordering::Relaxed);
-                p.done_batches.store(0, Ordering::Relaxed);
-                p.done_chunks.store(0, Ordering::Relaxed);
-            }
-
-            let concurrency = self.concurrency.min(total_batches.max(1));
-
-            let indexed_batches: Vec<(usize, Vec<String>)> =
-                texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
-
-            let (task_tx, task_rx) =
-                crossbeam_channel::bounded::<(usize, Vec<String>)>(concurrency * 2);
-            let (result_tx, result_rx) = crossbeam_channel::bounded::<(
-                usize,
-                Result<Vec<Vec<f32>>, SearchError>,
-            )>(concurrency * 2);
-
-            let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
-                .map(|_| {
-                    let rx = task_rx.clone();
-                    let tx = result_tx.clone();
-                    let emb = embedder.clone();
-                    let prog = progress.cloned();
-
-                    std::thread::spawn(move || {
-                        while let Ok((idx, batch)) = rx.recv() {
-                            let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-                            let result = emb.embed_batch(&refs);
-                            if let (Ok(_), Some(p)) = (&result, &prog) {
-                                p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
-                                p.done_batches.fetch_add(1, Ordering::Relaxed);
-                            }
-                            let _ = tx.send((idx, result));
-                        }
-                    })
-                })
-                .collect();
-
-            drop(task_rx);
-            drop(result_tx);
-
-            let producer = std::thread::spawn(move || {
-                for (idx, batch) in indexed_batches {
-                    if task_tx.send((idx, batch)).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
-            while let Ok((idx, result)) = result_rx.recv() {
-                results.push((idx, result?));
-            }
-
-            let _ = producer.join();
-            for w in workers {
-                let _ = w.join();
-            }
-
-            if let Some(p) = progress {
-                p.active.store(false, Ordering::Relaxed);
-            }
-
-            results.sort_by_key(|(i, _)| *i);
-            let all_embeddings: Vec<Vec<f32>> =
-                results.into_iter().flat_map(|(_, embs)| embs).collect();
-
-            self.store.reindex_documents(
-                collection,
-                virtual_path,
-                version_hash,
-                documents,
-                Some(&all_embeddings),
-            )?;
-
+        let embeddings = self.embed_documents(documents, progress)?;
+        self.store.reindex_documents(
+            collection,
+            virtual_path,
+            version_hash,
+            documents,
+            embeddings.as_deref(),
+        )?;
+        if embeddings.is_some() {
             self.index =
                 Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
-        } else {
-            self.store.reindex_documents(
-                collection,
-                virtual_path,
-                version_hash,
-                documents,
-                None,
-            )?;
         }
 
         let count = documents.len();
         info!(collection, count, "document indexing complete");
         Ok(count)
+    }
+
+    pub fn replace_reference_collection_if_stale(
+        &mut self,
+        collection: &str,
+        virtual_path: &str,
+        fingerprint: &str,
+        documents: &[Document],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<ReferenceCollectionReplaceOutcome, SearchError> {
+        let committed = self.store.reference_collection_fingerprint(collection)?;
+        if committed.as_deref() == Some(fingerprint) {
+            if self.loaded_reference_fingerprint != committed && self.embedder.is_some() {
+                self.index =
+                    Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
+            }
+            self.loaded_reference_fingerprint = committed;
+            return Ok(ReferenceCollectionReplaceOutcome {
+                committed_fingerprint: fingerprint.to_owned(),
+                written: false,
+            });
+        }
+        let embeddings = self.embed_documents(documents, progress)?;
+        let outcome = self.store.replace_reference_collection_if_stale(
+            collection,
+            virtual_path,
+            fingerprint,
+            documents,
+            embeddings.as_deref(),
+        )?;
+        if self.loaded_reference_fingerprint.as_deref()
+            != Some(outcome.committed_fingerprint.as_str())
+            && self.embedder.is_some()
+        {
+            self.index =
+                Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
+        }
+        self.loaded_reference_fingerprint = Some(outcome.committed_fingerprint.clone());
+        Ok(ReferenceCollectionReplaceOutcome {
+            committed_fingerprint: outcome.committed_fingerprint,
+            written: outcome.written,
+        })
+    }
+
+    fn embed_documents(
+        &self,
+        documents: &[Document],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<Option<Vec<Vec<f32>>>, SearchError> {
+        let Some(embedder) = &self.embedder else { return Ok(None) };
+        let texts: Vec<String> = documents.iter().map(|d| d.body.clone()).collect();
+        let batch_size = self.batch_size;
+        let total_batches = texts.len().div_ceil(batch_size);
+
+        if let Some(p) = progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(1, Ordering::Relaxed);
+            p.total_chunks.store(texts.len(), Ordering::Relaxed);
+            p.total_batches.store(total_batches, Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let concurrency = self.concurrency.min(total_batches.max(1));
+
+        let indexed_batches: Vec<(usize, Vec<String>)> =
+            texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
+
+        let (task_tx, task_rx) =
+            crossbeam_channel::bounded::<(usize, Vec<String>)>(concurrency * 2);
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<(
+            usize,
+            Result<Vec<Vec<f32>>, SearchError>,
+        )>(concurrency * 2);
+
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+            .map(|_| {
+                let rx = task_rx.clone();
+                let tx = result_tx.clone();
+                let emb = embedder.clone();
+                let prog = progress.cloned();
+
+                std::thread::spawn(move || {
+                    while let Ok((idx, batch)) = rx.recv() {
+                        let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                        let result = emb.embed_batch(&refs);
+                        if let (Ok(_), Some(p)) = (&result, &prog) {
+                            p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                            p.done_batches.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx.send((idx, result));
+                    }
+                })
+            })
+            .collect();
+
+        drop(task_rx);
+        drop(result_tx);
+
+        let producer = std::thread::spawn(move || {
+            for (idx, batch) in indexed_batches {
+                if task_tx.send((idx, batch)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
+        while let Ok((idx, result)) = result_rx.recv() {
+            results.push((idx, result?));
+        }
+
+        let _ = producer.join();
+        for w in workers {
+            let _ = w.join();
+        }
+
+        if let Some(p) = progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        results.sort_by_key(|(i, _)| *i);
+        let all_embeddings: Vec<Vec<f32>> =
+            results.into_iter().flat_map(|(_, embs)| embs).collect();
+        Ok(Some(all_embeddings))
     }
 
     pub fn has_semantic(&self) -> bool {
@@ -3265,7 +3320,7 @@ mod tests {
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
     use crate::workspace_overlay::RefreshMode;
     use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
-    use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
+    use crate::{BaselineRef, CorpusId, Document, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
@@ -6400,5 +6455,218 @@ mod tests {
             super::WorkspaceRootsTransitionOutcome::Superseded
         );
         assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn reference_collection_replace_is_atomic_stamped_and_idempotent() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let old = [Document {
+            title: "Old".to_owned(),
+            body: "olduniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+        let new = [
+            Document {
+                title: "New".to_owned(),
+                body: "newuniquemarker".to_owned(),
+                kind: "type".to_owned(),
+            },
+            Document {
+                title: "Property".to_owned(),
+                body: "property marker".to_owned(),
+                kind: "property".to_owned(),
+            },
+        ];
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-old",
+                    &old,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-new",
+                    &new,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            !engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-new",
+                    &new,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(engine.text_search("olduniquemarker", 10, Some("platform")).unwrap().is_empty());
+        assert_eq!(engine.text_search("newuniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        assert_eq!(engine.load_indexed_documents(Some("platform")).unwrap().len(), 2);
+        let integrity: String = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    #[test]
+    fn concurrent_reference_writers_commit_one_generation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        let engines =
+            [SearchEngine::fts_only(&db_path).unwrap(), SearchEngine::fts_only(&db_path).unwrap()];
+        for mut engine in engines {
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let documents = [Document {
+                    title: "Shared".to_owned(),
+                    body: "shared generation marker".to_owned(),
+                    kind: "type".to_owned(),
+                }];
+                barrier.wait();
+                let outcome = engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp-shared",
+                        &documents,
+                        None,
+                    )
+                    .unwrap();
+                let hits =
+                    engine.text_search("shared generation marker", 10, Some("platform")).unwrap();
+                (outcome, hits.len(), engine.loaded_reference_fingerprint.clone())
+            }));
+        }
+        let outcomes: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        assert_eq!(outcomes.iter().filter(|(outcome, _, _)| outcome.written).count(), 1);
+        assert!(outcomes.iter().all(|(outcome, hits, loaded)| {
+            outcome.committed_fingerprint == "fp-shared"
+                && *hits == 1
+                && loaded.as_deref() == Some("fp-shared")
+        }));
+    }
+
+    #[test]
+    fn reference_collection_publish_is_process_safe_for_absent_and_stale_db() {
+        const CHILD: &str = "BSL_SEARCH_REFERENCE_WRITER_CHILD";
+        if let Ok(worker) = std::env::var(CHILD) {
+            let root = std::path::PathBuf::from(
+                std::env::var("BSL_SEARCH_REFERENCE_WRITER_ROOT").unwrap(),
+            );
+            let ready = root.join(format!("ready-{worker}"));
+            fs::write(&ready, b"ready").unwrap();
+            let start = root.join("start");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !start.exists() {
+                assert!(std::time::Instant::now() < deadline, "parent never released barrier");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let documents = [Document {
+                title: "ProcessSafe".to_owned(),
+                body: "processsafemarker".to_owned(),
+                kind: "type".to_owned(),
+            }];
+            let mut engine = SearchEngine::fts_only(&root.join("reference-search.db")).unwrap();
+            let outcome = engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-process-safe",
+                    &documents,
+                    None,
+                )
+                .unwrap();
+            let count = engine.load_indexed_documents(Some("platform")).unwrap().len();
+            fs::write(
+                root.join(format!("result-{worker}")),
+                format!("{}:{count}:{}", outcome.written, outcome.committed_fingerprint),
+            )
+            .unwrap();
+            return;
+        }
+
+        for stale in [false, true] {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            if stale {
+                let mut engine = SearchEngine::fts_only(&root.join("reference-search.db")).unwrap();
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp-stale",
+                        &[Document {
+                            title: "Stale".to_owned(),
+                            body: "stalemarker".to_owned(),
+                            kind: "type".to_owned(),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            }
+            let exe = std::env::current_exe().unwrap();
+            let mut children = Vec::new();
+            for worker in ["a", "b"] {
+                children.push(
+                    std::process::Command::new(&exe)
+                        .args([
+                            "--exact",
+                            "engine::tests::reference_collection_publish_is_process_safe_for_absent_and_stale_db",
+                        ])
+                        .env(CHILD, worker)
+                        .env("BSL_SEARCH_REFERENCE_WRITER_ROOT", root)
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !(root.join("ready-a").exists() && root.join("ready-b").exists()) {
+                assert!(std::time::Instant::now() < deadline, "writers never reached barrier");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            fs::write(root.join("start"), b"start").unwrap();
+            for child in &mut children {
+                assert!(child.wait().unwrap().success());
+            }
+            let results: Vec<_> = ["a", "b"]
+                .map(|worker| fs::read_to_string(root.join(format!("result-{worker}"))).unwrap())
+                .into_iter()
+                .collect();
+            assert_eq!(results.iter().filter(|result| result.starts_with("true:")).count(), 1);
+            assert!(results.iter().all(|result| result.ends_with(":1:fp-process-safe")));
+
+            let connection = rusqlite::Connection::open(root.join("reference-search.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>("PRAGMA integrity_check", [], |row| row.get(0))
+                    .unwrap(),
+                "ok"
+            );
+            let chunks: i64 =
+                connection.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0)).unwrap();
+            let fts: i64 = connection
+                .query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!((chunks, fts), (1, 1));
+        }
     }
 }

@@ -6,11 +6,13 @@
 //! candidates. The core card is served whenever the resident is `Ready`, independent of the
 //! graph's readiness.
 
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use ide::{Locale, SymbolInfoCard, SymbolInfoRequest, SymbolInfoSections, SymbolPosition};
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::diagnostics_state::DiagnosticsResident;
@@ -19,13 +21,231 @@ use crate::tools::location::{
     Completeness, Freshness, FreshnessSource, Location, LocationUnavailable, PositionRange,
     ReasonCode,
 };
-use crate::tools::response::{structured, trim_items_to_budget, truncate_text_to_budget};
+use crate::tools::response::{serialized_bytes, structured};
 
 /// Default number of top calling modules included in the `usages` summary.
 pub(crate) const DEFAULT_TOP_MODULES: usize = 5;
 
 /// Default cap on graph candidates offered on a resident miss.
 pub(crate) const DEFAULT_CANDIDATE_LIMIT: usize = 20;
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+#[serde(untagged)]
+#[schemars(transform = union_as_one_of)]
+#[allow(
+    dead_code,
+    clippy::large_enum_variant,
+    reason = "schema-only union published by tools/list is never instantiated"
+)]
+enum SymbolInfoOutput {
+    Ok(SymbolInfoOk),
+    NotFound(SymbolInfoCandidates<NotFoundStatus>),
+    Ambiguous(SymbolInfoCandidates<AmbiguousStatus>),
+    Loading(SymbolInfoLoading),
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct SymbolInfoLoading {
+    schema_version: SchemaVersion,
+    status: LoadingStatus,
+    detail: String,
+    state: String,
+    generation: u64,
+    elapsed_ms: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct SymbolInfoOk {
+    schema_version: SchemaVersion,
+    status: OkStatus,
+    symbol: String,
+    kind: Option<String>,
+    container: Option<Value>,
+    signature: Option<String>,
+    doc: Option<String>,
+    return_type: Option<String>,
+    definition: Option<Value>,
+    definitions: Option<Vec<Value>>,
+    members: Option<Vec<SymbolMemberOutput>>,
+    usages: Option<Value>,
+    usages_unavailable: Option<String>,
+    freshness: Option<Value>,
+    truncated: Option<bool>,
+    budget_hint: Option<String>,
+    semantics_unavailable: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct SymbolInfoCandidates<S> {
+    schema_version: SchemaVersion,
+    status: S,
+    resolved: bool,
+    symbol: String,
+    candidates: Vec<Value>,
+    total: usize,
+    total_exact: bool,
+    truncated: bool,
+    providers: Vec<Value>,
+    hint: String,
+    freshness: Value,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+#[serde(untagged)]
+#[schemars(transform = union_as_one_of)]
+#[allow(dead_code, reason = "schema-only member union published by tools/list")]
+enum SymbolMemberOutput {
+    Typed(TypedMemberOutput),
+    Callable(CallableMemberOutput),
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct TypedMemberOutput {
+    name: String,
+    kind: String,
+    member_kind: MemberKind,
+    origin: MemberOrigin,
+    availability: MemberAvailabilityOutput,
+    source_extension: Option<String>,
+    #[serde(rename = "type")]
+    type_name: String,
+    type_variants: Vec<TypeVariantOutput>,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct CallableMemberOutput {
+    name: String,
+    kind: String,
+    member_kind: MemberKind,
+    origin: MemberOrigin,
+    availability: MemberAvailabilityOutput,
+    source_extension: Option<String>,
+    signature: MemberSignatureOutput,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct MemberAvailabilityOutput {
+    contexts: Option<Vec<MemberContext>>,
+    context_status: ContextStatus,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct TypeVariantOutput {
+    presentation: String,
+    technical_name: Option<String>,
+    resolution: TypeResolution,
+    reason: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct MemberSignatureOutput {
+    presentation: String,
+}
+
+macro_rules! wire_enum {
+    ($name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
+        #[derive(Deserialize, JsonSchema, Serialize)]
+        #[allow(dead_code, reason = "schema-only wire values published by tools/list")]
+        enum $name {
+            $(#[serde(rename = $wire)] $variant),+
+        }
+    };
+}
+
+wire_enum!(SchemaVersion { V1 => "1" });
+wire_enum!(OkStatus { Ok => "ok" });
+wire_enum!(NotFoundStatus { NotFound => "not_found" });
+wire_enum!(AmbiguousStatus { Ambiguous => "ambiguous" });
+wire_enum!(LoadingStatus { Loading => "loading" });
+wire_enum!(MemberKind {
+    Attribute => "attribute",
+    TabularSection => "tabular_section",
+    Method => "method",
+    Variable => "variable",
+    Property => "property",
+    FormAttribute => "form_attribute",
+    FormElement => "form_element",
+    Handler => "handler",
+});
+wire_enum!(MemberOrigin {
+    Metadata => "metadata",
+    Module => "module",
+    Platform => "platform",
+});
+wire_enum!(MemberContext {
+    ThinClient => "thin_client",
+    WebClient => "web_client",
+    ThickClientManaged => "thick_client_managed",
+    ThickClientOrdinary => "thick_client_ordinary",
+    Server => "server",
+    MobileClient => "mobile_client",
+    ExternalConnection => "external_connection",
+});
+wire_enum!(ContextStatus {
+    Available => "available",
+    Unavailable => "unavailable",
+    Unknown => "unknown",
+    NotEvaluated => "not_evaluated",
+});
+wire_enum!(TypeResolution {
+    Static => "static",
+    Source => "source",
+    Unresolved => "unresolved",
+});
+
+fn union_as_one_of(schema: &mut schemars::Schema) {
+    let object = schema.ensure_object();
+    if let Some(branches) = object.remove("anyOf") {
+        object.insert("oneOf".to_string(), branches);
+    }
+}
+
+pub(crate) fn symbol_info_output_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*rmcp::handler::server::tool::schema_for_type::<SymbolInfoOutput>()).clone();
+    single_value_enums_to_consts(&mut schema);
+    Arc::new(schema)
+}
+
+fn single_value_enums_to_consts(object: &mut Map<String, Value>) {
+    if let Some(constant) = object
+        .get("enum")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .and_then(|values| values.first())
+        .cloned()
+    {
+        object.remove("enum");
+        object.insert("const".into(), constant);
+    }
+    for value in object.values_mut() {
+        match value {
+            Value::Object(object) => single_value_enums_to_consts(object),
+            Value::Array(values) => {
+                for value in values {
+                    if let Value::Object(object) = value {
+                        single_value_enums_to_consts(object);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn database_error(message: impl std::fmt::Display) -> McpError {
+    McpError::internal_error(format!("symbol_info database: {message}"), None)
+}
+
+/// Preserve the resident loading envelope used by sibling tools while making the
+/// successful `symbol_info` variant conform to this tool's versioned output schema.
+pub(crate) fn loading(report: &crate::diagnostics_state::StatusReport) -> CallToolResult {
+    let mut result = crate::tools::metadata::loading(report);
+    result.structured_content.as_mut().expect("metadata loading is structured")["schema_version"] =
+        json!("1");
+    result
+}
 
 /// Interpret the `include` section filter. An empty filter means "all sections"; unknown
 /// entries are ignored (a superset request never narrows below the named sections).
@@ -45,6 +265,17 @@ pub(crate) fn locale_from(raw: Option<&str>) -> Result<Locale, McpError> {
         }
         None => Ok(Locale::default()),
     }
+}
+
+pub(crate) fn filter_members(
+    card: &mut SymbolInfoCard,
+    member_kind: Option<&str>,
+    member_name: Option<&str>,
+) {
+    card.members.retain(|member| {
+        member_kind.is_none_or(|kind| member.member_kind.eq_ignore_ascii_case(kind))
+            && member_name.is_none_or(|name| member.name.to_lowercase() == name.to_lowercase())
+    });
 }
 
 /// Resolve the semantic card on the resident host. Runs inside the resident read lock.
@@ -145,7 +376,7 @@ pub(crate) fn render_card(
     max_output_tokens: usize,
     stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
-    let (mut body, budget_exhausted) = card_to_value(card, max_output_tokens);
+    let mut body = card_to_value(card);
     // Three states, not one flag: the resident lost the symbol's semantics, the graph is
     // still indexing, or the graph answered and does not know this symbol. They call for
     // different reactions — retry, retry later, don't retry — so they get different codes.
@@ -178,29 +409,39 @@ pub(crate) fn render_card(
     // must not have to change when the second target starts being reported.
     body["definitions"] = json!(definitions_value(card, stamp));
 
-    let completeness = Completeness::complete()
-        .when(budget_exhausted, ReasonCode::OutputBudget, "card trimmed to fit max_output_tokens")
-        .when(
-            degraded,
-            ReasonCode::ModalityDegraded,
-            "the call graph could not answer for this symbol",
-        )
-        // The same condition the miss shape reports, under the same code: the graph is
-        // building, and a consumer driving retries off the code must not get two answers
-        // for one state depending on whether the symbol happened to resolve.
-        .when(
-            indexing,
-            ReasonCode::IndexBuilding,
-            "the call graph is still indexing, so usages are not counted yet",
-        )
+    let completeness = |budget_exhausted| {
+        Completeness::complete()
+            .when(
+                budget_exhausted,
+                ReasonCode::OutputBudget,
+                "card trimmed to fit max_output_tokens",
+            )
+            .when(
+                degraded,
+                ReasonCode::ModalityDegraded,
+                "the call graph could not answer for this symbol",
+            )
+            // The same condition the miss shape reports, under the same code: the graph is
+            // building, and a consumer driving retries off the code must not get two answers
+            // for one state depending on whether the symbol happened to resolve.
+            .when(
+                indexing,
+                ReasonCode::IndexBuilding,
+                "the call graph is still indexing, so usages are not counted yet",
+            )
         // Deliberately NOT stamped here: the workspace-wide unread counter. This answer is
         // one resolved symbol, and a hole in an unrelated module does not make it less
         // whole. The miss below is the shape where a hole CAN hide the answer, and that is
         // where the counter is read.
-        ;
-    body["freshness"] = stamp.freshness(completeness).to_value();
+    };
+    body["freshness"] = stamp.freshness(completeness(false)).to_value();
 
-    structured(body)
+    let full = structured(body.clone());
+    if serialized_bytes(&full) <= max_output_tokens.saturating_mul(4) {
+        return full;
+    }
+    body["freshness"] = stamp.freshness(completeness(true)).to_value();
+    fit_card_to_budget(body, max_output_tokens)
 }
 
 /// What the caller knows about the resident that answered: its root table (for locations)
@@ -296,7 +537,10 @@ pub(crate) fn render_not_found(
     answer: crate::tools::name_answer::NameAnswer,
     stamp: &ResidentStamp<'_>,
 ) -> CallToolResult {
+    let status = if answer.total == 0 { "not_found" } else { "ambiguous" };
     let mut body = serde_json::Map::new();
+    body.insert("schema_version".into(), json!("1"));
+    body.insert("status".into(), json!(status));
     body.insert("resolved".into(), json!(false));
     body.insert("symbol".into(), json!(symbol));
     let completeness = answer.insert_into(&mut body);
@@ -340,11 +584,10 @@ fn usages(graph: &GraphDb, graph_id: &str, top_modules: usize) -> Option<Value> 
     Some(value)
 }
 
-/// The card body plus whether the output budget cut anything: the fact is known here and
-/// travels up with the body rather than being recovered from the rendered JSON.
-fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> (Value, bool) {
+fn card_to_value(card: &SymbolInfoCard) -> Value {
     let mut body = Map::new();
-    let mut truncated = false;
+    body.insert("schema_version".into(), json!("1"));
+    body.insert("status".into(), json!("ok"));
     body.insert("symbol".into(), json!(card.symbol));
     body.insert("kind".into(), json!(card.kind));
 
@@ -362,10 +605,6 @@ fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> (Value, boo
         body.insert("signature".into(), json!(signature));
     }
     if let Some(doc) = &card.doc {
-        // Doc comments can be arbitrarily large; bound them against the budget so a single field
-        // cannot blow the response (the other free-text/list tools budget likewise).
-        let mut doc = doc.clone();
-        truncated |= truncate_text_to_budget(&mut doc, max_output_tokens, "\n… (truncated)");
         body.insert("doc".into(), json!(doc));
     }
     if let Some(return_type) = &card.return_type {
@@ -377,8 +616,6 @@ fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> (Value, boo
             d["path"] = json!(path);
         }
         if let Some(snippet) = &def.snippet {
-            let mut snippet = snippet.clone();
-            truncated |= truncate_text_to_budget(&mut snippet, max_output_tokens, " …");
             d["snippet"] = json!(snippet);
         }
         body.insert("definition".into(), d);
@@ -389,31 +626,137 @@ fn card_to_value(card: &SymbolInfoCard, max_output_tokens: usize) -> (Value, boo
             .members
             .iter()
             .map(|m| {
-                let mut v = json!({ "name": m.name, "kind": m.kind });
+                let mut v = json!({
+                    "name": m.name,
+                    "kind": m.kind,
+                    "member_kind": m.member_kind,
+                    "origin": m.origin.as_str(),
+                    "availability": {
+                        "contexts": m.availability.contexts,
+                        "context_status": m.availability.context_status.as_str(),
+                    },
+                });
+                if let Some(source_extension) = &m.source_extension {
+                    v["source_extension"] = json!(source_extension);
+                }
+                if let Some(reason) = &m.availability.reason {
+                    v["availability"]["reason"] = json!(reason);
+                }
                 if let Some(ty) = &m.ty {
                     v["type"] = json!(ty);
+                    v["type_variants"] = json!(m
+                        .type_variants
+                        .iter()
+                        .map(|variant| {
+                            let mut value = json!({
+                                "presentation": variant.presentation,
+                                "technical_name": variant.technical_name,
+                                "resolution": variant.resolution,
+                            });
+                            if let Some(reason) = &variant.reason {
+                                value["reason"] = json!(reason);
+                            }
+                            value
+                        })
+                        .collect::<Vec<_>>());
+                } else if let Some(signature) = &m.signature {
+                    v["signature"] = json!({ "presentation": signature.presentation });
                 }
                 v
             })
             .collect();
-        truncated |= trim_items_to_budget(&mut members, max_output_tokens);
+        members.sort_by_cached_key(|member| {
+            (
+                member["member_kind"].as_str().unwrap_or_default().to_owned(),
+                member["name"].as_str().unwrap_or_default().to_lowercase(),
+                member["origin"].as_str().unwrap_or_default().to_owned(),
+                member["source_extension"].as_str().unwrap_or_default().to_owned(),
+            )
+        });
         body.insert("members".into(), json!(members));
     }
-    if truncated {
-        body.insert("truncated".into(), json!(true));
-        body.insert(
-            "budget_hint".into(),
-            json!("output trimmed to fit max_output_tokens; raise it to see the rest"),
-        );
+
+    Value::Object(body)
+}
+
+fn fit_card_to_budget(mut body: Value, max_output_tokens: usize) -> CallToolResult {
+    let ceiling = max_output_tokens.saturating_mul(4);
+    let symbol = body["symbol"].clone();
+    body["truncated"] = json!(true);
+    body["budget_hint"] = json!("increase max_output_tokens or narrow member_kind/member_name");
+
+    let fitted = |body: &Value| {
+        let result = structured(body.clone());
+        (serialized_bytes(&result) <= ceiling).then_some(result)
+    };
+    if let Some(result) = fitted(&body) {
+        return result;
     }
 
-    (Value::Object(body), truncated)
+    for field in ["doc", "usages"] {
+        if body.as_object_mut().is_some_and(|body| body.remove(field).is_some()) {
+            if let Some(result) = fitted(&body) {
+                return result;
+            }
+        }
+    }
+    if body
+        .get_mut("definition")
+        .and_then(Value::as_object_mut)
+        .is_some_and(|definition| definition.remove("snippet").is_some())
+    {
+        if let Some(result) = fitted(&body) {
+            return result;
+        }
+    }
+    while body
+        .get_mut("members")
+        .and_then(Value::as_array_mut)
+        .is_some_and(|members| members.pop().is_some())
+    {
+        if let Some(result) = fitted(&body) {
+            return result;
+        }
+    }
+    if body.as_object_mut().expect("card body is an object").remove("members").is_some() {
+        if let Some(result) = fitted(&body) {
+            return result;
+        }
+    }
+    for field in [
+        "definitions",
+        "freshness",
+        "definition",
+        "kind",
+        "container",
+        "signature",
+        "return_type",
+        "usages_unavailable",
+        "semantics_unavailable",
+    ] {
+        if body.as_object_mut().is_some_and(|body| body.remove(field).is_some()) {
+            if let Some(result) = fitted(&body) {
+                return result;
+            }
+        }
+    }
+
+    structured(json!({
+        "schema_version": "1",
+        "status": "ok",
+        "symbol": symbol,
+        "truncated": true,
+        "budget_hint": "increase max_output_tokens or narrow member_kind/member_name",
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ide::{SymbolContainer, SymbolDefinition, SymbolMember};
+    use ide::{
+        SymbolContainer, SymbolDefinition, SymbolMember, SymbolMemberAvailability,
+        SymbolMemberContextStatus, SymbolMemberOrigin, SymbolTypeVariant,
+    };
     use line_index::LineColRange;
 
     /// A workspace whose configuration root owns the module the card below points at.
@@ -531,11 +874,54 @@ mod tests {
     }
 
     #[test]
+    fn member_filters_are_exact_and_do_not_change_card_sections() {
+        let mut card = method_card();
+        card.members = vec![
+            SymbolMember::metadata("Артикул", "Реквизит", "attribute", Some("Строка".into())),
+            SymbolMember::callable(
+                "артикул",
+                "Метод",
+                "method",
+                "артикул()",
+                SymbolMemberOrigin::Module,
+            ),
+            SymbolMember::metadata("Цена", "Реквизит", "attribute", Some("Число".into())),
+        ];
+
+        filter_members(&mut card, Some("method"), Some("АРТИКУЛ"));
+        assert_eq!(card.members.len(), 1);
+        assert_eq!(card.members[0].member_kind, "method");
+        assert_eq!(card.signature.as_deref(), Some("Функция Сложить(А, Б) Экспорт"));
+        assert!(card.doc.is_some(), "member filters must not change legacy include sections");
+    }
+
+    #[test]
+    fn loading_is_a_versioned_symbol_info_output_branch() {
+        let report = crate::diagnostics_state::StatusReport {
+            state: "loading",
+            generation: 2,
+            files: None,
+            unread_files: None,
+            reload: "none",
+            error: None,
+            elapsed_ms: Some(20),
+            watch: None,
+        };
+        let body = loading(&report).structured_content.expect("loading structuredContent");
+
+        serde_json::from_value::<SymbolInfoOutput>(body.clone())
+            .expect("loading output schema shape");
+        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["status"], "loading");
+    }
+
+    #[test]
     fn render_card_without_graph_stamps_usages_unavailable() {
         let card = method_card();
         let roots = stand_roots();
         let result = render_card(&card, None, DEFAULT_TOP_MODULES, 6000, &stamp(&roots));
         let body = result.structured_content.unwrap();
+        serde_json::from_value::<SymbolInfoOutput>(body.clone()).expect("ok output schema shape");
         assert_eq!(body["kind"], "function");
         assert_eq!(body["container"]["context"], "Сервер");
         assert_eq!(body["usages_unavailable"], "graph indexing");
@@ -561,10 +947,9 @@ mod tests {
         assert_eq!(body["definition"]["line"], 3);
         assert_eq!(body["definition"]["path"], "/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl");
 
-        // The slab's own version lives INSIDE the location and nowhere else: hoisting it to
-        // the top level would tie this tool's response version to the slab's, which is the
-        // one thing the three-axis versioning exists to prevent.
-        assert!(body.get("schema_version").is_none(), "{body}");
+        // The tool envelope and the location slab have independent versions.
+        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["status"], "ok");
         let location = &body["definitions"][0]["location"];
         assert_eq!(location["root_id"], "");
         assert_eq!(location["path"], "CommonModules/МойМодуль/Ext/Module.bsl");
@@ -597,18 +982,120 @@ mod tests {
         let mut card = method_card();
         card.kind = "metadata object";
         card.members = (0..200)
-            .map(|i| SymbolMember {
-                name: format!("Реквизит{i}"),
-                kind: "Реквизит".to_string(),
-                ty: Some("Строка".to_string()),
+            .rev()
+            .map(|i| {
+                SymbolMember::metadata(
+                    format!("Реквизит{i:03}"),
+                    "Реквизит",
+                    "attribute",
+                    Some("Строка".to_string()),
+                )
             })
             .collect();
-        // A tiny budget forces the member list to be trimmed.
-        let (body, budget_exhausted) = card_to_value(&card, 5);
-        assert!(budget_exhausted, "the fact travels up with the body, not via the rendered JSON");
+        card.doc = Some("Документация".repeat(2_000));
+        card.definition.as_mut().unwrap().snippet = Some("Фрагмент".repeat(2_000));
+        let roots = stand_roots();
+        let first = render_card(&card, None, DEFAULT_TOP_MODULES, 1_000, &stamp(&roots));
+        let second = render_card(&card, None, DEFAULT_TOP_MODULES, 1_000, &stamp(&roots));
+        assert!(serialized_bytes(&first) <= 4_000);
+        let body = first.structured_content.unwrap();
+        serde_json::from_value::<SymbolInfoOutput>(body.clone())
+            .expect("truncated output schema shape");
         assert_eq!(body["truncated"], true);
         let members = body["members"].as_array().unwrap();
-        assert!(members.len() < 200 && !members.is_empty());
+        assert!(members.len() < 200 && !members.is_empty(), "{body}");
+        assert_eq!(body, second.structured_content.unwrap(), "same input keeps the same prefix");
+        assert!(members
+            .windows(2)
+            .all(|pair| { pair[0]["name"].as_str().unwrap() < pair[1]["name"].as_str().unwrap() }));
+
+        let text = first.content[0].raw.as_text().expect("JSON text mirror").text.as_str();
+        assert_eq!(serde_json::from_str::<Value>(text).unwrap(), body);
+
+        let tiny = render_card(&card, None, DEFAULT_TOP_MODULES, 1, &stamp(&roots));
+        let tiny_body = tiny.structured_content.unwrap();
+        assert_eq!(
+            tiny_body
+                .as_object()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["budget_hint", "schema_version", "status", "symbol", "truncated"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        serde_json::from_value::<SymbolInfoOutput>(tiny_body).expect("minimum output schema shape");
+    }
+
+    #[test]
+    fn member_contract_keeps_sources_and_type_signature_branches_separate() {
+        let mut card = method_card();
+        card.kind = "metadata object";
+        let mut metadata = SymbolMember::metadata(
+            "Состояние",
+            "Реквизит",
+            "attribute",
+            Some("Строка".to_string()),
+        );
+        metadata.type_variants = vec![
+            SymbolTypeVariant {
+                presentation: "Одинаковое представление".to_string(),
+                technical_name: Some("СправочникСсылка.А".to_string()),
+                resolution: "static",
+                reason: None,
+            },
+            SymbolTypeVariant {
+                presentation: "Одинаковое представление".to_string(),
+                technical_name: Some("СправочникСсылка.Б".to_string()),
+                resolution: "static",
+                reason: None,
+            },
+        ];
+        let mut module = SymbolMember::metadata(
+            "Состояние",
+            "Переменная",
+            "property",
+            Some("Неизвестно".to_string()),
+        );
+        module.origin = SymbolMemberOrigin::Module;
+        module.source_extension = Some("РасширениеА".to_string());
+        module.availability = SymbolMemberAvailability {
+            contexts: None,
+            context_status: SymbolMemberContextStatus::Unknown,
+            reason: Some("module_context_unknown".to_string()),
+        };
+        let callable = SymbolMember::callable(
+            "Состояние",
+            "Метод",
+            "method",
+            "Состояние()",
+            SymbolMemberOrigin::Platform,
+        );
+        card.members = vec![metadata, module, callable];
+
+        let body = card_to_value(&card);
+        let members = body["members"].as_array().unwrap();
+        assert_eq!(members.len(), 3, "same-name source candidates must not collapse");
+        let metadata = members.iter().find(|member| member["origin"] == "metadata").unwrap();
+        let module = members.iter().find(|member| member["origin"] == "module").unwrap();
+        let callable = members.iter().find(|member| member["origin"] == "platform").unwrap();
+        assert_eq!(metadata["availability"]["context_status"], "not_evaluated");
+        assert!(metadata["type_variants"].is_array());
+        assert_eq!(metadata["type_variants"].as_array().unwrap().len(), 2);
+        assert_ne!(
+            metadata["type_variants"][0]["technical_name"],
+            metadata["type_variants"][1]["technical_name"]
+        );
+        assert_eq!(module["member_kind"], "property");
+        assert_eq!(module["source_extension"], "РасширениеА");
+        assert!(module["availability"]["contexts"].is_null());
+        assert_eq!(module["availability"]["context_status"], "unknown");
+        assert_eq!(module["availability"]["reason"], "module_context_unknown");
+        assert_eq!(callable["signature"]["presentation"], "Состояние()");
+        assert!(callable.get("type").is_none());
+        assert!(callable.get("type_variants").is_none());
     }
 
     /// A miss carries the envelope, and an empty list says which source could
@@ -647,6 +1134,8 @@ mod tests {
         let body =
             render_not_found("НетТакого.Метод", answer, &stamp(&roots)).structured_content.unwrap();
 
+        serde_json::from_value::<SymbolInfoOutput>(body.clone())
+            .expect("not_found output schema shape");
         assert_eq!(body["resolved"], false);
         assert_eq!(body["symbol"], "НетТакого.Метод");
         assert!(body["candidates"].as_array().unwrap().is_empty());
@@ -656,5 +1145,26 @@ mod tests {
         // silently ship without an envelope.
         assert_eq!(body["freshness"]["source"], "resident");
         assert_eq!(body["freshness"]["completeness"]["reasons"][0]["code"], "index_building");
+    }
+
+    #[test]
+    fn candidates_are_ambiguous_and_database_failures_are_mcp_errors() {
+        let roots = stand_roots();
+        let answer = crate::tools::name_answer::NameAnswer {
+            candidates: vec![json!({"display": "Кандидат"})],
+            providers: Vec::new(),
+            total: 1,
+            total_exact: true,
+            truncated: false,
+            completeness: Completeness::complete(),
+        };
+        let body = render_not_found("Кандидат", answer, &stamp(&roots)).structured_content.unwrap();
+        serde_json::from_value::<SymbolInfoOutput>(body.clone())
+            .expect("ambiguous output schema shape");
+        assert_eq!(body["status"], "ambiguous");
+
+        let error = database_error("broken cache");
+        assert_eq!(error.code.0, -32603);
+        assert!(error.message.contains("broken cache"));
     }
 }

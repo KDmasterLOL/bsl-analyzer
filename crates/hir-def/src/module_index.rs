@@ -7,6 +7,8 @@ use vfs::FileId;
 use crate::body::{ExternalRef, ManagerType};
 use crate::Name;
 
+type NormalizedFormKey = (Option<(MdoType, String)>, String);
+
 /// Approximate live heap bytes for Salsa's `memory_usage` report: each map's
 /// table plus its owned `String` keys (and, for `common_modules_display`, its
 /// owned `String` values too). New heap-owning fields must be added here too.
@@ -26,16 +28,38 @@ pub(crate) fn module_index_heap(v: &Arc<ModuleIndex>) -> usize {
 
     bytes += map_table_bytes::<(ManagerType, String), FileId>(idx.managers.len());
     bytes += idx.managers.keys().map(|(_, s)| s.capacity()).sum::<usize>();
+    bytes += map_table_bytes::<(ManagerType, String), Vec<FileId>>(idx.manager_candidates.len());
+    bytes += idx
+        .manager_candidates
+        .iter()
+        .map(|((_, name), files)| {
+            name.capacity() + files.capacity() * std::mem::size_of::<FileId>()
+        })
+        .sum::<usize>();
 
     bytes += map_table_bytes::<(MdoType, String), FileId>(idx.object_modules.len());
     bytes += idx.object_modules.keys().map(|(_, s)| s.capacity()).sum::<usize>();
+    bytes += map_table_bytes::<(MdoType, String), Vec<FileId>>(idx.object_module_candidates.len());
+    bytes += idx
+        .object_module_candidates
+        .iter()
+        .map(|((_, name), files)| {
+            name.capacity() + files.capacity() * std::mem::size_of::<FileId>()
+        })
+        .sum::<usize>();
 
     bytes += map_table_bytes::<(MdoType, String), FileId>(idx.record_set_modules.len());
     bytes += idx.record_set_modules.keys().map(|(_, s)| s.capacity()).sum::<usize>();
 
-    bytes += map_table_bytes::<(Option<(MdoType, String)>, String), FileId>(idx.forms.len());
+    bytes += map_table_bytes::<NormalizedFormKey, FileId>(idx.forms.len());
     for (owner_key, form_name) in idx.forms.keys() {
         bytes += owner_key.as_ref().map_or(0, |(_, s)| s.capacity()) + form_name.capacity();
+    }
+    bytes += map_table_bytes::<NormalizedFormKey, Vec<FileId>>(idx.form_candidates.len());
+    for ((owner_key, form_name), files) in &idx.form_candidates {
+        bytes += owner_key.as_ref().map_or(0, |(_, s)| s.capacity())
+            + form_name.capacity()
+            + files.capacity() * std::mem::size_of::<FileId>();
     }
 
     bytes
@@ -48,12 +72,15 @@ pub struct ModuleIndex {
     common_modules_display: FxHashMap<String, String>,
 
     managers: FxHashMap<(ManagerType, String), FileId>,
+    manager_candidates: FxHashMap<(ManagerType, String), Vec<FileId>>,
 
     object_modules: FxHashMap<(MdoType, String), FileId>,
+    object_module_candidates: FxHashMap<(MdoType, String), Vec<FileId>>,
 
     record_set_modules: FxHashMap<(MdoType, String), FileId>,
 
-    forms: FxHashMap<(Option<(MdoType, String)>, String), FileId>,
+    forms: FxHashMap<NormalizedFormKey, FileId>,
+    form_candidates: FxHashMap<NormalizedFormKey, Vec<FileId>>,
 }
 
 impl ModuleIndex {
@@ -84,8 +111,13 @@ impl ModuleIndex {
                     .map(|(mdo_type, object)| (mdo_type, object.as_str().fold_lower()));
                 index
                     .forms
-                    .entry((owner, form_key.form_name.as_str().fold_lower()))
+                    .entry((owner.clone(), form_key.form_name.as_str().fold_lower()))
                     .or_insert(file_id);
+                index
+                    .form_candidates
+                    .entry((owner, form_key.form_name.as_str().fold_lower()))
+                    .or_default()
+                    .push(file_id);
                 continue;
             }
 
@@ -104,12 +136,22 @@ impl ModuleIndex {
                 }
                 ModuleFileKind::Manager => {
                     if let Some(manager_type) = module_type.to_manager_type() {
-                        index.managers.entry((manager_type, lower)).or_insert(file_id);
+                        index.managers.entry((manager_type, lower.clone())).or_insert(file_id);
+                        index
+                            .manager_candidates
+                            .entry((manager_type, lower))
+                            .or_default()
+                            .push(file_id);
                     }
                 }
                 ModuleFileKind::Object => {
                     if let Some(mdo_type) = module_type.to_mdo_type() {
-                        index.object_modules.entry((mdo_type, lower)).or_insert(file_id);
+                        index.object_modules.entry((mdo_type, lower.clone())).or_insert(file_id);
+                        index
+                            .object_module_candidates
+                            .entry((mdo_type, lower))
+                            .or_default()
+                            .push(file_id);
                     }
                 }
                 ModuleFileKind::RecordSet => {
@@ -147,8 +189,22 @@ impl ModuleIndex {
         self.managers.get(&(manager_type, name.as_str().fold_lower())).copied()
     }
 
+    pub fn manager_candidates(&self, manager_type: ManagerType, name: &Name) -> &[FileId] {
+        self.manager_candidates
+            .get(&(manager_type, name.as_str().fold_lower()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     pub fn resolve_object_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
         self.object_modules.get(&(mdo_type, name.as_str().fold_lower())).copied()
+    }
+
+    pub fn object_module_candidates(&self, mdo_type: MdoType, name: &Name) -> &[FileId] {
+        self.object_module_candidates
+            .get(&(mdo_type, name.as_str().fold_lower()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub fn resolve_record_set_module(&self, mdo_type: MdoType, name: &Name) -> Option<FileId> {
@@ -162,6 +218,18 @@ impl ModuleIndex {
     ) -> Option<FileId> {
         let owner_key = owner.map(|(mdo_type, name)| (mdo_type, name.as_str().fold_lower()));
         self.forms.get(&(owner_key, form_name.as_str().fold_lower())).copied()
+    }
+
+    pub fn form_module_candidates(
+        &self,
+        owner: Option<(MdoType, &Name)>,
+        form_name: &Name,
+    ) -> &[FileId] {
+        let owner_key = owner.map(|(mdo_type, name)| (mdo_type, name.as_str().fold_lower()));
+        self.form_candidates
+            .get(&(owner_key, form_name.as_str().fold_lower()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     pub fn common_module_count(&self) -> usize {

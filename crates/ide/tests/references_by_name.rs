@@ -667,6 +667,7 @@ fn references_follow_the_declared_dependency_matrix() {
         canonical_paths,
         // `tests` (slot 2) declares a dependency on `yaxunit` (slot 1).
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
+        topological_order: vec![0, 1, 2, 3],
         fingerprint: None,
     });
 

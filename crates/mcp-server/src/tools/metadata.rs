@@ -23,7 +23,7 @@ pub async fn get_live_metadata_tree(
             limit: limit.clamp(1, 1000),
         })
         .await
-        .map_err(|e| McpError::internal_error(format!("Ошибка чтения метаданных 1С: {e}"), None))?;
+        .map_err(live_metadata_error)?;
     Ok(crate::tools::response::structured(serde_json::json!({
         "source": "infobase",
         "connection": connection,
@@ -52,12 +52,24 @@ pub async fn get_live_metadata_object(
             name: name.to_string(),
         })
         .await
-        .map_err(|e| McpError::internal_error(format!("Ошибка чтения метаданных 1С: {e}"), None))?;
-    Ok(crate::tools::response::structured(serde_json::json!({
+        .map_err(live_metadata_error)?;
+    Ok(live_metadata_object_response(connection, value))
+}
+
+fn live_metadata_error(error: onec_client::Error) -> McpError {
+    McpError::internal_error(format!("Ошибка чтения метаданных 1С: {error}"), None)
+}
+
+fn live_metadata_object_response(
+    connection: Option<&str>,
+    object: onec_client::MetadataStructureResult,
+) -> CallToolResult {
+    crate::tools::response::structured(serde_json::json!({
+        "schema_version": "1",
         "source": "infobase",
         "connection": connection,
-        "object": value,
-    })))
+        "object": object,
+    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1090,6 +1102,44 @@ mod tests {
 
     fn extract_text(result: &CallToolResult) -> &str {
         result.content[0].raw.as_text().expect("expected text content").text.as_str()
+    }
+
+    #[test]
+    fn live_object_serializes_versioned_normalized_variants() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../bsl-analyzer/tests/fixtures/live_metadata_type_variants.json"
+        ))
+        .unwrap();
+        let object: onec_client::MetadataStructureResult =
+            serde_json::from_value(fixture["ru"].clone()).unwrap();
+        let result = live_metadata_object_response(Some("test"), object);
+        let body = result.structured_content.unwrap();
+
+        assert_eq!(body["schema_version"], "1");
+        assert_eq!(body["source"], "infobase");
+        assert_eq!(body["connection"], "test");
+        assert!(body["object"].get("futureField").is_none());
+        let attributes = body["object"]["Реквизиты"].as_array().unwrap();
+        assert_eq!(attributes[0]["type_variants"][0]["resolution"], "source");
+        let attribute = |name| attributes.iter().find(|item| item["name"] == name).unwrap();
+        assert_eq!(
+            attribute("Unsupported")["type_variants"][0]["reason"],
+            "technical_name_unavailable"
+        );
+        assert_eq!(
+            attribute("FutureUnknown")["type_variants"][0]["reason"],
+            "unknown_technical_name"
+        );
+    }
+
+    #[test]
+    fn live_service_failure_remains_an_mcp_error() {
+        let error = live_metadata_error(onec_client::Error::Status {
+            status: 500,
+            body: "service failed".to_string(),
+        });
+        assert_eq!(error.code.0, -32603);
+        assert!(error.message.contains("1C returned status 500"));
     }
 
     #[test]
