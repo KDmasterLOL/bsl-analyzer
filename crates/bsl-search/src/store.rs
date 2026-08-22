@@ -1661,10 +1661,8 @@ impl Store {
         for row in rows {
             let (id, blob) = row?;
             if blob.len() == dim * 4 {
-                let embedding: Vec<f32> = blob
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                    .collect();
+                let embedding: Vec<f32> =
+                    blob.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect();
                 result.push((id, embedding));
             }
         }
@@ -2435,10 +2433,8 @@ impl Store {
         for row in rows {
             let (id, blob) = row?;
             if blob.len() == dim * 4 {
-                let embedding: Vec<f32> = blob
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-                    .collect();
+                let embedding: Vec<f32> =
+                    blob.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect();
                 result.push((id, embedding));
             }
         }
@@ -2601,10 +2597,8 @@ impl Store {
         for row in rows {
             let (hash, blob) = row?;
             if blob.len() % 4 == 0 {
-                let embedding: Vec<f32> = blob
-                    .chunks_exact(4)
-                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                    .collect();
+                let embedding: Vec<f32> =
+                    blob.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect();
                 map.insert(hash, embedding);
             }
         }

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use base_db::DiagnosticsConfigInput;
@@ -58,6 +58,10 @@ impl FrozenFilePaths {
             .map_err(|_| anyhow::anyhow!("Failed to convert path to URL: {:?}", path))
     }
 
+    pub fn path_for_file_id(&self, file_id: FileId) -> Option<&Path> {
+        self.reverse.get(&file_id).map(PathBuf::as_path)
+    }
+
     pub fn len(&self) -> usize {
         self.reverse.len()
     }
@@ -77,6 +81,7 @@ pub struct LatencyRequestContext {
     pub analysis: Analysis,
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
+    pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
     /// Whether the client advertised support for `InsertTextMode::ADJUST_INDENTATION`,

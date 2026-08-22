@@ -106,6 +106,7 @@ struct NotifyActor {
     sender: loader::Sender,
     shutdown: Arc<AtomicBool>,
     watched_file_entries: FxHashSet<AbsPathBuf>,
+    watched_only_file_entries: FxHashSet<AbsPathBuf>,
     watched_dir_entries: Vec<loader::Directories>,
     watcher: Option<(RecommendedWatcher, Receiver<NotifyEvent>)>,
 }
@@ -145,6 +146,7 @@ impl NotifyActor {
             shutdown,
             watched_dir_entries: Vec::new(),
             watched_file_entries: FxHashSet::default(),
+            watched_only_file_entries: FxHashSet::default(),
             watcher: None,
         }
     }
@@ -182,6 +184,7 @@ impl NotifyActor {
 
                         self.watched_dir_entries.clear();
                         self.watched_file_entries.clear();
+                        self.watched_only_file_entries.clear();
 
                         self.send(loader::Message::Progress {
                             n_total: 0,
@@ -303,24 +306,26 @@ impl NotifyActor {
                         });
 
                         drop(watch_tx);
-                        tracing::debug!("Setting up file watchers...");
-                        let watch_count = watch_rx.len();
-                        for path in watch_rx {
-                            self.watch(&path);
-                        }
-                        tracing::debug!("Finished setting up {} file watchers", watch_count);
-
                         drop(entry_tx);
                         for entry in entry_rx {
                             match entry {
                                 loader::Entry::Files(files) => {
                                     self.watched_file_entries.extend(files)
                                 }
+                                loader::Entry::WatchOnlyFiles(files) => {
+                                    self.watched_only_file_entries.extend(files)
+                                }
                                 loader::Entry::Directories(dir) => {
                                     self.watched_dir_entries.push(dir)
                                 }
                             }
                         }
+                        tracing::debug!("Setting up file watchers...");
+                        let watch_count = watch_rx.len();
+                        for path in watch_rx {
+                            self.watch(&path);
+                        }
+                        tracing::debug!("Finished setting up {} file watchers", watch_count);
                         tracing::debug!("File watching setup complete");
                     }
                     Message::Invalidate(path) => {
@@ -422,6 +427,18 @@ impl NotifyActor {
                     let contents = read(file.as_path());
                     on_file_loaded();
                     push_loaded(file, contents);
+                }
+            }
+            loader::Entry::WatchOnlyFiles(files) => {
+                for file in files {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if do_watch {
+                        watch(file.as_ref());
+                    }
+                    on_file_loaded();
+                    push_watch_only(file);
                 }
             }
             loader::Entry::Directories(dirs) => {
@@ -606,8 +623,17 @@ impl NotifyActor {
     /// emits its own removal event, which IS handled, so this only affects
     /// backends that collapse a subtree delete into one directory event.
     fn classify_event_path(&self, path: &AbsPathBuf) -> EventPathAction {
-        match fs::metadata(path) {
+        if self.watched_only_file_entries.contains(path) {
+            return EventPathAction::WatchOnly;
+        }
+        match fs::symlink_metadata(path) {
             Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return match self.classify_watched_path(path) {
+                        Some(loader::LoadMode::WatchOnly) => EventPathAction::WatchOnly,
+                        _ => EventPathAction::Ignore,
+                    };
+                }
                 if meta.file_type().is_dir() {
                     if self.watched_dir_entries.iter().any(|dir| dir.contains_dir(path)) {
                         return EventPathAction::WatchDir;
@@ -654,6 +680,9 @@ impl NotifyActor {
         if self.watched_file_entries.contains(path) {
             return Some(loader::LoadMode::LoadContent);
         }
+        if self.watched_only_file_entries.contains(path) {
+            return Some(loader::LoadMode::WatchOnly);
+        }
         let mut found: Option<loader::LoadMode> = None;
         for dir in &self.watched_dir_entries {
             if let Some(m) = dir.classify_file(path) {
@@ -672,7 +701,7 @@ impl NotifyActor {
 
     fn count_files_in_entry(entry: &loader::Entry, cancel: &AtomicBool) -> usize {
         match entry {
-            loader::Entry::Files(files) => files.len(),
+            loader::Entry::Files(files) | loader::Entry::WatchOnlyFiles(files) => files.len(),
             loader::Entry::Directories(dirs) => {
                 let roots: Vec<&std::path::Path> =
                     dirs.include.iter().map(|p| p.as_path().as_ref()).collect();
@@ -704,7 +733,14 @@ impl NotifyActor {
 
     fn watch(&mut self, path: &Path) {
         if let Some((watcher, _)) = &mut self.watcher {
-            log_notify_error(watcher.watch(path, RecursiveMode::Recursive));
+            let exact = self
+                .watched_file_entries
+                .iter()
+                .chain(&self.watched_only_file_entries)
+                .any(|entry| entry.as_path() == path);
+            let target = if exact { path.parent().unwrap_or(path) } else { path };
+            let mode = if exact { RecursiveMode::NonRecursive } else { RecursiveMode::Recursive };
+            log_notify_error(watcher.watch(target, mode));
         }
     }
 
@@ -1048,6 +1084,29 @@ mod tests {
         assert!(cap.loaded.is_empty(), "no content extensions configured, got {:#?}", cap.loaded);
         let total_watch_only: usize = cap.watch_only.iter().map(|c| c.len()).sum();
         assert_eq!(total_watch_only, 4);
+    }
+
+    #[test]
+    fn explicit_watch_only_files_are_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = AbsPathBuf::assert_utf8(dir.path().join("baseline.json"));
+        std::fs::write(path.as_path(), b"secret").unwrap();
+        let loaded = Mutex::new(Vec::new());
+        let watched = Mutex::new(Vec::new());
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::WatchOnlyFiles(vec![path.clone()]),
+            false,
+            |_| {},
+            || {},
+            |files| loaded.lock().unwrap().extend(files),
+            LOADED_CHUNK_BYTES,
+            |files| watched.lock().unwrap().extend(files),
+            WATCH_ONLY_CHUNK_PATHS,
+            &AtomicBool::new(false),
+        );
+        assert!(loaded.into_inner().unwrap().is_empty());
+        assert_eq!(watched.into_inner().unwrap(), vec![path]);
     }
 
     #[test]

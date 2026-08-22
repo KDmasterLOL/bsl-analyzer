@@ -1,0 +1,166 @@
+use std::path::Path;
+use std::time::Duration;
+
+use ide::diagnostics_baseline::{
+    diagnostic_fingerprint, diagnostics_baseline_json, normalize_diagnostic_snippet,
+    DiagnosticsBaseline, DiagnosticsBaselineEntry, DiagnosticsBaselineRange,
+    DiagnosticsBaselineScope, DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+};
+use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
+use rmcp::model::{CallToolRequest, CallToolRequestParams, ClientRequest};
+use rmcp::service::{PeerRequestOptions, RunningService};
+use rmcp::{RoleClient, ServiceExt};
+use serde_json::{json, Map, Value};
+
+type Client = RunningService<RoleClient, ()>;
+
+fn write(root: &Path, relative: &str, contents: &str) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+fn write_module(root: &Path, name: &str, body: &str) {
+    write(
+        root,
+        &format!("CommonModules/{name}.xml"),
+        &format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+  <CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
+    <Properties><Name>{name}</Name><Server>true</Server></Properties>
+  </CommonModule>
+</MetaDataObject>"#,
+            id = name.len()
+        ),
+    );
+    write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
+}
+
+async fn client(root: &Path) -> Client {
+    let server = McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(root.to_path_buf()).expect("valid project"),
+    );
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    ().serve(client_io).await.expect("session initialized")
+}
+
+async fn diagnostics(client: &Client, arguments: Map<String, Value>) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let result = client
+            .call_tool(CallToolRequestParams::new("diagnostics").with_arguments(arguments.clone()))
+            .await
+            .expect("diagnostics call");
+        let body = result.structured_content.expect("structured response");
+        if body["status"] != "loading" {
+            return body;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "resident did not become ready");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn args(action: &str) -> Map<String, Value> {
+    Map::from_iter([("action".to_owned(), json!(action))])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let first_rel = "CommonModules/Первый/Ext/Module.bsl";
+    let first_body = "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n";
+    write_module(root, "Первый", first_body);
+    write_module(root, "Второй", "Процедура Выполнить() Экспорт\n    А = 1;\nКонецПроцедуры\n");
+    write(root, "bsl-analyzer.toml", "[diagnostics.baseline]\npath = \"baseline.json\"\n");
+    let baseline_path = root.join("baseline.json");
+    let mut baseline = DiagnosticsBaseline {
+        schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+        scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+        diagnostics: vec![],
+    };
+    std::fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
+
+    let client = client(root).await;
+    let mut file_args = args("file");
+    file_args.insert("path".to_owned(), json!(first_rel));
+    file_args.insert("min_severity".to_owned(), json!("hint"));
+    file_args.insert("detail".to_owned(), json!("detailed"));
+    let initial = diagnostics(&client, file_args.clone()).await;
+    let finding = initial["result"]["findings"].as_array().unwrap().first().unwrap();
+    let line = finding["range"]["start_line"].as_u64().unwrap() as usize;
+    let snippet = normalize_diagnostic_snippet(first_body.lines().nth(line).unwrap());
+    let code = finding["code"].as_str().unwrap().to_owned();
+    baseline.diagnostics.push(DiagnosticsBaselineEntry {
+        fingerprint: diagnostic_fingerprint(first_rel, &code, &snippet, 0),
+        path: first_rel.to_owned(),
+        code,
+        snippet,
+        occurrence: 0,
+        message: finding["message"].as_str().unwrap().to_owned(),
+        severity: finding["internal_severity"].as_str().unwrap().to_owned(),
+        range: DiagnosticsBaselineRange {
+            start_line: finding["range"]["start_line"].as_u64().unwrap() as u32,
+            start_column: finding["range"]["start_column"].as_u64().unwrap() as u32,
+            end_line: finding["range"]["end_line"].as_u64().unwrap() as u32,
+            end_column: finding["range"]["end_column"].as_u64().unwrap() as u32,
+        },
+    });
+    let valid = diagnostics_baseline_json(&baseline).unwrap();
+    std::fs::write(&baseline_path, &valid).unwrap();
+    let classified = diagnostics(&client, file_args.clone()).await;
+    assert_eq!(classified["result"]["baseline"]["known"], 1);
+    assert_eq!(
+        classified["result"]["findings"].as_array().unwrap().len() + 1,
+        initial["result"]["findings"].as_array().unwrap().len()
+    );
+
+    let mut workspace_args = args("workspace");
+    workspace_args.insert("min_severity".to_owned(), json!("hint"));
+    workspace_args.insert("max_files".to_owned(), json!(1));
+    let limited = diagnostics(&client, workspace_args.clone()).await;
+    assert_eq!(limited["result"]["baseline"]["state"], "partial");
+    assert_eq!(limited["result"]["baseline"]["complete"], false);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let source = root.join(first_rel);
+        let original = std::fs::metadata(&source).unwrap().permissions();
+        std::fs::write(&source, format!("{first_body}// drift\n")).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let stale = diagnostics(&client, args("workspace")).await;
+        assert_eq!(stale["stale"], true);
+        assert_eq!(stale["result"]["baseline"]["state"], "partial");
+        assert_eq!(stale["result"]["baseline"]["resolved"], 0);
+        std::fs::set_permissions(&source, original).unwrap();
+        std::fs::write(&source, first_body).unwrap();
+    }
+
+    std::fs::write(&baseline_path, b"{broken").unwrap();
+    let broken = diagnostics(&client, file_args.clone()).await;
+    assert_eq!(broken["result"]["baseline"]["state"], "error");
+    assert!(broken["result"].get("findings").is_none());
+    std::fs::write(&baseline_path, &valid).unwrap();
+    let recovered = diagnostics(&client, file_args.clone()).await;
+    assert_eq!(recovered["result"]["baseline"]["known"], 1);
+
+    let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+        CallToolRequestParams::new("diagnostics").with_arguments(args("workspace")),
+    ));
+    client
+        .peer()
+        .send_cancellable_request(request, PeerRequestOptions::no_options())
+        .await
+        .expect("cancellable request")
+        .cancel(Some("integration cancellation".to_owned()))
+        .await
+        .expect("cancellation notification");
+    let after_cancel = diagnostics(&client, file_args).await;
+    assert_eq!(after_cancel["result"]["baseline"]["known"], 1);
+
+    client.cancel().await.expect("session closed");
+}

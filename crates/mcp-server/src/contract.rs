@@ -184,7 +184,13 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         // did not ask.
         default_enabled: false,
     },
-    tool("diagnostics", DIAGNOSTICS_ACTIONS),
+    ToolDecl {
+        name: "diagnostics",
+        actions: DIAGNOSTICS_ACTIONS,
+        note: None,
+        output_schema_version: Some("15"),
+        default_enabled: true,
+    },
     tool("outline", &[]),
     SYNTAX_HELP,
 ];
@@ -1703,6 +1709,8 @@ mod tests {
                           }
                         ],
                         "name": "diagnostics",
+                        "output_schema_fingerprint": "blake3:efeb864443d7a49accbd6d9fec3c3a25971f4266aa4187b0e3c19097cdaaa581",
+                        "output_schema_version": "15",
                         "params": [
                           {
                             "name": "action",

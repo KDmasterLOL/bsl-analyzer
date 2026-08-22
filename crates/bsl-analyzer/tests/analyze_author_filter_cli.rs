@@ -193,3 +193,54 @@ fn author_filter_composes_with_git_diff_scope() {
     assert!(!vendor, "out-of-scope vendor file must stay excluded:\n{sarif}");
     assert!(own, "in-scope developer change must be reported:\n{sarif}");
 }
+
+#[test]
+fn baseline_classification_precedes_author_presentation_filter() {
+    let temp = setup_repo();
+    fs::write(
+        temp.path().join("bsl-analyzer.toml"),
+        "[diagnostics.baseline]\npath = \"baseline.json\"\n",
+    )
+    .unwrap();
+    fs::write(
+        temp.path().join("baseline.json"),
+        r#"{
+  "schema_version": 1,
+  "scope": { "source_root": "", "extensions": [] },
+  "diagnostics": []
+}
+"#,
+    )
+    .unwrap();
+
+    let run = |extra: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+            .args(["analyze", "-s"])
+            .arg(temp.path())
+            .args(["--format", "jsonl"])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let unfiltered = run(&[]);
+    let filtered = run(&["--ignored-author", VENDOR_NAME]);
+    let unfiltered_done = unfiltered.iter().find(|event| event["type"] == "done").unwrap();
+    let filtered_done = filtered.iter().find(|event| event["type"] == "done").unwrap();
+    let findings = |events: &[serde_json::Value]| {
+        events
+            .iter()
+            .filter(|event| event["type"] == "file")
+            .map(|event| event["diagnostics"].as_array().unwrap().len())
+            .sum::<usize>()
+    };
+
+    assert_eq!(unfiltered_done["baseline"]["new"], filtered_done["baseline"]["new"]);
+    assert_eq!(filtered_done["baseline"]["state"], "partial");
+    assert!(findings(&filtered) < findings(&unfiltered));
+}
