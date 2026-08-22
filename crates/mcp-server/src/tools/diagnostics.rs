@@ -2350,7 +2350,7 @@ mod tests {
                         codes: Vec::new(),
                         max_files: 100,
                     },
-                    &SweepCancel::default(),
+                    &crate::cancel::RequestCancel::default(),
                 )
             }) {
                 ResidentOutcome::Ready(sweep, _) => sweep,

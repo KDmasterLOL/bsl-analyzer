@@ -1908,7 +1908,7 @@ impl McpServer {
         let retry_diag = diag.clone();
         let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
             let sweep_cancel = std::sync::Arc::clone(session.cancel());
-            let outcome = session.read(|resident, _analysis, generation| {
+            let outcome = session.read_fanout(|resident, generation| {
                 let sweep = resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
                 if sweep.cancelled {
                     tracing::info!(

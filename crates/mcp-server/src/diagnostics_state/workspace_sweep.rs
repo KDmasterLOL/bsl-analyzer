@@ -39,14 +39,23 @@ pub(crate) struct WorkspaceSweep {
     /// The sweep was cancelled mid-flight (MCP `notifications/cancelled` or transport
     /// shutdown); `aggregates` cover only the `files_swept` files processed before it.
     pub cancelled: bool,
+    /// How this sweep's findings classified against the diagnostics baseline; a
+    /// cancelled sweep carries the unclassified summary, never a `Disabled` one.
     pub baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
+    /// Identity of the baseline files the classification read, folded into the
+    /// result id so a baseline edit alone changes it.
     pub baseline_epoch: String,
 }
 
 impl WorkspaceSweep {
     /// A sweep cancelled before it selected a single file: nothing analysed, and the
     /// coverage numbers that do not depend on the selection still stated.
-    pub(crate) fn nothing_swept(files_total: usize, files_unread: usize) -> Self {
+    pub(crate) fn nothing_swept(
+        files_total: usize,
+        files_unread: usize,
+        baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
+        baseline_epoch: String,
+    ) -> Self {
         Self {
             aggregates: Vec::new(),
             files_swept: 0,
@@ -57,6 +66,8 @@ impl WorkspaceSweep {
             author_head: None,
             truncated: false,
             cancelled: true,
+            baseline,
+            baseline_epoch,
         }
     }
 }

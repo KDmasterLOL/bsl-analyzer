@@ -787,22 +787,6 @@ fn analyze_salsa(
 
     let elapsed = start.elapsed();
 
-    // A fatal blame error aborts the run, but only AFTER the JSONL stream is
-    // closed properly (`file` events + `done`): consumers must never see a
-    // start-only stream. Per-file errors are already recorded in the results.
-    let author_fatal_msg = author_fatal.lock().unwrap().take();
-    if author_filter.is_some() && author_fatal_msg.is_none() {
-        let seen = author_seen.load(Ordering::Relaxed);
-        let dropped = author_dropped.load(Ordering::Relaxed);
-        let blame_secs = author_blame_us.load(Ordering::Relaxed) as f64 / 1e6;
-        tracing::info!(seen, dropped, blame_secs, "author filter applied");
-        if !quiet && !jsonl {
-            println!(
-                "Author filter: dropped {dropped} of {seen} finding(s) (blame {blame_secs:.1}s)"
-            );
-        }
-    }
-
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");
         bsl_analyzer::mem_report::print_salsa_event_report(&db, "TROUGH (post-eviction)");
@@ -946,6 +930,26 @@ fn analyze_salsa(
                     *analysis = None;
                 }
             });
+    }
+
+    // Both the fatal verdict and the counters are read AFTER the filter pass that
+    // produces them; reading them earlier reports an empty run and turns a
+    // fail-closed abort into a report with silently missing findings.
+    //
+    // A fatal blame error aborts the run, but only AFTER the JSONL stream is
+    // closed properly (`file` events + `done`): consumers must never see a
+    // start-only stream. Per-file errors are already recorded in the results.
+    let author_fatal_msg = author_fatal.lock().unwrap().take();
+    if author_filter.is_some() && author_fatal_msg.is_none() {
+        let seen = author_seen.load(Ordering::Relaxed);
+        let dropped = author_dropped.load(Ordering::Relaxed);
+        let blame_secs = author_blame_us.load(Ordering::Relaxed) as f64 / 1e6;
+        tracing::info!(seen, dropped, blame_secs, "author filter applied");
+        if !quiet && !jsonl {
+            println!(
+                "Author filter: dropped {dropped} of {seen} finding(s) (blame {blame_secs:.1}s)"
+            );
+        }
     }
 
     let total_diagnostics: usize =

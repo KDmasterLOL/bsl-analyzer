@@ -57,21 +57,57 @@ fn setup_repo() -> TempDir {
 }
 
 fn run_analyze(root: &Path, extra_args: &[&str]) -> (bool, String, String) {
+    let (ok, sarif, _stdout, stderr) = run_analyze_verbose(root, extra_args, true);
+    (ok, sarif, stderr)
+}
+
+/// `quiet` is a parameter because the operator-facing summary of the author
+/// filter only exists without `-q`: a fixture that always passes `-q` cannot
+/// observe whether that summary states the truth.
+fn run_analyze_verbose(
+    root: &Path,
+    extra_args: &[&str],
+    quiet: bool,
+) -> (bool, String, String, String) {
     let output_dir = root.join("reports");
     fs::create_dir_all(&output_dir).expect("output dir");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
-        .args(["analyze", "-s"])
-        .arg(root)
-        .args(["-r", "sarif", "-o"])
-        .arg(&output_dir)
-        .arg("-q")
-        .args(extra_args)
-        .output()
-        .expect("run bsl-analyzer");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"));
+    command.args(["analyze", "-s"]).arg(root).args(["-r", "sarif", "-o"]).arg(&output_dir);
+    if quiet {
+        command.arg("-q");
+    }
+    let output = command.args(extra_args).output().expect("run bsl-analyzer");
 
     let sarif = fs::read_to_string(output_dir.join("bsl-analyzer.sarif")).unwrap_or_default();
-    (output.status.success(), sarif, String::from_utf8_lossy(&output.stderr).into_owned())
+    (
+        output.status.success(),
+        sarif,
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// Overwrites the loose object backing `path` in HEAD with bytes that are not a
+/// valid zlib object, leaving the commit and tree readable. Blame then fails for
+/// that one file with a real read error — deleting the object instead would look
+/// like "not in HEAD", which resolves to "keep everything" and never fails.
+fn corrupt_blame_source(root: &Path, path: &str) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", &format!("HEAD:{path}")])
+        .output()
+        .expect("run git rev-parse");
+    assert!(output.status.success(), "git rev-parse failed for {path}");
+    let object = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let (prefix, rest) = object.split_at(2);
+    let loose = root.join(".git/objects").join(prefix).join(rest);
+    assert!(loose.is_file(), "expected a loose object at {}", loose.display());
+    // Loose objects are written read-only; replacing the file works both here and
+    // under a CI user for whom the mode bits would not have applied anyway.
+    fs::remove_file(&loose).expect("remove loose object");
+    fs::write(&loose, b"not a zlib stream").expect("corrupt loose object");
 }
 
 fn reported_files(sarif: &str) -> (bool, bool) {
@@ -243,4 +279,43 @@ fn baseline_classification_precedes_author_presentation_filter() {
     assert_eq!(unfiltered_done["baseline"]["new"], filtered_done["baseline"]["new"]);
     assert_eq!(filtered_done["baseline"]["state"], "partial");
     assert!(findings(&filtered) < findings(&unfiltered));
+}
+
+#[test]
+fn blame_failure_aborts_the_run_instead_of_dropping_findings() {
+    let temp = setup_repo();
+    corrupt_blame_source(temp.path(), "Vendor.bsl");
+
+    let (ok, sarif, _stdout, stderr) =
+        run_analyze_verbose(temp.path(), &["--ignored-author", VENDOR_NAME], true);
+
+    assert!(
+        !ok,
+        "a blame failure must fail the run: a report missing findings it could not \
+         classify is worse than no report\nstderr: {stderr}\nsarif: {sarif}"
+    );
+    assert!(
+        stderr.contains("author filter"),
+        "the failure must name the author filter\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn author_filter_summary_states_the_counts_it_actually_dropped() {
+    let temp = setup_repo();
+
+    let (ok, sarif, stdout, stderr) =
+        run_analyze_verbose(temp.path(), &["--ignored-author", VENDOR_NAME], false);
+    assert!(ok, "stderr: {stderr}");
+    let (vendor, own) = reported_files(&sarif);
+    assert!(!vendor && own, "fixture must actually drop a finding:\n{sarif}");
+
+    let summary = stdout
+        .lines()
+        .find(|line| line.starts_with("Author filter:"))
+        .unwrap_or_else(|| panic!("no author filter summary in stdout:\n{stdout}"));
+    assert!(
+        !summary.contains("dropped 0 of 0"),
+        "summary is read before the filter runs and reports nothing: {summary}"
+    );
 }

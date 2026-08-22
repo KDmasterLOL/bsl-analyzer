@@ -8,10 +8,11 @@ use std::{
 
 use clap::{Args, Subcommand, ValueEnum};
 use ide::diagnostics_baseline::{
-    classify_diagnostics, diagnostics_baseline_json, parse_diagnostics_baseline,
-    BaselineDiagnosticCandidate, DiagnosticsBaseline, DiagnosticsBaselineCoverage,
-    DiagnosticsBaselineEntry, DiagnosticsBaselineExtension, DiagnosticsBaselineRange,
-    DiagnosticsBaselineScope, DiagnosticsBaselineSummary, DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+    classify_diagnostics, diagnostics_baseline_json, is_protected_diagnostic,
+    parse_diagnostics_baseline, BaselineDiagnosticCandidate, DiagnosticsBaseline,
+    DiagnosticsBaselineCoverage, DiagnosticsBaselineEntry, DiagnosticsBaselineExtension,
+    DiagnosticsBaselineRange, DiagnosticsBaselineScope, DiagnosticsBaselineSummary,
+    DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
 };
 use ide::partitioned_diagnostics_baseline::{
     classify_partitioned_diagnostics, diagnostics_manifest, diagnostics_manifest_json,
@@ -258,7 +259,7 @@ pub fn apply(
                 candidates,
                 &DiagnosticsBaselineCoverage::Full,
             )?;
-            let diagnostics = classified.new.into_iter().map(|item| item.entry).collect();
+            let diagnostics = recordable(classified.new.into_iter().map(|item| item.entry));
             let baseline = DiagnosticsBaseline {
                 schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
                 scope,
@@ -330,8 +331,9 @@ pub fn apply(
             let added = classified.new.len();
             let removed = classified.resolved.len();
             let unchanged = classified.known.len();
-            let mut diagnostics: Vec<_> =
-                classified.new.into_iter().chain(classified.known).map(|item| item.entry).collect();
+            let mut diagnostics: Vec<_> = recordable(
+                classified.new.into_iter().chain(classified.known).map(|item| item.entry),
+            );
             let bytes = diagnostics_baseline_json(&DiagnosticsBaseline {
                 schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
                 scope,
@@ -633,10 +635,19 @@ fn apply_partitioned(
                         .filter(|(id, _)| plan.enabled_partition_ids.contains(id))
                         .flat_map(|(_, entries)| entries.iter().cloned())
                         .collect::<Vec<_>>();
+                    // Carry the dormant partitions whenever the project scope is
+                    // unchanged, because that is exactly when `publish_set` deletes the
+                    // objects a new manifest omits — a repair must not take partitions
+                    // outside `include` with it. A changed scope prunes dormant metadata
+                    // on purpose, and leaves the objects themselves on disk.
+                    let mut prepared = prepare_all(&plan, buckets)?;
+                    if old.project_scope_fingerprint == plan.project_scope_fingerprint {
+                        carry_dormant(&plan, &old, &mut prepared)?;
+                    }
                     let published = publish_set(
                         &directory,
                         plan.project_scope_fingerprint.clone(),
-                        prepare_all(&plan, buckets)?,
+                        prepared,
                         Some(&old.generation),
                     )?;
                     return Ok(DiagnosticsBaselineOperationResult {
@@ -678,11 +689,12 @@ fn apply_partitioned(
                 selected_counts(&classified, selected.as_deref());
             let mut buckets: std::collections::BTreeMap<String, Vec<DiagnosticsBaselineEntry>> =
                 plan.partitions.iter().map(|partition| (partition.id.clone(), vec![])).collect();
-            for item in classified.new.iter().chain(&classified.known) {
-                let owner = plan
-                    .owner_for_project_path(&item.entry.path)
-                    .ok_or("unowned current diagnostic")?;
-                buckets.get_mut(owner).unwrap().push(item.entry.clone());
+            for entry in recordable(
+                classified.new.iter().chain(&classified.known).map(|item| item.entry.clone()),
+            ) {
+                let owner =
+                    plan.owner_for_project_path(&entry.path).ok_or("unowned current diagnostic")?;
+                buckets.get_mut(owner).unwrap().push(entry);
             }
             let mut prepared = Vec::new();
             for partition in plan
@@ -995,7 +1007,7 @@ fn current_entries_by_partition<T>(
         &DiagnosticsBaselineCoverage::Full,
     )?;
     for item in classified.new {
-        if matches!(item.entry.code.as_str(), "UnknownSuppressionCode" | "SuppressionWithoutCode") {
+        if is_protected_diagnostic(&item.entry.code) {
             continue;
         }
         buckets.get_mut(&item.diagnostic).unwrap().push(item.entry);
@@ -1019,6 +1031,15 @@ fn scope_from_plan(
             })
             .collect(),
     }
+}
+
+/// Entries a baseline file may hold. A protected diagnostic stays active and is
+/// never recorded, so every write path filters here instead of each rediscovering
+/// the rule — the validator rejects such an entry and would fail the whole command.
+fn recordable(
+    entries: impl IntoIterator<Item = DiagnosticsBaselineEntry>,
+) -> Vec<DiagnosticsBaselineEntry> {
+    entries.into_iter().filter(|entry| !is_protected_diagnostic(&entry.code)).collect()
 }
 
 fn prepare_all(

@@ -36,11 +36,13 @@ impl<'a> PartitionFileWriter<'a> {
         let temp = TemporaryFile::new(directory, temp_name("migration.json"));
         let file = directory.create_file_new(temp.path())?;
         let mut file = HashingWriter::new(BufWriter::new(file));
+        // Spacing matters: these bytes must match `diagnostics_partition_json` exactly,
+        // or an object streamed here cannot be regenerated for repair.
         file.write_all(br#"{"schema_version":"#)?;
         serde_json::to_writer(&mut file, &DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION)?;
-        file.write_all(br#", "partition":"#)?;
+        file.write_all(br#","partition":"#)?;
         serde_json::to_writer(&mut file, &partition.identity)?;
-        file.write_all(br#", "diagnostics":["#)?;
+        file.write_all(br#","diagnostics":["#)?;
         Ok(Self { partition, file, temp, entries: 0 })
     }
 
@@ -497,6 +499,56 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("migration")));
+    }
+
+    /// The streaming writer and the in-memory serializer produce the same object
+    /// file. `repair_object` demands a byte-identical regeneration, so a set built
+    /// by one of them must stay repairable by the other.
+    #[test]
+    fn streamed_and_serialized_partitions_are_byte_identical() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let identity = DiagnosticsBaselinePartitionIdentity::Main { path: "src/cf".to_owned() };
+        let partition = DiagnosticsBaselinePartition {
+            id: "main".to_owned(),
+            key: blake3::hash(b"main").to_hex().to_string(),
+            identity: identity.clone(),
+        };
+        let path = "src/cf/Main.bsl";
+        let snippet = "Message(1);";
+        let entry = DiagnosticsBaselineEntry {
+            fingerprint: diagnostic_fingerprint(path, "LineLength", snippet, 0),
+            path: path.to_owned(),
+            code: "LineLength".to_owned(),
+            snippet: snippet.to_owned(),
+            occurrence: 0,
+            message: "m".to_owned(),
+            severity: "Warning".to_owned(),
+            range: DiagnosticsBaselineRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 1,
+            },
+        };
+
+        let mut writer = PartitionFileWriter::new(&directory, &partition).unwrap();
+        writer.write_entry(&entry).unwrap();
+        let (prepared, _) = writer.finish().unwrap();
+        let PreparedPartition::Staged { hash, .. } = &prepared else {
+            panic!("the streaming writer stages its object")
+        };
+
+        let serialized = ide::partitioned_diagnostics_baseline::diagnostics_partition_json(
+            identity,
+            vec![entry],
+        )
+        .unwrap();
+        assert_eq!(
+            *hash,
+            blake3::hash(&serialized).to_hex().to_string(),
+            "a set created by migration would not be repairable by `create --partition`"
+        );
     }
 
     #[test]

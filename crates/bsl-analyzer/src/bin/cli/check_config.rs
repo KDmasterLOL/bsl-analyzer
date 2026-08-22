@@ -62,8 +62,11 @@ pub fn check_config(
         .into());
     }
     if diagnostics_baseline.issue {
+        // Every failure carries its own detail — the path that is missing, the schema
+        // that is unsupported. A caller that captures only stderr sees this line and
+        // nothing else, so a constant string there is not actionable.
         let detail = diagnostics_baseline
-            .config_error
+            .error_detail
             .as_deref()
             .unwrap_or("diagnostics baseline reported an error");
         return Err(io::Error::new(
@@ -108,7 +111,7 @@ fn diagnostics_config_from_project(
 struct DiagnosticsBaselineCheck {
     status: String,
     issue: bool,
-    config_error: Option<String>,
+    error_detail: Option<String>,
 }
 
 fn inspect_diagnostics_baseline(
@@ -118,7 +121,7 @@ fn inspect_diagnostics_baseline(
         return DiagnosticsBaselineCheck {
             status: "unavailable (project invalid)".to_owned(),
             issue: false,
-            config_error: None,
+            error_detail: None,
         };
     };
     use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
@@ -127,7 +130,7 @@ fn inspect_diagnostics_baseline(
         DiagnosticsBaselineSnapshot::Disabled => DiagnosticsBaselineCheck {
             status: "disabled".to_owned(),
             issue: false,
-            config_error: None,
+            error_detail: None,
         },
         DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
             DiagnosticsBaselineCheck {
@@ -138,7 +141,7 @@ fn inspect_diagnostics_baseline(
                     baseline.diagnostics.len()
                 ),
                 issue: false,
-                config_error: None,
+                error_detail: None,
             }
         }
         DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
@@ -164,7 +167,7 @@ fn inspect_diagnostics_baseline(
                     if unsuppressed.is_empty() { "none" } else { &unsuppressed }
                 ),
                 issue: false,
-                config_error: None,
+                error_detail: None,
             }
         }
         DiagnosticsBaselineSnapshot::Error { path, code, detail, .. } => {
@@ -176,11 +179,7 @@ fn inspect_diagnostics_baseline(
                 "unsupported_schema" => format!("ERROR: {detail}: {path}"),
                 _ => format!("ERROR: invalid file {path}: {detail}"),
             };
-            DiagnosticsBaselineCheck {
-                status,
-                issue: true,
-                config_error: (code == "invalid_configuration").then_some(detail),
-            }
+            DiagnosticsBaselineCheck { status, issue: true, error_detail: Some(detail) }
         }
     }
 }

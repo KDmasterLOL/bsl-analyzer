@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use ide::diagnostics_baseline::{
-    classify_diagnostics, BaselineDiagnosticCandidate, DiagnosticsBaselineCoverage,
-    DiagnosticsBaselineRange,
+    BaselineDiagnosticCandidate, DiagnosticsBaselineCoverage, DiagnosticsBaselineRange,
 };
 use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
 
@@ -47,9 +46,13 @@ pub(crate) fn active_for_file(
     };
     let active: std::collections::HashSet<_> = match snapshot {
         DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
-            let Ok(classified) =
-                classify_diagnostics(baseline, project_path.clone(), candidates, &coverage)
-            else {
+            let Ok(classified) = ide::diagnostics_baseline::classify_diagnostics_with(
+                baseline,
+                project_path.clone(),
+                candidates,
+                &coverage,
+                ide::diagnostics_baseline::ResolvedPolicy::Skip,
+            ) else {
                 return diagnostics;
             };
             classified.new.into_iter().map(|item| item.diagnostic).collect()
@@ -70,13 +73,17 @@ pub(crate) fn active_for_file(
             else {
                 return diagnostics;
             };
+            // Only this file's active diagnostics are wanted; `resolved` would walk
+            // every entry of every enabled partition on each publication and be
+            // discarded, making editor latency grow with the accumulated debt.
             let Ok(classified) =
-                ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
+                ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics_with(
                     baseline,
                     plan,
                     project_path.clone(),
                     candidates,
                     &coverage,
+                    ide::diagnostics_baseline::ResolvedPolicy::Skip,
                 )
             else {
                 return diagnostics;

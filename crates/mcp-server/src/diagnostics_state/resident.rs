@@ -561,9 +561,20 @@ impl DiagnosticsResident {
         // cancelled — and not by unwinding: a sweep that reports what it managed is
         // this call's whole shape, and the coverage numbers beside it stay honest.
         if cancel.is_cancelled() {
+            let baseline = self.diagnostics_baseline.error_summary().unwrap_or_else(|| match self
+                .diagnostics_baseline
+                .path()
+            {
+                Some(path) => ide::diagnostics_baseline::DiagnosticsBaselineSummary::interrupted(
+                    Some(path.to_string_lossy().into_owned()),
+                ),
+                None => ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+            });
             return WorkspaceSweep::nothing_swept(
                 self.by_path.len() + self.holes.len(),
                 self.holes.len(),
+                baseline,
+                self.diagnostics_baseline.epoch().to_owned(),
             );
         }
         let mut files: Vec<FileId> = Vec::with_capacity(self.by_path.len());
@@ -680,8 +691,15 @@ impl DiagnosticsResident {
                 .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
                 .collect()
         };
+        // Holes belong in this denominator for the same reason they belong in
+        // `files_total`: a partition may only be upgraded to full coverage when every
+        // file it owns was actually analysed, and an unreadable file was not. Omitting
+        // it would report that file's baseline entries as resolved — "already fixed" —
+        // on the strength of never having looked at it.
         let all_project_files: std::collections::BTreeSet<String> = path_of
             .values()
+            .map(String::as_str)
+            .chain(self.holes.keys().map(String::as_str))
             .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
             .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
             .collect();
@@ -785,32 +803,48 @@ impl DiagnosticsResident {
             active_by_file.entry(file_id).or_default().push(diagnostic);
         }
 
+        // The author pass queries Salsa through its own db clones, so it observes
+        // cancellation exactly the way the candidate pass above does: register the
+        // clone's token, stop between files, and keep an unwind inside the worker.
+        // Without that this pass is unstoppable, and a cancellation unwind would
+        // cross rayon into the state lock as a panic.
         let author_filter = self.author_filter.as_ref();
         let author_ignored = std::sync::atomic::AtomicUsize::new(0);
         let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = swept
             .par_iter()
             .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
+                if !worker.registered {
+                    cancel
+                        .register(salsa::Database::cancellation_token(worker.analysis.database()));
+                    worker.registered = true;
+                }
+                if cancel.is_cancelled() {
+                    return Vec::new();
+                }
                 let diagnostics = active_by_file.get(&file_id).cloned().unwrap_or_default();
-                let diagnostics = match author_filter {
-                    Some(filter) if !diagnostics.is_empty() => filter_by_author(
-                        &worker.analysis,
-                        file_id,
-                        path_of.get(&file_id).map(Path::new),
-                        filter,
-                        diagnostics,
-                        &author_ignored,
-                    ),
-                    _ => diagnostics,
-                };
-                diagnostics
-                    .iter()
-                    .map(|diagnostic| {
-                        (
-                            diagnostic.code.as_str().to_owned(),
-                            ide::SeverityBucket::from(diagnostic.severity),
-                        )
-                    })
-                    .collect()
+                let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                    let diagnostics = match author_filter {
+                        Some(filter) if !diagnostics.is_empty() => filter_by_author(
+                            &worker.analysis,
+                            file_id,
+                            path_of.get(&file_id).map(Path::new),
+                            filter,
+                            diagnostics,
+                            &author_ignored,
+                        ),
+                        _ => diagnostics,
+                    };
+                    diagnostics
+                        .iter()
+                        .map(|diagnostic| {
+                            (
+                                diagnostic.code.as_str().to_owned(),
+                                ide::SeverityBucket::from(diagnostic.severity),
+                            )
+                        })
+                        .collect()
+                }));
+                caught.unwrap_or_default()
             })
             .collect();
 
@@ -853,7 +887,9 @@ impl DiagnosticsResident {
             findings_ignored_by_author: author_ignored.load(std::sync::atomic::Ordering::Relaxed),
             author_head: author_filter.map(|f| f.short_identity()),
             truncated,
-            cancelled,
+            // Re-read: cancellation can also arrive during the author pass, and a
+            // report that hid it would present a partial sweep as a complete one.
+            cancelled: cancelled || cancel.is_cancelled(),
             baseline,
             baseline_epoch: self.diagnostics_baseline.epoch().to_owned(),
         }
