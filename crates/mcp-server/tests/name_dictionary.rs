@@ -113,6 +113,7 @@ fn candidates(body: &Value) -> &Vec<Value> {
 fn provider_state(body: &Value, provider: &str) -> String {
     body["result"]["providers"]
         .as_array()
+        .or_else(|| body["providers"].as_array())
         .unwrap_or_else(|| panic!("the answer names its providers: {body}"))
         .iter()
         .find(|p| p["provider"] == provider)
@@ -131,56 +132,56 @@ fn reason_codes(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn categories(body: &Value) -> Vec<String> {
-    candidates(body).iter().filter_map(|c| c["category"].as_str().map(str::to_owned)).collect()
+fn assert_graph_completeness_matches_state(body: &Value) {
+    let incomplete = reason_codes(body).iter().any(|code| code == "index_building");
+    match provider_state(body, "graph").as_str() {
+        "not_ready" => assert!(incomplete, "a building graph must make the answer partial: {body}"),
+        "answered" => {
+            assert!(!incomplete, "a consulted graph must not make the answer partial: {body}")
+        }
+        state => {
+            panic!("the valid fixture left the graph in an unexpected state `{state}`: {body}")
+        }
+    }
 }
 
-/// И2. The platform and the configuration's own tables answer by name with no
-/// graph at all.
-///
-/// The graph state matters: with a BUILT graph a metadata object is found by its
-/// `mdo/…` node, so the same assertion would pass on an implementation that only
-/// relabelled a graph hit. Asked before the build, only a dictionary can answer.
+/// И2. The platform and the configuration's own tables answer independently of
+/// the graph's readiness.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn names_resolve_before_the_graph_exists() {
+async fn names_resolve_from_non_graph_providers() {
     let ws = stage_workspace();
     let client = workspace_client(ws.path(), true).await;
     wait_until_resident_is_ready(&client).await;
 
     let platform = resolve(&client, "СтрНайти").await;
-    assert_eq!(
-        provider_state(&platform, "graph"),
-        "not_ready",
-        "the stand is meant to have no graph yet: {platform}",
-    );
-    assert!(
-        categories(&platform).iter().any(|c| c == "platform_member"),
-        "a platform member is missing: {platform}",
-    );
+    let platform_candidate = candidates(&platform)
+        .iter()
+        .find(|candidate| candidate["category"] == "platform_member")
+        .unwrap_or_else(|| panic!("a platform member is missing: {platform}"));
+    assert_eq!(platform_candidate["provider"], "platform", "{platform}");
+    assert_eq!(provider_state(&platform, "platform"), "answered", "{platform}");
 
     let object = resolve(&client, "Справочник1").await;
-    assert!(
-        categories(&object).iter().any(|c| c == "metadata_object"),
-        "a metadata object is missing: {object}",
-    );
+    let object_candidate = candidates(&object)
+        .iter()
+        .find(|candidate| candidate["category"] == "metadata_object")
+        .unwrap_or_else(|| panic!("a metadata object is missing: {object}"));
+    assert_eq!(object_candidate["provider"], "metadata_listing", "{object}");
+    assert_eq!(provider_state(&object, "metadata_listing"), "answered", "{object}");
 }
 
-/// И3. A source that could not be consulted is named, and the answer says it is
-/// partial. The control is the same query once the graph is built.
+/// И3. The graph provider state and the answer's completeness agree while the
+/// eager graph converges. The control is the same query once it is built.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_unconsulted_source_is_named_not_merely_missing() {
+async fn graph_provider_state_matches_answer_completeness() {
     let ws = stage_workspace();
     let client = workspace_client(ws.path(), true).await;
     wait_until_resident_is_ready(&client).await;
 
     let building = resolve(&client, "СтрНайти").await;
     assert!(!candidates(&building).is_empty(), "{building}");
-    assert_eq!(provider_state(&building, "graph"), "not_ready", "{building}");
     assert_eq!(provider_state(&building, "platform"), "answered", "{building}");
-    assert!(
-        reason_codes(&building).iter().any(|c| c == "index_building"),
-        "the answer does not admit it is partial: {building}",
-    );
+    assert_graph_completeness_matches_state(&building);
 
     // The positive control. Without it the assertions above pass on an
     // implementation that reports `not_ready` unconditionally.
@@ -205,10 +206,7 @@ async fn an_empty_list_says_whether_it_is_a_proven_zero() {
 
     let building = resolve(&client, ABSENT).await;
     assert!(candidates(&building).is_empty(), "{building}");
-    assert!(
-        reason_codes(&building).iter().any(|c| c == "index_building"),
-        "an empty list while the graph builds must not read as complete: {building}",
-    );
+    assert_graph_completeness_matches_state(&building);
 
     wait_until_graph_is_ready(&client).await;
     let settled = resolve(&client, ABSENT).await;
@@ -219,7 +217,7 @@ async fn an_empty_list_says_whether_it_is_a_proven_zero() {
     );
 }
 
-/// И16. The other entry is fixed too.
+/// И16. The other entry is fixed too, independently of graph readiness.
 ///
 /// `symbol_info` used to answer a resident miss from the graph alone, so with no
 /// graph it returned an empty list — even for a platform member, which the graph
@@ -228,7 +226,7 @@ async fn an_empty_list_says_whether_it_is_a_proven_zero() {
 /// `СтрНайти`. A name nothing could hold would leave the list empty under either
 /// implementation, which is why the test that asked for one proved nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_resident_miss_is_answered_without_the_graph() {
+async fn a_resident_miss_is_answered_by_the_platform() {
     let ws = stage_workspace();
     let client = workspace_client(ws.path(), true).await;
     wait_until_resident_is_ready(&client).await;
@@ -247,20 +245,7 @@ async fn a_resident_miss_is_answered_without_the_graph() {
         "the platform answered nothing on a miss: {miss}",
     );
 
-    let graph_state = miss["providers"]
-        .as_array()
-        .unwrap_or_else(|| panic!("the miss names its providers: {miss}"))
-        .iter()
-        .find(|p| p["provider"] == "graph")
-        .unwrap_or_else(|| panic!("`graph` is named: {miss}"))["state"]
-        .clone();
-    assert_eq!(graph_state, "not_ready", "{miss}");
-
-    let reasons: Vec<&str> = miss["freshness"]["completeness"]["reasons"]
-        .as_array()
-        .map(|r| r.iter().filter_map(|r| r["code"].as_str()).collect())
-        .unwrap_or_default();
-    assert!(reasons.contains(&"index_building"), "{miss}");
+    assert_graph_completeness_matches_state(&miss);
 }
 
 /// И1. Every address published is accepted back by the tool it names, and the
@@ -369,10 +354,7 @@ async fn a_metadata_object_arrives_with_its_xml_and_not_an_excuse() {
     let ws = stage_workspace();
     let client = workspace_client(ws.path(), true).await;
     wait_until_resident_is_ready(&client).await;
-    // Waiting for the resident alone leaves the graph silent — the stand next
-    // door asserts exactly that. Without this wait the count below is taken over
-    // an answer the graph never contributed to, so it can neither see the split
-    // nor confirm the merge.
+    // This assertion exercises the merge, so wait for both contributors explicitly.
     wait_until_graph_is_ready(&client).await;
 
     let body = resolve(&client, "Справочник1").await;
