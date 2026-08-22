@@ -164,10 +164,13 @@ fn large_selective_v1_migration_streams_skipped_entries_with_bounded_rss() {
         if index > 0 {
             writer.write_all(b",").unwrap();
         }
+        // Zero-padded so the paths sort in index order: streaming migration cannot sort,
+        // so it rejects a legacy set whose entries are out of canonical order, and
+        // unpadded names put `modules/10.bsl` before `modules/2.bsl`.
         let path = if index < ENABLED_RECORDS {
-            format!("src/cf/modules/{index}.bsl")
+            format!("src/cf/modules/{index:07}.bsl")
         } else {
-            format!("src/cfe/Ext/modules/{index}.bsl")
+            format!("src/cfe/Ext/modules/{index:07}.bsl")
         };
         let snippet = format!("Message({index});");
         serde_json::to_writer(

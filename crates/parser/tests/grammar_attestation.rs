@@ -323,8 +323,15 @@ fn names_a_section(text: &str) -> bool {
 /// нём быть не должно.
 #[test]
 fn the_document_lists_every_verdict() {
-    let attestation =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/legal/bsl-clean-room-slice-b3.md");
+    let legal = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/legal");
+    // The public mirror is published without `docs/legal/`, so the attestation is absent
+    // there by construction and there is nothing to compare the checklist against. A
+    // missing FILE inside an existing directory is a real breakage and still fails below.
+    if !legal.is_dir() {
+        eprintln!("пропуск: каталога docs/legal нет, аттестацию сверять не с чем");
+        return;
+    }
+    let attestation = legal.join("bsl-clean-room-slice-b3.md");
     let text = std::fs::read_to_string(&attestation)
         .unwrap_or_else(|err| panic!("{} не прочитан: {err}", attestation.display()));
 
