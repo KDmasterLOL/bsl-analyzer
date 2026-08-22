@@ -115,6 +115,20 @@ fn check_config_cli_rejects_invalid_include_before_baseline_io() {
     assert!(!temp.path().join("baselines").exists());
 }
 
+/// Drop the ambient git environment. When the suite runs inside a `git commit` pre-commit
+/// hook, GIT_DIR / GIT_INDEX_FILE point at the real repository and win over the fixture
+/// directory: the temporary project would be staged into the developer's own index, and
+/// its blobs would die with the temporary directory, leaving that index unable to build a
+/// tree.
+fn hermetic(command: &mut Command) -> &mut Command {
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&key);
+        }
+    }
+    command
+}
+
 fn init_git(root: &Path) {
     for args in [
         &["init", "-q"][..],
@@ -123,7 +137,8 @@ fn init_git(root: &Path) {
         &["add", "."],
         &["commit", "-qm", "fixture"],
     ] {
-        assert!(Command::new("git").current_dir(root).args(args).status().unwrap().success());
+        let mut command = Command::new("git");
+        assert!(hermetic(&mut command).current_dir(root).args(args).status().unwrap().success());
     }
 }
 

@@ -14,17 +14,22 @@ const VENDOR_EMAIL: &str = "vendor@example.com";
 const DEV_NAME: &str = "Разработчик";
 const DEV_EMAIL: &str = "dev@example.com";
 
-fn run_git_as(dir: &Path, name: &str, email: &str, args: &[&str]) {
-    let mut cmd = Command::new("git");
-    // Inherited GIT_* variables (e.g. GIT_AUTHOR_NAME when the test suite
-    // itself runs inside a `git commit` pre-commit hook) override the `-c`
-    // identity below and would silently reattribute the fixture commits.
+/// Drop the ambient git environment. When the suite runs inside a `git commit` pre-commit
+/// hook, inherited GIT_* variables win over both the `-c` identity below — silently
+/// reattributing the fixture commits — and the fixture directory itself: GIT_DIR and
+/// GIT_INDEX_FILE would point every command at the developer's own repository.
+fn hermetic(command: &mut Command) -> &mut Command {
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("GIT_") {
-            cmd.env_remove(&key);
+            command.env_remove(&key);
         }
     }
-    let output = cmd
+    command
+}
+
+fn run_git_as(dir: &Path, name: &str, email: &str, args: &[&str]) {
+    let mut cmd = Command::new("git");
+    let output = hermetic(&mut cmd)
         .arg("-C")
         .arg(dir)
         .args(["-c", &format!("user.name={name}"), "-c", &format!("user.email={email}")])
@@ -95,7 +100,8 @@ fn run_analyze_verbose(
 /// that one file with a real read error — deleting the object instead would look
 /// like "not in HEAD", which resolves to "keep everything" and never fails.
 fn corrupt_blame_source(root: &Path, path: &str) {
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    let output = hermetic(&mut command)
         .arg("-C")
         .arg(root)
         .args(["rev-parse", &format!("HEAD:{path}")])

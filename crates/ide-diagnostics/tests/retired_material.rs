@@ -68,8 +68,17 @@ fn window_matches(haystack: &[u8], span: usize, fingerprint: u64) -> bool {
 /// там старый текст красил бы гейт, ничего не вернув ни в репозиторий, ни в
 /// поставку. Именно отслеживаемый файл — то, что попадает в историю и наружу.
 fn tracked_files(root: &Path) -> Vec<std::path::PathBuf> {
-    let listing =
-        std::process::Command::new("git").arg("ls-files").arg("-z").current_dir(root).output();
+    let mut command = std::process::Command::new("git");
+    // Унаследованные GIT_* бьют `current_dir`: под pre-commit хуком GIT_DIR указывает на
+    // корень репозитория, и листинг возвращает пути всего воркспейса вместо путей крейта.
+    // Приклеенные к `root`, они не существуют, нечитаемое отсеивается, и гейт зеленеет,
+    // не прочитав ни одного файла.
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&key);
+        }
+    }
+    let listing = command.arg("ls-files").arg("-z").current_dir(root).output();
 
     if let Ok(listing) = listing {
         if listing.status.success() {
