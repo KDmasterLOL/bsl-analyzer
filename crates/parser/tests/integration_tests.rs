@@ -109,11 +109,17 @@ fn test_annotation_with_params() {
 }
 
 #[test]
-fn test_annotation_nested() {
-    let input = r#"&До(&Вокруг("Тест"))
+fn test_annotation_does_not_take_another_annotation_as_a_value() {
+    let nested = r#"&Перед(&НаКлиенте)
 Процедура Тест() КонецПроцедуры"#;
-    let result = parse(input);
-    assert!(!result.has_errors());
+    assert!(
+        parse(nested).has_errors(),
+        "значением параметра аннотации служит значение, а не другая аннотация"
+    );
+
+    let value = r#"&Перед("Тест")
+Процедура Тест() КонецПроцедуры"#;
+    assert!(!parse(value).has_errors(), "обычное значение параметра принимается");
 }
 
 #[test]
@@ -406,13 +412,13 @@ fn test_preprocessor_not_expression() {
 }
 
 #[test]
-fn test_preprocessor_os_symbols() {
-    let input = r#"#Если Windows Тогда
-    Процедура НаWindows() КонецПроцедуры
-#ИначеЕсли Linux Тогда
-    Процедура НаLinux() КонецПроцедуры
-#ИначеЕсли MacOS Тогда
-    Процедура НаMacOS() КонецПроцедуры
+fn test_preprocessor_unknown_symbol_still_parses() {
+    // Разбор не зависит от того, известен ли символ: список известных живёт
+    // в диагностике, а грамматика принимает в условии любой идентификатор.
+    let input = r#"#Если Мираж Тогда
+    Процедура ПриМираже() КонецПроцедуры
+#ИначеЕсли НЕ Морок Тогда
+    Процедура ПриМороке() КонецПроцедуры
 #КонецЕсли"#;
     let result = parse(input);
     assert!(!result.has_errors());

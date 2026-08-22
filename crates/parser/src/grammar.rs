@@ -201,6 +201,15 @@ pub(super) fn preprocessor_if(p: &mut Parser) {
     m.complete(p, NodeKind::PreIfDir);
 }
 
+/// The `Тогда` a preprocessor condition ends at.
+///
+/// Byte-identical to the predicate of the same name in `statements.rs`, and
+/// kept apart on purpose: that one is awaited by the `Если` statement, this one
+/// by `#Если`. A single predicate asked by both would answer without knowing
+/// which rule is asking, and a boundary that cannot tell its positions apart is
+/// how a shared look-ahead stops distinguishing them.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, findings D1 and D2.
 fn at_then(p: &Parser) -> bool {
     p.at(T![KwThen])
 }
@@ -336,6 +345,15 @@ fn preproc_logical_expression(p: &mut Parser) {
     m.complete(p, NodeKind::PreLogicalExpr);
 }
 
+/// Parentheses are read here although the source does not write them.
+///
+/// The `<Логическое выражение>` production of section 4.8.1.2 is a flat chain of
+/// `[НЕ] <Символ>` joined by `И`/`Или`, with no parentheses and no precedence —
+/// which is why the chain above is flat too. Parentheses are accepted anyway:
+/// they occur 29 times across a corpus of 75 438 files, and refusing them would
+/// be 29 false errors on code the platform builds.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D3.
 fn preproc_logical_operand(p: &mut Parser) {
     let m = p.start();
 

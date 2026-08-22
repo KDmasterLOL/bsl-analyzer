@@ -45,6 +45,49 @@ the working reference:
   * crates/parser/src/grammar/sdbl/  (SDBL grammar)
   * crates/parser/src/grammar/    (BSL grammar layer)
   * crates/lexer/src/lib.rs       (BSL token inventory)
+  * crates/ide-diagnostics/src/utils/preprocessor_symbols.rs
+                                  (preprocessor symbol list; its file
+                                  header named the PREPROC_*_SYMBOL tokens
+                                  of BSLLexer.g4 as the source)
+
+The last path lies outside the parser and lexer crates and was missing
+from this list until 2026-08-21. It is added here because the omission
+was in the record, not in the licensing: ide-diagnostics is a Tier B
+crate for an unrelated reason.
+
+Test material is a provenance class of its own. The commit that
+introduced the diagnostic for unknown preprocessor symbols also recorded
+"Test fixture copied verbatim from bsl-language-server". Deleting the
+fixture file later moved that material into an inline test rather than
+retiring it. It has now been replaced with material derived from section
+4.8.1.2 of the 1C Developer's Guide, and a test in the crate fails if the
+retired material reappears.
+
+A sweep of every BSL test input in the tree, done on 2026-08-21, found
+that the unknown-preprocessor-symbol fixture was one case of a class.
+The commits that introduced diagnostic fixtures say in their own words
+that test files were copied from bsl-language-server and from
+bsl-language-server-rust. 07d2b977 deleted 187 such fixtures when the
+tests moved inline, and the material of a large part of them is still
+present in crates/ide-diagnostics.
+
+What is stated here is that class, not a per-file map. Four independent
+ways of building such a map were tried, and each failed in its own
+direction: attributing a fixture to the commit that merely moved it,
+crediting shared boilerplate as surviving material, matching a line any
+test could contain, and following a rename into a sibling fixture. A
+textual match also cannot see material a test builds programmatically.
+A record that looks precise and is repeatedly wrong — sometimes
+understating what was taken, sometimes attributing our own work to
+others — is worse than a narrower record that holds. The remedy for the
+uncertainty is not a better map but replacement of the material, tracked
+in https://github.com/itrous/bsl-analyzer/issues/52.
+
+Two things are listed file by file, because both are established without
+heuristics: the 21 fixtures added by 4601ffcb, which that commit itself
+enumerates, and crates/parser/tests/fixtures/Module.bsl. Both are in the
+table in LICENSING.md. The evidence in full is in
+docs/legal/bsl-clean-room-slice-b4.md.
 
 These facts are stated here directly, and not left to be discovered in
 the commit history, because the public mirror of this repository does
@@ -67,8 +110,39 @@ The SDBL layer has since been rewritten in bounded slices from official
 1C documentation under the clean-room process described in
 docs/legal/sdbl-clean-room-slices.md, and now diverges from the upstream
 grammar in token inventory, token granularity, rule decomposition and
-operator precedence. That rewrite is not finished, and the BSL layer has
-not been rewritten at all.
+operator precedence. That rewrite is not finished.
+
+The BSL layer is being rewritten the same way, under
+docs/legal/bsl-clean-room-slices.md. All four sub-slices are complete: the
+BSL token inventory (bsl-clean-room-slice-b1.md) and the preprocessor
+symbol list with its test material (b2.md), both re-derived from Chapter
+4 of the 1C Developer's Guide for 8.3.27; the grammar rules, attested
+rule by rule rather than rewritten (b3.md); and the test material, whose
+origin was established where the history establishes it and left stated
+as unestablished where it does not (b4.md).
+
+The compatibility question that ran alongside them is recorded as a
+decision in docs/legal/bsl-compatibility-decision.md. Compatibility with
+bsl-language-server on BSL parsing stays a stated goal of this product;
+what the record establishes is that no parsing rule was adopted on the
+strength of that implementation. Both commits that changed what the
+parser accepts derive their rule from Chapter 4 by section, and the
+other implementation supplied a corpus-scale cross-check of a decision
+already taken. The record names its own limit: it reads commit
+messages, so a silent comparison would not appear in it.
+
+What this does and does not deliver. The BSL half of exit-criteria item
+10 is now complete: the token inventory was re-derived, the preprocessor
+symbols were re-derived, every grammar rule carries a verdict with the
+section it rests on, the test material's origin is recorded, and the
+compatibility decision is written down. It does not by itself relicense
+anything. Three items of the checklist remain open — the SDBL parser
+rule naming, the comparison of sdbl-hir against the upstream lowering,
+and the test corpus — and until they close, the crates named above stay
+under LGPL-3.0-or-later. What has changed is that for crates/parser and
+crates/lexer the only thing standing between them and Tier A is the
+remaining SDBL work, which is a position neither crate has been in
+before.
 
 The current assessment — what is proven, what has diverged, and what is
 still outstanding — is in docs/legal/sdbl-provenance-2026-07-audit.md.
@@ -150,9 +224,13 @@ Upstream acknowledgements
   * bsl-parser — grammar reference used when the SDBL and BSL layers
     were first written — LGPL-3.0-or-later
   * bsl-language-server — deliberate compatibility target for the
-    configuration format and the diagnostic catalogue; also the
-    reference used when crates/cfg and parts of crates/hir-def were
-    first written — LGPL-3.0-or-later
+    configuration format, the diagnostic catalogue and BSL parsing;
+    also the reference used when crates/cfg and parts of crates/hir-def
+    were first written — LGPL-3.0-or-later. Where parsing is concerned
+    the decision is recorded in docs/legal/bsl-compatibility-decision.md:
+    both rules that changed what the parser accepts come out of Chapter 4
+    by section, and that project supplied a corpus-scale cross-check
+    rather than the rule.
   * mdclasses — object-model reference used when crates/bsl-metadata
     was first written — LGPL-3.0
   * v8std.ru — public catalogue of 1C coding standards — CC0
@@ -160,7 +238,16 @@ Upstream acknowledgements
     CC BY 4.0, redistributed with its own license header intact. The
     copy was taken from the test resources of bsl-parser, which had
     itself adapted it as a fixture; the content and its license are
-    1C's, not that project's.
+    1C's, not that project's. CC BY 4.0 asks that modifications be
+    indicated: the file carries the previous adaptation in its own
+    header, and this repository changed two further lines of the body
+    in f1fc00ff (2026-05-13), correcting an event-handler statement to
+    the syntax section 4.6.11.1 gives. The license header itself has
+    never been touched, and a test fails if it is removed or altered.
+  * crates/bsl-metadata/fixtures/designer/{Catalogs,CommonModules,
+    Documents,Ext,HTTPServices,InformationRegisters,WebServices} —
+    21 BSL files introduced by 4601ffcb, whose message records
+    "Comprehensive test fixtures copied from bsl-language-server-rust".
   * crates/bsl-platform/data/platform_data.json — © ООО «1С-Софт»,
     1C copyright, bundled for interoperability; see
     crates/bsl-platform/data/PROVENANCE.md

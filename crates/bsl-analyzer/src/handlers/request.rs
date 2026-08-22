@@ -1423,13 +1423,16 @@ pub fn handle_document_diagnostic(
     if config.scope.is_some() && ctx.scope_dirty_docs.contains(&uri) {
         config.scope = None;
     }
+    let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     let ide_diagnostics = ctx.analysis.file_diagnostics_cached(file_id, config);
     let text = match ctx.mem_docs.get(&uri) {
         Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
         None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
     };
-    let ide_diagnostics = match (ctx.workspace_root.as_deref(), uri.to_file_path().ok().as_deref())
-    {
+    let ide_diagnostics = match (
+        ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+        uri.to_file_path().ok().as_deref(),
+    ) {
         (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
             &ctx.diagnostics_baseline,
             root,
@@ -1453,10 +1456,17 @@ pub fn handle_document_diagnostic(
     }
 
     // An open buffer's overlay text (and its cached line index) reflects unsaved edits;
-    // a closed file has neither, so fall back to the database's disk-backed text.
-    let line_index = LineIndex::new(&text);
+    // a closed file has neither, so fall back to the database's disk-backed text and
+    // to an index built here. Rebuilding the index for an open buffer would redo, on
+    // every keystroke-driven pull, work the document already holds.
+    let owned_line_index = ctx.mem_docs.get(&uri).is_none().then(|| LineIndex::new(&text));
+    let line_index = match (&owned_line_index, ctx.mem_docs.get(&uri)) {
+        (Some(index), _) => index,
+        (None, Some(doc)) => doc.line_index(),
+        (None, None) => unreachable!("an index is built exactly when the document is closed"),
+    };
     let items = crate::lsp::to_proto::diagnostics_with_encoding(
-        &line_index,
+        line_index,
         &text,
         &ide_diagnostics,
         ctx.position_encoding,
@@ -1658,74 +1668,87 @@ fn workspace_report_item(
     let open_doc = ctx.mem_docs.get(&url);
     let version = open_doc.map(|doc| doc.version() as i64);
 
+    // The baseline decides which diagnostics are active, so the result id — and with it
+    // the "unchanged" verdict — can only be computed after it. Conversion to LSP items
+    // is the expensive half and stays behind that verdict: an unchanged document must
+    // not pay for a report the client already has.
+    //
     // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
     // file has neither, so fall back to the database's disk-backed text.
-    let (diagnostics, lsp_items) = match open_doc {
-        Some(doc) => {
-            let diagnostics =
-                match (ctx.workspace_root.as_deref(), ctx.file_paths.path_for_file_id(file_id)) {
-                    (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
-                        &ctx.diagnostics_baseline,
-                        root,
-                        path,
-                        doc.text(),
-                        diagnostics,
-                    ),
-                    _ => diagnostics,
-                };
-            let lsp = crate::lsp::to_proto::diagnostics_with_encoding(
-                doc.line_index(),
-                doc.text(),
-                &diagnostics,
-                ctx.position_encoding,
-            );
-            (diagnostics, lsp)
+    //
+    // A closed file's disk-backed text read (and conversion) can panic if the file was
+    // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
+    // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
+    // is a real abort and must keep unwinding.
+    // When the baseline cannot change the set, the result id is known without the file
+    // text — and an unchanged document then costs neither a read nor an index. The
+    // whole-config sweep goes through here once per file, so that read is not free.
+    // The baseline is not applied under an analysis scope — see `applies_under_scope`.
+    let baseline_applies = ctx.diagnostics_baseline.affects_diagnostics()
+        && crate::diagnostics_baseline::applies_under_scope(ctx.diagnostics_config.scope.is_some());
+    if !baseline_applies {
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
+                WorkspaceUnchangedDocumentDiagnosticReport {
+                    uri: url,
+                    version,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id,
+                    },
+                },
+            ));
         }
-        None => {
-            // A closed file's disk-backed text read (and conversion) can panic if the file was
-            // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
-            // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
-            // is a real abort and must keep unwinding.
-            let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let text = ctx.analysis.file_text(file_id);
-                let diagnostics =
-                    match (ctx.workspace_root.as_deref(), ctx.file_paths.path_for_file_id(file_id))
-                    {
-                        (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
-                            &ctx.diagnostics_baseline,
-                            root,
-                            path,
-                            &text,
-                            diagnostics,
-                        ),
-                        _ => diagnostics,
-                    };
-                let line_index = LineIndex::new(&text);
-                let lsp = crate::lsp::to_proto::diagnostics_with_encoding(
-                    &line_index,
-                    &text,
-                    &diagnostics,
-                    ctx.position_encoding,
-                );
-                (diagnostics, lsp)
-            }));
-            match converted {
-                Ok(result) => result,
-                Err(payload) if payload.is::<salsa::Cancelled>() => {
-                    std::panic::resume_unwind(payload)
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        file_id = file_id.0,
-                        "workspace diagnostics: skipping file after a text-read panic"
-                    );
-                    return None;
-                }
-            }
+    }
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let text = match open_doc {
+            Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
+            None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
+        };
+        let diagnostics = match (
+            ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+            ctx.file_paths.path_for_file_id(file_id),
+        ) {
+            (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+                &ctx.diagnostics_baseline,
+                root,
+                path,
+                &text,
+                diagnostics,
+            ),
+            _ => diagnostics,
+        };
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            return (result_id, None);
+        }
+        let owned_line_index = open_doc.is_none().then(|| LineIndex::new(&text));
+        let line_index = match (&owned_line_index, open_doc) {
+            (Some(index), _) => index,
+            (None, Some(doc)) => doc.line_index(),
+            (None, None) => unreachable!("an index is built exactly when the document is closed"),
+        };
+        let lsp = crate::lsp::to_proto::diagnostics_with_encoding(
+            line_index,
+            &text,
+            &diagnostics,
+            ctx.position_encoding,
+        );
+        (result_id, Some(lsp))
+    }));
+    let (result_id, lsp_items) = match report {
+        Ok(report) => report,
+        Err(payload) if payload.is::<salsa::Cancelled>() => std::panic::resume_unwind(payload),
+        Err(_) => {
+            tracing::warn!(
+                file_id = file_id.0,
+                "workspace diagnostics: skipping file after a text-read panic"
+            );
+            return None;
         }
     };
-    let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
-    if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+    let Some(lsp_items) = lsp_items else {
         return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
             WorkspaceUnchangedDocumentDiagnosticReport {
                 uri: url,
@@ -1735,7 +1758,7 @@ fn workspace_report_item(
                 },
             },
         ));
-    }
+    };
 
     Some(WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
         uri: url,
@@ -1929,6 +1952,7 @@ fn convert_document_highlight_kind(kind: IdeDocumentHighlightKind) -> LspDocumen
 fn convert_folding_range_kind(kind: IdeFoldingRangeKind) -> LspFoldingRangeKind {
     match kind {
         IdeFoldingRangeKind::Region => LspFoldingRangeKind::Region,
+        IdeFoldingRangeKind::Comment => LspFoldingRangeKind::Comment,
     }
 }
 
@@ -3399,6 +3423,105 @@ mod tests {
         assert_eq!(result[2].start_line, 2);
         assert_eq!(result[2].end_line, 4);
         assert_eq!(result[2].kind, None);
+    }
+
+    fn folding_lines_for(
+        file_name: &str,
+        source: &str,
+    ) -> Vec<(u32, u32, Option<LspFoldingRangeKind>)> {
+        let mut state = create_test_state();
+        state.init_empty_source_root();
+
+        let uri = lsp_types::Url::parse(&format!("file:///{file_name}")).unwrap();
+        state.mem_docs.insert(uri.clone(), source.to_string(), 1);
+        let open_file_id = state.vfs_file_for_url(&uri).unwrap();
+        state.open_files.insert(open_file_id);
+        {
+            let mut vfs = state.vfs.write();
+            vfs.set_file_contents(
+                VfsPath::new(uri.to_file_path().unwrap()),
+                Some(Arc::from(source)),
+            );
+        }
+        state.process_changes(false);
+
+        let ctx = latency_ctx(&state);
+        let params = FoldingRangeParams {
+            text_document: TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+
+        handle_folding_range(ctx, params)
+            .unwrap()
+            .unwrap()
+            .iter()
+            .map(|range| (range.start_line, range.end_line, range.kind.clone()))
+            .collect()
+    }
+
+    const FOLDING_COMMENT_SOURCE: &str = r#"#Область ПрограммныйИнтерфейс
+
+// Возвращает описание физического лица для передачи в ФЭС.
+//
+// Параметры:
+//  ФизическоеЛицо - СправочникСсылка.ФизическиеЛица - лицо, чьи данные собираются.
+//  Дата           - Дата - на какой момент брать историю наименований.
+//
+// Возвращаемое значение:
+//  Структура - состав полей описан в документации подсистемы.
+//
+Функция ОписаниеФизическогоЛица(ФизическоеЛицо, Дата) Экспорт
+
+    // Пустая ссылка сюда доходить не должна: вызывающий код проверяет её сам,
+    // но контракт дешевле продублировать, чем потом искать пустую структуру
+    // в выгрузке.
+    Если НЕ ЗначениеЗаполнено(ФизическоеЛицо) Тогда
+        ВызватьИсключение "Не задано физическое лицо";
+    КонецЕсли;
+
+    Возврат Новый Структура;
+
+КонецФункции
+
+#КонецОбласти"#;
+
+    fn issue_folding_lines() -> Vec<(u32, u32, Option<LspFoldingRangeKind>)> {
+        vec![
+            (0, 24, Some(LspFoldingRangeKind::Region)),
+            (2, 10, Some(LspFoldingRangeKind::Comment)),
+            (11, 22, None),
+            (13, 15, Some(LspFoldingRangeKind::Comment)),
+            (16, 18, None),
+        ]
+    }
+
+    #[test]
+    fn folding_range_reports_comment_kind() {
+        assert_eq!(
+            folding_lines_for("folding_comment.bsl", FOLDING_COMMENT_SOURCE),
+            issue_folding_lines()
+        );
+    }
+
+    #[test]
+    fn folding_range_reports_comment_kind_on_crlf() {
+        // Модуль, пришедший из 1С под Windows, разделён CRLF: `\r` уезжает внутрь
+        // токена комментария, а пустая строка приходит парой NEWLINE с пробельным
+        // токеном между ними. Номера строк в ответе от этого меняться не должны.
+        let crlf = FOLDING_COMMENT_SOURCE.replace('\n', "\r\n");
+        assert_eq!(folding_lines_for("folding_comment_crlf.bsl", &crlf), issue_folding_lines());
+
+        // В фикстуре из issue пустых строк внутри серий нет, поэтому сама по себе
+        // она CRLF-слепую сборку серий не различает. Этот вход различает: пустая
+        // строка обязана разорвать серию и здесь.
+        assert_eq!(
+            folding_lines_for("folding_crlf_split.bsl", "// а\r\n// б\r\n\r\n// в\r\n// г\r\n"),
+            vec![
+                (0, 1, Some(LspFoldingRangeKind::Comment)),
+                (3, 4, Some(LspFoldingRangeKind::Comment)),
+            ]
+        );
     }
 
     fn setup_code_action_doc(source: &str) -> (GlobalState, lsp_types::Url) {

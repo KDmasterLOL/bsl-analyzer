@@ -1,4 +1,11 @@
-include!("diagnostics_baseline_lsp.rs");
+mod common;
+
+use common::*;
+use std::io::Write;
+use std::process::Command;
+use std::time::Duration;
+
+use serde_json::Value;
 
 const UNSUPPRESSED: &str =
     "Процедура Тест()\n    // bsl-analyzer:off NoSuchRule\n    А = А;\nКонецПроцедуры\n";

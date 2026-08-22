@@ -599,6 +599,7 @@ fn resolve_by_text(
     let mut matching_lines: Vec<u32> = Vec::new();
     let mut number = 0u32;
     while let Some(line_text) = index.safe_line_str(&text, number) {
+        db.unwind_if_revision_cancelled();
         let Some(line_start) = index.try_line_start(number) else { break };
         let before = spans.len();
         for (at, _) in line_text.trim_end().match_indices(needle) {
@@ -783,6 +784,32 @@ fn symbol_at(db: &RootDatabaseImpl, file_id: FileId, offset: TextSize) -> Option
     Semantics::new(db).symbol_for_token(file_id, &token)
 }
 
+/// Order the hits and count them per file — the walk's reduction step.
+///
+/// Its own function so it can be cancelled and shown to be cancelled: the walk that
+/// produced `hits` observes cancellation at every file, and this phase is as long as
+/// the hit list. A sort has no boundary inside it to unwind at, so the checkpoint goes
+/// immediately before it; the counting pass does have one, and takes it per hit.
+fn order_and_count_by_file(
+    db: &RootDatabaseImpl,
+    hits: &mut [ReferenceHit],
+) -> Vec<(FileId, usize)> {
+    db.unwind_if_revision_cancelled();
+    hits.sort_by_key(|hit| (hit.file_id.0, hit.range.start()));
+
+    let mut per_file: Vec<(FileId, usize)> = Vec::new();
+    for hit in hits.iter() {
+        db.unwind_if_revision_cancelled();
+        match per_file.last_mut() {
+            Some((file_id, count)) if *file_id == hit.file_id => *count += 1,
+            _ => per_file.push((hit.file_id, 1)),
+        }
+    }
+    db.unwind_if_revision_cancelled();
+    per_file.sort_by_key(|(file_id, count)| (std::cmp::Reverse(*count), file_id.0));
+    per_file
+}
+
 fn collect_references(
     db: &RootDatabaseImpl,
     home_file: FileId,
@@ -844,16 +871,7 @@ fn collect_references(
         }
     }
 
-    hits.sort_by_key(|hit| (hit.file_id.0, hit.range.start()));
-
-    let mut per_file: Vec<(FileId, usize)> = Vec::new();
-    for hit in &hits {
-        match per_file.last_mut() {
-            Some((file_id, count)) if *file_id == hit.file_id => *count += 1,
-            _ => per_file.push((hit.file_id, 1)),
-        }
-    }
-    per_file.sort_by_key(|(file_id, count)| (std::cmp::Reverse(*count), file_id.0));
+    let per_file = order_and_count_by_file(db, &mut hits);
 
     ReferencesResult {
         outcome: ReferencesOutcome::Resolved,
@@ -890,6 +908,31 @@ mod tests {
         db.set_file_text(file_id, source);
 
         (db, file_id)
+    }
+
+    /// The reduction after the walk answers to the cancel too: ordering the hits and
+    /// counting them per file is as long as the hit list, and runs no query.
+    #[test]
+    fn the_reduction_observes_a_cancelled_request() {
+        let (db, file_id) = create_db_with_file("Процедура П()\nКонецПроцедуры\n");
+        let mut hits: Vec<ReferenceHit> = (0..20)
+            .map(|i| ReferenceHit {
+                file_id,
+                range: TextRange::new(TextSize::from(i), TextSize::from(i + 1)),
+                enclosing_range: None,
+                kind: ReferenceKind::Read,
+            })
+            .collect();
+
+        salsa::Database::cancellation_token(&db).cancel();
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            order_and_count_by_file(&db, &mut hits)
+        }));
+
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the hits were ordered and counted after the request was cancelled"
+        );
     }
 
     #[test]

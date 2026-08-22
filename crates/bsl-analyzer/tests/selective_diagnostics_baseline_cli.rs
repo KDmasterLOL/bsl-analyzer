@@ -282,3 +282,70 @@ fn selective_cli_repair_preserves_no_acceptance_contract() {
     assert!(stderr.contains("diagnostics baseline object is corrupt"), "{stderr}");
     assert_eq!(manifest(temp.path())["generation"], before["generation"]);
 }
+
+/// Repairing a damaged enabled object must not take the dormant ones with it:
+/// dropping `include` is documented as the way back to a full set, and that
+/// promise only holds while their objects stay on disk.
+#[test]
+fn repairing_a_damaged_object_keeps_dormant_partition_objects() {
+    let temp = setup(&["main"]);
+    let root = temp.path();
+    // A full set first: `include` is what makes a partition dormant, so the
+    // fixture has to publish every partition before adopting a selection.
+    fs::write(
+        root.join("bsl-analyzer.toml"),
+        r#"[source]
+root = "src/cf"
+extensions = [{ name = "Ext", path = "src/cfe/Ext" }]
+
+[diagnostics.baseline]
+directory = "baselines"
+"#,
+    )
+    .unwrap();
+    let created = baseline(root, "create", &[]);
+    assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stderr));
+
+    let dormant: Vec<_> = walk_objects(&root.join("baselines/objects/extensions"));
+    assert!(!dormant.is_empty(), "fixture must publish an extension object");
+
+    write_config(root, &["main"], "");
+    for object in walk_objects(&root.join("baselines/objects/main")) {
+        fs::remove_file(&object).unwrap();
+    }
+
+    let output = baseline(root, "update", &[]);
+    assert!(
+        output.status.success(),
+        "repair run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["operation"], "rebuilt",
+        "a run that could not read the previous set must not report an update: {result}"
+    );
+    assert_eq!(result["removed"], 0);
+
+    for object in &dormant {
+        assert!(
+            object.is_file(),
+            "repair deleted a dormant partition object the user still owns: {}",
+            object.display()
+        );
+    }
+}
+
+fn walk_objects(directory: &Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(directory) else { return found };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(walk_objects(&path));
+        } else if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            found.push(path);
+        }
+    }
+    found
+}

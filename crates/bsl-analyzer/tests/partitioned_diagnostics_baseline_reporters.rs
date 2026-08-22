@@ -60,8 +60,11 @@ fn partitioned_baseline_reporters_keep_their_existing_containers() {
         .unwrap()
         .iter()
         .all(|result| result.get("baselineState").is_none()));
+    // JUnit carries no baseline summary: `<properties>` is only valid inside a
+    // `<testsuite>`, and a document with one under `<testsuites>` fails schema
+    // validation in the tools this format exists for. SARIF and JSONL carry it.
     let junit = fs::read_to_string(temp.path().join("reports/bsl-analyzer.junit.xml")).unwrap();
-    assert!(junit.contains("&quot;partitions&quot;"));
+    assert!(!junit.contains("<properties>"));
 
     let jsonl = run(temp.path(), &["analyze", "-s", ".", "--format", "jsonl"]);
     assert!(jsonl.status.success());

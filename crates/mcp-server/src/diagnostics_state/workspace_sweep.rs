@@ -1,7 +1,3 @@
-use std::sync::Mutex;
-
-use super::lifecycle::lock_recover;
-
 /// Filters for a workspace sweep.
 pub(crate) struct SweepOptions {
     pub min_severity: ide::SeverityBucket,
@@ -43,76 +39,35 @@ pub(crate) struct WorkspaceSweep {
     /// The sweep was cancelled mid-flight (MCP `notifications/cancelled` or transport
     /// shutdown); `aggregates` cover only the `files_swept` files processed before it.
     pub cancelled: bool,
+    /// How this sweep's findings classified against the diagnostics baseline; a
+    /// cancelled sweep carries the unclassified summary, never a `Disabled` one.
     pub baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
+    /// Identity of the baseline files the classification read, folded into the
+    /// result id so a baseline edit alone changes it.
     pub baseline_epoch: String,
 }
 
-/// Cancellation bridge for one workspace sweep: rayon workers register the salsa
-/// token of their per-worker db clone before their first query, and the MCP
-/// `notifications/cancelled` watcher cancels them all at once. Registration and
-/// cancellation share one mutex, so a worker registering after the cancel request
-/// has its token cancelled on the spot — there is no window in which a late worker
-/// runs to completion. Cancelling touches only worker-clone tokens, never the
-/// master db handle.
-#[derive(Default)]
-pub(crate) struct SweepCancel {
-    inner: Mutex<SweepCancelInner>,
-}
-
-#[derive(Default)]
-struct SweepCancelInner {
-    cancel_requested: bool,
-    tokens: Vec<salsa::CancellationToken>,
-}
-
-impl SweepCancel {
-    /// Register a worker handle's token; cancels it immediately when cancellation
-    /// was already requested.
-    pub(crate) fn register(&self, token: salsa::CancellationToken) {
-        let mut inner = lock_recover(&self.inner);
-        if inner.cancel_requested {
-            token.cancel();
+impl WorkspaceSweep {
+    /// A sweep cancelled before it selected a single file: nothing analysed, and the
+    /// coverage numbers that do not depend on the selection still stated.
+    pub(crate) fn nothing_swept(
+        files_total: usize,
+        files_unread: usize,
+        baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
+        baseline_epoch: String,
+    ) -> Self {
+        Self {
+            aggregates: Vec::new(),
+            files_swept: 0,
+            files_total,
+            files_out_of_scope: 0,
+            files_unread,
+            findings_ignored_by_author: 0,
+            author_head: None,
+            truncated: false,
+            cancelled: true,
+            baseline,
+            baseline_epoch,
         }
-        inner.tokens.push(token);
-    }
-
-    /// Request cancellation: every registered worker token unwinds at its next salsa
-    /// query boundary; workers not yet registered are cancelled by `register`.
-    pub(crate) fn cancel_all(&self) {
-        let mut inner = lock_recover(&self.inner);
-        inner.cancel_requested = true;
-        for token in &inner.tokens {
-            token.cancel();
-        }
-    }
-
-    /// Cheap file-boundary check for workers between queries (nothing to unwind from).
-    pub(crate) fn is_cancelled(&self) -> bool {
-        lock_recover(&self.inner).cancel_requested
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The single registration/cancellation mutex closes the race with workers that
-    /// start after the cancel request: their token is cancelled at registration.
-    #[test]
-    fn register_after_cancel_is_cancelled_on_the_spot() {
-        let cancel = SweepCancel::default();
-
-        let early = salsa::CancellationToken::default();
-        cancel.register(early.clone());
-        assert!(!early.is_cancelled(), "no cancel requested yet");
-        assert!(!cancel.is_cancelled());
-
-        cancel.cancel_all();
-        assert!(early.is_cancelled(), "cancel_all cancels every registered token");
-        assert!(cancel.is_cancelled());
-
-        let late = salsa::CancellationToken::default();
-        cancel.register(late.clone());
-        assert!(late.is_cancelled(), "a late registration is cancelled immediately");
     }
 }

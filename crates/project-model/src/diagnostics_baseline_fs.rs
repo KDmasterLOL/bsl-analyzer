@@ -156,6 +156,17 @@ fn open_regular_file(
     display: &Path,
 ) -> io::Result<File> {
     options.follow(FollowSymlinks::No);
+    // The type of an EXISTING entry is checked before opening: opening a FIFO with no
+    // writer blocks forever, and this runs inside the LSP and MCP request paths, which
+    // would then never answer. A missing entry is not an error here — the same helper
+    // creates files — and the check after the open stays, closing the window between
+    // the two.
+    match dir.symlink_metadata(name) {
+        Ok(metadata) if !metadata.is_file() => return Err(link_error(display)),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
     let file = dir.open_with(name, &options)?;
     if !file.metadata()?.is_file() {
         return Err(link_error(display));
@@ -278,6 +289,32 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use tempfile::tempdir;
+
+    /// Opening a FIFO that has no writer blocks forever, and these calls run inside
+    /// LSP and MCP request handling. The type must be rejected before the open, not
+    /// after it — a check that never runs rejects nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_in_the_managed_directory_does_not_block_the_reader() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let fifo = root.path().join("baselines/manifest.json");
+        let path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo failed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let directory =
+                ManagedBaselineDirectory::open(root.path(), "baselines", false).unwrap();
+            let _ = tx.send(directory.open_file("manifest.json").is_err());
+            drop(root);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(rejected) => assert!(rejected, "a FIFO must be rejected, not opened"),
+            Err(_) => panic!("open blocked on a FIFO instead of rejecting it"),
+        }
+        drop(directory);
+    }
 
     #[test]
     fn partitioned_baseline_path_security_rejects_non_portable_paths() {

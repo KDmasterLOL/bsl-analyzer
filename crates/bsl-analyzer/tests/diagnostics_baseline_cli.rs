@@ -202,3 +202,35 @@ fn documented_migration() {
     assert_success(&run(root.path(), &["diagnostics", "baseline", "update", "-s", "."]));
     assert_success(&run(root.path(), &["diagnostics", "baseline", "check", "-s", "."]));
 }
+
+/// A malformed suppression directive raises a protected diagnostic. Protected
+/// diagnostics stay active and are deliberately kept out of the baseline file —
+/// which must mean "not recorded", not "the command fails".
+const MALFORMED_SUPPRESSION: &str =
+    "Процедура Тест()\n    // bsl-analyzer:off NoSuchRule\n    А = А;\nКонецПроцедуры\n";
+
+#[test]
+fn protected_diagnostics_do_not_block_baseline_create_and_update() {
+    let temp = setup();
+    let root = temp.path();
+    fs::write(root.join("src/cf/Main.bsl"), MALFORMED_SUPPRESSION).unwrap();
+
+    assert_success(&run(root, &["diagnostics", "baseline", "create", "-s", "."]));
+    let baseline: serde_json::Value =
+        serde_json::from_slice(&fs::read(root.join(".bsl-diagnostics-baseline.json")).unwrap())
+            .unwrap();
+    let codes: Vec<_> = baseline["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["code"].as_str().unwrap())
+        .collect();
+    assert!(
+        !codes
+            .iter()
+            .any(|code| matches!(*code, "UnknownSuppressionCode" | "SuppressionWithoutCode")),
+        "a protected diagnostic must never be recorded: {codes:?}"
+    );
+
+    assert_success(&run(root, &["diagnostics", "baseline", "update", "-s", "."]));
+}

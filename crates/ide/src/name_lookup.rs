@@ -15,6 +15,7 @@
 use hir::{module_key_for_path, DefDatabase, ModuleKey, Name};
 use ide_db::base_db::{RootQueryDb, SourceDatabase, SourceRootId, BSL_SOURCE_ROOT};
 use ide_db::RootDatabaseImpl;
+use salsa::Database;
 use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 use vfs::FileId;
@@ -846,10 +847,13 @@ impl RootPlaces {
         {
             return Some(file_id);
         }
+        // The fallback table is built from EVERY file of the root, and it is built from
+        // inside a per-candidate loop whose checkpoint has already been passed.
         let table = self.normalized.get_or_insert_with(|| {
             file_set
                 .iter()
                 .filter_map(|file_id| {
+                    db.unwind_if_revision_cancelled();
                     let path = file_set.path_for_file(&file_id)?;
                     Some((path.as_path().to_str()?.replace('\\', "/"), file_id))
                 })
@@ -938,7 +942,14 @@ impl<'q> Merge<'q> {
         }
         let provider = shape.id;
         let found = collect(self);
-        let kept: Vec<_> = found.into_iter().filter(|c| self.accepts(c)).collect();
+        // The provider's own loops carry checkpoints; this pass over what it returned
+        // is a second walk of the same size, and it runs no query of its own.
+        let db = self.db;
+        let kept: Vec<_> = found
+            .into_iter()
+            .inspect(|_| db.unwind_if_revision_cancelled())
+            .filter(|c| self.accepts(c))
+            .collect();
         self.provider_total += kept.len();
         self.candidates.extend(kept);
         self.report(provider, ProviderState::Answered);
@@ -949,10 +960,12 @@ impl<'q> Merge<'q> {
             self.capped = true;
         }
         self.provider_total += hits.total;
+        let db = self.db;
         let mut placed = PathPlaces::new(self.db);
         let kept: Vec<_> = hits
             .candidates
             .into_iter()
+            .inspect(|_| db.unwind_if_revision_cancelled())
             .map(|mut candidate| {
                 // Before `accepts`: a path IS a place, and a caller asking only
                 // for locatable candidates must not lose one for having said so
@@ -974,6 +987,10 @@ impl<'q> Merge<'q> {
         // Cached, not recomputed per comparison: the ordering key folds the
         // name, and a broad query ranks tens of thousands of candidates — two
         // allocations per COMPARISON is where the whole answer goes.
+        // Ranking and folding are one indivisible step: once the sort starts there is
+        // no boundary inside it to unwind at, so a cancel that has already arrived must
+        // be seen before it — not after tens of thousands of comparisons.
+        self.db.unwind_if_revision_cancelled();
         self.candidates.sort_by_cached_key(|c| {
             (c.match_tier, c.category, c.display.fold_lower(), c.display.clone())
         });
@@ -988,6 +1005,7 @@ impl<'q> Merge<'q> {
         let mut first: rustc_hash::FxHashMap<_, usize> = Default::default();
         let mut merged: Vec<NameCandidate> = Vec::with_capacity(self.candidates.len());
         for candidate in std::mem::take(&mut self.candidates) {
+            self.db.unwind_if_revision_cancelled();
             match first.get(&candidate.identity()) {
                 Some(&at) => merged[at].absorb_addresses(candidate),
                 None => {
@@ -1029,7 +1047,7 @@ pub fn lookup_names(
 
     merge.run(MODULE_INDEX, |m| from_module_index(db, m));
     merge.run(METADATA_LISTING, |m| from_metadata_listing(db, m));
-    merge.run(PLATFORM, from_platform);
+    merge.run(PLATFORM, |m| from_platform(db, m));
     merge.run(MODULE_MEMBERS, |m| from_module_members(db, m));
 
     for source in external {
@@ -1074,6 +1092,8 @@ fn spell_symbols(db: &RootDatabaseImpl, candidates: &mut [NameCandidate]) {
     let mut owners: rustc_hash::FxHashMap<FileId, Option<ModuleKey>> = Default::default();
 
     for candidate in candidates.iter_mut() {
+        // `top` is the caller's number, so this list is as long as the client asked for.
+        db.unwind_if_revision_cancelled();
         let Some(SymbolSpelling::OwningModule) = candidate.spelling.take() else { continue };
         let Some(place) = candidate.place else { continue };
         let owner = owners.entry(place.file_id).or_insert_with(|| {
@@ -1092,6 +1112,7 @@ fn from_module_index(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCandid
     let index = db.module_index(ROOT);
     let mut out = Vec::new();
     for display in index.common_module_display_names() {
+        db.unwind_if_revision_cancelled();
         let Some(tier) = merge.tier(display) else { continue };
         let Some(file_id) = index.resolve_common_module(&Name::new(display)) else { continue };
         out.push(
@@ -1118,6 +1139,7 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
         let Some(listing) = db.metadata_listing(root.as_ref()) else { continue };
 
         for entry in listing.entries(db).iter() {
+            db.unwind_if_revision_cancelled();
             let Some(tier) = merge.tier(&entry.name) else { continue };
             out.push(
                 NameCandidate::new(
@@ -1132,6 +1154,7 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
         }
 
         for entry in listing.common_modules(db).iter() {
+            db.unwind_if_revision_cancelled();
             let Some(tier) = merge.tier(&entry.name) else { continue };
             // The module body is the useful destination; its XML is the fallback
             // for a module whose `.bsl` could not be read.
@@ -1168,6 +1191,7 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
             .chain(listing.web_services(db).iter().map(|e| (&e.name, e.main)))
             .chain(listing.integration_services(db).iter().map(|e| (&e.name, e.main)))
         {
+            db.unwind_if_revision_cancelled();
             let Some(tier) = merge.tier(name) else { continue };
             out.push(
                 NameCandidate::new(
@@ -1186,7 +1210,7 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
 /// Platform members. There is no name index to consult — the singleton exposes
 /// whole collections and nothing narrower — so this is a linear scan, the same
 /// one `syntax_help` already performs.
-fn from_platform(merge: &mut Merge<'_>) -> Vec<NameCandidate> {
+fn from_platform(db: &RootDatabaseImpl, merge: &mut Merge<'_>) -> Vec<NameCandidate> {
     let mut out = Vec::new();
 
     let mut push = |canonical: &str,
@@ -1201,6 +1225,7 @@ fn from_platform(merge: &mut Merge<'_>) -> Vec<NameCandidate> {
     };
 
     for entry in hir::platform_name_entries() {
+        db.unwind_if_revision_cancelled();
         let Some(tier) = merge.best_tier(&[entry.name, entry.english_name]) else {
             continue;
         };
@@ -1226,6 +1251,7 @@ fn from_module_members(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCand
 
     let mut out = Vec::new();
     for module in members.modules.values() {
+        db.unwind_if_revision_cancelled();
         for method in &module.methods {
             let Some(tier) = merge.tier(method.name.as_str()) else { continue };
             // The `symbol` is not spelled here. A broad query matches tens of
@@ -1292,6 +1318,94 @@ mod tests {
     use ide_db::base_db::SourceRoot;
     use ide_db::metadata::{CommonModuleEntry, MdoEntry, MetadataListingData};
     use vfs::{file_set::FileSet, VfsPath};
+
+    /// The phases that follow the providers answer to the cancel too: keeping what a
+    /// provider returned, ranking, and folding duplicates each walk the whole candidate
+    /// list and run no query of their own.
+    ///
+    /// Called directly, because a cancel arriving mid-lookup cannot be aimed at one
+    /// phase from outside: a pre-cancelled token unwinds in the first provider.
+    #[test]
+    fn the_phases_after_the_providers_observe_a_cancelled_request() {
+        let db = RootDatabaseImpl::default();
+        let query = NameQuery::new("Имя", 100);
+        let candidates = || {
+            (0..50)
+                .map(|i| {
+                    NameCandidate::new(
+                        format!("Имя{i}"),
+                        NameCategory::CommonModule,
+                        NameMatchTier::Prefix,
+                        MODULE_INDEX.id,
+                    )
+                    .with_graph_id(format!("id{i}"))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        salsa::Database::cancellation_token(&db).cancel();
+
+        let mut keeping = Merge::new(&db, &query, "имя".to_string());
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            keeping.run(MODULE_INDEX, |_| candidates())
+        }));
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "keeping a provider's candidates walked the whole list after the cancel"
+        );
+
+        let mut merge = Merge::new(&db, &query, "имя".to_string());
+        merge.candidates = candidates();
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(move || merge.finish()));
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "ranking and folding ran to the end after the cancel"
+        );
+    }
+
+    /// Two more phases that run no query of their own: spelling the survivors, whose
+    /// length is the number the CALLER asked for, and the fallback path table, which is
+    /// built from every file of a root — from inside a loop whose checkpoint has
+    /// already been passed for that candidate.
+    #[test]
+    fn the_address_phases_observe_a_cancelled_request() {
+        let db = db_with_files(&[
+            ("/ws/CommonModules/Первый/Ext/Module.bsl", "Процедура П() Экспорт КонецПроцедуры"),
+            ("/ws/CommonModules/Второй/Ext/Module.bsl", "Процедура В() Экспорт КонецПроцедуры"),
+        ]);
+        salsa::Database::cancellation_token(&db).cancel();
+
+        let mut candidates: Vec<NameCandidate> = (0..10)
+            .map(|i| {
+                let mut candidate = NameCandidate::new(
+                    format!("П{i}"),
+                    NameCategory::ModuleMethod,
+                    NameMatchTier::Prefix,
+                    MODULE_INDEX.id,
+                );
+                candidate.spelling = Some(SymbolSpelling::OwningModule);
+                candidate.place = Some(NamePlace::whole_file(FileId(0)));
+                candidate
+            })
+            .collect();
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            spell_symbols(&db, &mut candidates)
+        }));
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the survivors were spelled after the request was cancelled"
+        );
+
+        // A spelling the direct lookup misses, so the fallback table gets built.
+        let mut places = PathPlaces::new(&db);
+        let caught = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+            places.of("\\ws\\CommonModules\\Первый\\Ext\\Module.bsl")
+        }));
+        assert!(
+            matches!(caught, Err(salsa::Cancelled::Local)),
+            "the path table walked the whole root after the request was cancelled"
+        );
+    }
 
     fn db_with_files(files: &[(&str, &str)]) -> RootDatabaseImpl {
         let mut db = RootDatabaseImpl::default();

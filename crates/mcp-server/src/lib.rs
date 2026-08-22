@@ -1,6 +1,7 @@
 mod baseline;
 pub mod broker;
 mod cache;
+mod cancel;
 mod change_hub;
 pub mod contract;
 mod diagnostics_state;
@@ -12,6 +13,8 @@ mod http;
 pub mod project;
 mod state;
 mod tools;
+#[cfg(test)]
+mod walk_probe;
 mod workspace_lease;
 
 pub use baseline::{
@@ -958,8 +961,9 @@ impl McpServer {
     async fn metadata(
         &self,
         params: Parameters<MetadataParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
         let mode = p.mode.as_deref().unwrap_or("auto");
@@ -1038,25 +1042,9 @@ impl McpServer {
         // never a hard "not loaded" error, so an evicted resident degrades to slow, not
         // wrong. Reference/shared profiles have no resident and stay "not configured".
         let diag = self.state.diagnostics().clone();
+        // Kicks the lazy build only: every outcome, `loading` included, is rendered from
+        // the read, so an already-cancelled request is never handed a body.
         diag.ensure_loading();
-        match diag.status() {
-            DiagnosticsStatus::Disabled => {
-                return Err(McpError::invalid_params(
-                    "metadata is only available in the workspace profile",
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Failed(msg) => {
-                return Err(McpError::internal_error(
-                    format!("metadata database load failed: {msg}"),
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::metadata::loading(&diag.status_report()))
-            }
-            DiagnosticsStatus::Ready { .. } => {}
-        }
 
         let action = p.action.clone();
         let filter = p.filter.clone();
@@ -1065,10 +1053,13 @@ impl McpServer {
         let max_output_tokens =
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
 
-        tokio::task::spawn_blocking(move || {
-            let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
-                diag.read(|resident, _generation| {
-                    let db = resident.db();
+        let started = std::time::Instant::now();
+        let retry_diag = diag.clone();
+        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
+            let read = || {
+                session.read(|resident, analysis, _generation| {
+                    let _ = resident;
+                    let db = analysis.database();
                     match action.as_str() {
                         "info" => {
                             let (config, extensions) = tools::metadata::configs_from_db(db);
@@ -1077,6 +1068,7 @@ impl McpServer {
                         "tree" => {
                             let (config, extensions) = tools::metadata::configs_from_db(db);
                             tools::metadata::get_metadata_tree(
+                                db,
                                 &config,
                                 &extensions,
                                 filter.clone(),
@@ -1097,25 +1089,26 @@ impl McpServer {
                 })
             };
 
-            let mut outcome = read(&diag);
+            let mut outcome = read();
             // A miss for a VALID object type may be an object added since the last throttled
             // drift scan: force ONE storm-guarded re-scan and retry. A bad object type is
-            // returned as-is (reloading cannot fix it, and it must not force a scan).
+            // returned as-is (reloading cannot fix it, and it must not force a scan). The
+            // cancellation is observed before the retry: the rescan walks the tree.
             if action == "object" {
                 if let ResidentOutcome::Ready(Err(_), _) = &outcome {
                     let valid_type = object_type
                         .as_deref()
                         .is_some_and(tools::metadata::is_resolvable_object_type);
-                    if valid_type {
-                        diag.force_rescan();
-                        outcome = read(&diag);
+                    if valid_type && !session.is_cancelled() {
+                        session.force_rescan();
+                        outcome = read();
                     }
                 }
             }
 
             match outcome {
                 ResidentOutcome::Ready(result, _freshness) => result,
-                ResidentOutcome::Loading => Ok(tools::metadata::loading(&diag.status_report())),
+                ResidentOutcome::Loading => Ok(tools::metadata::loading(&session.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "metadata is only available in the workspace profile",
                     None,
@@ -1125,8 +1118,10 @@ impl McpServer {
                 }
             }
         })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        .await;
+        cancellable_answer(outcome, "metadata", started, || {
+            tools::metadata::loading(&retry_diag.status_report())
+        })
     }
 
     /// Search project code or the built-in platform reference from the workspace profile.
@@ -1525,8 +1520,13 @@ impl McpServer {
     /// says what it is actually doing — building, failed, or absent from this
     /// profile — instead of returning an empty list that would read as a proven
     /// zero.
-    async fn resolve_names(&self, query: String, limit: usize) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::ResidentOutcome;
+    async fn resolve_names(
+        &self,
+        query: String,
+        limit: usize,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::diagnostics_state::{resident_call, ResidentOutcome};
 
         let graph = self.state.graph().clone();
         let snapshot = graph.snapshot();
@@ -1537,7 +1537,9 @@ impl McpServer {
         let resident_state = resident_provider_state(&diag.status());
         let resident_ready = resident_state == ide::ProviderState::Answered;
 
-        tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let retry_diag = diag.clone();
+        let outcome = resident_call(diag, ct, move |session| {
             let source = match (&snapshot, graph_state) {
                 (Some(snapshot), ide::ProviderState::Answered) => {
                     crate::graph_query::GraphNameSource::answering(&snapshot.graph)
@@ -1552,8 +1554,7 @@ impl McpServer {
             };
 
             let outcome = resident_ready.then(|| {
-                diag.read(|resident, _generation| {
-                    let analysis = resident.analysis();
+                session.read(|resident, analysis, _generation| {
                     let (value, completeness) = served(
                         analysis.database(),
                         ide::ProviderState::Answered,
@@ -1589,8 +1590,7 @@ impl McpServer {
             // failed, or absent from this profile. The platform still answers,
             // which is the whole point of serving this action ahead of the gate.
             let (value, completeness) = answer.unwrap_or_else(|| {
-                let empty = ide::Analysis::new();
-                served(empty.database(), workspace, None)
+                session.read_detached(|empty| served(empty.database(), workspace, None))
             });
 
             // Not `graph::envelope`: that one stamps the graph's revision and
@@ -1600,8 +1600,10 @@ impl McpServer {
                 "result": value,
             })))
         })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        .await;
+        cancellable_answer(outcome, "graph resolve", started, || {
+            tools::metadata::loading(&retry_diag.status_report())
+        })
     }
 
     /// Whole-config semantic call graph: traverse who-calls-whom and object/metadata usage by
@@ -1615,7 +1617,11 @@ impl McpServer {
     /// builds, traversal returns a retry envelope — but `resolve` answers anyway, from the
     /// name dictionary, and names every source it could not consult.
     #[tool(name = "graph", annotations(read_only_hint = true))]
-    async fn graph(&self, params: Parameters<GraphParams>) -> Result<CallToolResult, McpError> {
+    async fn graph(
+        &self,
+        params: Parameters<GraphParams>,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let graph = self.state.graph().clone();
 
@@ -1646,7 +1652,7 @@ impl McpServer {
         if p.action == "resolve" {
             let query = require(p.query, "query", "resolve")?;
             let limit = p.top.unwrap_or(tools::graph::DEFAULT_RESOLVE_LIMIT);
-            return self.resolve_names(query, limit).await;
+            return self.resolve_names(query, limit, ct).await;
         }
 
         match graph.status() {
@@ -1763,8 +1769,9 @@ impl McpServer {
     async fn symbol_info(
         &self,
         params: Parameters<SymbolInfoParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
         if p.symbol.as_deref().is_some_and(|symbol| !ide::is_well_formed_symbol(symbol)) {
@@ -1789,25 +1796,11 @@ impl McpServer {
             ));
         }
 
-        // The core card resolves on the resident host — mirror `metadata`'s lazy-load lifecycle
-        // so an evicted/building resident degrades to a retry envelope, never a hard error.
+        // The core card resolves on the resident host. Kicks the lazy build and nothing
+        // more: every outcome, the retry envelope included, is rendered from the read, so
+        // an already-cancelled request is never handed a body.
         let diag = self.state.diagnostics().clone();
         diag.ensure_loading();
-        match diag.status() {
-            DiagnosticsStatus::Disabled => {
-                return Err(McpError::invalid_params(
-                    "symbol_info is only available in the workspace profile",
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Failed(msg) => {
-                return Err(tools::symbol_info::database_error(format!("load failed: {msg}")))
-            }
-            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::symbol_info::loading(&diag.status_report()))
-            }
-            DiagnosticsStatus::Ready { .. } => {}
-        }
 
         let sections = tools::symbol_info::sections_from(&p.include);
         let locale = tools::symbol_info::locale_from(p.locale.as_deref())?;
@@ -1827,14 +1820,16 @@ impl McpServer {
         let graph = self.state.graph().clone();
         graph.ensure_loading();
 
-        tokio::task::spawn_blocking(move || {
-            let read = |diag: &crate::diagnostics_state::DiagnosticsState| {
-                diag.read(|resident, _generation| {
+        let started = std::time::Instant::now();
+        let outcome = crate::diagnostics_state::resident_call(diag.clone(), ct, move |session| {
+            let read = || {
+                session.read(|resident, analysis, _generation| {
                     // The root table and the unread count are read UNDER the same lock as
                     // the card, so the envelope describes the resident that answered rather
                     // than whatever it became afterwards.
                     let card = tools::symbol_info::resolve_card(
                         resident,
+                        analysis.database(),
                         symbol.as_deref(),
                         root_id.as_deref(),
                         path.as_deref(),
@@ -1849,14 +1844,15 @@ impl McpServer {
                 })
             };
 
-            let mut outcome = read(&diag);
+            let mut outcome = read();
             // A resident miss on a well-formed qualified name may be a symbol added since the
             // last throttled drift scan: force ONE storm-guarded re-scan and retry, matching the
-            // `metadata object` miss path.
+            // `metadata object` miss path. Observed before the retry: the rescan walks the
+            // tree, and a second full read after the client has gone is pure waste.
             if let ResidentOutcome::Ready(Ok((None, _, _)), _) = &outcome {
-                if symbol.is_some() {
-                    diag.force_rescan();
-                    outcome = read(&diag);
+                if symbol.is_some() && !session.is_cancelled() {
+                    session.force_rescan();
+                    outcome = read();
                 }
             }
 
@@ -1866,7 +1862,7 @@ impl McpServer {
                     (card, roots, unread_files, freshness)
                 }
                 ResidentOutcome::Loading => {
-                    return Ok(tools::symbol_info::loading(&diag.status_report()))
+                    return Ok(tools::symbol_info::loading(&session.status_report()))
                 }
                 ResidentOutcome::Disabled => {
                     return Err(McpError::invalid_params(
@@ -1918,8 +1914,7 @@ impl McpServer {
                         }
                         (_, state) => crate::graph_query::GraphNameSource::absent(state),
                     };
-                    let answer = diag.read(|resident, _generation| {
-                        let analysis = resident.analysis();
+                    let answer = session.read(|resident, analysis, _generation| {
                         let db = analysis.database();
                         let query = ide::NameQuery::new(
                             symbol,
@@ -1939,13 +1934,15 @@ impl McpServer {
                         // The resident was evicted between the card read and this
                         // one; a retry envelope is the honest answer, not a miss
                         // with no candidates.
-                        _ => Ok(tools::symbol_info::loading(&diag.status_report())),
+                        _ => Ok(tools::symbol_info::loading(&session.status_report())),
                     }
                 }
             }
         })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        .await;
+        cancellable_answer(outcome, "symbol_info", started, || {
+            tools::metadata::loading(&diag.status_report())
+        })
     }
 
     /// Every occurrence of ONE symbol across the workspace, each labelled with what it does
@@ -1981,8 +1978,9 @@ impl McpServer {
     async fn references(
         &self,
         params: Parameters<ReferencesParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::{resident_call, ResidentOutcome};
 
         let p = params.0;
         if p.symbol.is_none() && p.path.is_none() {
@@ -1997,35 +1995,23 @@ impl McpServer {
         }
 
         let diag = self.state.diagnostics().clone();
+        // Kicks the lazy build, and nothing more. The lifecycle is NOT branched on here:
+        // an answer decided before `resident_call` is an answer decided before the
+        // cancellation token is ever consulted, so an already-cancelled request would be
+        // handed a `loading` body — the one shape the contract says a cancelled call
+        // never produces. Every outcome, `loading` included, is rendered from the read.
         diag.ensure_loading();
-        match diag.status() {
-            DiagnosticsStatus::Disabled => {
-                return Err(McpError::invalid_params(
-                    "references is only available in the workspace profile",
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Failed(msg) => {
-                return Err(McpError::internal_error(
-                    format!("references database load failed: {msg}"),
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::metadata::loading(&diag.status_report()))
-            }
-            DiagnosticsStatus::Ready { .. } => {}
-        }
 
         let max_output_tokens = p.max_output_tokens.unwrap_or(tools::references::DEFAULT_BUDGET);
 
-        tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let outcome = resident_call(diag.clone(), ct, move |session| {
             // The whole answer is assembled under the resident read lock: the hits, the
             // paths they are published under and the root table that names them all
             // describe ONE revision, and taking any of them afterwards would stamp the
             // envelope of a resident that no longer produced the body.
             let read = || {
-                diag.read(|resident, _generation| {
+                session.read(|resident, analysis, _generation| {
                     let params = tools::references::Params {
                         symbol: p.symbol.as_deref(),
                         anchor_root_id: p.anchor_root_id.as_deref(),
@@ -2042,7 +2028,12 @@ impl McpServer {
                         max_files: p.max_files,
                         include_preview: p.include_preview,
                     };
-                    tools::references::answer(resident, &params, max_output_tokens)
+                    tools::references::answer(
+                        resident,
+                        analysis.database(),
+                        &params,
+                        max_output_tokens,
+                    )
                 })
             };
 
@@ -2054,8 +2045,11 @@ impl McpServer {
             // qualify is decided by the answer itself — see `warrants_rescan`; nothing is
             // decided here, because a decision written here cannot be observed from a test.
             if let ResidentOutcome::Ready(Ok(answer), _) = &outcome {
-                if tools::references::warrants_rescan(answer) {
-                    diag.force_rescan();
+                // Observed before the retry, not only inside it: the rescan itself walks
+                // the tree, and a second full answer after the client has gone is the
+                // most expensive thing this tool can do for nobody.
+                if tools::references::warrants_rescan(answer) && !session.is_cancelled() {
+                    session.force_rescan();
                     outcome = read();
                 }
             }
@@ -2067,7 +2061,7 @@ impl McpServer {
                     freshness.topology,
                     freshness.stale,
                 )),
-                ResidentOutcome::Loading => Ok(tools::metadata::loading(&diag.status_report())),
+                ResidentOutcome::Loading => Ok(tools::metadata::loading(&session.status_report())),
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "references is only available in the workspace profile",
                     None,
@@ -2077,8 +2071,10 @@ impl McpServer {
                 }
             }
         })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        .await;
+        cancellable_answer(outcome, "references", started, || {
+            tools::metadata::loading(&diag.status_report())
+        })
     }
 
     /// Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
@@ -2102,7 +2098,13 @@ impl McpServer {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
-        if p.max_output_tokens.is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
+        // Only the actions that honour a budget are held to its minimum: `schema` and
+        // `status` ignore `max_output_tokens` entirely, and refusing them for a value
+        // they never read would be a refusal about nothing.
+        let budgeted = matches!(p.action.as_str(), "catalog" | "file" | "workspace");
+        if budgeted
+            && p.max_output_tokens
+                .is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
         {
             return Err(McpError::invalid_params(
                 format!(
@@ -2135,7 +2137,7 @@ impl McpServer {
                     self.state.standalone_extension_notice().as_deref(),
                 ))
             }
-            "file" => self.diagnostics_file(p).await,
+            "file" => self.diagnostics_file(p, ct).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,
             other => Err(contract::unknown_action(McpProfile::Workspace, "diagnostics", other)),
         }
@@ -2143,8 +2145,11 @@ impl McpServer {
 
     /// The `diagnostics file` action: build/serve per-file findings from the resident
     /// analysis database, behind the lazy-load lifecycle and freshness envelope.
-    async fn diagnostics_file(&self, p: DiagnosticsParams) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::DiagnosticsStatus;
+    async fn diagnostics_file(
+        &self,
+        p: DiagnosticsParams,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
         use tools::diagnostics::{parse_detail, parse_min_severity, FileFilters};
 
         let diag = self.state.diagnostics().clone();
@@ -2152,25 +2157,9 @@ impl McpServer {
         let path = std::path::PathBuf::from(path);
         let root_id = p.root_id;
 
+        // Kicks the lazy build only: every outcome, `loading` included, is rendered from
+        // the read, so an already-cancelled request is never handed a body.
         diag.ensure_loading();
-        match diag.status() {
-            DiagnosticsStatus::Disabled => {
-                return Err(McpError::invalid_params(
-                    "diagnostics 'file' is only available in the workspace profile",
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Failed(msg) => {
-                return Err(McpError::internal_error(
-                    format!("diagnostics database load failed: {msg}"),
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading(&diag.status_report()))
-            }
-            DiagnosticsStatus::Ready { .. } => {}
-        }
 
         let min_severity = parse_min_severity(p.min_severity.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -2191,13 +2180,16 @@ impl McpServer {
             detailed,
         };
 
-        tokio::task::spawn_blocking(move || {
+        let started = std::time::Instant::now();
+        let retry_diag = diag.clone();
+        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
             // `generation` is supplied by `read` under the lock (so `result_id` describes
             // the exact resident state queried), and the freshness verdict is computed
             // under that same lock and returned alongside — the envelope is atomic.
-            let outcome = diag.read(|resident, generation| {
+            let outcome = session.read(|resident, analysis, generation| {
                 tools::diagnostics::file_findings(
                     resident,
+                    analysis,
                     root_id.as_deref(),
                     &path,
                     &filters,
@@ -2209,7 +2201,9 @@ impl McpServer {
                 ResidentOutcome::Ready((result, completeness), freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, completeness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
+                ResidentOutcome::Loading => {
+                    Ok(tools::diagnostics::loading(&session.status_report()))
+                }
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'file' is only available in the workspace profile",
                     None,
@@ -2219,8 +2213,10 @@ impl McpServer {
                 }
             }
         })
-        .await
-        .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        .await;
+        cancellable_answer(outcome, "diagnostics file", started, || {
+            tools::diagnostics::loading(&retry_diag.status_report())
+        })
     }
 
     /// The `diagnostics workspace` action: an opt-in, bounded whole-config sweep that
@@ -2237,33 +2233,16 @@ impl McpServer {
         p: DiagnosticsParams,
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{
-            DiagnosticsStatus, ResidentOutcome, SweepCancel, SweepOptions,
-        };
+        use crate::diagnostics_state::{ResidentOutcome, SweepOptions};
         use tools::diagnostics::{
             parse_min_severity, DEFAULT_MAX_SWEEP_FILES, MAX_SWEEP_FILES_CEILING,
         };
 
         let diag = self.state.diagnostics().clone();
+        // Kicks the lazy build only: branching on the lifecycle here would answer before
+        // the cancellation token is consulted, and a cancelled call would be handed a
+        // `loading` body. The read renders every outcome, `loading` included.
         diag.ensure_loading();
-        match diag.status() {
-            DiagnosticsStatus::Disabled => {
-                return Err(McpError::invalid_params(
-                    "diagnostics 'workspace' is only available in the workspace profile",
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Failed(msg) => {
-                return Err(McpError::internal_error(
-                    format!("diagnostics database load failed: {msg}"),
-                    None,
-                ))
-            }
-            DiagnosticsStatus::Idle | DiagnosticsStatus::Loading => {
-                return Ok(tools::diagnostics::loading(&diag.status_report()))
-            }
-            DiagnosticsStatus::Ready { .. } => {}
-        }
 
         let min_severity = parse_min_severity(p.min_severity.as_deref())
             .map_err(|e| McpError::invalid_params(e, None))?;
@@ -2277,18 +2256,16 @@ impl McpServer {
             max_files: p.max_files.unwrap_or(DEFAULT_MAX_SWEEP_FILES).min(MAX_SWEEP_FILES_CEILING),
         };
 
-        // Bridge MCP cancellation into the sweep: rmcp cancels `ct` on
-        // `notifications/cancelled`; `join_unless_cancelled` observes it, fans the
-        // cancel out to every per-worker salsa token the sweep has registered, and
-        // answers immediately instead of waiting out the resident queue. Only
-        // worker-clone tokens are cancelled — the master db and concurrent
-        // diagnostics calls stay untouched.
-        let cancel = std::sync::Arc::new(SweepCancel::default());
-
+        // The sweep fans out to rayon, and each worker queries its OWN db clone with its
+        // own salsa token. Those tokens register in the request's registry — the same one
+        // the door uses for the request's handle — so one cancel reaches the request and
+        // every worker it spawned. Only clones are ever cancelled: the master handle and
+        // concurrent calls stay untouched.
         let started = std::time::Instant::now();
-        let sweep_cancel = std::sync::Arc::clone(&cancel);
-        let join = tokio::task::spawn_blocking(move || {
-            let outcome = diag.read(|resident, generation| {
+        let retry_diag = diag.clone();
+        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
+            let sweep_cancel = std::sync::Arc::clone(session.cancel());
+            let outcome = session.read_fanout(|resident, generation| {
                 let sweep = resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
                 if sweep.cancelled {
                     tracing::info!(
@@ -2306,7 +2283,9 @@ impl McpServer {
                 ResidentOutcome::Ready((result, completeness), freshness) => {
                     Ok(tools::diagnostics::envelope(freshness, completeness, result))
                 }
-                ResidentOutcome::Loading => Ok(tools::diagnostics::loading(&diag.status_report())),
+                ResidentOutcome::Loading => {
+                    Ok(tools::diagnostics::loading(&session.status_report()))
+                }
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "diagnostics 'workspace' is only available in the workspace profile",
                     None,
@@ -2315,17 +2294,11 @@ impl McpServer {
                     Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
                 }
             }
-        });
-        match join_unless_cancelled(ct, cancel, join).await {
-            // Per the MCP cancellation spec the client ignores any response after
-            // its `notifications/cancelled`, so answer with a plain error instead
-            // of inventing a partial-success shape; the detached sweep logs the
-            // partial coverage on its own.
-            None => Err(McpError::internal_error("request cancelled", None)),
-            Some(joined) => {
-                joined.map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
-            }
-        }
+        })
+        .await;
+        cancellable_answer(outcome, "diagnostics workspace", started, || {
+            tools::diagnostics::loading(&retry_diag.status_report())
+        })
     }
 
     /// The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
@@ -2375,28 +2348,32 @@ impl McpServer {
     }
 }
 
-/// Await the sweep's blocking task under the rmcp per-request token. Cancellation
-/// wins: when `ct` fires (MCP `notifications/cancelled` or transport shutdown) —
-/// including a token already cancelled before the first poll — the sweep's salsa
-/// tokens are cancelled via `cancel.cancel_all()` and `None` is returned right
-/// away, WITHOUT waiting for the blocking task: it may still be queued behind
-/// another sweep on the resident mutex, and once it runs it exits early and logs
-/// on its own. `Some(join result)` when the task finishes first; a completed call
-/// never cancels anything.
-async fn join_unless_cancelled<T>(
-    ct: tokio_util::sync::CancellationToken,
-    cancel: std::sync::Arc<crate::diagnostics_state::SweepCancel>,
-    mut join: tokio::task::JoinHandle<T>,
-) -> Option<Result<T, tokio::task::JoinError>> {
-    tokio::select! {
-        // Biased so an already-cancelled token deterministically beats a completed
-        // join — a cancelled request must never race into a normal response.
-        biased;
-        _ = ct.cancelled() => {
-            cancel.cancel_all();
-            None
+/// One rendering of a resident call's outcome, so no tool invents its own.
+///
+/// `retry` builds that tool's own retry envelope: it is what a caller gets when a WRITER
+/// cut the call short, which is not the client's cancellation and must not be reported as
+/// one. Everything else is the same sentence for every tool — the contract says the server
+/// has one behaviour at cancellation, and one behaviour is easiest to keep by having one
+/// place that spells it.
+fn cancellable_answer(
+    outcome: crate::diagnostics_state::CallOutcome<Result<CallToolResult, McpError>>,
+    tool: &'static str,
+    started: std::time::Instant,
+    retry: impl FnOnce() -> CallToolResult,
+) -> Result<CallToolResult, McpError> {
+    use crate::diagnostics_state::CallOutcome;
+    match outcome {
+        CallOutcome::Ready(answer) => answer,
+        CallOutcome::Cancelled => {
+            tracing::info!(
+                tool,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "MCP call cancelled, answer abandoned"
+            );
+            Err(McpError::internal_error("request cancelled", None))
         }
-        joined = &mut join => Some(joined),
+        CallOutcome::Superseded => Ok(retry()),
+        CallOutcome::Panicked => Err(McpError::internal_error("internal handler panic", None)),
     }
 }
 
@@ -3295,69 +3272,5 @@ mod tool_descriptions {
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 
         "###]].assert_eq(&rendered);
-    }
-}
-
-#[cfg(test)]
-mod cancel_bridge {
-    use super::join_unless_cancelled;
-    use crate::diagnostics_state::SweepCancel;
-    use std::sync::Arc;
-
-    /// A token cancelled before the first poll deterministically wins over an
-    /// already-completed join: the sweep registry is cancelled and no normal
-    /// response can race out.
-    #[tokio::test]
-    async fn pre_cancelled_token_beats_a_completed_join() {
-        let ct = tokio_util::sync::CancellationToken::new();
-        ct.cancel();
-        let cancel = Arc::new(SweepCancel::default());
-        let join = tokio::task::spawn_blocking(|| 42);
-        let _ = join.is_finished();
-
-        let out = join_unless_cancelled(ct, Arc::clone(&cancel), join).await;
-        assert!(out.is_none(), "a cancelled request must never produce a normal response");
-        assert!(cancel.is_cancelled(), "the cancel must fan out to the sweep registry");
-    }
-
-    /// A cancel arriving while the blocking task is stuck (queued on the resident
-    /// mutex in production) answers immediately instead of waiting the task out.
-    #[tokio::test]
-    async fn mid_flight_cancel_answers_without_waiting_for_the_join() {
-        let ct = tokio_util::sync::CancellationToken::new();
-        let cancel = Arc::new(SweepCancel::default());
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let join = tokio::task::spawn_blocking(move || rx.recv());
-
-        let guard = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join);
-        let canceller = async {
-            tokio::task::yield_now().await;
-            ct.cancel();
-        };
-        // The guard can only resolve through the cancel arm: the blocking task
-        // stays parked on the channel until we release it below.
-        let (out, ()) = tokio::join!(guard, canceller);
-        assert!(out.is_none(), "cancellation must not wait for the blocked task");
-        assert!(cancel.is_cancelled());
-
-        tx.send(()).expect("the detached task is still alive and picks up the release");
-    }
-
-    /// A call that completes first returns the join result untouched, and a late
-    /// cancel is a no-op for the (finished) sweep.
-    #[tokio::test]
-    async fn completed_join_is_returned_and_a_late_cancel_is_a_noop() {
-        let ct = tokio_util::sync::CancellationToken::new();
-        let cancel = Arc::new(SweepCancel::default());
-        let join = tokio::task::spawn_blocking(|| 7);
-
-        let out = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join).await;
-        let value = out.expect("uncancelled call yields the join").expect("no panic");
-        assert_eq!(value, 7);
-        assert!(!cancel.is_cancelled(), "a completed call must not cancel anything");
-
-        ct.cancel();
-        tokio::task::yield_now().await;
-        assert!(!cancel.is_cancelled(), "a cancel after completion has nothing to reach");
     }
 }

@@ -125,7 +125,88 @@ inherits the obligations of the original sources.
 
 | Path | Source | Status |
 |---|---|---|
-| `crates/parser/tests/fixtures/Module.bsl` | ООО «1С-Софт» | CC BY 4.0 (header preserved in the file) |
+| `crates/parser/tests/fixtures/Module.bsl` | ООО «1С-Софт» | CC BY 4.0. Licence header preserved in the file and gated by a test; body modified — see below |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Commands/Команда1/Ext/CommandModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Ext/ManagerModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Ext/ObjectModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Forms/ФормаВыбора/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Forms/ФормаСписка/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/Справочник1/Forms/ФормаЭлемента/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/СправочникСМенеджером/Ext/ManagerModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Catalogs/СправочникСМенеджером/Ext/ObjectModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/CommonModules/ГлобальныйСерверныйМодуль/Ext/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/CommonModules/КлиентскийОбщийМодуль/Ext/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Documents/Документ1/Forms/ФормаВыбора/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Documents/Документ1/Forms/ФормаДокумента/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Documents/Документ1/Forms/ФормаСписка/Ext/Form/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Ext/ExternalConnectionModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Ext/ManagedApplicationModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/Ext/SessionModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/HTTPServices/HTTPСервис1/Ext/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1/Ext/ManagerModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/InformationRegisters/РегистрСведений1/Ext/RecordSetModule.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
+| `crates/bsl-metadata/fixtures/designer/WebServices/WebСервис1/Ext/Module.bsl` | bsl-language-server-rust | test fixture, added by `4601ffcb` |
 | `crates/bsl-platform/data/platform_data.json` | ООО «1С-Софт» | 1C copyright, see `crates/bsl-platform/data/PROVENANCE.md` — not covered by MIT / Apache-2.0 / LGPL-3.0 |
+
+Test material that came from `bsl-language-server` — the fixture of the
+unknown-preprocessor-symbol diagnostic — is **no longer present**. It was
+replaced on 2026-08-21 with material derived from section 4.8.1.2 of the 1C
+Developer's Guide, so it is not an entry in the table above: the table lists
+third-party content that is still bundled. See
+`docs/legal/bsl-clean-room-slice-b2.md`;
+`crates/ide-diagnostics/tests/retired_material.rs` fails if the retired
+material reappears verbatim in any Git-tracked file of that crate, whatever
+its extension.
+
+### The body of `Module.bsl` was modified here
+
+CC BY 4.0 asks that modifications be indicated. The file's own header records
+the adaptation made before we received it. This repository changed two further
+lines in `f1fc00ff` (2026-05-13), correcting an event-handler statement to the
+syntax section 4.6.11.1 gives. The licence header itself has never been touched:
+`crates/parser/tests/fixture_licence.rs` fails if it is removed or altered.
+
+### Test material embedded in Rust sources
+
+The rows above name files, not directories. An earlier revision of this table
+named the seven directories those files sit in, on the reasoning that each
+directory held only files from `4601ffcb`. That reasoning was wrong and the check
+behind it was narrower than the claim it licensed: it counted only `.bsl` files.
+`designer/Catalogs/` alone holds eighteen files — eight BSL and ten XML — and
+several of them were introduced by other commits. A directory row would have
+taken those out of the workspace licence and attributed them to a project that
+never supplied them, which is an error in the direction of someone else's rights.
+
+The other 15 BSL files under `crates/bsl-metadata/fixtures/` — in
+`cfe_dependencies/`, `extension_common_module/` and seven `designer/`
+subdirectories — came from different commits and are **not** covered by these
+rows.
+
+A second body of test material has no path of its own. Diagnostic fixtures that
+were once `.bsl` files now live inside Rust test sources, and the Rust code
+around them is ours. Listing those Rust files here would say the wrong thing
+twice: it would put our own code outside the workspace licence, and it would
+still not say which part of the file is not ours.
+
+**What this document states about that material is a class, not a map.** The
+commits that introduced those fixtures record, in their own words, that test
+files were copied from `bsl-language-server` and from `bsl-language-server-rust`.
+`07d2b977` deleted 187 such fixtures when the tests moved inline, and the
+material of a large part of them is still present in `crates/ide-diagnostics`.
+
+A per-file map is deliberately not published. Four independent methods of
+building one were tried and each failed in its own direction — attributing a
+fixture to the commit that merely moved it, crediting shared boilerplate as
+surviving material, matching a line that any test could contain, and following a
+rename into a sibling fixture. A textual match also cannot see material a test
+builds programmatically. A map that looks precise and is repeatedly wrong is a
+worse record than a class statement that is right, and the remedy for the
+uncertainty is not a better map but replacement of the material, tracked in
+`https://github.com/itrous/bsl-analyzer/issues/52`.
+
+The evidence for the class statement — the commit messages, the migration commit,
+and the four failure modes in full — is in
+`docs/legal/bsl-clean-room-slice-b4.md`.
 
 See `NOTICE` for upstream acknowledgements.

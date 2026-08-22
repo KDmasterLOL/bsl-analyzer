@@ -9,6 +9,8 @@ pub mod grammar;
 mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
+#[cfg(test)]
+mod token_inventory_tests;
 
 use lexer::tokenize;
 

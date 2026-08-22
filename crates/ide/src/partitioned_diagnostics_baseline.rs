@@ -14,7 +14,7 @@ use crate::diagnostics_baseline::{
     ClassifiedDiagnostic, DiagnosticsBaseline, DiagnosticsBaselineCoverage,
     DiagnosticsBaselineEntry, DiagnosticsBaselineError, DiagnosticsBaselinePartitionSummary,
     DiagnosticsBaselineRange, DiagnosticsBaselineState, DiagnosticsBaselineSummary,
-    MissingDiagnosticSnippet,
+    MissingDiagnosticSnippet, ResolvedPolicy,
 };
 
 pub const DIAGNOSTICS_BASELINE_MANIFEST_SCHEMA_VERSION: u32 = 1;
@@ -57,6 +57,9 @@ pub struct DiagnosticsBaselineLoadStats {
     pub partitions_parsed: usize,
     pub fingerprints_validated: usize,
     pub objects_read: BTreeSet<String>,
+    /// Read calls the loader issued against the object files. Buffered reading keeps
+    /// this near `bytes / 8192`; an unbuffered reader makes it one per byte.
+    pub object_reads: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -299,8 +302,26 @@ pub fn classify_partitioned_diagnostics<T>(
     snapshot: &DiagnosticsBaselineSetSnapshot,
     plan: &DiagnosticsBaselinePartitionPlan,
     baseline_path: String,
+    current: Vec<PartitionedBaselineDiagnosticCandidate<T>>,
+    coverage: &BTreeMap<String, DiagnosticsBaselineCoverage>,
+) -> Result<ClassifiedPartitionedDiagnostics<T>, PartitionedDiagnosticsClassificationError> {
+    classify_partitioned_diagnostics_with(
+        snapshot,
+        plan,
+        baseline_path,
+        current,
+        coverage,
+        ResolvedPolicy::Compute,
+    )
+}
+
+pub fn classify_partitioned_diagnostics_with<T>(
+    snapshot: &DiagnosticsBaselineSetSnapshot,
+    plan: &DiagnosticsBaselinePartitionPlan,
+    baseline_path: String,
     mut current: Vec<PartitionedBaselineDiagnosticCandidate<T>>,
     coverage: &BTreeMap<String, DiagnosticsBaselineCoverage>,
+    resolved_policy: ResolvedPolicy,
 ) -> Result<ClassifiedPartitionedDiagnostics<T>, PartitionedDiagnosticsClassificationError> {
     current.sort_by(|left, right| {
         let left = &left.candidate;
@@ -369,8 +390,11 @@ pub fn classify_partitioned_diagnostics<T>(
     for expected_partition in &plan.partitions {
         let policy =
             plan.policy_for_partition(&expected_partition.id).expect("plan partition has policy");
-        let partition_coverage =
-            coverage.get(&expected_partition.id).unwrap_or(&DiagnosticsBaselineCoverage::Full);
+        // A partition the coverage map does not mention was NOT proven analysed. Assuming
+        // full coverage there would report every unmatched entry of that partition as
+        // resolved — "the debt is gone" about files nobody looked at.
+        let unproven = DiagnosticsBaselineCoverage::Partial { completed_files: BTreeSet::new() };
+        let partition_coverage = coverage.get(&expected_partition.id).unwrap_or(&unproven);
         let complete = matches!(partition_coverage, DiagnosticsBaselineCoverage::Full);
         let (partition_new, partition_known, partition_unsuppressed) =
             counts.get(&expected_partition.id).copied().unwrap_or_default();
@@ -394,24 +418,31 @@ pub fn classify_partitioned_diagnostics<T>(
                         )
                     })?;
                 let matched = matched.remove(&expected_partition.id).unwrap_or_default();
-                for entry in &partition.entries {
-                    let covered = match partition_coverage {
-                        DiagnosticsBaselineCoverage::Full => true,
-                        DiagnosticsBaselineCoverage::Partial { completed_files } => {
-                            completed_files.contains(entry.path.as_ref())
+                if resolved_policy == ResolvedPolicy::Compute {
+                    for entry in &partition.entries {
+                        let covered = match partition_coverage {
+                            DiagnosticsBaselineCoverage::Full => true,
+                            DiagnosticsBaselineCoverage::Partial { completed_files } => {
+                                completed_files.contains(entry.path.as_ref())
+                            }
+                        };
+                        if covered && !matched.contains(&entry.fingerprint) {
+                            partition_resolved += 1;
                         }
-                    };
-                    if covered && !matched.contains(&entry.fingerprint) {
-                        partition_resolved += 1;
                     }
                 }
                 resolved.len += partition_resolved;
-                resolved.partitions.push(ResolvedPartition {
-                    id: expected_partition.id.clone(),
-                    partition: partition.clone(),
-                    matched,
-                    coverage: partition_coverage.clone(),
-                });
+                // Under `Skip` nothing was counted, so nothing may be handed out either:
+                // `ResolvedPartitionedDiagnostics` promises that `len` equals what its
+                // iterator yields, and it is an `ExactSizeIterator`.
+                if resolved_policy == ResolvedPolicy::Compute {
+                    resolved.partitions.push(ResolvedPartition {
+                        id: expected_partition.id.clone(),
+                        partition: partition.clone(),
+                        matched,
+                        coverage: partition_coverage.clone(),
+                    });
+                }
                 (
                     partition.identity.clone(),
                     Some(manifest_entry.file.clone()),
@@ -453,7 +484,10 @@ pub fn classify_partitioned_diagnostics<T>(
         unsuppressed: Some(unsuppressed.len()),
         new: Some(new.len()),
         known: Some(known.len()),
-        resolved: Some(resolved.len()),
+        resolved: match resolved_policy {
+            ResolvedPolicy::Compute => Some(resolved.len()),
+            ResolvedPolicy::Skip => None,
+        },
         path: Some(baseline_path),
         schema_version: Some(DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION),
         manifest_schema_version: Some(DIAGNOSTICS_BASELINE_MANIFEST_SCHEMA_VERSION),
@@ -505,7 +539,9 @@ where
     R: Read,
     F: FnMut(&str, &DiagnosticsBaselineEntry) -> Result<(), PartitionedDiagnosticsBaselineError>,
 {
-    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    // Buffered here rather than at the call site: `from_reader` reads byte by byte,
+    // and a caller that forgets the wrapper gets no error, only a hundredfold cost.
+    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(reader));
     let parsed = LegacyMigrationSeed { plan, write_entry: &mut write_entry }
         .deserialize(&mut deserializer)?;
     deserializer.end()?;
@@ -650,6 +686,7 @@ where
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = HashSet::new();
+        let mut last_by_partition: HashMap<String, DiagnosticsBaselineEntry> = HashMap::new();
         let mut migrated = 0;
         let mut skipped_unsuppressed = 0;
         while let Some(entry) = sequence.next_element::<DiagnosticsBaselineEntry>()? {
@@ -678,6 +715,20 @@ where
                         entry.fingerprint,
                     )));
                 }
+                // Streaming cannot sort — that is the point of streaming — so the input
+                // must already be canonical. Otherwise the object written here differs
+                // byte-wise from what `diagnostics_partition_json` regenerates, and
+                // `create --partition` can never repair the migrated set.
+                if let Some(previous) = last_by_partition.get(owner) {
+                    if entry_sort(previous, &entry) == std::cmp::Ordering::Greater {
+                        return Err(A::Error::custom(
+                            PartitionedDiagnosticsBaselineError::UnsortedLegacyBaseline(
+                                entry.path.clone(),
+                            ),
+                        ));
+                    }
+                }
+                last_by_partition.insert(owner.to_owned(), entry.clone());
                 (self.write_entry)(owner, &entry).map_err(A::Error::custom)?;
                 migrated += 1;
             } else {
@@ -689,15 +740,20 @@ where
 }
 
 #[derive(Default)]
-struct StringPool(HashMap<String, Arc<str>>);
+/// Interner holding ONE copy of each string.
+///
+/// A map keyed by `String` would store the bytes twice — once in the key, once in the
+/// shared `Arc<str>` — and on a set of 1.6M distinct paths that second copy is tens of
+/// megabytes that nothing ever reads, counted by the resident-memory gate.
+struct StringPool(HashSet<Arc<str>>);
 
 impl StringPool {
     fn intern(&mut self, value: String) -> Arc<str> {
-        if let Some(existing) = self.0.get(&value) {
+        if let Some(existing) = self.0.get(value.as_str()) {
             return existing.clone();
         }
-        let shared: Arc<str> = Arc::from(value.as_str());
-        self.0.insert(value, shared.clone());
+        let shared: Arc<str> = Arc::from(value);
+        self.0.insert(shared.clone());
         shared
     }
 }
@@ -817,13 +873,18 @@ fn load_diagnostics_baseline_set_once(
                 Err(error) => return Err(error.into()),
             };
             stats.objects_read.insert(manifest_entry.file.clone());
-            let mut reader = HashingReader::new(file);
+            // The buffer belongs BETWEEN serde and the file: `from_reader` requests one
+            // byte at a time, so an unbuffered file costs a syscall — and a one-byte
+            // hasher update — per byte of the object.
+            let mut reader = std::io::BufReader::new(HashingReader::new(file));
             let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
             let parsed = PartitionSeed { pool: &mut pool }.deserialize(&mut deserializer)?;
             stats.partitions_parsed += 1;
             deserializer.end()?;
             drop(deserializer);
-            let actual_hash = reader.finalize();
+            let hashing = reader.into_inner();
+            stats.object_reads += hashing.reads();
+            let actual_hash = hashing.finalize();
             if parsed.identity != expected_partition.identity {
                 return Err(PartitionedDiagnosticsBaselineError::PartitionIdentityMismatch(
                     manifest_entry.partition_id.clone(),
@@ -908,21 +969,30 @@ fn read_file(
 struct HashingReader<R> {
     inner: R,
     hasher: blake3::Hasher,
+    /// Reads performed on the file. `serde_json` asks its reader one byte at a
+    /// time, so this counts a syscall per byte unless a buffer sits in between —
+    /// hence a gate over the ratio rather than trust in the call order.
+    reads: usize,
 }
 
 impl<R> HashingReader<R> {
     fn new(inner: R) -> Self {
-        Self { inner, hasher: blake3::Hasher::new() }
+        Self { inner, hasher: blake3::Hasher::new(), reads: 0 }
     }
 
     fn finalize(&self) -> [u8; 32] {
         *self.hasher.clone().finalize().as_bytes()
+    }
+
+    fn reads(&self) -> usize {
+        self.reads
     }
 }
 
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
+        self.reads += 1;
         self.hasher.update(&buffer[..read]);
         Ok(read)
     }
@@ -1072,7 +1142,14 @@ pub fn diagnostics_partition_json(
         partition: identity,
         diagnostics,
     };
-    pretty_json(&file)
+    // Compact, and byte-identical to what `PartitionFileWriter` streams: a set may be
+    // published by either writer, and `repair_object` compares regenerated bytes
+    // against the manifest hash. A pretty object here would make every migrated set
+    // unrepairable. The manifest beside it stays pretty — it is small and read by
+    // people, while these objects are content-addressed and read by the tool.
+    let mut bytes = serde_json::to_vec(&file)?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 pub fn diagnostics_manifest(
@@ -1263,9 +1340,7 @@ fn validate_source_path(
     }
 }
 
-fn protected(code: &str) -> bool {
-    matches!(code, "UnknownSuppressionCode" | "SuppressionWithoutCode")
-}
+use crate::diagnostics_baseline::is_protected_diagnostic as protected;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PartitionedDiagnosticsBaselineError {
@@ -1303,6 +1378,11 @@ pub enum PartitionedDiagnosticsBaselineError {
     Duplicate(String),
     #[error("diagnostic fingerprint does not match fields: {0}")]
     FingerprintMismatch(String),
+    #[error(
+        "legacy diagnostics baseline is not in canonical order at {0}; \
+         run `diagnostics baseline update` on it before migrating"
+    )]
+    UnsortedLegacyBaseline(String),
     #[error("protected diagnostic cannot enter a baseline: {0}")]
     ProtectedDiagnostic(String),
     #[error("diagnostic path has no unique owner: {0}")]
@@ -1882,6 +1962,155 @@ mod tests {
         selective_loader_fails_closed_for_every_enabled_object_error();
         selective_loader_validates_enabled_identity_instead_of_global_scope();
         selective_loader_defers_dormant_content_validation_until_reenable();
+    }
+
+    /// A migrated object must be byte-identical to what `diagnostics_partition_json`
+    /// regenerates, or `create --partition` can never repair the set. Streaming cannot
+    /// sort, so an out-of-order legacy file is refused rather than silently written in
+    /// an order no regeneration reproduces.
+    #[test]
+    fn migration_refuses_a_legacy_baseline_that_is_not_canonical() {
+        let plan = selective_plan(&["main"]);
+        let entry = |path: &str| DiagnosticsBaselineEntry {
+            fingerprint: diagnostic_fingerprint(path, "LineLength", "Message(1);", 0),
+            path: path.to_owned(),
+            code: "LineLength".to_owned(),
+            snippet: "Message(1);".to_owned(),
+            occurrence: 0,
+            message: "m".to_owned(),
+            severity: "Warning".to_owned(),
+            range: DiagnosticsBaselineRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 1,
+            },
+        };
+        let legacy = |entries: Vec<DiagnosticsBaselineEntry>| {
+            serde_json::to_vec(&DiagnosticsBaseline {
+                schema_version: crate::diagnostics_baseline::DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: crate::diagnostics_baseline::DiagnosticsBaselineScope {
+                    source_root: "src/cf".to_owned(),
+                    extensions: vec![crate::diagnostics_baseline::DiagnosticsBaselineExtension {
+                        name: "Ext".to_owned(),
+                        path: "src/cfe/Ext".to_owned(),
+                        depends_on: vec![],
+                    }],
+                },
+                diagnostics: entries,
+            })
+            .unwrap()
+        };
+
+        let ordered = legacy(vec![entry("src/cf/a.bsl"), entry("src/cf/b.bsl")]);
+        let mut written = 0;
+        migrate_v1_reader(&ordered[..], &plan, |_, _| {
+            written += 1;
+            Ok(())
+        })
+        .expect("a canonical file migrates");
+        assert_eq!(written, 2, "positive control: the fixture migrates when ordered");
+
+        let reversed = legacy(vec![entry("src/cf/b.bsl"), entry("src/cf/a.bsl")]);
+        let error = migrate_v1_reader(&reversed[..], &plan, |_, _| Ok(())).unwrap_err();
+        assert!(
+            error.to_string().contains("canonical order"),
+            "an out-of-order file must be named as such: {error}"
+        );
+    }
+
+    /// `serde_json` asks its reader for one byte at a time, so an object read without a
+    /// buffer costs a syscall per byte — the very path the partitioned mode exists for.
+    /// The ratio is the gate: the file is far larger than one buffer, so a byte-at-a-time
+    /// loader could not possibly pass it.
+    #[test]
+    fn partition_objects_are_read_through_a_buffer() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main", "extension:Ext"]);
+        write_set(&directory, &plan);
+        let (_snapshot, stats) =
+            load_diagnostics_baseline_set_reusing(&directory, &plan, None, &BTreeSet::new())
+                .unwrap();
+
+        let bytes: usize = stats
+            .objects_read
+            .iter()
+            .map(|file| {
+                let mut object = directory.open_file(file).unwrap();
+                let mut buffer = Vec::new();
+                std::io::Read::read_to_end(&mut object, &mut buffer).unwrap();
+                buffer.len()
+            })
+            .sum();
+        assert!(bytes > 0, "the fixture must publish object bytes to read");
+        assert!(
+            stats.object_reads * 64 < bytes.max(64),
+            "objects were read {} times for {bytes} bytes — that is byte-at-a-time reading",
+            stats.object_reads
+        );
+    }
+
+    /// Skipping `resolved` must change nothing about which diagnostics are active:
+    /// the fixture is one that DOES have a resolved entry under `Compute`, so a
+    /// silent behaviour change would show up as a differing active set here.
+    #[test]
+    fn skipping_resolved_keeps_the_active_classification_intact() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main"]);
+        write_set(&directory, &plan);
+        let snapshot = load_diagnostics_baseline_set(&directory, &plan).unwrap();
+        let coverage = BTreeMap::from([
+            ("main".to_owned(), DiagnosticsBaselineCoverage::Full),
+            ("extension:Ext".to_owned(), DiagnosticsBaselineCoverage::Full),
+        ]);
+        let current = || {
+            vec![candidate(
+                "extension:Ext",
+                "src/cfe/Ext/CommonModules/B/Ext/Module.bsl",
+                "LineLength",
+            )]
+        };
+
+        let computed = classify_partitioned_diagnostics_with(
+            &snapshot,
+            &plan,
+            "baselines".to_owned(),
+            current(),
+            &coverage,
+            ResolvedPolicy::Compute,
+        )
+        .unwrap();
+        assert!(
+            computed.summary.resolved.is_some_and(|resolved| resolved > 0),
+            "positive control: this fixture must have something to resolve"
+        );
+
+        let skipped = classify_partitioned_diagnostics_with(
+            &snapshot,
+            &plan,
+            "baselines".to_owned(),
+            current(),
+            &coverage,
+            ResolvedPolicy::Skip,
+        )
+        .unwrap();
+        assert_eq!(skipped.new.len(), computed.new.len());
+        assert_eq!(skipped.known.len(), computed.known.len());
+        assert_eq!(skipped.unsuppressed.len(), computed.unsuppressed.len());
+        assert_eq!(skipped.summary.new, computed.summary.new);
+        assert_eq!(skipped.summary.known, computed.summary.known);
+        assert_eq!(
+            skipped.summary.resolved, None,
+            "a skipped count must be absent, not a zero that reads as \"nothing was resolved\""
+        );
+        assert_eq!(computed.resolved.len(), computed.resolved.into_iter().count());
+        assert_eq!(
+            skipped.resolved.len(),
+            skipped.resolved.into_iter().count(),
+            "len and the iterator must agree — the type promises ExactSizeIterator"
+        );
     }
 
     fn classify_selective(

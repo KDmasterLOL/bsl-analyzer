@@ -1,4 +1,11 @@
-include!("diagnostics_baseline_lsp.rs");
+mod common;
+
+use common::*;
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+
+use serde_json::Value;
 
 fn partitioned_project() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

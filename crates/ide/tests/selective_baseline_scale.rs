@@ -129,13 +129,17 @@ fn write_object(
 }
 
 fn child_peak_rss(child: &mut Child) -> (std::process::ExitStatus, u64) {
+    // VmHWM, not sampled VmRSS: the kernel keeps the true high-water mark, while polling
+    // misses any peak shorter than the sampling interval — exactly the regression these
+    // gates exist to catch (a partition buffered whole for a few milliseconds). Read
+    // just before reaping, since /proc disappears with the process.
     let mut peak = 0;
     loop {
         if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", child.id())) {
-            if let Some(rss) = status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()
+            if let Some(hwm) = status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<u64>().ok()
             }) {
-                peak = peak.max(rss * 1024);
+                peak = peak.max(hwm * 1024);
             }
         }
         if let Some(status) = child.try_wait().unwrap() {
@@ -211,6 +215,12 @@ fn child_mode(mode: &str, root: &std::path::Path) {
             &BTreeSet::new(),
         )
         .unwrap();
+        // Measured while the resident snapshot is alive, so `black_box` below still sees
+        // it; the independent load happens AFTER it is released, because that load parses
+        // `main` in full before reaching the corrupted extension object and would
+        // otherwise put two copies of the enabled partition in a child budgeted for one.
+        std::hint::black_box(&snapshot);
+        drop(snapshot);
         assert!(load_diagnostics_baseline_set_reusing(
             &directory,
             &plan(DiagnosticsBaselineSelection::All),
@@ -219,7 +229,6 @@ fn child_mode(mode: &str, root: &std::path::Path) {
         )
         .is_err());
     }
-    std::hint::black_box(snapshot);
     std::thread::sleep(Duration::from_millis(150));
 }
 
