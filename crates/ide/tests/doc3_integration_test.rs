@@ -4,7 +4,11 @@ use std::path::PathBuf;
 #[test]
 #[ignore]
 fn test_load_doc3_metadata() {
-    let doc3_root = PathBuf::from(env!("HOME")).join("src/doc3");
+    let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) else {
+        println!("home directory not found, skipping test");
+        return;
+    };
+    let doc3_root = PathBuf::from(home).join("src/doc3");
 
     if !doc3_root.exists() {
         println!("doc3 project not found at {:?}, skipping test", doc3_root);

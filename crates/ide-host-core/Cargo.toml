@@ -18,6 +18,9 @@ vfs.workspace = true
 rayon.workspace = true
 salsa.workspace = true
 tracing.workspace = true
+project-model.workspace = true
+blake3 = "1.8"
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

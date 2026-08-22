@@ -11,16 +11,22 @@
 //! `schema` action advertises the contract. Both are computed from compile-time
 //! metadata, so no resident analysis database is required.
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::str::FromStr;
 
+use ide::diagnostics_baseline::{
+    classify_diagnostics, BaselineDiagnosticCandidate, DiagnosticsBaselineCoverage,
+    DiagnosticsBaselineRange, DiagnosticsBaselineSummary,
+};
 use ide::{
     catalog_entry, diagnostic_catalog, DiagnosticCode, DocumentSymbol, Locale, SeverityBucket,
     SymbolKind, TextRange,
 };
 use rmcp::model::CallToolResult;
+use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde_json::{json, Value};
 
 use crate::diagnostics_state::{DiagnosticsResident, Freshness, StatusReport, WorkspaceSweep};
@@ -33,6 +39,7 @@ use crate::tools::response::{structured, trim_items_to_budget};
 /// Server-side cap on returned findings, honouring Anthropic's tool-response budget.
 /// `counts` still reports the full severity histogram, so a capped response is honest.
 pub(crate) const DEFAULT_MAX_FINDINGS: usize = 200;
+pub(crate) const MIN_OUTPUT_TOKENS: usize = 256;
 
 /// Default cap on files swept by the opt-in `workspace` action. Bounds the cost of a
 /// whole-config pass; the agent can raise it up to [`MAX_SWEEP_FILES_CEILING`].
@@ -43,6 +50,145 @@ pub(crate) const DEFAULT_MAX_SWEEP_FILES: usize = 1000;
 /// unbounded whole-config pass that stalls the server for minutes. A larger config is
 /// reported as `truncated` with the true `files_total`.
 pub(crate) const MAX_SWEEP_FILES_CEILING: usize = 5000;
+
+pub struct DiagnosticsResponseSchema;
+
+impl JsonSchema for DiagnosticsResponseSchema {
+    fn schema_name() -> Cow<'static, str> {
+        "DiagnosticsResponse".into()
+    }
+
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "type": "object",
+            "oneOf": [
+                generator.subschema_for::<DiagnosticsBaselineSuccessEnvelope>(),
+                generator.subschema_for::<DiagnosticsBaselineErrorEnvelope>(),
+                generator.subschema_for::<DiagnosticsActionResponse>(),
+                generator.subschema_for::<DiagnosticsSchemaResponse>(),
+                generator.subschema_for::<DiagnosticsStateResponse>(),
+                generator.subschema_for::<DiagnosticsLoadingResponse>(),
+            ]
+        })
+    }
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccessEnvelope {
+    pub revision: u64,
+    pub stale: bool,
+    pub reload: String,
+    pub result: DiagnosticsBaselineSuccessResult,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineErrorEnvelope {
+    pub revision: u64,
+    pub stale: bool,
+    pub reload: String,
+    pub result: DiagnosticsBaselineErrorResult,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccessResult {
+    pub baseline: DiagnosticsBaselineSuccess,
+    #[schemars(flatten)]
+    pub additional: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineErrorResult {
+    pub baseline: DiagnosticsBaselineError,
+    #[schemars(flatten)]
+    pub additional: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineSuccess {
+    pub state: DiagnosticsBaselineSuccessState,
+    pub complete: bool,
+    pub selection: Option<String>,
+    pub partitions_enabled: Option<usize>,
+    pub partitions_unsuppressed: Option<usize>,
+    pub unsuppressed: Option<usize>,
+    pub new: Option<usize>,
+    pub known: Option<usize>,
+    pub resolved: Option<usize>,
+    pub path: Option<String>,
+    pub schema_version: Option<u32>,
+    pub manifest_schema_version: Option<u32>,
+    pub partitions_total: usize,
+    pub partitions_returned: usize,
+    pub partitions_truncated: bool,
+    pub partitions: Vec<serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[schemars(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum DiagnosticsBaselineSuccessState {
+    Disabled,
+    Full,
+    Partial,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsBaselineError {
+    pub state: DiagnosticsBaselineErrorState,
+    pub complete: bool,
+    pub selection: Option<String>,
+    pub partitions_enabled: Option<usize>,
+    pub partitions_unsuppressed: Option<usize>,
+    pub unsuppressed: Option<usize>,
+    pub error_code: String,
+    pub detail: String,
+    pub path: Option<String>,
+    pub schema_version: Option<u32>,
+    pub manifest_schema_version: Option<u32>,
+    pub partitions_total: usize,
+    pub partitions_returned: usize,
+    pub partitions_truncated: bool,
+    pub partitions: Vec<serde_json::Value>,
+    pub errors_total: usize,
+    pub errors: Vec<serde_json::Value>,
+}
+
+#[derive(JsonSchema)]
+#[schemars(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum DiagnosticsBaselineErrorState {
+    Error,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsActionResponse {
+    pub action: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsSchemaResponse {
+    pub schema_version: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsStateResponse {
+    pub state: String,
+}
+
+#[derive(JsonSchema)]
+#[allow(dead_code)]
+pub struct DiagnosticsLoadingResponse {
+    pub status: String,
+}
 
 /// Filters applied to a file's diagnostics before they become findings.
 pub(crate) struct FileFilters {
@@ -87,10 +233,8 @@ pub fn catalog(
     // `diagnostic_catalog` / the `codes` walk both emit a deterministic, stable order, so a
     // budget-trimmed catalog drops a stable tail rather than a random subset.
     let total = entries.len();
-    let mut entries: Vec<Value> =
+    let entries: Vec<Value> =
         entries.iter().map(|e| serde_json::to_value(e).unwrap_or(Value::Null)).collect();
-    let exhausted =
-        max_output_tokens.map(|budget| trim_items_to_budget(&mut entries, budget)).unwrap_or(false);
 
     let mut body = json!({
         "action": "catalog",
@@ -98,15 +242,42 @@ pub fn catalog(
         "count": entries.len(),
         "entries": entries,
     });
-    if exhausted {
-        body["total"] = json!(total);
-        body["budget_exhausted"] = json!(true);
-        body["budget_hint"] = json!(
-            "catalog truncated to fit max_output_tokens; narrow with `codes` or raise the budget"
-        );
-    }
     if !unknown.is_empty() {
         body["unknown_codes"] = json!(unknown);
+    }
+    if let Some(limit) = max_output_tokens.map(|tokens| tokens.saturating_mul(4)) {
+        if serde_json::to_vec(&body).is_ok_and(|bytes| bytes.len() > limit) {
+            let all_entries =
+                body["entries"].as_array_mut().map(std::mem::take).unwrap_or_default();
+            let all_unknown =
+                body["unknown_codes"].as_array_mut().map(std::mem::take).unwrap_or_default();
+            body["total"] = json!(total);
+            body["budget_exhausted"] = json!(true);
+            body["budget_hint"] = json!(
+                "catalog truncated to fit max_output_tokens; narrow with `codes` or raise the budget"
+            );
+            let mut used = serde_json::to_vec(&body).map_or(limit, |bytes| bytes.len());
+            let mut keep = |items: Vec<Value>| {
+                let mut kept = Vec::new();
+                for item in items {
+                    let extra = serde_json::to_vec(&item).map_or(0, |bytes| bytes.len())
+                        + usize::from(!kept.is_empty());
+                    if used.saturating_add(extra) > limit {
+                        break;
+                    }
+                    used += extra;
+                    kept.push(item);
+                }
+                kept
+            };
+            let entries = keep(all_entries);
+            let unknown = keep(all_unknown);
+            body["count"] = json!(entries.len());
+            body["entries"] = json!(entries);
+            if body.get("unknown_codes").is_some() {
+                body["unknown_codes"] = json!(unknown);
+            }
+        }
     }
     structured(body)
 }
@@ -140,8 +311,22 @@ const ANSWERED_BY: loc::FreshnessSource = loc::FreshnessSource::Resident;
 pub fn envelope(
     freshness: Freshness,
     completeness: loc::Completeness,
-    result: Value,
+    mut result: Value,
 ) -> CallToolResult {
+    if (freshness.stale || freshness.reload != "none")
+        && matches!(result["baseline"]["state"].as_str(), Some("full" | "partial"))
+    {
+        result["baseline"]["state"] = json!("partial");
+        result["baseline"]["complete"] = json!(false);
+        result["baseline"]["resolved"] = json!(0);
+        if let Some(partitions) = result["baseline"]["partitions"].as_array_mut() {
+            for partition in partitions {
+                partition["state"] = json!("partial");
+                partition["complete"] = json!(false);
+                partition["resolved"] = json!(0);
+            }
+        }
+    }
     structured(json!({
         "revision": freshness.revision,
         "stale": freshness.stale,
@@ -202,7 +387,10 @@ pub(crate) fn file_findings(
         Err(error) => {
             let detail = error.to_string();
             let error = FileError::Rooted(error);
-            return (error.to_value(&detail, requested_spelling), error.completeness());
+            let completeness = error.completeness();
+            let mut body = error.to_value(&detail, requested_spelling);
+            body["baseline"] = bounded_baseline_value(&unclassified_baseline(resident), None);
+            return (budgeted_diagnostics_response(body, filters.max_output_tokens), completeness);
         }
     };
     let path = path.as_path();
@@ -212,18 +400,24 @@ pub(crate) fn file_findings(
         // first one ("no findings"). The two are kept apart so an agent can tell
         // "wrong path" from "this module is unanalysed".
         if resident.is_unread(path) {
-            return (
-                FileError::Unreadable.to_value(
-                    "workspace .bsl file exists but its bytes could not be read; \
+            let error = FileError::Unreadable;
+            let mut body = error.to_value(
+                "workspace .bsl file exists but its bytes could not be read; \
                      it is held out of service and re-read every drift window",
-                    path,
-                ),
-                FileError::Unreadable.completeness(),
+                path,
+            );
+            body["baseline"] = bounded_baseline_value(&unclassified_baseline(resident), None);
+            return (
+                budgeted_diagnostics_response(body, filters.max_output_tokens),
+                error.completeness(),
             );
         }
+        let error = FileError::NotInWorkspace;
+        let mut body = error.to_value("path is not a resident workspace .bsl file", path);
+        body["baseline"] = bounded_baseline_value(&unclassified_baseline(resident), None);
         return (
-            FileError::NotInWorkspace.to_value("path is not a resident workspace .bsl file", path),
-            FileError::NotInWorkspace.completeness(),
+            budgeted_diagnostics_response(body, filters.max_output_tokens),
+            error.completeness(),
         );
     };
     let analysis = resident.analysis();
@@ -231,6 +425,33 @@ pub(crate) fn file_findings(
     // Analyse against the project's effective config (the single source of truth shared
     // with LSP and CLI), so disabled rules and tuned thresholds are honoured.
     let diagnostics = analysis.diagnostics(file_id, resident.config());
+    let (diagnostics, baseline) =
+        match classify_file_baseline(resident, path, &file_text, diagnostics) {
+            Ok(result) => result,
+            Err(baseline) => {
+                return (
+                    budgeted_diagnostics_response(
+                        json!({
+                            "result_id": format!(
+                                "{}@{}",
+                                result_id(path, generation, &file_text),
+                                resident.diagnostics_baseline().epoch(),
+                            ),
+                            "kind": "full",
+                            "baseline": bounded_baseline_value(
+                                &baseline,
+                                preferred_partition(resident, path),
+                            ),
+                        }),
+                        filters.max_output_tokens,
+                    ),
+                    loc::Completeness::partial(
+                        loc::ReasonCode::ModalityDegraded,
+                        "diagnostics baseline could not classify this file",
+                    ),
+                );
+            }
+        };
 
     // Author filter before any histogram or shaping, so `counts` reflects what
     // the response can actually show. Blame failures keep everything (fail-open).
@@ -323,12 +544,17 @@ pub(crate) fn file_findings(
     if let Some(filter) = resident.author_filter() {
         rid = format!("{rid}@{}", filter.short_identity());
     }
+    rid = format!("{rid}@{}", resident.diagnostics_baseline().epoch());
     let mut body = json!({
         "result_id": rid,
         "kind": "full",
         "counts": counts.to_value(),
         "truncated": count_capped || budget_exhausted,
         "findings": findings,
+        "baseline": bounded_baseline_value(
+            &baseline,
+            preferred_partition(resident, path),
+        ),
     });
     // An empty report for a file outside the vendor-diff scope must not read as
     // "no findings": say explicitly that the file was not analyzed.
@@ -352,6 +578,7 @@ pub(crate) fn file_findings(
             "findings truncated to fit max_output_tokens; narrow with `codes`/`min_severity`/range or raise the budget"
         });
     }
+    fit_diagnostics_response_budget(&mut body, filters.max_output_tokens, "findings");
 
     let completeness = loc::Completeness::complete()
         .when(
@@ -379,6 +606,270 @@ pub(crate) fn file_findings(
     // while any file anywhere is unreadable would teach a consumer to ignore the field.
 
     (body, completeness)
+}
+
+fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineSummary {
+    use ide::diagnostics_baseline::DiagnosticsBaselineState;
+    use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
+
+    match resident.diagnostics_baseline() {
+        DiagnosticsBaselineSnapshot::Disabled => DiagnosticsBaselineSummary::disabled(),
+        snapshot @ DiagnosticsBaselineSnapshot::Error { .. } => {
+            snapshot.error_summary().expect("error snapshot has a summary")
+        }
+        DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
+            DiagnosticsBaselineSummary {
+                state: DiagnosticsBaselineState::Partial,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
+                new: Some(0),
+                known: Some(0),
+                resolved: Some(0),
+                path: Some(project_path.clone()),
+                schema_version: Some(baseline.schema_version),
+                manifest_schema_version: None,
+                complete: false,
+                error_code: None,
+                detail: None,
+                partitions: vec![],
+                errors: vec![],
+            }
+        }
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
+            DiagnosticsBaselineSummary {
+                state: DiagnosticsBaselineState::Partial,
+                selection: Some(plan.selection),
+                partitions_enabled: Some(plan.enabled_partition_ids.len()),
+                partitions_unsuppressed: Some(
+                    plan.partitions.len() - plan.enabled_partition_ids.len(),
+                ),
+                unsuppressed: Some(0),
+                new: Some(0),
+                known: Some(0),
+                resolved: Some(0),
+                path: Some(project_path.clone()),
+                schema_version: Some(
+                    ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+                ),
+                manifest_schema_version: Some(baseline.manifest.schema_version),
+                complete: false,
+                error_code: None,
+                detail: None,
+                partitions: plan
+                    .partitions
+                    .iter()
+                    .map(|expected| {
+                        let policy = plan.policy_for_partition(&expected.id).unwrap();
+                        let loaded = baseline.partitions.get(&expected.id);
+                        ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary {
+                            id: expected.id.clone(),
+                            identity: expected.identity.clone(),
+                            policy,
+                            path: loaded.map(|partition| partition.file.to_string()),
+                            schema_version: loaded.map(|_| ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION),
+                            state: DiagnosticsBaselineState::Partial,
+                            new: 0,
+                            known: 0,
+                            resolved: 0,
+                            unsuppressed: 0,
+                            complete: false,
+                        }
+                    })
+                    .collect(),
+                errors: vec![],
+            }
+        }
+    }
+}
+
+fn preferred_partition<'a>(resident: &'a DiagnosticsResident, path: &Path) -> Option<&'a str> {
+    let (_, plan, _) = resident.diagnostics_baseline().ready_set()?;
+    let relative = path
+        .strip_prefix(resident.workspace_root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    plan.owner_for_project_path(&relative)
+}
+
+fn bounded_baseline_value(summary: &DiagnosticsBaselineSummary, preferred: Option<&str>) -> Value {
+    let mut partitions = summary.partitions.clone();
+    partitions.sort_by(|left, right| left.id.cmp(&right.id));
+    if let Some(preferred) = preferred {
+        if let Some(index) = partitions.iter().position(|partition| partition.id == preferred) {
+            let preferred = partitions.remove(index);
+            partitions.insert(0, preferred);
+        }
+    }
+    let partitions_total = partitions.len();
+    let values = serde_json::to_value(partitions).expect("partition summaries serialize");
+    let mut value = serde_json::to_value(summary).expect("baseline summary serializes");
+    value["partitions"] = values;
+    value["partitions_total"] = json!(partitions_total);
+    value["partitions_returned"] = json!(partitions_total);
+    value["partitions_truncated"] = json!(false);
+    if summary.state == ide::diagnostics_baseline::DiagnosticsBaselineState::Error {
+        value["errors_total"] = json!(summary.errors.len().max(1));
+    }
+    value
+}
+
+fn classify_file_baseline(
+    resident: &DiagnosticsResident,
+    path: &Path,
+    file_text: &str,
+    diagnostics: Vec<ide::Diagnostic>,
+) -> Result<(Vec<ide::Diagnostic>, DiagnosticsBaselineSummary), Box<DiagnosticsBaselineSummary>> {
+    use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
+    let relative = path
+        .strip_prefix(resident.workspace_root())
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let source_lines: Vec<_> = file_text.lines().collect();
+    let candidates: Vec<_> = diagnostics
+        .into_iter()
+        .enumerate()
+        .map(|(index, diagnostic)| {
+            let output = diagnostic.to_output(file_text);
+            BaselineDiagnosticCandidate {
+                diagnostic: (index, diagnostic),
+                path: relative.clone(),
+                code: output.code,
+                snippet: Some(ide::diagnostics_baseline::diagnostic_line_snippet(
+                    &source_lines,
+                    output.start_line,
+                )),
+                message: output.message,
+                severity: output.severity,
+                range: DiagnosticsBaselineRange {
+                    start_line: output.start_line as u32,
+                    start_column: output.start_column as u32,
+                    end_line: output.end_line as u32,
+                    end_column: output.end_column as u32,
+                },
+            }
+        })
+        .collect();
+    let snapshot = resident.diagnostics_baseline();
+    if matches!(snapshot, DiagnosticsBaselineSnapshot::Disabled) {
+        return Ok((
+            candidates.into_iter().map(|item| item.diagnostic.1).collect(),
+            DiagnosticsBaselineSummary::disabled(),
+        ));
+    }
+    if matches!(snapshot, DiagnosticsBaselineSnapshot::Error { .. }) {
+        return Err(Box::new(snapshot.error_summary().expect("error snapshot has a summary")));
+    }
+    let completed_files = if resident.config().scope.is_none() {
+        std::collections::BTreeSet::from([relative.clone()])
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    match snapshot {
+        DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
+            let classified = classify_diagnostics(
+                baseline,
+                project_path.clone(),
+                candidates,
+                &DiagnosticsBaselineCoverage::Partial { completed_files },
+            )
+            .map_err(|error| {
+                Box::new(DiagnosticsBaselineSummary {
+                    state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+                    selection: None,
+                    partitions_enabled: None,
+                    partitions_unsuppressed: None,
+                    unsuppressed: None,
+                    new: None,
+                    known: None,
+                    resolved: None,
+                    path: Some(project_path.clone()),
+                    schema_version: Some(baseline.schema_version),
+                    manifest_schema_version: None,
+                    complete: false,
+                    error_code: Some("missing_snippet".to_owned()),
+                    detail: Some(error.to_string()),
+                    partitions: vec![],
+                    errors: vec![],
+                })
+            })?;
+            Ok((
+                classified.new.into_iter().map(|item| item.diagnostic.1).collect(),
+                classified.summary,
+            ))
+        }
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
+            let owner = plan.owner_for_project_path(&relative);
+            let Some(owner) = owner else {
+                let mut summary = unclassified_baseline(resident);
+                summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Error;
+                summary.complete = false;
+                summary.error_code = Some("unowned_diagnostic".to_owned());
+                return Err(Box::new(summary));
+            };
+            let wrapped = candidates
+                .into_iter()
+                .map(|candidate| {
+                    ide::partitioned_diagnostics_baseline::PartitionedBaselineDiagnosticCandidate {
+                        partition_id: owner.to_owned(),
+                        candidate,
+                    }
+                })
+                .collect();
+            let coverage = plan
+                .partitions
+                .iter()
+                .map(|partition| {
+                    let files = if partition.id == owner {
+                        completed_files.clone()
+                    } else {
+                        std::collections::BTreeSet::new()
+                    };
+                    (
+                        partition.id.clone(),
+                        DiagnosticsBaselineCoverage::Partial { completed_files: files },
+                    )
+                })
+                .collect();
+            let classified =
+                ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
+                    baseline,
+                    plan,
+                    project_path.clone(),
+                    wrapped,
+                    &coverage,
+                )
+                .map_err(|error| {
+                    let mut summary = unclassified_baseline(resident);
+                    summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Error;
+                    summary.complete = false;
+                    summary.error_code = Some(
+                        match &error {
+                            ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsClassificationError::MissingSnippet(_) => "missing_snippet",
+                            ide::partitioned_diagnostics_baseline::PartitionedDiagnosticsClassificationError::MissingEnabledPartition(_) => "invalid_set",
+                        }
+                        .to_owned(),
+                    );
+                    summary.detail = Some(error.to_string());
+                    Box::new(summary)
+                })?;
+            Ok((
+                classified
+                    .new
+                    .into_iter()
+                    .chain(classified.unsuppressed)
+                    .map(|item| item.diagnostic.1)
+                    .collect(),
+                classified.summary,
+            ))
+        }
+        DiagnosticsBaselineSnapshot::Disabled | DiagnosticsBaselineSnapshot::Error { .. } => {
+            unreachable!()
+        }
+    }
 }
 
 /// The `workspace` action's result body: whole-config diagnostics aggregated per code
@@ -415,13 +906,18 @@ pub(crate) fn workspace_findings(
         Some(identity) => format!("workspace@{generation}@{identity}"),
         None => format!("workspace@{generation}"),
     };
+    let rid = format!("{rid}@{}", sweep.baseline_epoch);
     let mut body = json!({
         "result_id": rid,
         "files_swept": sweep.files_swept,
         "files_total": sweep.files_total,
         "truncated": sweep.truncated || budget_exhausted,
         "aggregates": aggregates,
+        "baseline": bounded_baseline_value(&sweep.baseline, None),
     });
+    if sweep.baseline.state == ide::diagnostics_baseline::DiagnosticsBaselineState::Error {
+        body.as_object_mut().expect("workspace body is an object").remove("aggregates");
+    }
     if sweep.files_unread > 0 {
         body["files_unread"] = json!(sweep.files_unread);
     }
@@ -440,6 +936,7 @@ pub(crate) fn workspace_findings(
         body["budget_hint"] =
             json!("aggregates truncated to fit max_output_tokens; narrow with `codes`/`min_severity` or raise the budget");
     }
+    fit_diagnostics_response_budget(&mut body, max_output_tokens, "aggregates");
 
     let completeness = loc::Completeness::complete()
         .when(
@@ -476,6 +973,75 @@ struct FindingPlace<'a> {
     file: &'a Result<loc::Location, loc::LocationUnavailable>,
     range: Option<line_index::LineColRange>,
     enclosing: Option<line_index::LineColRange>,
+}
+
+fn fit_diagnostics_response_budget(
+    body: &mut Value,
+    max_output_tokens: Option<usize>,
+    items_key: &str,
+) {
+    let Some(limit) = max_output_tokens.map(|tokens| tokens.saturating_mul(4)) else { return };
+    while serde_json::to_vec(body).is_ok_and(|bytes| bytes.len() > limit) {
+        let partitions = body["baseline"]["partitions"].as_array_mut();
+        if partitions.is_some_and(|partitions| !partitions.is_empty()) {
+            let partitions = body["baseline"]["partitions"].as_array_mut().unwrap();
+            partitions.pop();
+            let returned = partitions.len();
+            body["baseline"]["partitions_returned"] = json!(returned);
+            body["baseline"]["partitions_truncated"] = json!(true);
+            continue;
+        }
+        let errors = body["baseline"]["errors"].as_array_mut();
+        if errors.is_some_and(|errors| errors.len() > 1) {
+            body["baseline"]["errors"].as_array_mut().unwrap().pop();
+            continue;
+        }
+        let items = body[items_key].as_array_mut();
+        if items.is_some_and(|items| !items.is_empty()) {
+            body[items_key].as_array_mut().unwrap().pop();
+            body["truncated"] = json!(true);
+            body["budget_exhausted"] = json!(true);
+            continue;
+        }
+        if truncate_response_string(body, limit) {
+            continue;
+        }
+        break;
+    }
+}
+
+fn budgeted_diagnostics_response(mut body: Value, max_output_tokens: Option<usize>) -> Value {
+    fit_diagnostics_response_budget(&mut body, max_output_tokens, "findings");
+    body
+}
+
+fn truncate_response_string(body: &mut Value, limit: usize) -> bool {
+    const POINTERS: &[&str] = &[
+        "/detail",
+        "/path",
+        "/baseline/detail",
+        "/baseline/path",
+        "/baseline/errors/0/detail",
+        "/scope_hint",
+        "/author_hint",
+        "/budget_hint",
+    ];
+    for pointer in POINTERS {
+        let current = serde_json::to_vec(body).map_or(limit, |bytes| bytes.len());
+        let Some(value) = body.pointer_mut(pointer) else { continue };
+        let Some(text) = value.as_str() else { continue };
+        if text.len() <= 1 {
+            continue;
+        }
+        let keep = text.len().saturating_sub(current.saturating_sub(limit)).max(1);
+        let mut boundary = keep.min(text.len());
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        *value = json!(&text[..boundary]);
+        return true;
+    }
+    false
 }
 
 fn finding_value(
@@ -577,8 +1143,9 @@ fn enclosing_method_range(range: TextRange, methods: &[(String, TextRange)]) -> 
 /// once `previous_result_id` lands).
 fn result_id(path: &Path, generation: u64, text: &str) -> String {
     let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
     text.hash(&mut hasher);
-    format!("{}@{}@{:016x}", path.to_string_lossy(), generation, hasher.finish())
+    format!("{}@{generation}@{:016x}", path.to_string_lossy(), hasher.finish())
 }
 
 /// The four-bucket severity histogram, always emitted so the agent knows what a
@@ -608,7 +1175,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "12",
+        "schema_version": "15",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -658,9 +1225,32 @@ fn schema_json() -> Value {
             "internal_severity": "7-grade name (detailed only)",
             "fix": "{ label } (detailed only, when present)"
         },
+        "baseline_result": {
+            "state": "disabled | full | partial | error",
+            "complete": "bool — true only when the result proves complete baseline coverage (disabled is complete)",
+            "selection": "all | selective — effective partition selection (partitioned mode only)",
+            "partitions_enabled": "usize — owners using baseline policy (partitioned mode only)",
+            "partitions_unsuppressed": "usize — owners using unsuppressed policy (partitioned mode only)",
+            "unsuppressed": "usize — active findings from unsuppressed owners (partitioned mode only)",
+            "new": "usize — current findings absent from the baseline (omitted for disabled/error)",
+            "known": "usize — current findings matched by the baseline (omitted for disabled/error)",
+            "resolved": "usize — baseline entries proven absent in completed files (omitted for disabled/error)",
+            "path": "string — configured project-relative baseline path (omitted when disabled)",
+            "schema_version": "u32 — loaded baseline file schema version (when known)",
+            "manifest_schema_version": "u32 — partition-set manifest schema version (partitioned mode only)",
+            "partitions_total": "usize — total partition summaries before response-budget shaping",
+            "partitions_returned": "usize — partition summaries present in partitions",
+            "partitions_truncated": "bool — one or more partition summaries were omitted by max_output_tokens",
+            "partitions": "partition summary[] — sorted by id; file owner first when any detail fits",
+            "errors_total": "usize — number of deterministic set errors (error only)",
+            "errors": "set error[] — deterministic partition/code/detail/epoch entries bounded by max_output_tokens (error only)",
+            "error_code": "string — stable load/validation error code (error only)",
+            "detail": "string — actionable load/validation error detail (error only)"
+        },
         "file_result": {
-            "result_id": "<path>@<generation>@<content-hash>[@<blame-head>] — pull-model freshness handle; the blame-head suffix appears when [analysis].ignored_authors is active",
+            "result_id": "<path>@<generation>@<content-hash>[@<blame-head>]@<baseline-epoch> — pull-model freshness handle; the blame-head component appears when [analysis].ignored_authors is active",
             "kind": "full — (unchanged reserved for a future previous_result_id round-trip)",
+            "baseline": "baseline_result — classification summary, present on success and baseline errors",
             "counts": "{ error, warning, info, hint } — full histogram before the floor/cap (after the author filter)",
             "truncated": "bool — the findings cap was hit; counts still complete",
             "findings": "finding[]",
@@ -675,7 +1265,8 @@ fn schema_json() -> Value {
             "max_files": "usize — cap on files swept (default 1000, hard ceiling 5000); a larger config surfaces as truncated with the true files_total"
         },
         "workspace_result": {
-            "result_id": "workspace@<generation>[@<blame-head>] — the blame-head suffix appears when [analysis].ignored_authors is active",
+            "result_id": "workspace@<generation>[@<blame-head>]@<baseline-epoch> — the blame-head component appears when [analysis].ignored_authors is active",
+            "baseline": "baseline_result — classification summary, present on success and baseline errors",
             "findings_ignored_by_author": "usize — findings suppressed by [analysis].ignored_authors across the sweep; present only when > 0",
             "author_hint": "string — present with findings_ignored_by_author",
             "files_swept": "usize — files actually analyzed",
@@ -735,7 +1326,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "12");
+        assert_eq!(body["schema_version"], "15");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -769,6 +1360,35 @@ mod tests {
         // The file contract is advertised for cold-start discovery.
         assert!(body["file_params"]["path"].is_string());
         assert!(body["file_result"]["result_id"].is_string());
+        assert!(body["file_result"]["baseline"].is_string());
+        assert!(body["workspace_result"]["baseline"].is_string());
+        let baseline = &body["baseline_result"];
+        for field in [
+            "state",
+            "complete",
+            "selection",
+            "partitions_enabled",
+            "partitions_unsuppressed",
+            "unsuppressed",
+            "new",
+            "known",
+            "resolved",
+            "path",
+            "schema_version",
+            "manifest_schema_version",
+            "partitions_total",
+            "partitions_returned",
+            "partitions_truncated",
+            "partitions",
+            "errors_total",
+            "error_code",
+            "detail",
+        ] {
+            assert!(baseline[field].is_string(), "baseline field {field} is not advertised");
+        }
+        for state in ["disabled", "full", "partial", "error"] {
+            assert!(baseline["state"].as_str().unwrap().contains(state));
+        }
         assert!(body["envelope"]["revision"].is_string());
         // The version bump above is only honest if the new keys are described too.
         assert!(body["finding"]["location"].is_string(), "the location contract advertised");
@@ -815,6 +1435,24 @@ mod tests {
                 reason.as_str(),
             );
         }
+    }
+
+    #[test]
+    fn diagnostics_selective_baseline_response_advertises_schema_15() {
+        let body = schema_json();
+        assert_eq!(body["schema_version"], "15");
+        for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
+        {
+            assert!(body["baseline_result"][field].is_string());
+        }
+    }
+
+    #[test]
+    fn diagnostics_schema_json() {
+        let body = schema_json();
+        assert_eq!(body["schema_version"], "15");
+        assert!(body["baseline_result"]["selection"].is_string());
+        assert!(body["baseline_result"]["unsuppressed"].is_string());
     }
 
     #[test]
@@ -874,6 +1512,17 @@ mod tests {
         let unknown = body["unknown_codes"].as_array().unwrap();
         assert_eq!(unknown.len(), 1);
         assert_eq!(unknown[0], "NoSuchCode");
+    }
+
+    #[test]
+    fn catalog_budget_covers_unknown_codes_and_envelope() {
+        let codes = (0..4_096)
+            .map(|index| format!("Unknown{index}{}", "x".repeat(200)))
+            .collect::<Vec<_>>();
+        let result = catalog(Locale::Ru, &codes, Some(MIN_OUTPUT_TOKENS));
+        let body = body_of(&result);
+        assert!(serde_json::to_vec(body).unwrap().len() <= MIN_OUTPUT_TOKENS * 4);
+        assert_eq!(body["budget_exhausted"], true);
     }
 
     mod file_action {
@@ -970,6 +1619,172 @@ mod tests {
         }
 
         #[test]
+        fn diagnostics_partitioned_baseline_response_covers_schema_errors_and_minimum_budget() {
+            let schema = Value::Object(
+                rmcp::handler::server::tool::schema_for_type::<DiagnosticsResponseSchema>()
+                    .as_ref()
+                    .clone(),
+            );
+            assert_eq!(schema["type"], "object");
+            assert!(schema["oneOf"].as_array().is_some_and(|branches| branches.len() >= 2));
+            let encoded = schema.to_string();
+            for required in [
+                "baseline",
+                "state",
+                "complete",
+                "error_code",
+                "detail",
+                "partitions_total",
+                "partitions_returned",
+                "partitions_truncated",
+                "errors_total",
+                "errors",
+            ] {
+                assert!(encoded.contains(&format!("\"{required}\"")), "missing {required}");
+            }
+
+            let disabled_dir = tempfile::tempdir().unwrap();
+            sample_workspace(disabled_dir.path());
+            let disabled_state = ready_state(disabled_dir.path());
+            let mut filters = default_filters();
+            filters.max_output_tokens = Some(1);
+            let disabled = run(
+                &disabled_state,
+                &disabled_dir.path().join("CommonModules/Сервер/Ext/Module.bsl"),
+                &filters,
+            );
+            assert_eq!(disabled["baseline"]["state"], "disabled");
+            assert_eq!(disabled["baseline"]["partitions_total"], 0);
+            assert_eq!(disabled["baseline"]["partitions_returned"], 0);
+            assert_eq!(disabled["baseline"]["partitions_truncated"], false);
+            let response = envelope(
+                Freshness { revision: 1, topology: 0, stale: false, reload: "none" },
+                loc::Completeness::complete(),
+                disabled,
+            );
+            assert_structured_mirrors_text(&response);
+            assert!(body_of(&response)["result"]["baseline"].is_object());
+
+            let error_dir = tempfile::tempdir().unwrap();
+            sample_workspace(error_dir.path());
+            write(
+                error_dir.path(),
+                "bsl-analyzer.toml",
+                "[diagnostics.baseline]\npath = \"baseline.json\"\n",
+            );
+            write(error_dir.path(), "baseline.json", "{broken");
+            let error_state = ready_state(error_dir.path());
+            let error = run(
+                &error_state,
+                &error_dir.path().join("CommonModules/Сервер/Ext/Module.bsl"),
+                &default_filters(),
+            );
+            assert_eq!(error["baseline"]["state"], "error");
+            assert!(error["baseline"]["error_code"].is_string());
+            assert!(error["baseline"]["detail"].is_string());
+            assert_eq!(error["baseline"]["errors_total"], 1);
+            assert!(error.get("findings").is_none());
+            assert!(error.get("counts").is_none());
+
+            let partition =
+                |id: &str| ide::diagnostics_baseline::DiagnosticsBaselinePartitionSummary {
+                    id: id.to_owned(),
+                    identity: project_model::DiagnosticsBaselinePartitionIdentity::Main {
+                        path: String::new(),
+                    },
+                    policy: project_model::DiagnosticsBaselinePartitionPolicy::Baseline,
+                    path: Some(format!("objects/{id}.json")),
+                    schema_version: Some(2),
+                    state: ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+                    new: 0,
+                    known: 0,
+                    resolved: 0,
+                    unsuppressed: 0,
+                    complete: true,
+                };
+            let mut summary = DiagnosticsBaselineSummary::disabled();
+            summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Full;
+            summary.partitions = vec![partition("main"), partition("extension:z")];
+            let mut minimum =
+                json!({"baseline": bounded_baseline_value(&summary, Some("extension:z"))});
+            fit_diagnostics_response_budget(&mut minimum, Some(1), "findings");
+            let minimum = &minimum["baseline"];
+            assert_eq!(minimum["partitions_total"], 2);
+            assert_eq!(minimum["partitions_returned"], 0);
+            assert_eq!(minimum["partitions_truncated"], true);
+            let owner_first = bounded_baseline_value(&summary, Some("extension:z"));
+            assert_eq!(owner_first["partitions"][0]["id"], "extension:z");
+            let stale = envelope(
+                Freshness { revision: 2, topology: 0, stale: true, reload: "running" },
+                loc::Completeness::complete(),
+                json!({"baseline": owner_first.clone()}),
+            );
+            let stale = &body_of(&stale)["result"]["baseline"];
+            assert!(stale["partitions"].as_array().unwrap().iter().all(|partition| {
+                partition["state"] == "partial"
+                    && partition["complete"] == false
+                    && partition["resolved"] == 0
+            }));
+
+            summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Error;
+            summary.errors = ["extension:a", "extension:b"]
+                .into_iter()
+                .map(|id| ide::diagnostics_baseline::DiagnosticsBaselineErrorSummary {
+                    partition_id: Some(id.to_owned()),
+                    code: "missing_partition".to_owned(),
+                    detail: format!("missing partition: {id}"),
+                    epoch: id.to_owned(),
+                })
+                .collect();
+            let errors = bounded_baseline_value(&summary, None);
+            assert_eq!(errors["errors_total"], 2);
+            assert_eq!(errors["errors"].as_array().unwrap().len(), 2);
+
+            let mut whole = json!({
+                "result_id": "x",
+                "truncated": false,
+                "findings": (0..20).map(|index| json!({"message": "x".repeat(80), "index": index})).collect::<Vec<_>>(),
+                "baseline": owner_first,
+            });
+            fit_diagnostics_response_budget(&mut whole, Some(100), "findings");
+            assert!(serde_json::to_vec(&whole).unwrap().len() <= 400);
+            assert_eq!(whole["baseline"]["partitions_total"], 2);
+            assert_eq!(whole["baseline"]["partitions_truncated"], true);
+
+            let first_partition = "p".repeat(64);
+            let early_error = budgeted_diagnostics_response(
+                json!({
+                    "error": "invalid_path",
+                    "kind": "full",
+                    "result_id": "1@".to_owned() + &"a".repeat(64) + "@" + &"b".repeat(64),
+                    "detail": "d".repeat(2_000),
+                    "path": "p".repeat(2_000),
+                    "baseline": {
+                        "state": "error",
+                        "complete": false,
+                        "path": "baselines",
+                        "error_code": "missing_partition",
+                        "detail": "set error".repeat(1_000),
+                        "partitions": [],
+                        "partitions_total": 0,
+                        "partitions_returned": 0,
+                        "partitions_truncated": false,
+                        "errors_total": 2,
+                        "errors": [
+                            {"code": "missing_partition", "detail": "first".repeat(1_000), "partition_id": first_partition, "epoch": "c".repeat(64)},
+                            {"code": "orphan_partition", "detail": "second", "epoch": "d".repeat(64)}
+                        ]
+                    }
+                }),
+                Some(MIN_OUTPUT_TOKENS),
+            );
+            assert!(serde_json::to_vec(&early_error).unwrap().len() <= MIN_OUTPUT_TOKENS * 4);
+            assert_eq!(early_error["baseline"]["errors"].as_array().unwrap().len(), 1);
+            assert_eq!(early_error["baseline"]["errors"][0]["code"], "missing_partition");
+            assert_eq!(early_error["baseline"]["errors"][0]["partition_id"], first_partition);
+        }
+
+        #[test]
         fn file_findings_shapes_the_result() {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
@@ -985,11 +1800,12 @@ mod tests {
                 assert!(body["counts"][sev].is_u64(), "counts.{sev} present");
             }
             assert!(body["findings"].is_array());
-            // result_id = <path>@<generation>@<content-hash>.
+            // result_id = <generation>@<content-hash>@<baseline-epoch>.
             let id = body["result_id"].as_str().unwrap();
             let parts: Vec<&str> = id.rsplitn(3, '@').collect();
-            assert_eq!(parts.len(), 3, "result_id has path@gen@hash shape: {id}");
-            assert_eq!(parts[0].len(), 16, "content hash is 16 hex chars");
+            assert_eq!(parts.len(), 3, "result_id carries the baseline epoch: {id}");
+            assert_eq!(parts[0], "disabled");
+            assert_eq!(parts[1].len(), 16, "content hash is 16 hex chars");
         }
 
         #[test]
@@ -1386,9 +2202,9 @@ mod tests {
             for sev in ["error", "warning", "info", "hint"] {
                 assert_eq!(body["counts"][sev], 0, "counts.{sev} must be filtered: {body}");
             }
-            // result_id = <path>@<gen>@<hash>@<blame-head>.
+            // result_id = <gen>@<hash>@<blame-head>@<baseline-epoch>.
             let id = body["result_id"].as_str().unwrap();
-            assert_eq!(id.rsplitn(4, '@').count(), 4, "result_id carries the blame head: {id}");
+            assert_eq!(id.rsplitn(4, '@').count(), 4, "result_id carries both epochs: {id}");
 
             let sweep = match state.read(|resident, _| {
                 resident.workspace_aggregates(
@@ -1453,6 +2269,185 @@ mod tests {
                 &default_filters(),
             );
             assert!(!has_line_length(&loose_body), "huge threshold suppresses LineLength");
+        }
+
+        #[test]
+        fn diagnostics_baseline_snapshot_filters_file_and_workspace_without_rebuilding_salsa() {
+            use ide::diagnostics_baseline::{
+                diagnostic_fingerprint, diagnostics_baseline_json, DiagnosticsBaseline,
+                DiagnosticsBaselineEntry, DiagnosticsBaselineRange, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(root, "bsl-analyzer.toml", "[diagnostics.baseline]\npath = \"baseline.json\"\n");
+            let baseline_path = root.join("baseline.json");
+            let mut baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![],
+            };
+            fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
+
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+            let filters = FileFilters { detailed: true, ..default_filters() };
+            let first = run(&state, &path, &filters);
+            let finding = first["findings"].as_array().unwrap().first().unwrap();
+            let relative = "CommonModules/Сервер/Ext/Module.bsl";
+            let line = finding["range"]["start_line"].as_u64().unwrap() as usize;
+            let text = fs::read_to_string(&path).unwrap();
+            let snippet = ide::diagnostics_baseline::normalize_diagnostic_snippet(
+                text.lines().nth(line).unwrap(),
+            );
+            let code = finding["code"].as_str().unwrap().to_owned();
+            baseline.diagnostics.push(DiagnosticsBaselineEntry {
+                fingerprint: diagnostic_fingerprint(relative, &code, &snippet, 0),
+                path: relative.to_owned(),
+                code,
+                snippet,
+                occurrence: 0,
+                message: finding["message"].as_str().unwrap().to_owned(),
+                severity: finding["internal_severity"].as_str().unwrap().to_owned(),
+                range: DiagnosticsBaselineRange {
+                    start_line: finding["range"]["start_line"].as_u64().unwrap() as u32,
+                    start_column: finding["range"]["start_column"].as_u64().unwrap() as u32,
+                    end_line: finding["range"]["end_line"].as_u64().unwrap() as u32,
+                    end_column: finding["range"]["end_column"].as_u64().unwrap() as u32,
+                },
+            });
+            let generation = state.generation();
+            fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
+
+            let second = run(&state, &path, &filters);
+            assert_eq!(second["baseline"]["known"], 1);
+            assert_eq!(
+                second["findings"].as_array().unwrap().len() + 1,
+                first["findings"].as_array().unwrap().len()
+            );
+            assert_eq!(state.generation(), generation, "baseline reload must not rebuild Salsa");
+            assert_ne!(second["result_id"], first["result_id"]);
+
+            let sweep = match state.read(|resident, _| {
+                resident.workspace_aggregates(
+                    resident.config(),
+                    &SweepOptions {
+                        min_severity: SeverityBucket::Hint,
+                        codes: Vec::new(),
+                        max_files: 100,
+                    },
+                    &SweepCancel::default(),
+                )
+            }) {
+                ResidentOutcome::Ready(sweep, _) => sweep,
+                _ => panic!("expected Ready outcome"),
+            };
+            assert_eq!(sweep.baseline.known, Some(1));
+            assert!(sweep.baseline.complete);
+        }
+
+        #[test]
+        fn diagnostics_baseline_file_in_active_diff_scope_resolves_nothing() {
+            use ide::diagnostics_baseline::{
+                diagnostic_fingerprint, diagnostics_baseline_json, DiagnosticsBaseline,
+                DiagnosticsBaselineEntry, DiagnosticsBaselineRange, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(
+                root,
+                "bsl-analyzer.toml",
+                "[analysis]\ndiff_base = \"HEAD\"\n[diagnostics.baseline]\npath = \"baseline.json\"\n",
+            );
+            let relative = "CommonModules/Сервер/Ext/Module.bsl";
+            let baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![DiagnosticsBaselineEntry {
+                    fingerprint: diagnostic_fingerprint(relative, "UnreachableCode", "Возврат;", 0),
+                    path: relative.to_owned(),
+                    code: "UnreachableCode".to_owned(),
+                    snippet: "Возврат;".to_owned(),
+                    occurrence: 0,
+                    message: "known outside diff".to_owned(),
+                    severity: "warning".to_owned(),
+                    range: DiagnosticsBaselineRange {
+                        start_line: 0,
+                        start_column: 0,
+                        end_line: 0,
+                        end_column: 8,
+                    },
+                }],
+            };
+            fs::write(root.join("baseline.json"), diagnostics_baseline_json(&baseline).unwrap())
+                .unwrap();
+            run_git(root, &["init", "-q"]);
+            run_git(root, &["add", "."]);
+            run_git(root, &["commit", "-q", "-m", "baseline"]);
+            fs::write(root.join(relative), "Процедура Изменена()\nКонецПроцедуры\n").unwrap();
+
+            let state = ready_state(root);
+            let body = run(&state, &root.join(relative), &default_filters());
+            assert_ne!(body["out_of_scope"], true);
+            assert_eq!(body["baseline"]["state"], "partial");
+            assert_eq!(body["baseline"]["resolved"], 0);
+        }
+
+        #[test]
+        fn diagnostics_baseline_reload_observes_write_replace_and_delete_without_rebuilding_salsa()
+        {
+            use ide::diagnostics_baseline::{
+                diagnostics_baseline_json, DiagnosticsBaseline, DiagnosticsBaselineScope,
+                DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            };
+            use std::io::Write;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            write(root, "bsl-analyzer.toml", "[diagnostics.baseline]\npath = \"baseline.json\"\n");
+            let baseline_path = root.join("baseline.json");
+            let baseline = DiagnosticsBaseline {
+                schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                diagnostics: vec![],
+            };
+            let bytes = diagnostics_baseline_json(&baseline).unwrap();
+            fs::write(&baseline_path, &bytes).unwrap();
+
+            let state = ready_state(root);
+            let path = root.join("CommonModules/Сервер/Ext/Module.bsl");
+            let generation = state.generation();
+            let first = run(&state, &path, &default_filters());
+
+            let mut rewritten = bytes.clone();
+            rewritten.push(b'\n');
+            fs::write(&baseline_path, &rewritten).unwrap();
+            let changed = run(&state, &path, &default_filters());
+            assert_ne!(changed["result_id"], first["result_id"]);
+            assert_eq!(state.generation(), generation);
+
+            let mut replacement = tempfile::NamedTempFile::new_in(root).unwrap();
+            replacement.write_all(b" \n").unwrap();
+            replacement.write_all(&bytes).unwrap();
+            replacement.flush().unwrap();
+            replacement.as_file().sync_all().unwrap();
+            replacement.persist(&baseline_path).unwrap();
+            let replaced = run(&state, &path, &default_filters());
+            assert_ne!(replaced["result_id"], changed["result_id"]);
+            assert_eq!(state.generation(), generation);
+
+            fs::remove_file(&baseline_path).unwrap();
+            let removed = run(&state, &path, &default_filters());
+            assert_eq!(removed["baseline"]["state"], "error");
+            assert_eq!(removed["baseline"]["error_code"], "missing");
+            assert_ne!(removed["result_id"], replaced["result_id"]);
+            assert_eq!(state.generation(), generation);
         }
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {

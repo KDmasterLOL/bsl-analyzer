@@ -43,6 +43,8 @@ pub(crate) struct WorkspaceSweep {
     /// The sweep was cancelled mid-flight (MCP `notifications/cancelled` or transport
     /// shutdown); `aggregates` cover only the `files_swept` files processed before it.
     pub cancelled: bool,
+    pub baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
+    pub baseline_epoch: String,
 }
 
 /// Cancellation bridge for one workspace sweep: rayon workers register the salsa
