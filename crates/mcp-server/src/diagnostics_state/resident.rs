@@ -844,7 +844,14 @@ impl DiagnosticsResident {
                         })
                         .collect()
                 }));
-                caught.unwrap_or_default()
+                match caught {
+                    Ok(codes) => codes,
+                    // Same discipline as the candidate pass above: only this request's
+                    // own cancellation may degrade to an empty file. Anything else is a
+                    // real defect and must not hide behind valid-looking aggregates.
+                    Err(salsa::Cancelled::Local) => Vec::new(),
+                    Err(other) => std::panic::resume_unwind(Box::new(other)),
+                }
             })
             .collect();
 

@@ -731,16 +731,38 @@ impl NotifyActor {
         }
     }
 
+    /// What to hand `notify` for `path`, or `None` when it is already covered.
+    ///
+    /// A single file cannot be watched on its own, so an exactly-listed one is watched
+    /// through its directory. That directory must NOT be registered non-recursively when
+    /// a recursive watch over it already exists: `notify` replaces the mode of a path it
+    /// already watches, so the narrower registration would silently drop events for
+    /// every subdirectory — and the baseline lives in the project root by default,
+    /// which is exactly such a directory. Events for the file arrive through the
+    /// recursive watch anyway; `classify_event_path` recognises it by its own list.
+    fn watch_target(&self, path: &Path) -> Option<(std::path::PathBuf, RecursiveMode)> {
+        let exact = self
+            .watched_file_entries
+            .iter()
+            .chain(&self.watched_only_file_entries)
+            .any(|entry| entry.as_path() == path);
+        if !exact {
+            return Some((path.to_path_buf(), RecursiveMode::Recursive));
+        }
+        let parent = path.parent().unwrap_or(path);
+        let covered = Utf8PathBuf::from_path_buf(parent.to_path_buf())
+            .ok()
+            .and_then(|parent| AbsPathBuf::try_from(parent).ok())
+            .is_some_and(|parent| {
+                self.watched_dir_entries.iter().any(|dir| dir.contains_dir(&parent))
+            });
+        (!covered).then(|| (parent.to_path_buf(), RecursiveMode::NonRecursive))
+    }
+
     fn watch(&mut self, path: &Path) {
+        let Some((target, mode)) = self.watch_target(path) else { return };
         if let Some((watcher, _)) = &mut self.watcher {
-            let exact = self
-                .watched_file_entries
-                .iter()
-                .chain(&self.watched_only_file_entries)
-                .any(|entry| entry.as_path() == path);
-            let target = if exact { path.parent().unwrap_or(path) } else { path };
-            let mode = if exact { RecursiveMode::NonRecursive } else { RecursiveMode::Recursive };
-            log_notify_error(watcher.watch(target, mode));
+            log_notify_error(watcher.watch(&target, mode));
         }
     }
 
@@ -1211,6 +1233,42 @@ mod tests {
         assert_eq!(actor.classify_watched_path(&bsl), Some(loader::LoadMode::LoadContent));
         assert_eq!(actor.classify_watched_path(&xml), Some(loader::LoadMode::WatchOnly));
         assert_eq!(actor.classify_watched_path(&other), None);
+    }
+
+    /// An exactly-listed file inside a recursively watched directory must not
+    /// re-register that directory: `notify` would replace the recursive mode with the
+    /// narrower one and stop delivering events from every subdirectory. The baseline
+    /// file sits in the project root by default, so this is the ordinary case.
+    #[test]
+    fn watch_target_keeps_a_recursive_directory_recursive() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["json"]);
+        let mut actor = actor_with_watched_dirs(vec![dirs]);
+        let inside =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("baseline.json"));
+        actor.watched_only_file_entries.insert(inside.clone());
+
+        assert_eq!(
+            actor.watch_target(inside.as_ref() as &std::path::Path),
+            None,
+            "the recursive watch already covers it"
+        );
+
+        // A directory is still registered recursively.
+        let subdir = AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("sub"));
+        assert_eq!(
+            actor.watch_target(subdir.as_ref() as &std::path::Path),
+            Some(((subdir.as_ref() as &std::path::Path).to_path_buf(), RecursiveMode::Recursive))
+        );
+
+        // A file OUTSIDE every watched directory still needs its own parent watch.
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = AbsPathBuf::assert_utf8(outside_dir.path().join("baseline.json"));
+        actor.watched_only_file_entries.insert(outside.clone());
+        assert_eq!(
+            actor.watch_target(outside.as_ref() as &std::path::Path),
+            Some((outside_dir.path().to_path_buf(), RecursiveMode::NonRecursive))
+        );
     }
 
     #[test]

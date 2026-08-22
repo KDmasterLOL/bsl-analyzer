@@ -57,6 +57,9 @@ pub struct DiagnosticsBaselineLoadStats {
     pub partitions_parsed: usize,
     pub fingerprints_validated: usize,
     pub objects_read: BTreeSet<String>,
+    /// Read calls the loader issued against the object files. Buffered reading keeps
+    /// this near `bytes / 8192`; an unbuffered reader makes it one per byte.
+    pub object_reads: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -426,12 +429,17 @@ pub fn classify_partitioned_diagnostics_with<T>(
                     }
                 }
                 resolved.len += partition_resolved;
-                resolved.partitions.push(ResolvedPartition {
-                    id: expected_partition.id.clone(),
-                    partition: partition.clone(),
-                    matched,
-                    coverage: partition_coverage.clone(),
-                });
+                // Under `Skip` nothing was counted, so nothing may be handed out either:
+                // `ResolvedPartitionedDiagnostics` promises that `len` equals what its
+                // iterator yields, and it is an `ExactSizeIterator`.
+                if resolved_policy == ResolvedPolicy::Compute {
+                    resolved.partitions.push(ResolvedPartition {
+                        id: expected_partition.id.clone(),
+                        partition: partition.clone(),
+                        matched,
+                        coverage: partition_coverage.clone(),
+                    });
+                }
                 (
                     partition.identity.clone(),
                     Some(manifest_entry.file.clone()),
@@ -528,7 +536,9 @@ where
     R: Read,
     F: FnMut(&str, &DiagnosticsBaselineEntry) -> Result<(), PartitionedDiagnosticsBaselineError>,
 {
-    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    // Buffered here rather than at the call site: `from_reader` reads byte by byte,
+    // and a caller that forgets the wrapper gets no error, only a hundredfold cost.
+    let mut deserializer = serde_json::Deserializer::from_reader(std::io::BufReader::new(reader));
     let parsed = LegacyMigrationSeed { plan, write_entry: &mut write_entry }
         .deserialize(&mut deserializer)?;
     deserializer.end()?;
@@ -840,13 +850,18 @@ fn load_diagnostics_baseline_set_once(
                 Err(error) => return Err(error.into()),
             };
             stats.objects_read.insert(manifest_entry.file.clone());
-            let mut reader = HashingReader::new(file);
+            // The buffer belongs BETWEEN serde and the file: `from_reader` requests one
+            // byte at a time, so an unbuffered file costs a syscall — and a one-byte
+            // hasher update — per byte of the object.
+            let mut reader = std::io::BufReader::new(HashingReader::new(file));
             let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
             let parsed = PartitionSeed { pool: &mut pool }.deserialize(&mut deserializer)?;
             stats.partitions_parsed += 1;
             deserializer.end()?;
             drop(deserializer);
-            let actual_hash = reader.finalize();
+            let hashing = reader.into_inner();
+            stats.object_reads += hashing.reads();
+            let actual_hash = hashing.finalize();
             if parsed.identity != expected_partition.identity {
                 return Err(PartitionedDiagnosticsBaselineError::PartitionIdentityMismatch(
                     manifest_entry.partition_id.clone(),
@@ -931,21 +946,30 @@ fn read_file(
 struct HashingReader<R> {
     inner: R,
     hasher: blake3::Hasher,
+    /// Reads performed on the file. `serde_json` asks its reader one byte at a
+    /// time, so this counts a syscall per byte unless a buffer sits in between —
+    /// hence a gate over the ratio rather than trust in the call order.
+    reads: usize,
 }
 
 impl<R> HashingReader<R> {
     fn new(inner: R) -> Self {
-        Self { inner, hasher: blake3::Hasher::new() }
+        Self { inner, hasher: blake3::Hasher::new(), reads: 0 }
     }
 
     fn finalize(&self) -> [u8; 32] {
         *self.hasher.clone().finalize().as_bytes()
+    }
+
+    fn reads(&self) -> usize {
+        self.reads
     }
 }
 
 impl<R: Read> Read for HashingReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         let read = self.inner.read(buffer)?;
+        self.reads += 1;
         self.hasher.update(&buffer[..read]);
         Ok(read)
     }
@@ -1912,6 +1936,38 @@ mod tests {
         selective_loader_defers_dormant_content_validation_until_reenable();
     }
 
+    /// `serde_json` asks its reader for one byte at a time, so an object read without a
+    /// buffer costs a syscall per byte — the very path the partitioned mode exists for.
+    /// The ratio is the gate: the file is far larger than one buffer, so a byte-at-a-time
+    /// loader could not possibly pass it.
+    #[test]
+    fn partition_objects_are_read_through_a_buffer() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let plan = selective_plan(&["main", "extension:Ext"]);
+        write_set(&directory, &plan);
+        let (_snapshot, stats) =
+            load_diagnostics_baseline_set_reusing(&directory, &plan, None, &BTreeSet::new())
+                .unwrap();
+
+        let bytes: usize = stats
+            .objects_read
+            .iter()
+            .map(|file| {
+                let mut object = directory.open_file(file).unwrap();
+                let mut buffer = Vec::new();
+                std::io::Read::read_to_end(&mut object, &mut buffer).unwrap();
+                buffer.len()
+            })
+            .sum();
+        assert!(bytes > 0, "the fixture must publish object bytes to read");
+        assert!(
+            stats.object_reads * 64 < bytes.max(64),
+            "objects were read {} times for {bytes} bytes — that is byte-at-a-time reading",
+            stats.object_reads
+        );
+    }
+
     /// Skipping `resolved` must change nothing about which diagnostics are active:
     /// the fixture is one that DOES have a resolved entry under `Compute`, so a
     /// silent behaviour change would show up as a differing active set here.
@@ -1965,6 +2021,12 @@ mod tests {
         assert_eq!(
             skipped.summary.resolved, None,
             "a skipped count must be absent, not a zero that reads as \"nothing was resolved\""
+        );
+        assert_eq!(computed.resolved.len(), computed.resolved.into_iter().count());
+        assert_eq!(
+            skipped.resolved.len(),
+            skipped.resolved.into_iter().count(),
+            "len and the iterator must agree — the type promises ExactSizeIterator"
         );
     }
 

@@ -78,6 +78,10 @@ async fn workspace_action_answers_without_a_baseline() {
 
     assert!(body["result"]["files_total"].as_u64().unwrap() >= 2, "{body}");
 
+    // An unreadable file turns into a resident hole and rebuilds the database under
+    // the session — the state in which this sweep used to panic. Mode bits are the
+    // only trigger found for it, and a privileged user ignores them, so the leg
+    // states plainly when it did not run instead of passing vacuously.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -89,8 +93,14 @@ async fn workspace_action_answers_without_a_baseline() {
         )
         .unwrap();
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let stale = diagnostics(&client, arguments.clone()).await;
-        assert!(stale["result"]["files_total"].as_u64().unwrap() >= 2, "{stale}");
+        if std::fs::read(&source).is_err() {
+            let stale = diagnostics(&client, arguments.clone()).await;
+            assert!(stale["result"]["files_total"].as_u64().unwrap() >= 2, "{stale}");
+        } else {
+            eprintln!(
+                "skipping the rebuilt-resident leg: mode 0o000 is not an obstacle for this user"
+            );
+        }
         std::fs::set_permissions(&source, original).unwrap();
     }
 }
@@ -118,6 +128,10 @@ async fn workspace_action_answers_with_a_baseline_configured() {
 
     // A file that becomes unreadable turns into a resident hole and rebuilds the
     // database behind the session — the sweep must survive that, not panic.
+    // An unreadable file turns into a resident hole and rebuilds the database under
+    // the session — the state in which this sweep used to panic. Mode bits are the
+    // only trigger found for it, and a privileged user ignores them, so the leg
+    // states plainly when it did not run instead of passing vacuously.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -129,8 +143,14 @@ async fn workspace_action_answers_with_a_baseline_configured() {
         )
         .unwrap();
         std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let stale = diagnostics(&client, arguments.clone()).await;
-        assert!(stale["result"]["files_total"].as_u64().unwrap() >= 2, "{stale}");
+        if std::fs::read(&source).is_err() {
+            let stale = diagnostics(&client, arguments.clone()).await;
+            assert!(stale["result"]["files_total"].as_u64().unwrap() >= 2, "{stale}");
+        } else {
+            eprintln!(
+                "skipping the rebuilt-resident leg: mode 0o000 is not an obstacle for this user"
+            );
+        }
         std::fs::set_permissions(&source, original).unwrap();
     }
 }

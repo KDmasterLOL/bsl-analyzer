@@ -44,7 +44,9 @@ fn setup_repo() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     let root = temp.path();
 
-    fs::write(root.join("Vendor.bsl"), BROKEN).expect("vendor file");
+    // Distinct content: identical files share one git blob, and corrupting it in
+    // `corrupt_blame_source` would damage the developer's file as well.
+    fs::write(root.join("Vendor.bsl"), format!("{BROKEN}// vendor\n")).expect("vendor file");
     run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["init", "-q"]);
     run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["add", "."]);
     run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["commit", "-q", "-m", "vendor"]);

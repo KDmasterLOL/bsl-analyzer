@@ -892,10 +892,15 @@ fn validate_partitioned_config_path(path: &str) -> Result<(), DiagnosticsBaselin
 }
 
 fn validate_partition_id(id: &str) -> Result<(), DiagnosticsBaselineProjectError> {
-    const MAX_BYTES: usize = 64;
-    if id.len() > MAX_BYTES {
+    // Counted in CHARACTERS: the id never reaches the file system — object paths are
+    // built from the blake3 key and hash — so the bound is only a sanity limit on a
+    // machine identifier. Counting bytes would halve it for Cyrillic, and extension
+    // names in 1C configurations are Russian, so an ordinary name would be rejected.
+    const MAX_CHARS: usize = 128;
+    let length = id.chars().count();
+    if length > MAX_CHARS {
         return Err(DiagnosticsBaselineProjectError::InvalidConfig(format!(
-            "partition id exceeds {MAX_BYTES} UTF-8 bytes"
+            "partition id is {length} characters, over the {MAX_CHARS} limit: {id}"
         )));
     }
     Ok(())
@@ -4299,7 +4304,7 @@ include = ["main", "extension:Sales"]
             diagnostics: partitioned_config(
                 "baselines",
                 vec![DiagnosticsBaselineGroupConfig {
-                    name: "x".repeat(65),
+                    name: "x".repeat(200),
                     extensions: vec!["A".to_owned()],
                 }],
             ),
@@ -4312,6 +4317,32 @@ include = ["main", "extension:Sales"]
             .diagnostics_baseline_partition_plan()
             .unwrap_err();
         assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+    }
+
+    /// Extension names in 1C configurations are Russian, and a byte-counted bound
+    /// would reject an ordinary one at half the length it allows in Latin.
+    #[test]
+    fn diagnostics_partition_id_accepts_a_russian_extension_name() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        // Long enough that the id exceeds the limit when counted in BYTES but not in
+        // characters: an input on which byte counting and character counting differ.
+        let name = "РасширениеДляОбменаСМаркировкой".repeat(3);
+        let id = format!("extension:{name}");
+        assert!(id.len() > 128 && id.chars().count() <= 128, "id {} bytes", id.len());
+        touch_extension(dir.path(), "src/cfe/Marking");
+        let config = ProjectConfig {
+            diagnostics: partitioned_config("baselines", vec![]),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![structured(&name, "src/cfe/Marking", &[])]),
+            ..Default::default()
+        };
+        let plan = Project::with_config(dir.path(), config)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap();
+        assert!(plan.partitions.iter().any(|partition| partition.id == id));
     }
 
     #[test]
