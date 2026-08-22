@@ -274,7 +274,30 @@ impl DiagnosticsState {
     /// `generation()` inside `f`. The freshness verdict is returned alongside the
     /// result, computed under the same lock, so the caller need not (and must not)
     /// re-sample it.
+    /// The resident read, reachable only through [`ResidentSession`] in production.
+    ///
+    /// Narrowed on purpose: a tool that reads the resident directly reads it on the
+    /// master handle, outside any request's cancellation registry — which is exactly the
+    /// shape every cancellation defect on this path has had. Tests keep direct access:
+    /// they assert on the resident itself, and routing them through a request would test
+    /// the door instead of the subject.
+    #[cfg(not(test))]
+    pub(super) fn read<F, R>(&self, f: F) -> ResidentOutcome<R>
+    where
+        F: FnOnce(&DiagnosticsResident, u64) -> R,
+    {
+        self.read_impl(f)
+    }
+
+    #[cfg(test)]
     pub(crate) fn read<F, R>(&self, f: F) -> ResidentOutcome<R>
+    where
+        F: FnOnce(&DiagnosticsResident, u64) -> R,
+    {
+        self.read_impl(f)
+    }
+
+    fn read_impl<F, R>(&self, f: F) -> ResidentOutcome<R>
     where
         F: FnOnce(&DiagnosticsResident, u64) -> R,
     {
@@ -338,7 +361,14 @@ impl DiagnosticsState {
                 &resident.project,
                 &resident.diagnostics_baseline,
             );
-        resident.diagnostics_baseline_observation = snapshot.observation();
+        // A write landing WHILE the set is read would otherwise be lost forever: the
+        // bytes are the old ones, but the observation taken afterwards is the new file's,
+        // so no later read ever sees a difference. Re-observing the previous paths says
+        // whether the ground moved during the read; if it did, an empty mark forces the
+        // next read to load again instead of trusting this snapshot.
+        let moved_during_read = observation != resident.diagnostics_baseline.observation();
+        resident.diagnostics_baseline_observation =
+            if moved_during_read { String::new() } else { snapshot.observation() };
         resident.diagnostics_baseline = snapshot;
     }
 
@@ -804,7 +834,7 @@ impl DiagnosticsState {
 /// (nothing to compare), making `stale` depend only on an in-flight reload.
 /// A fold of the analyzer config files' `(presence, len, mtime)`. Any change forces a
 /// full rebuild because it can alter the project's extension set and thus the db inputs.
-pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 

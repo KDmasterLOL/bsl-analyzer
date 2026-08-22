@@ -626,14 +626,18 @@ impl NotifyActor {
         if self.watched_only_file_entries.contains(path) {
             return EventPathAction::WatchOnly;
         }
-        match fs::symlink_metadata(path) {
+        // Symlinks are followed here, as the initial scan follows them (`follow_links`):
+        // a `.bsl` reached through a link is loaded at startup, so its later edits must
+        // arrive too. Baseline files, the reason the type is inspected at all, are
+        // answered by the exact-match check above and never reach this point.
+        match fs::metadata(path).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Err(error)
+            } else {
+                fs::symlink_metadata(path)
+            }
+        }) {
             Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    return match self.classify_watched_path(path) {
-                        Some(loader::LoadMode::WatchOnly) => EventPathAction::WatchOnly,
-                        _ => EventPathAction::Ignore,
-                    };
-                }
                 if meta.file_type().is_dir() {
                     if self.watched_dir_entries.iter().any(|dir| dir.contains_dir(path)) {
                         return EventPathAction::WatchDir;
@@ -731,16 +735,38 @@ impl NotifyActor {
         }
     }
 
+    /// What to hand `notify` for `path`, or `None` when it is already covered.
+    ///
+    /// A single file cannot be watched on its own, so an exactly-listed one is watched
+    /// through its directory. That directory must NOT be registered non-recursively when
+    /// a recursive watch over it already exists: `notify` replaces the mode of a path it
+    /// already watches, so the narrower registration would silently drop events for
+    /// every subdirectory — and the baseline lives in the project root by default,
+    /// which is exactly such a directory. Events for the file arrive through the
+    /// recursive watch anyway; `classify_event_path` recognises it by its own list.
+    fn watch_target(&self, path: &Path) -> Option<(std::path::PathBuf, RecursiveMode)> {
+        let exact = self
+            .watched_file_entries
+            .iter()
+            .chain(&self.watched_only_file_entries)
+            .any(|entry| entry.as_path() == path);
+        if !exact {
+            return Some((path.to_path_buf(), RecursiveMode::Recursive));
+        }
+        let parent = path.parent().unwrap_or(path);
+        let covered = Utf8PathBuf::from_path_buf(parent.to_path_buf())
+            .ok()
+            .and_then(|parent| AbsPathBuf::try_from(parent).ok())
+            .is_some_and(|parent| {
+                self.watched_dir_entries.iter().any(|dir| dir.contains_dir(&parent))
+            });
+        (!covered).then(|| (parent.to_path_buf(), RecursiveMode::NonRecursive))
+    }
+
     fn watch(&mut self, path: &Path) {
+        let Some((target, mode)) = self.watch_target(path) else { return };
         if let Some((watcher, _)) = &mut self.watcher {
-            let exact = self
-                .watched_file_entries
-                .iter()
-                .chain(&self.watched_only_file_entries)
-                .any(|entry| entry.as_path() == path);
-            let target = if exact { path.parent().unwrap_or(path) } else { path };
-            let mode = if exact { RecursiveMode::NonRecursive } else { RecursiveMode::Recursive };
-            log_notify_error(watcher.watch(target, mode));
+            log_notify_error(watcher.watch(&target, mode));
         }
     }
 
@@ -1211,6 +1237,72 @@ mod tests {
         assert_eq!(actor.classify_watched_path(&bsl), Some(loader::LoadMode::LoadContent));
         assert_eq!(actor.classify_watched_path(&xml), Some(loader::LoadMode::WatchOnly));
         assert_eq!(actor.classify_watched_path(&other), None);
+    }
+
+    /// The initial scan follows symlinks, so a source file reached through one is
+    /// loaded — and its later edits have to arrive as content, not be ignored. Baseline
+    /// files keep their exact-match handling and are unaffected.
+    #[test]
+    fn classify_event_path_follows_a_symlinked_source() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["json"]);
+        let mut actor = actor_with_watched_dirs(vec![dirs]);
+        let join = |name: &str| {
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join(name))
+        };
+
+        let real = join("real.bsl");
+        std::fs::write(AsRef::<std::path::Path>::as_ref(&real), b"x").unwrap();
+        let link = join("Link.bsl");
+        std::os::unix::fs::symlink("real.bsl", AsRef::<std::path::Path>::as_ref(&link)).unwrap();
+        assert_eq!(actor.classify_event_path(&real), EventPathAction::LoadContent);
+        assert_eq!(
+            actor.classify_event_path(&link),
+            EventPathAction::LoadContent,
+            "a symlinked source must still deliver its content"
+        );
+
+        // A baseline file listed exactly stays watch-only, symlink or not.
+        let baseline = join("baseline.json");
+        std::fs::write(AsRef::<std::path::Path>::as_ref(&baseline), b"{}").unwrap();
+        actor.watched_only_file_entries.insert(baseline.clone());
+        assert_eq!(actor.classify_event_path(&baseline), EventPathAction::WatchOnly);
+    }
+
+    /// An exactly-listed file inside a recursively watched directory must not
+    /// re-register that directory: `notify` would replace the recursive mode with the
+    /// narrower one and stop delivering events from every subdirectory. The baseline
+    /// file sits in the project root by default, so this is the ordinary case.
+    #[test]
+    fn watch_target_keeps_a_recursive_directory_recursive() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["json"]);
+        let mut actor = actor_with_watched_dirs(vec![dirs]);
+        let inside =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("baseline.json"));
+        actor.watched_only_file_entries.insert(inside.clone());
+
+        assert_eq!(
+            actor.watch_target(inside.as_ref() as &std::path::Path),
+            None,
+            "the recursive watch already covers it"
+        );
+
+        // A directory is still registered recursively.
+        let subdir = AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("sub"));
+        assert_eq!(
+            actor.watch_target(subdir.as_ref() as &std::path::Path),
+            Some(((subdir.as_ref() as &std::path::Path).to_path_buf(), RecursiveMode::Recursive))
+        );
+
+        // A file OUTSIDE every watched directory still needs its own parent watch.
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = AbsPathBuf::assert_utf8(outside_dir.path().join("baseline.json"));
+        actor.watched_only_file_entries.insert(outside.clone());
+        assert_eq!(
+            actor.watch_target(outside.as_ref() as &std::path::Path),
+            Some((outside_dir.path().to_path_buf(), RecursiveMode::NonRecursive))
+        );
     }
 
     #[test]

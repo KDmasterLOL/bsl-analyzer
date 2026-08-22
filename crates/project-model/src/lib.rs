@@ -555,13 +555,13 @@ impl Project {
                 .iter()
                 .map(|partition| {
                     (
-                        &partition.id,
+                        partition.id.clone(),
                         if enabled_partition_ids.contains(&partition.id) {
                             DiagnosticsBaselinePartitionPolicy::Baseline
                         } else {
                             DiagnosticsBaselinePartitionPolicy::Unsuppressed
                         },
-                        &partition.identity,
+                        canonical_identity(&partition.identity),
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -573,7 +573,11 @@ impl Project {
         roots.sort_by(|left, right| {
             right.root.len().cmp(&left.root.len()).then(left.root.cmp(&right.root))
         });
-        let scope_bytes = serde_json::to_vec(&resolved.scope)
+        // Hashed over a canonical ordering: the declaration order of independent
+        // extensions carries no meaning — ownership, ids and roots do not depend on it —
+        // but the fingerprint would, and a reordered `bsl-analyzer.toml` would then
+        // invalidate the whole published set as a scope mismatch.
+        let scope_bytes = serde_json::to_vec(&canonical_scope(&resolved.scope))
             .map_err(|error| DiagnosticsBaselineProjectError::InvalidConfig(error.to_string()))?;
         let mut scope_hasher = blake3::Hasher::new();
         scope_hasher.update(b"bsl-analyzer/diagnostics-baseline/project-scope/v1\0");
@@ -891,11 +895,46 @@ fn validate_partitioned_config_path(path: &str) -> Result<(), DiagnosticsBaselin
         .map_err(|error| DiagnosticsBaselineProjectError::InvalidConfig(error.to_string()))
 }
 
+/// The project scope in a declaration-order-independent form, for fingerprinting only.
+/// The scope itself keeps topological order, which callers rely on.
+fn canonical_scope(scope: &DiagnosticsBaselineProjectScope) -> DiagnosticsBaselineProjectScope {
+    let mut scope = scope.clone();
+    for extension in &mut scope.extensions {
+        extension.depends_on.sort();
+    }
+    scope.extensions.sort_by(|left, right| left.name.cmp(&right.name));
+    scope
+}
+
+/// The same canonicalisation for a partition identity: group members and declared
+/// dependencies are sets, and their order must not move the selection fingerprint.
+fn canonical_identity(
+    identity: &DiagnosticsBaselinePartitionIdentity,
+) -> DiagnosticsBaselinePartitionIdentity {
+    let mut identity = identity.clone();
+    match &mut identity {
+        DiagnosticsBaselinePartitionIdentity::Main { .. } => {}
+        DiagnosticsBaselinePartitionIdentity::Extension { depends_on, .. } => depends_on.sort(),
+        DiagnosticsBaselinePartitionIdentity::Group { members, .. } => {
+            for member in members.iter_mut() {
+                member.depends_on.sort();
+            }
+            members.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+    }
+    identity
+}
+
 fn validate_partition_id(id: &str) -> Result<(), DiagnosticsBaselineProjectError> {
-    const MAX_BYTES: usize = 64;
-    if id.len() > MAX_BYTES {
+    // Counted in CHARACTERS: the id never reaches the file system — object paths are
+    // built from the blake3 key and hash — so the bound is only a sanity limit on a
+    // machine identifier. Counting bytes would halve it for Cyrillic, and extension
+    // names in 1C configurations are Russian, so an ordinary name would be rejected.
+    const MAX_CHARS: usize = 128;
+    let length = id.chars().count();
+    if length > MAX_CHARS {
         return Err(DiagnosticsBaselineProjectError::InvalidConfig(format!(
-            "partition id exceeds {MAX_BYTES} UTF-8 bytes"
+            "partition id is {length} characters, over the {MAX_CHARS} limit: {id}"
         )));
     }
     Ok(())
@@ -4299,7 +4338,7 @@ include = ["main", "extension:Sales"]
             diagnostics: partitioned_config(
                 "baselines",
                 vec![DiagnosticsBaselineGroupConfig {
-                    name: "x".repeat(65),
+                    name: "x".repeat(200),
                     extensions: vec!["A".to_owned()],
                 }],
             ),
@@ -4312,6 +4351,69 @@ include = ["main", "extension:Sales"]
             .diagnostics_baseline_partition_plan()
             .unwrap_err();
         assert!(matches!(error, DiagnosticsBaselineProjectError::InvalidConfig(_)));
+    }
+
+    /// Declaration order of independent extensions is not part of the scope: a
+    /// reordered config must not read as a different project and invalidate the whole
+    /// published set.
+    #[test]
+    fn diagnostics_partition_scope_fingerprint_ignores_declaration_order() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_extension(dir.path(), "src/cfe/C");
+        let plan_for = |order: [&str; 2]| {
+            let config = ProjectConfig {
+                diagnostics: partitioned_config("baselines", vec![]),
+                configuration_root: Some("src/cf".to_owned()),
+                extensions: Some(
+                    order
+                        .iter()
+                        .map(|name| structured(name, &format!("src/cfe/{name}"), &[]))
+                        .collect(),
+                ),
+                ..Default::default()
+            };
+            Project::with_config(dir.path(), config)
+                .unwrap()
+                .diagnostics_baseline_partition_plan()
+                .unwrap()
+                .unwrap()
+        };
+        let straight = plan_for(["A", "C"]);
+        let swapped = plan_for(["C", "A"]);
+        assert_ne!(
+            straight.project_scope.extensions[0].name, swapped.project_scope.extensions[0].name,
+            "positive control: the fixture must actually change the declared order"
+        );
+        assert_eq!(straight.project_scope_fingerprint, swapped.project_scope_fingerprint);
+        assert_eq!(straight.selection_fingerprint, swapped.selection_fingerprint);
+    }
+
+    /// Extension names in 1C configurations are Russian, and a byte-counted bound
+    /// would reject an ordinary one at half the length it allows in Latin.
+    #[test]
+    fn diagnostics_partition_id_accepts_a_russian_extension_name() {
+        let dir = tempdir().unwrap();
+        write_configuration_xml(&dir.path().join("src/cf"), "<xml/>");
+        // Long enough that the id exceeds the limit when counted in BYTES but not in
+        // characters: an input on which byte counting and character counting differ.
+        let name = "РасширениеДляОбменаСМаркировкой".repeat(3);
+        let id = format!("extension:{name}");
+        assert!(id.len() > 128 && id.chars().count() <= 128, "id {} bytes", id.len());
+        touch_extension(dir.path(), "src/cfe/Marking");
+        let config = ProjectConfig {
+            diagnostics: partitioned_config("baselines", vec![]),
+            configuration_root: Some("src/cf".to_owned()),
+            extensions: Some(vec![structured(&name, "src/cfe/Marking", &[])]),
+            ..Default::default()
+        };
+        let plan = Project::with_config(dir.path(), config)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap()
+            .unwrap();
+        assert!(plan.partitions.iter().any(|partition| partition.id == id));
     }
 
     #[test]

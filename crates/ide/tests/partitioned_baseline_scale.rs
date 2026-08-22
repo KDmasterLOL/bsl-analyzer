@@ -2,14 +2,15 @@
 
 use std::io::{BufWriter, Write};
 
+use ide::diagnostics_baseline::ResolvedPolicy;
 use ide::diagnostics_baseline::{
     diagnostic_fingerprint, BaselineDiagnosticCandidate, DiagnosticsBaselineCoverage,
     DiagnosticsBaselineEntry, DiagnosticsBaselineRange,
 };
 use ide::partitioned_diagnostics_baseline::{
-    classify_partitioned_diagnostics, diagnostics_manifest, diagnostics_manifest_json,
-    load_diagnostics_baseline_set_reusing, partition_object_path, DiagnosticsBaselineManifestEntry,
-    PartitionedBaselineDiagnosticCandidate,
+    classify_partitioned_diagnostics, classify_partitioned_diagnostics_with, diagnostics_manifest,
+    diagnostics_manifest_json, load_diagnostics_baseline_set_reusing, partition_object_path,
+    DiagnosticsBaselineManifestEntry, PartitionedBaselineDiagnosticCandidate,
 };
 use project_model::{
     DiagnosticsBaselinePartition, DiagnosticsBaselinePartitionIdentity,
@@ -28,6 +29,26 @@ fn resident_bytes() -> u64 {
         })
         .unwrap()
         * 1024
+}
+
+fn candidate(path: &str) -> PartitionedBaselineDiagnosticCandidate<()> {
+    PartitionedBaselineDiagnosticCandidate {
+        partition_id: "main".to_owned(),
+        candidate: BaselineDiagnosticCandidate {
+            diagnostic: (),
+            path: path.to_owned(),
+            code: "LineLength".to_owned(),
+            snippet: Some("Message(0);".to_owned()),
+            message: "m".to_owned(),
+            severity: "Warning".to_owned(),
+            range: DiagnosticsBaselineRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 1,
+            },
+        },
+    }
 }
 
 #[test]
@@ -154,6 +175,39 @@ fn loads_and_classifies_1_6m_entries_with_bounded_rss() {
         "resident growth {added} exceeds 1.5x input {input_bytes}"
     );
     assert_eq!(classified.resolved.into_iter().count(), RECORDS - 1);
+
+    // A single-file classification must not pay for the whole baseline. The
+    // `Compute` run beside it is the positive control: it walks all RECORDS
+    // entries, so a measurement that cannot tell the two apart would fail here
+    // rather than silently certify an unchanged cost.
+    let one_file = |policy| {
+        let started = std::time::Instant::now();
+        let classified = classify_partitioned_diagnostics_with(
+            &snapshot,
+            &plan,
+            "baselines".to_owned(),
+            vec![candidate("modules/0.bsl")],
+            &std::collections::BTreeMap::from([(
+                "main".to_owned(),
+                DiagnosticsBaselineCoverage::Partial {
+                    completed_files: std::collections::BTreeSet::from(["modules/0.bsl".to_owned()]),
+                },
+            )]),
+            policy,
+        )
+        .unwrap();
+        (started.elapsed(), classified)
+    };
+    let (computed_time, computed) = one_file(ResolvedPolicy::Compute);
+    let (skipped_time, skipped) = one_file(ResolvedPolicy::Skip);
+    assert_eq!(computed.summary.known, skipped.summary.known);
+    assert_eq!(skipped.summary.resolved, None);
+    assert!(
+        skipped_time * 8 < computed_time,
+        "skipping resolved must drop the per-file cost by an order of magnitude, \
+         not shave it: skip {skipped_time:?} against compute {computed_time:?}"
+    );
+
     let old = snapshot.partitions["main"].clone();
     let (reloaded, reload_stats) = load_diagnostics_baseline_set_reusing(
         &directory,

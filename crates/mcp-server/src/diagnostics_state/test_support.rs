@@ -7,7 +7,7 @@ use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 use super::lifecycle::{lock_recover, DiagnosticsState};
 use super::types::{DiagnosticsStatus, ResidentOutcome};
 
-pub(super) fn write(root: &Path, rel: &str, text: &str) {
+pub(crate) fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, text).unwrap();
@@ -15,7 +15,7 @@ pub(super) fn write(root: &Path, rel: &str, text: &str) {
 
 /// Write only a common module's descriptor XML (not its `Ext/Module.bsl`), so a test
 /// can flip a metadata property as pure `.xml` drift without touching the body.
-pub(super) fn write_common_module_xml(root: &Path, name: &str, server: bool) {
+pub(crate) fn write_common_module_xml(root: &Path, name: &str, server: bool) {
     let client = !server;
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -39,7 +39,7 @@ pub(super) fn write_common_module_xml(root: &Path, name: &str, server: bool) {
     write(root, &format!("CommonModules/{name}.xml"), &xml);
 }
 
-pub(super) fn write_common_module(root: &Path, name: &str, server: bool, body: &str) {
+pub(crate) fn write_common_module(root: &Path, name: &str, server: bool, body: &str) {
     write_common_module_xml(root, name, server);
     write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
 }

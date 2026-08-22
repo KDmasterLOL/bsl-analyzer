@@ -3,7 +3,7 @@ use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use lexer::{tokenize, Token, TokenKind};
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode, SyntaxToken};
+use syntax::{CommentRun, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -39,12 +39,6 @@ impl Config {
     }
 }
 
-#[derive(Debug)]
-struct CommentGroup {
-    range: TextRange,
-    tokens: Vec<SyntaxToken>,
-}
-
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let code = DiagnosticCode::CommentedCode;
     if ctx.is_disabled_with_metadata(code) {
@@ -58,16 +52,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let root = parse.syntax_node();
     let file_text = ctx.file_text();
 
-    let comment_tokens = collect_comment_tokens(&root);
-    let comment_groups = group_consecutive_comments(comment_tokens, &file_text);
-
-    for group in comment_groups {
-        if is_commented_code(&group, &config) {
+    // Владения строкой диагностика не требует: комментарий за кодом — такой же
+    // кандидат в закомментированный код, как стоящий на своей строке.
+    for run in syntax::comment_runs(&root) {
+        if is_commented_code(&run, &config) {
             // Deleting commented-out code is destructive and easy to regret, so it is an
             // opt-in quick fix, never part of an unattended `source.fixAll` sweep. The whole
             // commented line(s) are removed, but only when they hold nothing but the
             // comments (no real code shares them — see `deletable_lines_range`).
-            let fixes = deletable_lines_range(&file_text, &group)
+            let fixes = deletable_lines_range(&file_text, &run)
                 .map(|delete_range| {
                     Fix::manual(
                         "Удалить закомментированный код",
@@ -79,7 +72,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
                 message: message_ru(),
-                range: group.range,
+                range: run.range(),
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
                 fixes,
@@ -93,87 +86,26 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 /// The full lines a comment group occupies — indentation and trailing newline included —
 /// but only when the group is the sole content of those lines. Returns `None` if any real
 /// code shares a line (before, between, or after the comments), so deleting never drops it.
-fn deletable_lines_range(text: &str, group: &CommentGroup) -> Option<TextRange> {
-    let start: usize = group.range.start().into();
-    let end: usize = group.range.end().into();
+fn deletable_lines_range(text: &str, run: &CommentRun) -> Option<TextRange> {
+    let start: usize = run.range().start().into();
+    let end: usize = run.range().end().into();
     let line_start = text[..start].rfind('\n').map_or(0, |nl| nl + 1);
     let line_end = text[end..].find('\n').map_or(text.len(), |nl| end + nl + 1);
 
     // Everything in the region that is not a comment token must be whitespace.
     let mut cursor = line_start;
-    for token in &group.tokens {
-        let token_start: usize = token.text_range().start().into();
+    for line in run.lines() {
+        let token_start: usize = line.token.text_range().start().into();
         if !text[cursor..token_start].trim().is_empty() {
             return None;
         }
-        cursor = token.text_range().end().into();
+        cursor = line.token.text_range().end().into();
     }
     if !text[cursor..line_end].trim().is_empty() {
         return None;
     }
 
     Some(TextRange::new((line_start as u32).into(), (line_end as u32).into()))
-}
-
-fn collect_comment_tokens(root: &SyntaxNode) -> Vec<SyntaxToken> {
-    let mut tokens = Vec::new();
-    for element in root.descendants_with_tokens() {
-        if let NodeOrToken::Token(token) = element {
-            if token.kind() == SyntaxKind::COMMENT {
-                tokens.push(token);
-            }
-        }
-    }
-    tokens
-}
-
-fn group_consecutive_comments(tokens: Vec<SyntaxToken>, file_text: &str) -> Vec<CommentGroup> {
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-
-    let mut line_starts = vec![0];
-    for (idx, ch) in file_text.char_indices() {
-        if ch == '\n' {
-            line_starts.push(idx + 1);
-        }
-    }
-
-    let get_line = |offset: usize| -> usize {
-        line_starts.binary_search(&offset).unwrap_or_else(|idx| idx.saturating_sub(1))
-    };
-
-    let mut groups = Vec::new();
-    let mut current_tokens = vec![tokens[0].clone()];
-    let mut prev_line = get_line(u32::from(tokens[0].text_range().start()) as usize);
-
-    for curr_token in tokens.iter().skip(1) {
-        let curr_offset = u32::from(curr_token.text_range().start()) as usize;
-        let curr_line = get_line(curr_offset);
-
-        if curr_line == prev_line + 1 {
-            current_tokens.push(curr_token.clone());
-        } else {
-            groups.push(finish_group(current_tokens));
-            current_tokens = vec![curr_token.clone()];
-        }
-
-        prev_line = curr_line;
-    }
-
-    if !current_tokens.is_empty() {
-        groups.push(finish_group(current_tokens));
-    }
-
-    groups
-}
-
-fn finish_group(tokens: Vec<SyntaxToken>) -> CommentGroup {
-    let range = TextRange::new(
-        tokens.first().unwrap().text_range().start(),
-        tokens.last().unwrap().text_range().end(),
-    );
-    CommentGroup { range, tokens }
 }
 
 /// Strips the leading `//` markers from a single comment token's text.
@@ -192,15 +124,15 @@ fn message_ru() -> String {
 /// a BSL statement and the group does not carry a recognised documentation
 /// marker. Reporting the whole group range keeps a single finding aligned with
 /// the block a developer would delete.
-fn is_commented_code(group: &CommentGroup, config: &Config) -> bool {
-    if group.tokens.is_empty() {
+fn is_commented_code(run: &CommentRun, config: &Config) -> bool {
+    if run.lines().is_empty() {
         return false;
     }
 
     // Documentation blocks (`Параметры:`, `Возвращаемое значение:`, …) describe
     // an API; the structured parameter lines below such markers frequently end
     // in `;` and read like code without being executable.
-    if is_documentation_block(group) {
+    if is_documentation_block(run) {
         return false;
     }
 
@@ -208,16 +140,17 @@ fn is_commented_code(group: &CommentGroup, config: &Config) -> bool {
     // where data lines form the majority is a commented-out data block, not
     // commented-out code.  The first-line guard prevents a group that opens with
     // a real assignment and continues with HTML fragments from being suppressed.
-    if group_is_commented_data(group) {
+    if group_is_commented_data(run) {
         return false;
     }
 
     // The SQL text-block continuation prefix (`|`) only marks code when the same
     // group also opens a real query (`ВЫБРАТЬ`, `SELECT`, …); a lone `| прозаичный
     // хвост` is just a boxed comment, not a commented-out query.
-    let group_has_query = group.tokens.iter().any(|token| line_opens_query(comment_body(token)));
+    let group_has_query =
+        run.lines().iter().any(|line| line_opens_query(comment_body(&line.token)));
 
-    group.tokens.iter().any(|token| line_is_code(comment_body(token), config, group_has_query))
+    run.lines().iter().any(|line| line_is_code(comment_body(&line.token), config, group_has_query))
 }
 
 const DOC_MARKERS: &[&str] = &[
@@ -233,9 +166,9 @@ const DOC_MARKERS: &[&str] = &[
     "description:",
 ];
 
-fn is_documentation_block(group: &CommentGroup) -> bool {
-    group.tokens.iter().any(|token| {
-        let lowered = comment_body(token).trim().to_lowercase();
+fn is_documentation_block(run: &CommentRun) -> bool {
+    run.lines().iter().any(|line| {
+        let lowered = comment_body(&line.token).trim().to_lowercase();
         DOC_MARKERS.iter().any(|marker| lowered.starts_with(marker))
     })
 }
@@ -245,9 +178,13 @@ fn is_documentation_block(group: &CommentGroup) -> bool {
 ///   1. The first non-empty comment line is itself data (so a group that opens
 ///      with a real statement and continues with HTML fragments is not skipped).
 ///   2. Data lines form a strict majority (> half) of all non-empty lines.
-fn group_is_commented_data(group: &CommentGroup) -> bool {
-    let bodies: Vec<&str> =
-        group.tokens.iter().map(|t| comment_body(t).trim()).filter(|s| !s.is_empty()).collect();
+fn group_is_commented_data(run: &CommentRun) -> bool {
+    let bodies: Vec<&str> = run
+        .lines()
+        .iter()
+        .map(|line| comment_body(&line.token).trim())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     if bodies.is_empty() {
         return false;
@@ -459,7 +396,7 @@ fn assignment_index(toks: &[Token]) -> Option<usize> {
         }
         let prev = toks[idx - 1].kind;
         let next = toks[idx + 1].kind;
-        if matches!(prev, TokenKind::Lt | TokenKind::Gt | TokenKind::Eq | TokenKind::Exclamation) {
+        if matches!(prev, TokenKind::Lt | TokenKind::Gt | TokenKind::Eq) {
             continue;
         }
         if matches!(next, TokenKind::Eq | TokenKind::Gt) {
@@ -703,6 +640,37 @@ mod tests {
                 Возврат Б;
             КонецФункции"#]],
         );
+    }
+
+    #[test]
+    fn commented_code_inside_multiline_literal_is_not_reported() {
+        // Строки многострочного литерала, начинающиеся с `//`, лексер отдаёт
+        // токенами комментария — текстом запроса они от этого быть не перестают.
+        let inside_literal = "Процедура П()\n    Т = \"ВЫБРАТЬ *\n    // Сообщить(1);\n    // Возврат;\n    |ИЗ Т\";\nКонецПроцедуры";
+        assert!(check_ast_diagnostic(inside_literal, check).is_empty());
+
+        // Тот же текст вне литерала: без него пустой ответ выше означал бы и
+        // «литерал распознан», и «диагностика перестала срабатывать вовсе».
+        let outside_literal = "Процедура П()\n    // Сообщить(1);\n    // Возврат;\nКонецПроцедуры";
+        let diagnostics = check_ast_diagnostic(outside_literal, check);
+        expect![[r#"
+            CommentedCode @ 2:5..3:16
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(outside_literal, &diagnostics));
+    }
+
+    #[test]
+    fn inline_code_comment_is_still_reported() {
+        // Комментарий за кодом остаётся кандидатом в закомментированный код:
+        // отсутствие быстрой правки не означает отсутствия находки.
+        let code = "Функция Тест()\n    Х = ВызовФункции();    // Возврат Старое;\n    Возврат Х;\nКонецФункции";
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            CommentedCode @ 2:28..2:46
+              message: Программные модули не должны иметь закомментированных фрагментов кода
+              severity: Information"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
@@ -1133,6 +1101,24 @@ mod tests {
         let code = "Процедура Тест()\n    // .\n    // ..\nКонецПроцедуры";
         let diagnostics = crate::test_utils::check_ast_diagnostic(code, check);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// `!=` в теле комментария — сравнение, а не присваивание.
+    ///
+    /// Пара входов обязательна: на одном лишь `!=` проверка зелена при любой
+    /// реализации `assignment_index`, включая ту, что не находит присваиваний
+    /// вовсе. `а = 1;` рядом показывает, что мерка вообще способна их видеть.
+    #[test]
+    fn bang_equals_is_not_an_assignment() {
+        let index = |text: &str| super::assignment_index(&super::code_tokens(text));
+
+        assert_eq!(index("а != 1"), None);
+        assert_eq!(index("Массив[0] != 1"), None);
+        assert_eq!(index("Функция() != 1"), None);
+
+        assert!(index("а = 1;").is_some(), "мерка не видит присваивания и потому ничего не пиннит");
+        assert!(index("Массив[0] = 1;").is_some());
+        assert!(index("Функция() = 1;").is_some());
     }
 
     #[test]

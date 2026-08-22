@@ -81,7 +81,7 @@ Detailed reference: `docs/architecture/ARCHITECTURE.md`, `docs/contributing/DEVE
 ## BSL language
 
 - **Bilingual** identifiers and keywords are case-insensitive: `Процедура` ≡ `Procedure`.
-- **Preprocessor** directives include localized and English forms, for example `#Если`, `#Область`, `#Использовать`.
+- **Preprocessor** directives include localized and English forms, for example `#Если`, `#Область`, `#Вставка`.
 - **Annotations** include localized and English forms, for example `&НаКлиенте`, `&НаСервере`, `&До`, `&После`, `&Вместо`.
 
 ## General Rules

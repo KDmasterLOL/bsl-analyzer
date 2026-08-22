@@ -66,9 +66,11 @@ fn selective_baseline_reporters_keep_existing_containers_and_show_policy() {
         .unwrap()
         .iter()
         .all(|result| result.get("baselineState").is_none()));
+    // The selection and per-partition policy are reported by SARIF and JSONL, asserted
+    // above and below. JUnit carries no baseline summary at all: `<properties>` under
+    // `<testsuites>` is not valid in the schema its consumers validate against.
     let junit = fs::read_to_string(temp.path().join("reports/bsl-analyzer.junit.xml")).unwrap();
-    assert!(junit.contains("&quot;selection&quot;:&quot;selective&quot;"));
-    assert!(junit.contains("&quot;policy&quot;:&quot;unsuppressed&quot;"));
+    assert!(!junit.contains("<properties>"));
 
     let jsonl = run(temp.path(), &["analyze", "-s", ".", "--format", "jsonl"]);
     assert!(jsonl.status.success());

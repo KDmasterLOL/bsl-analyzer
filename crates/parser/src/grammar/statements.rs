@@ -107,6 +107,14 @@ fn at_end_do(p: &Parser) -> bool {
 // standing on that word. `Если Тогда` used to consume the `Тогда` in front of
 // it and then report it missing.
 
+/// The `Тогда` the `Если` header ends at.
+///
+/// Byte-identical to the predicate of the same name in `grammar.rs`, and kept
+/// apart on purpose — that one is awaited by `#Если`. See the banner there for
+/// why one predicate answering both questions would stop telling the two
+/// positions apart.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, findings D1 and D2.
 fn at_then(p: &Parser) -> bool {
     p.at(T![KwThen])
 }
@@ -320,6 +328,13 @@ fn parse_raise_call_args(p: &mut Parser) {
     p.expect(T![RParen]);
 }
 
+/// The tilde is optional, though 4.2.4.2 makes it part of the label.
+///
+/// 4.6.7 writes `Перейти <Метка>;` and its example writes `Перейти ~Метка1;`.
+/// Taking the label without its tilde leaves the statement its shape while the
+/// tilde is still being typed, instead of losing the label name with it.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D10.
 fn goto_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
@@ -345,6 +360,15 @@ fn label_stmt(p: &mut Parser) {
     m.complete(p, NodeKind::LabelStmt);
 }
 
+/// The parentheses of 4.6.8 are read as optional.
+///
+/// The section writes `Выполнить(<Строка>)` with the parentheses inside the
+/// form rather than in brackets of optionality. They are optional here because
+/// the bare form occurs 41 times across a corpus of 75 438 files, against 1833
+/// parenthesised ones, and refusing it would be 41 false errors on code that
+/// builds.
+///
+/// Provenance: `docs/legal/bsl-clean-room-slice-b3.md`, finding D8.
 fn execute_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();

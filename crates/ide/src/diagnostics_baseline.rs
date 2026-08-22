@@ -185,6 +185,14 @@ pub struct DiagnosticsBaselinePartitionSummary {
 }
 
 impl DiagnosticsBaselineSummary {
+    /// A baseline that is configured but whose classification never ran to a
+    /// verdict — the sweep was cancelled first. Absent counts say that, where a
+    /// zero would claim "nothing new was found" and [`Self::disabled`] would claim
+    /// the project has no baseline at all.
+    pub fn interrupted(path: Option<String>) -> Self {
+        Self { state: DiagnosticsBaselineState::Partial, path, complete: false, ..Self::disabled() }
+    }
+
     pub fn disabled() -> Self {
         Self {
             state: DiagnosticsBaselineState::Disabled,
@@ -308,11 +316,35 @@ fn validate_relative_path(path: &str, allow_empty: bool) -> Result<(), Diagnosti
     }
 }
 
+/// Whether a classification has to produce the `resolved` set.
+///
+/// Computing it walks every entry of the baseline (of every enabled partition, in
+/// the partitioned form) and asks the coverage whether that entry's file was
+/// analysed. That is the right shape for a whole-project run, which does it once,
+/// and pure cost for a caller classifying a single file to decide which of its
+/// diagnostics stay active — there the walk is proportional to accumulated debt
+/// and its result is discarded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedPolicy {
+    Compute,
+    Skip,
+}
+
 pub fn classify_diagnostics<T>(
+    baseline: &DiagnosticsBaseline,
+    baseline_path: String,
+    current: Vec<BaselineDiagnosticCandidate<T>>,
+    coverage: &DiagnosticsBaselineCoverage,
+) -> Result<ClassifiedDiagnostics<T>, MissingDiagnosticSnippet> {
+    classify_diagnostics_with(baseline, baseline_path, current, coverage, ResolvedPolicy::Compute)
+}
+
+pub fn classify_diagnostics_with<T>(
     baseline: &DiagnosticsBaseline,
     baseline_path: String,
     mut current: Vec<BaselineDiagnosticCandidate<T>>,
     coverage: &DiagnosticsBaselineCoverage,
+    resolved_policy: ResolvedPolicy,
 ) -> Result<ClassifiedDiagnostics<T>, MissingDiagnosticSnippet> {
     current.sort_by(|a, b| {
         (&a.path, &a.range, &a.code, &a.message).cmp(&(&b.path, &b.range, &b.code, &b.message))
@@ -360,20 +392,23 @@ pub fn classify_diagnostics<T>(
         }
     }
 
-    let resolved: Vec<_> = baseline
-        .diagnostics
-        .iter()
-        .filter(|entry| {
-            !matched.contains(&entry.fingerprint)
-                && match coverage {
-                    DiagnosticsBaselineCoverage::Full => true,
-                    DiagnosticsBaselineCoverage::Partial { completed_files } => {
-                        completed_files.contains(&entry.path)
+    let resolved: Vec<_> = match resolved_policy {
+        ResolvedPolicy::Skip => Vec::new(),
+        ResolvedPolicy::Compute => baseline
+            .diagnostics
+            .iter()
+            .filter(|entry| {
+                !matched.contains(&entry.fingerprint)
+                    && match coverage {
+                        DiagnosticsBaselineCoverage::Full => true,
+                        DiagnosticsBaselineCoverage::Partial { completed_files } => {
+                            completed_files.contains(&entry.path)
+                        }
                     }
-                }
-        })
-        .cloned()
-        .collect();
+            })
+            .cloned()
+            .collect(),
+    };
     let complete = matches!(coverage, DiagnosticsBaselineCoverage::Full);
     let summary = DiagnosticsBaselineSummary {
         state: if complete {
@@ -387,7 +422,10 @@ pub fn classify_diagnostics<T>(
         unsuppressed: None,
         new: Some(new.len()),
         known: Some(known.len()),
-        resolved: Some(resolved.len()),
+        resolved: match resolved_policy {
+            ResolvedPolicy::Compute => Some(resolved.len()),
+            ResolvedPolicy::Skip => None,
+        },
         path: Some(baseline_path),
         schema_version: Some(baseline.schema_version),
         manifest_schema_version: None,
@@ -401,7 +439,10 @@ pub fn classify_diagnostics<T>(
     Ok(ClassifiedDiagnostics { new, known, resolved, summary })
 }
 
-fn is_protected_diagnostic(code: &str) -> bool {
+/// A diagnostic that a baseline must never suppress, and therefore must never
+/// record: it reports a broken suppression directive, so hiding it would hide
+/// the very fact that a suppression does not work.
+pub fn is_protected_diagnostic(code: &str) -> bool {
     matches!(code, "UnknownSuppressionCode" | "SuppressionWithoutCode")
 }
 

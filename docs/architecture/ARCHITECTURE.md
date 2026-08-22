@@ -293,7 +293,9 @@ Cancellation-карты (`diagnostics_tokens`, `preload_tokens`,
 ## Полезные документы рядом
 
 - `docs/architecture/DATAFLOW.md` — flow-sensitive анализ и текущее покрытие диагностик
-- `docs/architecture/SEARCH_BASELINE_OVERLAY.md` — модель baseline + overlay
+- `docs/architecture/SEARCH_BASELINE_OVERLAY.md` — модель baseline + overlay в поиске
+- `docs/architecture/DIAGNOSTICS_BASELINE.md` — базовая линия диагностик: отпечаток,
+  партиции, публикация набора
 - `docs/configuration/PROJECT_CONFIGURATION.md` — структура конфигурации проекта
 - `docs/configuration/DIAGNOSTICS.md` — параметры диагностических правил
 - `docs/contributing/SALSA_GUIDE.md` — практические рекомендации по работе с Salsa

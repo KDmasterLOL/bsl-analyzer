@@ -132,6 +132,12 @@ impl GlobalState {
             .collect();
         config_files.sort();
         config_files.dedup();
+        // NOTE: object names are content-addressed, so this list changes with every
+        // baseline write and re-registering it reconfigures the loader — a full
+        // workspace rescan. Narrowing the watch to stable paths was tried and reverted:
+        // watching the manifest alone hides a corrupted enabled object, and watching the
+        // object directories makes edits to dormant partitions visible to the editor.
+        // Both properties are asserted by tests, so the fix needs a different mechanism.
         let mut baseline_files: Vec<_> = self
             .diagnostics_baseline
             .observation_paths()

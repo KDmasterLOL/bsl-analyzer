@@ -179,17 +179,21 @@ directory = "baselines"
         .args(["diagnostics", "baseline", "create", "-s", ".", "--from-v1", "legacy.json"])
         .spawn()
         .unwrap();
+    // VmHWM, not sampled VmRSS: a peak shorter than the sampling interval — a partition
+    // buffered whole before serialisation, say — is exactly the regression this gate
+    // exists for, and polling would never see it. The kernel keeps the high-water mark,
+    // so it is read on each turn and last before the process is reaped.
     let mut peak_rss = 0;
     let status = loop {
+        if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", child.id())) {
+            if let Some(hwm) = status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<u64>().ok()
+            }) {
+                peak_rss = peak_rss.max(hwm * 1024);
+            }
+        }
         if let Some(status) = child.try_wait().unwrap() {
             break status;
-        }
-        if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", child.id())) {
-            if let Some(rss) = status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()
-            }) {
-                peak_rss = peak_rss.max(rss * 1024);
-            }
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };

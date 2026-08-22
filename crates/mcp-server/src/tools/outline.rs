@@ -1162,6 +1162,7 @@ mod tests {
         let from_diagnostics = match state.read(|resident, generation| {
             crate::tools::diagnostics::file_findings(
                 resident,
+                &resident.analysis(),
                 None,
                 Path::new(missing),
                 &filters,

@@ -12,7 +12,7 @@ use mcp_server::{serve_stream, McpProfile, McpServer, SharedState, ToolGate};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 use tempfile::TempDir;
 
 type Client = RunningService<RoleClient, ()>;
@@ -2449,4 +2449,149 @@ async fn a_line_beginning_inside_a_continued_literal_is_quoted_from_its_start() 
     );
 
     client.cancel().await.ok();
+}
+
+/// Callers of one popular name, enough that the walk is still running when the cancel
+/// lands. Measured, not assigned: a cold walk over this many callers takes seconds while
+/// the resident builds in milliseconds. A smaller stand lets the answer finish first, and
+/// then the gate passes whatever the server does with a cancellation.
+const CANCEL_STAND_CALLERS: usize = 800;
+
+/// A cancelled call publishes an error and no body.
+///
+/// Asserted on the FRAMES, because a spec-compliant client cannot see this: rmcp resolves
+/// a cancelled request locally the moment it sends `notifications/cancelled` and drops
+/// whatever the server answers. What the server publishes is still the contract — it is
+/// what a client written differently would read — so the gate speaks the protocol itself.
+#[tokio::test]
+async fn a_cancelled_call_publishes_an_error_and_no_body() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let dst = stage_fixture();
+    write_module(dst.path(), "Прогрев", "Процедура Прогреть() Экспорт\nКонецПроцедуры\n");
+    for index in 0..CANCEL_STAND_CALLERS {
+        write_module(
+            dst.path(),
+            &format!("Толпа{index:04}"),
+            &format!(
+                "Процедура Вызвать{index:04}() Экспорт\n    \
+                 ПервыйОбщийМодуль.НеУстаревшаяФункция();\nКонецПроцедуры\n"
+            ),
+        );
+    }
+
+    let state = SharedState::workspace(dst.path().to_path_buf()).expect("valid workspace project");
+    let gate = ToolGate::for_launch(McpProfile::Workspace, &[TOOL.to_owned()]);
+    let server = McpServer::with_gate(McpProfile::Workspace, state, &gate);
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    let (read_half, mut write) = tokio::io::split(client_io);
+    let mut read = BufReader::new(read_half);
+
+    async fn send<W: tokio::io::AsyncWrite + Unpin>(write: &mut W, value: Value) {
+        write.write_all(format!("{value}\n").as_bytes()).await.expect("frame written");
+    }
+    /// Bounded on purpose: the one failure this gate exists to catch is a server that
+    /// does not answer a cancelled id, and an unbounded read would hang the run instead
+    /// of reporting it.
+    async fn next_frame<R: tokio::io::AsyncBufRead + Unpin>(read: &mut R) -> Value {
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(120), read.read_line(&mut line))
+            .await
+            .expect("the server must answer within the deadline")
+            .expect("frame read");
+        serde_json::from_str::<Value>(&line).expect("frame is JSON")
+    }
+
+    send(
+        &mut write,
+        json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "frame-gate", "version": "0"}
+            }
+        }),
+    )
+    .await;
+    let hello = next_frame(&mut read).await;
+    assert!(hello["result"]["serverInfo"].is_object(), "handshake answered: {hello}");
+    send(&mut write, json!({"jsonrpc": "2.0", "method": "notifications/initialized"})).await;
+
+    // Bring the resident up on a name whose walk touches almost nothing, so the popular
+    // name below is still cold — and therefore still walking — when its call is cancelled.
+    let mut id = 2;
+    loop {
+        send(
+            &mut write,
+            json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                "params": {"name": TOOL, "arguments": {"symbol": "Прогрев.Прогреть"}}
+            }),
+        )
+        .await;
+        let answer = next_frame(&mut read).await;
+        id += 1;
+        if answer["result"]["structuredContent"]["status"] != "loading" {
+            break;
+        }
+        assert!(id < 400, "the resident never became ready");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let subject = id;
+    send(
+        &mut write,
+        json!({
+            "jsonrpc": "2.0", "id": subject, "method": "tools/call",
+            "params": {"name": TOOL, "arguments": {"symbol": STAND_METHOD}}
+        }),
+    )
+    .await;
+    send(
+        &mut write,
+        json!({
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": {"requestId": subject, "reason": "gate"}
+        }),
+    )
+    .await;
+
+    let answered = loop {
+        let frame = next_frame(&mut read).await;
+        if frame["id"] == json!(subject) {
+            break frame;
+        }
+    };
+    assert!(
+        answered["result"].is_null(),
+        "a cancelled call published a body; if this stand became fast enough to finish \
+         first, raise CANCEL_STAND_CALLERS rather than relaxing the assertion: {answered}"
+    );
+    assert!(
+        answered["error"]["message"].as_str().is_some_and(|m| m.contains("request cancelled")),
+        "the error must name the cancellation: {answered}"
+    );
+
+    // Positive control on the same wire: uncancelled, the same call publishes a body.
+    let control = subject + 1;
+    send(
+        &mut write,
+        json!({
+            "jsonrpc": "2.0", "id": control, "method": "tools/call",
+            "params": {"name": TOOL, "arguments": {"symbol": STAND_METHOD}}
+        }),
+    )
+    .await;
+    let answered = loop {
+        let frame = next_frame(&mut read).await;
+        if frame["id"] == json!(control) {
+            break frame;
+        }
+    };
+    assert_eq!(
+        answered["result"]["structuredContent"]["outcome"], "resolved",
+        "the control must publish the body the cancelled call withheld: {answered}"
+    );
 }

@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod ast_utils;
+mod comment_run;
 pub mod sdbl_query;
 mod syntax_kind;
 mod syntax_node;
@@ -16,6 +17,7 @@ pub use crate::{
         extract_variable_comments_at_offset, has_trailing_comment, has_variable_description,
         trailing_semicolon,
     },
+    comment_run::{comment_runs, CommentLine, CommentRun},
     sdbl_query::{extract_sdbl_with_corrections, SdblQueryInfo},
     syntax_kind::SyntaxKind,
     syntax_node::{

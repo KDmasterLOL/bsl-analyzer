@@ -36,11 +36,13 @@ impl<'a> PartitionFileWriter<'a> {
         let temp = TemporaryFile::new(directory, temp_name("migration.json"));
         let file = directory.create_file_new(temp.path())?;
         let mut file = HashingWriter::new(BufWriter::new(file));
+        // Spacing matters: these bytes must match `diagnostics_partition_json` exactly,
+        // or an object streamed here cannot be regenerated for repair.
         file.write_all(br#"{"schema_version":"#)?;
         serde_json::to_writer(&mut file, &DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION)?;
-        file.write_all(br#", "partition":"#)?;
+        file.write_all(br#","partition":"#)?;
         serde_json::to_writer(&mut file, &partition.identity)?;
-        file.write_all(br#", "diagnostics":["#)?;
+        file.write_all(br#","diagnostics":["#)?;
         Ok(Self { partition, file, temp, entries: 0 })
     }
 
@@ -281,7 +283,38 @@ fn publish_set_with_hook(
         if old.project_scope_fingerprint == manifest.project_scope_fingerprint {
             let retained: HashSet<_> =
                 manifest.partitions.iter().map(|entry| entry.file.as_str()).collect();
+            // Only a superseded VERSION of a partition that still exists is deleted. A
+            // partition absent from the new manifest keeps its object: it may be dormant
+            // under `include`, or regrouped (`extension:A` becoming part of `group:T`),
+            // and the scope fingerprint does not cover grouping — it would report "same
+            // plan" while the ids changed, and the deletion would be irreversible.
+            let living: HashSet<_> =
+                manifest.partitions.iter().map(|entry| entry.partition_id.as_str()).collect();
             for entry in old.partitions {
+                if !living.contains(entry.partition_id.as_str()) {
+                    continue;
+                }
+                // Only content-addressed object paths are ever deleted. The old manifest
+                // is parsed as plain JSON, so a corrupted or hand-edited one could name
+                // `manifest.json` — or anything else in the managed directory — and the
+                // cleanup would obediently remove it.
+                let object_path = ide::partitioned_diagnostics_baseline::partition_object_path(
+                    &entry.partition_id,
+                    &blake3::hash(entry.partition_id.as_bytes()).to_hex(),
+                    &entry.blake3,
+                );
+                let addressed = entry.file.starts_with("objects/")
+                    && object_path.is_ok_and(|path| {
+                        std::path::Path::new(&path).file_name()
+                            == std::path::Path::new(&entry.file).file_name()
+                    });
+                if !addressed {
+                    tracing::warn!(
+                        file = %entry.file,
+                        "diagnostics baseline cleanup skipped a path that is not an object"
+                    );
+                    continue;
+                }
                 if !retained.contains(entry.file.as_str()) {
                     if let Err(error) = directory.remove_file(&entry.file) {
                         tracing::warn!(%error, path = entry.file, "diagnostics baseline cleanup failed");
@@ -497,6 +530,144 @@ mod tests {
             .file_name()
             .to_string_lossy()
             .contains("migration")));
+    }
+
+    /// The old manifest is parsed as plain JSON, so a corrupted one may name any path in
+    /// the managed directory. Cleanup must touch only content-addressed objects.
+    #[test]
+    fn cleanup_refuses_to_delete_a_path_that_is_not_an_object() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let scope = "a".repeat(64);
+        let first =
+            publish_set(&directory, scope.clone(), vec![partition("main", b"main-v1")], None)
+                .unwrap();
+
+        // A hand-edited manifest pointing at a file that is not an object.
+        directory.create_file_new("innocent.json").unwrap().write_all(b"keep me").unwrap();
+        let mut tampered = first.manifest.clone();
+        tampered.partitions[0].file = "innocent.json".to_owned();
+        atomic_write(&directory, "manifest.json", &diagnostics_manifest_json(&tampered).unwrap())
+            .unwrap();
+
+        publish_set(
+            &directory,
+            scope,
+            vec![partition("main", b"main-v2")],
+            Some(&tampered.generation),
+        )
+        .unwrap();
+
+        assert!(
+            read_optional(&directory, "innocent.json").unwrap().is_some(),
+            "cleanup deleted a path the manifest named but that is not an object"
+        );
+    }
+
+    /// Publication deletes superseded objects, but a partition that vanished from the
+    /// manifest — dormant under `include`, or regrouped — must keep its file: the scope
+    /// fingerprint does not cover grouping, so it would claim "same plan" while the ids
+    /// changed, and the deletion cannot be undone.
+    #[test]
+    fn publish_keeps_objects_of_partitions_missing_from_the_new_manifest() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let scope = "a".repeat(64);
+        let first = publish_set(
+            &directory,
+            scope.clone(),
+            vec![partition("main", b"main-v1"), partition("extension:A", b"ext-a")],
+            None,
+        )
+        .unwrap();
+        let dormant = first
+            .manifest
+            .partitions
+            .iter()
+            .find(|entry| entry.partition_id == "extension:A")
+            .unwrap()
+            .file
+            .clone();
+
+        // A new generation without `extension:A`, and with `main` rewritten.
+        let second = publish_set(
+            &directory,
+            scope,
+            vec![partition("main", b"main-v2")],
+            Some(&first.manifest.generation),
+        )
+        .unwrap();
+        let superseded = first
+            .manifest
+            .partitions
+            .iter()
+            .find(|entry| entry.partition_id == "main")
+            .unwrap()
+            .file
+            .clone();
+        assert_ne!(
+            superseded, second.manifest.partitions[0].file,
+            "positive control: main must actually have a new object"
+        );
+
+        assert!(
+            read_optional(&directory, &superseded).unwrap().is_none(),
+            "a superseded version of a living partition is still cleaned up"
+        );
+        assert!(
+            read_optional(&directory, &dormant).unwrap().is_some(),
+            "the object of a partition absent from the new manifest must survive"
+        );
+    }
+
+    /// The streaming writer and the in-memory serializer produce the same object
+    /// file. `repair_object` demands a byte-identical regeneration, so a set built
+    /// by one of them must stay repairable by the other.
+    #[test]
+    fn streamed_and_serialized_partitions_are_byte_identical() {
+        let root = tempdir().unwrap();
+        let directory = ManagedBaselineDirectory::open(root.path(), "baselines", true).unwrap();
+        let identity = DiagnosticsBaselinePartitionIdentity::Main { path: "src/cf".to_owned() };
+        let partition = DiagnosticsBaselinePartition {
+            id: "main".to_owned(),
+            key: blake3::hash(b"main").to_hex().to_string(),
+            identity: identity.clone(),
+        };
+        let path = "src/cf/Main.bsl";
+        let snippet = "Message(1);";
+        let entry = DiagnosticsBaselineEntry {
+            fingerprint: diagnostic_fingerprint(path, "LineLength", snippet, 0),
+            path: path.to_owned(),
+            code: "LineLength".to_owned(),
+            snippet: snippet.to_owned(),
+            occurrence: 0,
+            message: "m".to_owned(),
+            severity: "Warning".to_owned(),
+            range: DiagnosticsBaselineRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 1,
+            },
+        };
+
+        let mut writer = PartitionFileWriter::new(&directory, &partition).unwrap();
+        writer.write_entry(&entry).unwrap();
+        let (prepared, _) = writer.finish().unwrap();
+        let PreparedPartition::Staged { hash, .. } = &prepared else {
+            panic!("the streaming writer stages its object")
+        };
+
+        let serialized = ide::partitioned_diagnostics_baseline::diagnostics_partition_json(
+            identity,
+            vec![entry],
+        )
+        .unwrap();
+        assert_eq!(
+            *hash,
+            blake3::hash(&serialized).to_hex().to_string(),
+            "a set created by migration would not be repairable by `create --partition`"
+        );
     }
 
     #[test]
