@@ -1325,26 +1325,7 @@ fn suppress_known_files(
 ) {
     for (file_index, file) in files.iter_mut().enumerate() {
         let Some(analysis) = file else { continue };
-        let mut diagnostic_index = 0;
-        analysis.diagnostics.retain(|_| {
-            let keep = !known.contains(&(file_index, diagnostic_index));
-            diagnostic_index += 1;
-            keep
-        });
-        let mut snippet_index = 0;
-        analysis.line_snippets.retain(|_| {
-            let keep = !known.contains(&(file_index, snippet_index));
-            snippet_index += 1;
-            keep
-        });
-        // Ordinals were computed over the full set and stay attached to the findings
-        // that survive: a reporter must not renumber what suppression has thinned.
-        let mut occurrence_index = 0;
-        analysis.occurrences.retain(|_| {
-            let keep = !known.contains(&(file_index, occurrence_index));
-            occurrence_index += 1;
-            keep
-        });
+        analysis.retain_findings(|index| !known.contains(&(file_index, index)));
         if analysis.diagnostics.is_empty() {
             *file = None;
         }

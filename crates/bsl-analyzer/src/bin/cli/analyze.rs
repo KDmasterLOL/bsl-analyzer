@@ -931,18 +931,7 @@ fn analyze_salsa(
                         keep.range_survives(start, end)
                     })
                     .collect();
-                let mut index = 0;
-                file.diagnostics.retain(|_| {
-                    let retain = kept[index];
-                    index += 1;
-                    retain
-                });
-                index = 0;
-                file.line_snippets.retain(|_| {
-                    let retain = kept[index];
-                    index += 1;
-                    retain
-                });
+                file.retain_findings(|index| kept[index]);
                 author_seen.fetch_add(before, Ordering::Relaxed);
                 author_dropped.fetch_add(before - file.diagnostics.len(), Ordering::Relaxed);
                 if file.diagnostics.is_empty() {

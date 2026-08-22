@@ -321,3 +321,83 @@ fn author_filter_summary_states_the_counts_it_actually_dropped() {
         "summary is read before the filter runs and reports nothing: {summary}"
     );
 }
+
+/// Runs `analyze` with the Code Quality reporter and pairs every finding with its
+/// fingerprint, keyed by rule and line so the two runs can be matched up.
+fn code_quality_findings(root: &Path, extra_args: &[&str]) -> Vec<((String, u64), String)> {
+    let output_dir = root.join("reports");
+    fs::create_dir_all(&output_dir).expect("output dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .args(["analyze", "-s"])
+        .arg(root)
+        .args(["-r", "codequality", "-o"])
+        .arg(&output_dir)
+        .arg("-q")
+        .args(extra_args)
+        .output()
+        .expect("run bsl-analyzer");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let report = fs::read_to_string(output_dir.join("gl-code-quality-report.json"))
+        .expect("code quality report");
+    serde_json::from_str::<Vec<serde_json::Value>>(&report)
+        .expect("code quality report is a JSON array")
+        .into_iter()
+        .map(|issue| {
+            let key = (
+                issue["check_name"].as_str().expect("check_name").to_owned(),
+                issue["location"]["lines"]["begin"].as_u64().expect("begin line"),
+            );
+            (key, issue["fingerprint"].as_str().expect("fingerprint").to_owned())
+        })
+        .collect()
+}
+
+/// The ordinal folded into a Code Quality fingerprint is counted over the FULL set,
+/// before any filtering. A run that drops the vendor's finding must therefore leave
+/// every survivor with the fingerprint it had in the unfiltered run — otherwise a
+/// finding inherits the identity of one that was filtered out, and the merge-request
+/// widget diffs it against the wrong entry.
+#[test]
+fn author_filtered_survivors_keep_their_code_quality_fingerprint() {
+    let temp = TempDir::new().expect("tempdir");
+    let root = temp.path();
+
+    // The vendor's self-assignment sits on its own source line, so it opens the
+    // ordinal sequence; the developer's two are identical to each other and are
+    // numbered 0 and 1 among themselves. Dropping the vendor's finding shifts every
+    // later position by one, which is exactly what must not reach the ordinals.
+    fs::write(root.join("Mixed.bsl"), "Процедура Тест()\n    А = 1;\n    А = А;\nКонецПроцедуры\n")
+        .expect("vendor file");
+    run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["init", "-q"]);
+    run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["add", "."]);
+    run_git_as(root, VENDOR_NAME, VENDOR_EMAIL, &["commit", "-q", "-m", "vendor"]);
+
+    fs::write(
+        root.join("Mixed.bsl"),
+        "Процедура Тест()\n    А = 1;\n    А = А;\n    Б = 2;\n    Б = Б;\n    Б = Б;\nКонецПроцедуры\n",
+    )
+    .expect("developer edit");
+    run_git_as(root, DEV_NAME, DEV_EMAIL, &["add", "."]);
+    run_git_as(root, DEV_NAME, DEV_EMAIL, &["commit", "-q", "-m", "developer"]);
+
+    let full = code_quality_findings(root, &[]);
+    let filtered = code_quality_findings(root, &["--ignored-author", VENDOR_NAME]);
+
+    // Without a drop the comparison below holds for any implementation.
+    assert!(
+        filtered.len() < full.len(),
+        "the fixture must lose at least one finding to the author filter: {full:?} -> {filtered:?}"
+    );
+    assert!(filtered.len() >= 2, "two developer findings must survive: {filtered:?}");
+
+    for (key, fingerprint) in &filtered {
+        let before = full
+            .iter()
+            .find(|(full_key, _)| full_key == key)
+            .unwrap_or_else(|| panic!("{key:?} survived the filter but is absent from {full:?}"));
+        assert_eq!(
+            *fingerprint, before.1,
+            "{key:?} changed fingerprint once an earlier finding was filtered out"
+        );
+    }
+}
