@@ -1,4 +1,11 @@
-include!("diagnostics_baseline_lsp.rs");
+mod common;
+
+use common::*;
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+use serde_json::{json, Value};
 
 type McpClient = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 

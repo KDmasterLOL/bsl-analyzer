@@ -70,13 +70,17 @@ fn plan(selection: DiagnosticsBaselineSelection) -> DiagnosticsBaselinePartition
 }
 
 fn child_peak_rss(child: &mut Child) -> (std::process::ExitStatus, u64) {
+    // VmHWM, not sampled VmRSS: the kernel keeps the true high-water mark, while polling
+    // misses any peak shorter than the sampling interval — exactly the regression these
+    // gates exist to catch (a partition buffered whole for a few milliseconds). Read
+    // just before reaping, since /proc disappears with the process.
     let mut peak = 0;
     loop {
         if let Ok(status) = std::fs::read_to_string(format!("/proc/{}/status", child.id())) {
-            if let Some(rss) = status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")?.split_whitespace().next()?.parse::<u64>().ok()
+            if let Some(hwm) = status.lines().find_map(|line| {
+                line.strip_prefix("VmHWM:")?.split_whitespace().next()?.parse::<u64>().ok()
             }) {
-                peak = peak.max(rss * 1024);
+                peak = peak.max(hwm * 1024);
             }
         }
         if let Some(status) = child.try_wait().unwrap() {
@@ -102,6 +106,13 @@ fn run_child(mode: &str, root: &std::path::Path) -> u64 {
 }
 
 fn child_mode(mode: &str, root: &std::path::Path) {
+    // The idle child does nothing but start: its peak IS the process floor, which both
+    // real modes carry too. Comparing raw peaks would measure the test binary's startup
+    // footprint alongside the code under test, and the ratio would drift with it.
+    if mode == "idle" {
+        std::thread::sleep(Duration::from_millis(150));
+        return;
+    }
     let selection = if mode == "full" {
         DiagnosticsBaselineSelection::All
     } else {
@@ -182,10 +193,19 @@ fn large_selective_v1_migration_streams_skipped_entries_with_bounded_rss() {
     writer.write_all(b"]}\n").unwrap();
     writer.flush().unwrap();
 
+    let floor = run_child("idle", root);
     let full_peak = run_child("full", root);
     let selective_peak = run_child("selective", root);
+    let full_growth = full_peak.saturating_sub(floor);
+    let selective_growth = selective_peak.saturating_sub(floor);
+    eprintln!("floor={floor} full={full_peak} selective={selective_peak}");
     assert!(
-        selective_peak <= full_peak / 4,
-        "selective migration RSS {selective_peak} exceeds 25% of full {full_peak}"
+        full_growth > 0,
+        "positive control: the full migration must grow over an idle child ({full_peak} vs {floor})"
+    );
+    assert!(
+        selective_growth <= full_growth / 4,
+        "selective growth {selective_growth} exceeds 25% of full growth {full_growth} \
+         (floor {floor})"
     );
 }

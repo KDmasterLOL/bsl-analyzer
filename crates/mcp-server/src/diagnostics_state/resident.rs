@@ -563,10 +563,10 @@ impl DiagnosticsResident {
         if cancel.is_cancelled() {
             let baseline = self.diagnostics_baseline.error_summary().unwrap_or_else(|| match self
                 .diagnostics_baseline
-                .path()
+                .project_path()
             {
                 Some(path) => ide::diagnostics_baseline::DiagnosticsBaselineSummary::interrupted(
-                    Some(path.to_string_lossy().into_owned()),
+                    Some(path.to_owned()),
                 ),
                 None => ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
             });

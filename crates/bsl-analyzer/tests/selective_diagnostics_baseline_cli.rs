@@ -320,6 +320,12 @@ directory = "baselines"
         "repair run failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["operation"], "rebuilt",
+        "a run that could not read the previous set must not report an update: {result}"
+    );
+    assert_eq!(result["removed"], 0);
 
     for object in &dormant {
         assert!(

@@ -100,11 +100,15 @@ impl DiagnosticsBaselineCommand {
         }
     }
 
+    /// `./legacy.json` is what a shell completes to, and the managed-path rules reject a
+    /// `.` component. The prefix is stripped once, here, so preflight and the command
+    /// itself see the same spelling and the safety rules stay untouched.
     pub fn migration_source(&self) -> Option<&Path> {
-        match self {
+        let source = match self {
             Self::Create(args) => args.from_v1.as_deref(),
             Self::Check(_) | Self::Update(_) => None,
-        }
+        }?;
+        Some(source.strip_prefix("./").unwrap_or(source))
     }
 
     pub fn output_format(&self) -> DiagnosticsBaselineOutputFormat {
@@ -144,17 +148,34 @@ impl DiagnosticsBaselineCommand {
                     &resolved.project_path,
                     false,
                 );
-                if directory
-                    .as_ref()
-                    .ok()
-                    .and_then(|directory| directory.open_file("manifest.json").ok())
-                    .is_none()
-                {
-                    return Err("the first partitioned baseline must be created in full".into());
+                // Only an ABSENT manifest means "nothing published yet". A rejected
+                // directory, a symlinked manifest or a permission failure are different
+                // problems, and reporting them as a first run sends the user looking in
+                // the wrong place.
+                match directory.as_ref().map(|directory| directory.open_file("manifest.json")) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err("the first partitioned baseline must be created in full".into());
+                    }
+                    Ok(Err(error)) => {
+                        return Err(format!(
+                            "cannot read the diagnostics baseline manifest: {error}"
+                        )
+                        .into())
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "cannot open the diagnostics baseline directory: {error}"
+                        )
+                        .into())
+                    }
                 }
             }
         }
         if let Some(source) = self.migration_source() {
+            // `./legacy.json` is what a shell completes to, and the managed-path rules
+            // reject a `.` component. Normalising it here keeps the safety rules intact
+            // while accepting the spelling users actually type.
             let source = source.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
             project_model::ManagedBaselineDirectory::open_project_root(&project.root)?
                 .open_file(&source)?;
@@ -222,13 +243,25 @@ pub fn apply(
     proof: &super::analyze::CoverageProof,
     command: DiagnosticsBaselineCommand,
 ) -> Result<DiagnosticsBaselineOperationResult, Box<dyn Error + Send + Sync>> {
-    proof.require_full()?;
-    if project.config.analysis.diff_base.is_some()
-        || !project.config.analysis.ignored_authors.is_empty()
-    {
-        return Err(
-            "full diagnostics coverage required: project analysis filters are active".into()
-        );
+    // Migration reads the v1 file and nothing else — no current diagnostic takes part —
+    // so a partial analysis cannot make its result wrong. Demanding full coverage there
+    // would block the format change for every project that uses `diff_base` or
+    // `ignored_authors`, which is the reason those projects have a large baseline to
+    // migrate in the first place.
+    let migrating =
+        matches!(&command, DiagnosticsBaselineCommand::Create(args) if args.from_v1.is_some());
+    if !migrating {
+        // Named reason first: an active filter always makes coverage partial too, so
+        // `require_full` would answer with a `CoverageProof` dump and the actionable
+        // message below would never be seen.
+        if project.config.analysis.diff_base.is_some()
+            || !project.config.analysis.ignored_authors.is_empty()
+        {
+            return Err("full diagnostics coverage required: [analysis].diff_base or \
+                        [analysis].ignored_authors is active, so the analysis is narrowed"
+                .into());
+        }
+        proof.require_full()?;
     }
 
     let resolved =
@@ -401,6 +434,8 @@ fn apply_partitioned(
                 let diagnostics = buckets.remove(&selected).unwrap();
                 let bytes =
                     diagnostics_partition_json(partition.identity.clone(), diagnostics.clone())?;
+                let repairing =
+                    manifest.partitions.iter().any(|entry| entry.partition_id == selected);
                 let (added, generation) = if let Some(expected) =
                     manifest.partitions.iter().find(|entry| entry.partition_id == selected)
                 {
@@ -478,6 +513,11 @@ fn apply_partitioned(
                     &coverage,
                 )?;
                 let (_, _, unchanged, partitions) = selected_counts(&classified, Some(&selected));
+                // The reclassification above sees the entries this very command just
+                // published, so for a partition created from scratch they are the SAME
+                // records as `added`. Reporting both would say the partition holds twice
+                // what it does; a repair publishes nothing new and keeps its count.
+                let unchanged = if repairing { unchanged } else { 0 };
                 return Ok(DiagnosticsBaselineOperationResult {
                     operation: "created",
                     path: resolved.project_path.clone(),
@@ -490,7 +530,9 @@ fn apply_partitioned(
                     partitions_unsuppressed: Some(
                         plan.partitions.len() - plan.enabled_partition_ids.len(),
                     ),
-                    unsuppressed: Some(0),
+                    // Not measured on this path: a zero would read as "no partition is
+                    // left unsuppressed", which the command never checked.
+                    unsuppressed: None,
                     skipped_unsuppressed: None,
                     diagnostics,
                     generation: Some(generation),
@@ -501,8 +543,12 @@ fn apply_partitioned(
             if existing_manifest.is_some() {
                 return Err("diagnostics baseline manifest already exists".into());
             }
-            if let Some(source) = args.from_v1 {
-                let source = source.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
+            if let Some(source) = args.from_v1.as_deref() {
+                let source = source
+                    .strip_prefix("./")
+                    .unwrap_or(source)
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/");
                 let project_root =
                     project_model::ManagedBaselineDirectory::open_project_root(&project.root)?;
                 let mut writers: BTreeMap<_, _> = plan
@@ -549,7 +595,7 @@ fn apply_partitioned(
                     partitions_unsuppressed: Some(
                         plan.partitions.len() - plan.enabled_partition_ids.len(),
                     ),
-                    unsuppressed: Some(0),
+                    unsuppressed: None,
                     skipped_unsuppressed: Some(migration.skipped_unsuppressed),
                     diagnostics: vec![],
                     generation: Some(published.manifest.generation),
@@ -651,7 +697,11 @@ fn apply_partitioned(
                         Some(&old.generation),
                     )?;
                     return Ok(DiagnosticsBaselineOperationResult {
-                        operation: "updated",
+                        // Not "updated": the previous set could not be loaded, which is
+                        // why this branch exists, so nothing can be compared against it.
+                        // `added` counts the records the rebuilt set holds — calling that
+                        // an update would report 1.6M new findings for a repair.
+                        operation: "rebuilt",
                         path: resolved.project_path.clone(),
                         success: true,
                         added: diagnostics.len(),
@@ -758,7 +808,16 @@ fn apply_partitioned(
                 partitions_unsuppressed: Some(
                     plan.partitions.len() - plan.enabled_partition_ids.len(),
                 ),
-                unsuppressed: Some(classified.summary.unsuppressed.unwrap_or_default()),
+                // Scoped to the selected partition, as `check --partition` reports it:
+                // answering a question about one partition with the project-wide number
+                // makes the two commands disagree about the same run.
+                unsuppressed: Some(match selected.as_deref() {
+                    Some(id) => summaries
+                        .iter()
+                        .find(|partition| partition.id == id)
+                        .map_or(0, |partition| partition.unsuppressed),
+                    None => classified.summary.unsuppressed.unwrap_or_default(),
+                }),
                 skipped_unsuppressed: None,
                 diagnostics,
                 generation: Some(published.manifest.generation),
@@ -1101,11 +1160,13 @@ fn operation_from_classified<T>(
         Some(id) => classified.resolved.retain_partition(id),
         None => classified.resolved,
     };
+    // `diagnostics` lists the records this run TOUCHED. Findings of partitions outside
+    // `include` are merely active — they are counted in `unsuppressed`, and listing them
+    // here made a run with `added: 0, removed: 0` dump the whole excluded set.
     let mut diagnostics: Vec<_> = classified
         .new
         .into_iter()
         .map(|item| item.entry)
-        .chain(classified.unsuppressed.into_iter().map(|item| item.entry))
         .chain(resolved)
         .filter(|entry| {
             selected_id.is_none_or(|id| plan.owner_for_project_path(&entry.path) == Some(id))

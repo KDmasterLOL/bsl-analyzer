@@ -120,6 +120,75 @@ fn selective_v1_migration_streams_enabled_entries_and_preserves_source() {
     assert!(checked["added"].as_u64().unwrap() > 0, "current new diagnostics were accepted");
 }
 
+/// `./legacy.json` is the spelling a shell completes to; rejecting it as an invalid
+/// managed path made the documented command fail on a file that is right there.
+#[test]
+fn selective_v1_migration_accepts_a_dot_slash_source() {
+    let temp = setup();
+    let root = temp.path();
+    write_config(root, true);
+    let output = run(
+        root,
+        &[
+            "diagnostics",
+            "baseline",
+            "create",
+            "-s",
+            ".",
+            "--from-v1",
+            "./legacy.json",
+            "--format",
+            "json",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "./legacy.json must be accepted:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Migration only rewrites the v1 file into partition objects — no current diagnostic
+/// takes part — so an analysis narrowed by `[analysis]` filters cannot make its result
+/// wrong. Refusing there would lock the format change away from exactly the projects
+/// that have a large baseline to migrate.
+#[test]
+fn selective_v1_migration_runs_under_analysis_filters() {
+    let temp = setup();
+    let root = temp.path();
+    // The set is written to a directory; the legacy file stays as the migration source.
+    write_config(root, true);
+    let config = fs::read_to_string(root.join("bsl-analyzer.toml")).unwrap();
+    fs::write(
+        root.join("bsl-analyzer.toml"),
+        format!("{config}\n[analysis]\nignored_authors = [\"Vendor\"]\n"),
+    )
+    .unwrap();
+    // The author filter needs a repository to blame against.
+    for args in [
+        vec!["init", "-q"],
+        vec!["-c", "user.name=T", "-c", "user.email=t@e", "add", "."],
+        vec!["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "-m", "fixture"],
+    ] {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(&args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let output = migrate(root);
+    assert!(
+        output.status.success(),
+        "migration must not require full coverage:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["operation"], "created", "{result}");
+}
+
 #[test]
 fn selective_cli_rejects_from_v1_with_partition() {
     let temp = setup();

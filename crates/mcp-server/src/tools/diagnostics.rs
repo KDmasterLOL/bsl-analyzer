@@ -59,9 +59,13 @@ impl JsonSchema for DiagnosticsResponseSchema {
     }
 
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        // `anyOf`, not `oneOf`: the shapes are untagged and legitimately overlap — a
+        // `loading` body carries both `status` and `state`, matching two branches at
+        // once, and `oneOf` demands EXACTLY one. The schema describes what a response
+        // may look like; it is not a discriminator.
         json_schema!({
             "type": "object",
-            "oneOf": [
+            "anyOf": [
                 generator.subschema_for::<DiagnosticsBaselineSuccessEnvelope>(),
                 generator.subschema_for::<DiagnosticsBaselineErrorEnvelope>(),
                 generator.subschema_for::<DiagnosticsActionResponse>(),
@@ -270,8 +274,11 @@ pub fn catalog(
                 }
                 kept
             };
-            let entries = keep(all_entries);
+            // Unknown codes are budgeted FIRST: they are the answer to "are my codes
+            // real?", and dropping them silently leaves an empty list that reads as
+            // "everything is known" — the opposite of what happened.
             let unknown = keep(all_unknown);
+            let entries = keep(all_entries);
             body["count"] = json!(entries.len());
             body["entries"] = json!(entries);
             if body.get("unknown_codes").is_some() {
@@ -731,6 +738,16 @@ fn bounded_baseline_value(summary: &DiagnosticsBaselineSummary, preferred: Optio
     value["partitions_truncated"] = json!(false);
     if summary.state == ide::diagnostics_baseline::DiagnosticsBaselineState::Error {
         value["errors_total"] = json!(summary.errors.len().max(1));
+        // The error branch of the output schema requires `errors`, and the summary omits
+        // an empty list when serialising. A state that reports an error with no error in
+        // it would then match no branch of the tool's own schema.
+        if !value["errors"].is_array() {
+            value["errors"] = json!([{
+                "partition_id": Value::Null,
+                "code": summary.error_code.clone().unwrap_or_default(),
+                "detail": summary.detail.clone().unwrap_or_default(),
+            }]);
+        }
     }
     value
 }
@@ -823,6 +840,12 @@ fn classify_file_baseline(
                 summary.state = ide::diagnostics_baseline::DiagnosticsBaselineState::Error;
                 summary.complete = false;
                 summary.error_code = Some("unowned_diagnostic".to_owned());
+                // Without this the agent gets a bare error code: no file, no reason, and
+                // nothing to act on.
+                summary.detail = Some(format!(
+                    "no partition owns {relative}; check [diagnostics.baseline] groups \
+                     and [source] roots"
+                ));
                 return Err(Box::new(summary));
             };
             let wrapped = candidates
@@ -1665,7 +1688,7 @@ mod tests {
                     .clone(),
             );
             assert_eq!(schema["type"], "object");
-            assert!(schema["oneOf"].as_array().is_some_and(|branches| branches.len() >= 2));
+            assert!(schema["anyOf"].as_array().is_some_and(|branches| branches.len() >= 2));
             let encoded = schema.to_string();
             for required in [
                 "baseline",

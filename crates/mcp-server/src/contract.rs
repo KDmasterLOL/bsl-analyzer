@@ -611,8 +611,9 @@ mod tests {
                     let schema = output_schema(profile, decl.name).unwrap_or_else(|| {
                         panic!("{}/{} has no outputSchema", profile.as_str(), decl.name)
                     });
-                    assert!(
-                        schema["type"] == "object" || schema["oneOf"].is_array(),
+                    assert_eq!(
+                        schema["type"],
+                        "object",
                         "{}/{} outputSchema must describe object responses",
                         profile.as_str(),
                         decl.name
@@ -1574,7 +1575,7 @@ mod tests {
                           }
                         ],
                         "name": "diagnostics",
-                        "output_schema_fingerprint": "blake3:efeb864443d7a49accbd6d9fec3c3a25971f4266aa4187b0e3c19097cdaaa581",
+                        "output_schema_fingerprint": "blake3:2de7d4aa984c1a12c46e892e51dd64097a7087221b705850d7ebd90b609e1031",
                         "output_schema_version": "15",
                         "params": [
                           {

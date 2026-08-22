@@ -390,8 +390,11 @@ pub fn classify_partitioned_diagnostics_with<T>(
     for expected_partition in &plan.partitions {
         let policy =
             plan.policy_for_partition(&expected_partition.id).expect("plan partition has policy");
-        let partition_coverage =
-            coverage.get(&expected_partition.id).unwrap_or(&DiagnosticsBaselineCoverage::Full);
+        // A partition the coverage map does not mention was NOT proven analysed. Assuming
+        // full coverage there would report every unmatched entry of that partition as
+        // resolved — "the debt is gone" about files nobody looked at.
+        let unproven = DiagnosticsBaselineCoverage::Partial { completed_files: BTreeSet::new() };
+        let partition_coverage = coverage.get(&expected_partition.id).unwrap_or(&unproven);
         let complete = matches!(partition_coverage, DiagnosticsBaselineCoverage::Full);
         let (partition_new, partition_known, partition_unsuppressed) =
             counts.get(&expected_partition.id).copied().unwrap_or_default();
@@ -683,6 +686,7 @@ where
 
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
         let mut seen = HashSet::new();
+        let mut last_by_partition: HashMap<String, DiagnosticsBaselineEntry> = HashMap::new();
         let mut migrated = 0;
         let mut skipped_unsuppressed = 0;
         while let Some(entry) = sequence.next_element::<DiagnosticsBaselineEntry>()? {
@@ -711,6 +715,20 @@ where
                         entry.fingerprint,
                     )));
                 }
+                // Streaming cannot sort — that is the point of streaming — so the input
+                // must already be canonical. Otherwise the object written here differs
+                // byte-wise from what `diagnostics_partition_json` regenerates, and
+                // `create --partition` can never repair the migrated set.
+                if let Some(previous) = last_by_partition.get(owner) {
+                    if entry_sort(previous, &entry) == std::cmp::Ordering::Greater {
+                        return Err(A::Error::custom(
+                            PartitionedDiagnosticsBaselineError::UnsortedLegacyBaseline(
+                                entry.path.clone(),
+                            ),
+                        ));
+                    }
+                }
+                last_by_partition.insert(owner.to_owned(), entry.clone());
                 (self.write_entry)(owner, &entry).map_err(A::Error::custom)?;
                 migrated += 1;
             } else {
@@ -722,15 +740,20 @@ where
 }
 
 #[derive(Default)]
-struct StringPool(HashMap<String, Arc<str>>);
+/// Interner holding ONE copy of each string.
+///
+/// A map keyed by `String` would store the bytes twice — once in the key, once in the
+/// shared `Arc<str>` — and on a set of 1.6M distinct paths that second copy is tens of
+/// megabytes that nothing ever reads, counted by the resident-memory gate.
+struct StringPool(HashSet<Arc<str>>);
 
 impl StringPool {
     fn intern(&mut self, value: String) -> Arc<str> {
-        if let Some(existing) = self.0.get(&value) {
+        if let Some(existing) = self.0.get(value.as_str()) {
             return existing.clone();
         }
-        let shared: Arc<str> = Arc::from(value.as_str());
-        self.0.insert(value, shared.clone());
+        let shared: Arc<str> = Arc::from(value);
+        self.0.insert(shared.clone());
         shared
     }
 }
@@ -1355,6 +1378,11 @@ pub enum PartitionedDiagnosticsBaselineError {
     Duplicate(String),
     #[error("diagnostic fingerprint does not match fields: {0}")]
     FingerprintMismatch(String),
+    #[error(
+        "legacy diagnostics baseline is not in canonical order at {0}; \
+         run `diagnostics baseline update` on it before migrating"
+    )]
+    UnsortedLegacyBaseline(String),
     #[error("protected diagnostic cannot enter a baseline: {0}")]
     ProtectedDiagnostic(String),
     #[error("diagnostic path has no unique owner: {0}")]
@@ -1934,6 +1962,61 @@ mod tests {
         selective_loader_fails_closed_for_every_enabled_object_error();
         selective_loader_validates_enabled_identity_instead_of_global_scope();
         selective_loader_defers_dormant_content_validation_until_reenable();
+    }
+
+    /// A migrated object must be byte-identical to what `diagnostics_partition_json`
+    /// regenerates, or `create --partition` can never repair the set. Streaming cannot
+    /// sort, so an out-of-order legacy file is refused rather than silently written in
+    /// an order no regeneration reproduces.
+    #[test]
+    fn migration_refuses_a_legacy_baseline_that_is_not_canonical() {
+        let plan = selective_plan(&["main"]);
+        let entry = |path: &str| DiagnosticsBaselineEntry {
+            fingerprint: diagnostic_fingerprint(path, "LineLength", "Message(1);", 0),
+            path: path.to_owned(),
+            code: "LineLength".to_owned(),
+            snippet: "Message(1);".to_owned(),
+            occurrence: 0,
+            message: "m".to_owned(),
+            severity: "Warning".to_owned(),
+            range: DiagnosticsBaselineRange {
+                start_line: 0,
+                start_column: 0,
+                end_line: 0,
+                end_column: 1,
+            },
+        };
+        let legacy = |entries: Vec<DiagnosticsBaselineEntry>| {
+            serde_json::to_vec(&DiagnosticsBaseline {
+                schema_version: crate::diagnostics_baseline::DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+                scope: crate::diagnostics_baseline::DiagnosticsBaselineScope {
+                    source_root: "src/cf".to_owned(),
+                    extensions: vec![crate::diagnostics_baseline::DiagnosticsBaselineExtension {
+                        name: "Ext".to_owned(),
+                        path: "src/cfe/Ext".to_owned(),
+                        depends_on: vec![],
+                    }],
+                },
+                diagnostics: entries,
+            })
+            .unwrap()
+        };
+
+        let ordered = legacy(vec![entry("src/cf/a.bsl"), entry("src/cf/b.bsl")]);
+        let mut written = 0;
+        migrate_v1_reader(&ordered[..], &plan, |_, _| {
+            written += 1;
+            Ok(())
+        })
+        .expect("a canonical file migrates");
+        assert_eq!(written, 2, "positive control: the fixture migrates when ordered");
+
+        let reversed = legacy(vec![entry("src/cf/b.bsl"), entry("src/cf/a.bsl")]);
+        let error = migrate_v1_reader(&reversed[..], &plan, |_, _| Ok(())).unwrap_err();
+        assert!(
+            error.to_string().contains("canonical order"),
+            "an out-of-order file must be named as such: {error}"
+        );
     }
 
     /// `serde_json` asks its reader for one byte at a time, so an object read without a

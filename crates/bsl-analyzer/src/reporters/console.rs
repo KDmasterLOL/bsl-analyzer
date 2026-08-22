@@ -10,6 +10,11 @@ fn baseline_lines(baseline: &ide::diagnostics_baseline::DiagnosticsBaselineSumma
         DiagnosticsBaselineState::Partial => "partial",
         DiagnosticsBaselineState::Error => "error",
     };
+    // A project without the section keeps its previous output: printing "disabled" to
+    // everyone adds a line about a feature they never configured.
+    if matches!(baseline.state, DiagnosticsBaselineState::Disabled) {
+        return Vec::new();
+    }
     let mut lines = vec![format!("Diagnostics baseline: {state}")];
     if let (Some(selection), Some(enabled), Some(unsuppressed)) =
         (baseline.selection, baseline.partitions_enabled, baseline.partitions_unsuppressed)
@@ -97,9 +102,9 @@ mod tests {
 
     #[test]
     fn console_baseline_summary_covers_disabled_full_and_partial() {
-        assert_eq!(
-            baseline_lines(&DiagnosticsBaselineSummary::disabled()),
-            ["Diagnostics baseline: disabled"]
+        assert!(
+            baseline_lines(&DiagnosticsBaselineSummary::disabled()).is_empty(),
+            "a project without the section keeps its previous output"
         );
         for (state, label) in [
             (DiagnosticsBaselineState::Full, "full"),

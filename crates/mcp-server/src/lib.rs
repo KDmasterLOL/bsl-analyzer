@@ -1747,7 +1747,13 @@ impl McpServer {
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
-        if p.max_output_tokens.is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
+        // Only the actions that honour a budget are held to its minimum: `schema` and
+        // `status` ignore `max_output_tokens` entirely, and refusing them for a value
+        // they never read would be a refusal about nothing.
+        let budgeted = matches!(p.action.as_str(), "catalog" | "file" | "workspace");
+        if budgeted
+            && p.max_output_tokens
+                .is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
         {
             return Err(McpError::invalid_params(
                 format!(

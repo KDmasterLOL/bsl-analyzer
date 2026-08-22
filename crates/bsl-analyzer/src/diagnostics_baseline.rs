@@ -40,6 +40,14 @@ pub(crate) fn active_for_file(
     let source_lines: Vec<_> = text.lines().collect();
     // One index for the file, not one per diagnostic: `to_output` builds its own.
     let line_index = line_index::LineIndex::new(text);
+    // Diagnostics whose range runs past the text are dropped rather than converted:
+    // `to_output` panics on them, and this runs inside the publication worker, where a
+    // panic costs the whole file's diagnostics. The LSP converter beside it drops such a
+    // finding too, so the two agree on what a desynchronised pair yields.
+    let diagnostics: Vec<_> = diagnostics
+        .into_iter()
+        .filter(|diagnostic| usize::from(diagnostic.range.end()) <= text.len())
+        .collect();
     let candidates: Vec<_> = diagnostics
         .iter()
         .enumerate()
@@ -148,6 +156,32 @@ mod tests {
             tags: Vec::new(),
             fixes: Vec::new(),
         }
+    }
+
+    /// A diagnostic whose range runs past the text would panic the converter, and this
+    /// code runs inside the publication worker — the panic would cost the whole file's
+    /// diagnostics. Such a finding is dropped, exactly as the LSP converter drops it.
+    #[test]
+    fn a_diagnostic_past_the_end_of_the_text_is_dropped_not_panicked_on() {
+        let root = Path::new("/workspace");
+        let path = root.join("Module.bsl");
+        let text = "Процедура П()\n";
+        let mut beyond = diagnostic(DiagnosticCode::EmptyCodeBlock);
+        beyond.range = TextRange::new(0.into(), 9_000.into());
+
+        let baseline = DiagnosticsBaseline {
+            schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            diagnostics: vec![],
+        };
+        let snapshot = DiagnosticsBaselineSnapshot::Ready {
+            baseline,
+            project_path: "baseline.json".to_owned(),
+            path: root.join("baseline.json"),
+            epoch: "e".to_owned(),
+        };
+        let active = active_for_file(&snapshot, root, &path, text, vec![beyond]);
+        assert!(active.is_empty(), "the desynchronised finding must not reach the converter");
     }
 
     /// The ordinal in a fingerprint counts repetitions within the file, so it is only
@@ -375,6 +409,7 @@ directory = "baselines"
         let all = active_for_file(
             &DiagnosticsBaselineSnapshot::Error {
                 path: None,
+                project_path: None,
                 observation_paths: vec![],
                 selection: None,
                 partitions_enabled: None,

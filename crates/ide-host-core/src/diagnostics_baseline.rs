@@ -31,6 +31,10 @@ pub enum DiagnosticsBaselineSnapshot {
     },
     Error {
         path: Option<PathBuf>,
+        /// The baseline path as the project spells it, so an error summary names the
+        /// same thing a healthy one does instead of leaking an absolute machine path
+        /// into CI artefacts. `None` when the configuration itself failed to resolve.
+        project_path: Option<String>,
         observation_paths: Vec<PathBuf>,
         selection: Option<project_model::DiagnosticsBaselineSelection>,
         partitions_enabled: Option<usize>,
@@ -105,6 +109,7 @@ impl DiagnosticsBaselineSnapshot {
                 };
                 return Self::error_observed(
                     path.clone(),
+                    None,
                     path,
                     "invalid_configuration",
                     detail.clone().as_bytes(),
@@ -123,6 +128,7 @@ impl DiagnosticsBaselineSnapshot {
                     let detail = error.to_string();
                     return Self::error(
                         Some(resolved.path),
+                        Some(resolved.project_path.clone()),
                         "invalid_configuration",
                         detail.clone().as_bytes(),
                         detail,
@@ -147,6 +153,7 @@ impl DiagnosticsBaselineSnapshot {
                     );
                     return Self::error_observed(
                         Some(resolved.path.clone()),
+                        Some(resolved.project_path.clone()),
                         Some(resolved.path),
                         code,
                         detail.clone().as_bytes(),
@@ -176,6 +183,7 @@ impl DiagnosticsBaselineSnapshot {
                     );
                     let mut snapshot = Self::error_observed_many(
                         Some(resolved.path),
+                        Some(resolved.project_path.clone()),
                         observation_paths,
                         error.info().code,
                         &observed_bytes,
@@ -207,7 +215,13 @@ impl DiagnosticsBaselineSnapshot {
                     "cannot read diagnostics baseline {}: {error}",
                     resolved.path.display()
                 );
-                return Self::error(Some(resolved.path), code, detail.clone().as_bytes(), detail);
+                return Self::error(
+                    Some(resolved.path),
+                    Some(resolved.project_path.clone()),
+                    code,
+                    detail.clone().as_bytes(),
+                    detail,
+                );
             }
         };
         let scope = project_scope(&resolved.scope);
@@ -225,28 +239,42 @@ impl DiagnosticsBaselineSnapshot {
                     _ => "invalid_file",
                 };
                 let detail = error.to_string();
-                Self::error(Some(resolved.path), code, &bytes, detail)
+                Self::error(
+                    Some(resolved.path),
+                    Some(resolved.project_path.clone()),
+                    code,
+                    &bytes,
+                    detail,
+                )
             }
         }
     }
 
-    fn error(path: Option<PathBuf>, code: &str, bytes: &[u8], detail: String) -> Self {
-        Self::error_observed(path.clone(), path, code, bytes, detail)
+    fn error(
+        path: Option<PathBuf>,
+        project_path: Option<String>,
+        code: &str,
+        bytes: &[u8],
+        detail: String,
+    ) -> Self {
+        Self::error_observed(path.clone(), project_path, path, code, bytes, detail)
     }
 
     fn error_observed(
         path: Option<PathBuf>,
+        project_path: Option<String>,
         observation_path: Option<PathBuf>,
         code: &str,
         bytes: &[u8],
         detail: String,
     ) -> Self {
         let observation_paths = observation_path.iter().cloned().collect();
-        Self::error_observed_many(path, observation_paths, code, bytes, detail)
+        Self::error_observed_many(path, project_path, observation_paths, code, bytes, detail)
     }
 
     fn error_observed_many(
         path: Option<PathBuf>,
+        project_path: Option<String>,
         observation_paths: Vec<PathBuf>,
         code: &str,
         bytes: &[u8],
@@ -263,6 +291,7 @@ impl DiagnosticsBaselineSnapshot {
         let epoch = fingerprint.finalize().to_hex().to_string();
         Self::Error {
             path,
+            project_path,
             observation_paths,
             selection: None,
             partitions_enabled: None,
@@ -347,6 +376,18 @@ impl DiagnosticsBaselineSnapshot {
         matches!(self, Self::Ready { .. } | Self::ReadySet { .. })
     }
 
+    /// The baseline path as the project spells it — what every summary reports, so an
+    /// absolute machine path never reaches a response or a CI artefact.
+    pub fn project_path(&self) -> Option<&str> {
+        match self {
+            Self::Ready { project_path, .. } | Self::ReadySet { project_path, .. } => {
+                Some(project_path)
+            }
+            Self::Error { project_path, .. } => project_path.as_deref(),
+            Self::Disabled => None,
+        }
+    }
+
     pub fn observation(&self) -> String {
         let paths = self.observation_paths();
         if paths.is_empty() {
@@ -398,6 +439,7 @@ impl DiagnosticsBaselineSnapshot {
     pub fn error_summary(&self) -> Option<DiagnosticsBaselineSummary> {
         let Self::Error {
             path,
+            project_path,
             selection,
             partitions_enabled,
             partitions_unsuppressed,
@@ -418,7 +460,7 @@ impl DiagnosticsBaselineSnapshot {
             new: None,
             known: None,
             resolved: None,
-            path: path.as_deref().map(normalize_path),
+            path: project_path.clone().or_else(|| path.as_deref().map(normalize_path)),
             schema_version: None,
             manifest_schema_version: None,
             complete: false,
@@ -616,6 +658,28 @@ include = ["main"]
         manifest
     }
 
+    /// Every summary reports the project's own spelling of the path. An error summary
+    /// leaking an absolute path would put the developer's home directory into CI output
+    /// and break a consumer that joins the value with the project root.
+    #[test]
+    fn an_error_summary_reports_the_project_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/cf")).unwrap();
+        std::fs::write(dir.path().join("src/cf/Configuration.xml"), "<xml/>").unwrap();
+        std::fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\n[diagnostics.baseline]\npath = \"baseline.json\"\n",
+        )
+        .unwrap();
+        let config = project_model::ProjectConfig::load(dir.path()).unwrap().unwrap();
+        let project = project_model::Project::with_config(dir.path(), config).unwrap();
+
+        std::fs::write(dir.path().join("baseline.json"), b"{broken").unwrap();
+        let snapshot = DiagnosticsBaselineSnapshot::load(&project);
+        let summary = snapshot.error_summary().expect("a broken file is an error state");
+        assert_eq!(summary.path.as_deref(), Some("baseline.json"), "{summary:?}");
+    }
+
     #[test]
     fn selective_baseline_reload() {
         let dir = tempfile::tempdir().unwrap();
@@ -706,6 +770,7 @@ include = ["main"]
     #[test]
     fn partitioned_error_summary_preserves_deterministic_error_count() {
         let base = DiagnosticsBaselineSnapshot::error_observed_many(
+            None,
             None,
             vec![],
             "missing_partition",
