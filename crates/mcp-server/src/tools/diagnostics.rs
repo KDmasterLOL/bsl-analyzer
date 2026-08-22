@@ -581,7 +581,9 @@ pub(crate) fn file_findings(
             "findings truncated to fit max_output_tokens; narrow with `codes`/`min_severity`/range or raise the budget"
         });
     }
-    fit_diagnostics_response_budget(&mut body, filters.max_output_tokens, "findings");
+    let budget_exhausted =
+        fit_diagnostics_response_budget(&mut body, filters.max_output_tokens, "findings")
+            || budget_exhausted;
 
     let completeness = loc::Completeness::complete()
         .when(
@@ -687,13 +689,27 @@ fn unclassified_baseline(resident: &DiagnosticsResident) -> DiagnosticsBaselineS
     }
 }
 
+/// A file's path as the baseline spells it: relative to the workspace root, with `/`
+/// separators.
+///
+/// Both sides are canonicalised first. The request may spell the path as `./x`, through
+/// a symlinked component, or in another case on a case-insensitive file system, and a
+/// literal `strip_prefix` then fails — silently leaving the request's own spelling in
+/// the fingerprint, so the very same finding of the very same file comes back as `new`
+/// instead of `known`. The root itself may equally be given through a symlink.
+fn baseline_project_path(workspace_root: &Path, path: &Path) -> String {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let root = canonical(workspace_root);
+    let file = canonical(path);
+    file.strip_prefix(&root)
+        .unwrap_or(&file)
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
+}
+
 fn preferred_partition<'a>(resident: &'a DiagnosticsResident, path: &Path) -> Option<&'a str> {
     let (_, plan, _) = resident.diagnostics_baseline().ready_set()?;
-    let relative = path
-        .strip_prefix(resident.workspace_root())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
+    let relative = baseline_project_path(resident.workspace_root(), path);
     plan.owner_for_project_path(&relative)
 }
 
@@ -726,11 +742,7 @@ fn classify_file_baseline(
     diagnostics: Vec<ide::Diagnostic>,
 ) -> Result<(Vec<ide::Diagnostic>, DiagnosticsBaselineSummary), Box<DiagnosticsBaselineSummary>> {
     use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
-    let relative = path
-        .strip_prefix(resident.workspace_root())
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace(std::path::MAIN_SEPARATOR, "/");
+    let relative = baseline_project_path(resident.workspace_root(), path);
     let source_lines: Vec<_> = file_text.lines().collect();
     let candidates: Vec<_> = diagnostics
         .into_iter()
@@ -939,7 +951,9 @@ pub(crate) fn workspace_findings(
         body["budget_hint"] =
             json!("aggregates truncated to fit max_output_tokens; narrow with `codes`/`min_severity` or raise the budget");
     }
-    fit_diagnostics_response_budget(&mut body, max_output_tokens, "aggregates");
+    let budget_exhausted =
+        fit_diagnostics_response_budget(&mut body, max_output_tokens, "aggregates")
+            || budget_exhausted;
 
     let completeness = loc::Completeness::complete()
         .when(
@@ -966,6 +980,13 @@ pub(crate) fn workspace_findings(
             sweep.findings_ignored_by_author > 0,
             loc::ReasonCode::OutOfAnalysisScope,
             "findings on lines authored by [analysis].ignored_authors were suppressed",
+        )
+        // An unreadable baseline empties the sweep entirely, and a consumer that reads
+        // only the envelope would take that emptiness for a clean configuration.
+        .when(
+            sweep.baseline.state == ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+            loc::ReasonCode::ModalityDegraded,
+            "the diagnostics baseline could not be read; the sweep produced no aggregates",
         );
     (body, completeness)
 }
@@ -978,12 +999,19 @@ struct FindingPlace<'a> {
     enclosing: Option<line_index::LineColRange>,
 }
 
+/// Shrinks `body` to the budget, returning whether anything was dropped. The verdict
+/// matters to the caller: `completeness` is computed from a flag taken BEFORE this runs,
+/// and a body that trims itself here would otherwise be announced as complete.
+#[must_use]
 fn fit_diagnostics_response_budget(
     body: &mut Value,
     max_output_tokens: Option<usize>,
     items_key: &str,
-) {
-    let Some(limit) = max_output_tokens.map(|tokens| tokens.saturating_mul(4)) else { return };
+) -> bool {
+    let Some(limit) = max_output_tokens.map(|tokens| tokens.saturating_mul(4)) else {
+        return false;
+    };
+    let mut trimmed = false;
     while serde_json::to_vec(body).is_ok_and(|bytes| bytes.len() > limit) {
         let partitions = body["baseline"]["partitions"].as_array_mut();
         if partitions.is_some_and(|partitions| !partitions.is_empty()) {
@@ -992,11 +1020,13 @@ fn fit_diagnostics_response_budget(
             let returned = partitions.len();
             body["baseline"]["partitions_returned"] = json!(returned);
             body["baseline"]["partitions_truncated"] = json!(true);
+            trimmed = true;
             continue;
         }
         let errors = body["baseline"]["errors"].as_array_mut();
         if errors.is_some_and(|errors| errors.len() > 1) {
             body["baseline"]["errors"].as_array_mut().unwrap().pop();
+            trimmed = true;
             continue;
         }
         let items = body[items_key].as_array_mut();
@@ -1004,17 +1034,22 @@ fn fit_diagnostics_response_budget(
             body[items_key].as_array_mut().unwrap().pop();
             body["truncated"] = json!(true);
             body["budget_exhausted"] = json!(true);
+            trimmed = true;
             continue;
         }
         if truncate_response_string(body, limit) {
+            trimmed = true;
             continue;
         }
         break;
     }
+    trimmed
 }
 
 fn budgeted_diagnostics_response(mut body: Value, max_output_tokens: Option<usize>) -> Value {
-    fit_diagnostics_response_budget(&mut body, max_output_tokens, "findings");
+    // The envelope for these responses carries no completeness verdict, so the
+    // trimming verdict has no reader here; the body flags itself.
+    let _ = fit_diagnostics_response_budget(&mut body, max_output_tokens, "findings");
     body
 }
 
@@ -1711,7 +1746,7 @@ mod tests {
             summary.partitions = vec![partition("main"), partition("extension:z")];
             let mut minimum =
                 json!({"baseline": bounded_baseline_value(&summary, Some("extension:z"))});
-            fit_diagnostics_response_budget(&mut minimum, Some(1), "findings");
+            let _ = fit_diagnostics_response_budget(&mut minimum, Some(1), "findings");
             let minimum = &minimum["baseline"];
             assert_eq!(minimum["partitions_total"], 2);
             assert_eq!(minimum["partitions_returned"], 0);
@@ -1750,7 +1785,7 @@ mod tests {
                 "findings": (0..20).map(|index| json!({"message": "x".repeat(80), "index": index})).collect::<Vec<_>>(),
                 "baseline": owner_first,
             });
-            fit_diagnostics_response_budget(&mut whole, Some(100), "findings");
+            let _ = fit_diagnostics_response_budget(&mut whole, Some(100), "findings");
             assert!(serde_json::to_vec(&whole).unwrap().len() <= 400);
             assert_eq!(whole["baseline"]["partitions_total"], 2);
             assert_eq!(whole["baseline"]["partitions_truncated"], true);
@@ -2460,6 +2495,129 @@ mod tests {
             assert_eq!(removed["baseline"]["error_code"], "missing");
             assert_ne!(removed["result_id"], replaced["result_id"]);
             assert_eq!(state.generation(), generation);
+        }
+
+        /// An unreadable baseline leaves the sweep with nothing to report, and the
+        /// envelope must say so — a consumer reading only the envelope would otherwise
+        /// take the empty answer for a clean configuration.
+        #[test]
+        fn workspace_envelope_reports_a_broken_baseline() {
+            use crate::diagnostics_state::CodeAggregate;
+            let summary = |state| ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                state,
+                complete: false,
+                error_code: Some("invalid_file".to_owned()),
+                ..ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled()
+            };
+            let sweep = |state| WorkspaceSweep {
+                aggregates: vec![CodeAggregate {
+                    code: "LineLength".to_owned(),
+                    severity: ide::SeverityBucket::Warning,
+                    count: 1,
+                    files_affected: 1,
+                }],
+                files_swept: 1,
+                files_total: 1,
+                files_out_of_scope: 0,
+                files_unread: 0,
+                findings_ignored_by_author: 0,
+                author_head: None,
+                truncated: false,
+                cancelled: false,
+                baseline: summary(state),
+                baseline_epoch: "e".to_owned(),
+            };
+
+            let (_, healthy) = workspace_findings(
+                &sweep(ide::diagnostics_baseline::DiagnosticsBaselineState::Full),
+                1,
+                None,
+            );
+            assert_eq!(
+                healthy.to_value()["status"],
+                "complete",
+                "positive control: an intact baseline keeps the envelope complete"
+            );
+
+            let (_, broken) = workspace_findings(
+                &sweep(ide::diagnostics_baseline::DiagnosticsBaselineState::Error),
+                1,
+                None,
+            );
+            assert_ne!(broken.to_value()["status"], "complete", "{}", broken.to_value());
+        }
+
+        /// The baseline keys findings by the project-relative path, so the request's own
+        /// spelling must not reach the fingerprint: `./x` and `x` are the same file, and
+        /// a mismatch turns a suppressed finding back into a new one.
+        #[test]
+        fn baseline_project_path_ignores_request_spelling() {
+            let root = tempfile::tempdir().unwrap();
+            let nested = root.path().join("CommonModules/Сервер/Ext");
+            std::fs::create_dir_all(&nested).unwrap();
+            let module = nested.join("Module.bsl");
+            std::fs::write(&module, "Процедура Тест()\nКонецПроцедуры\n").unwrap();
+
+            let plain = baseline_project_path(root.path(), &module);
+            assert_eq!(plain, "CommonModules/Сервер/Ext/Module.bsl");
+
+            let dotted = root.path().join("./CommonModules/Сервер/./Ext/Module.bsl");
+            assert_eq!(baseline_project_path(root.path(), &dotted), plain);
+
+            // A root reached through a symlink names the same files.
+            let link = root
+                .path()
+                .parent()
+                .unwrap()
+                .join(format!("{}-link", root.path().file_name().unwrap().to_string_lossy()));
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(root.path(), &link).unwrap();
+            assert_eq!(baseline_project_path(&link, &module), plain);
+            let _ = std::fs::remove_file(&link);
+        }
+
+        /// The body is shaped to the budget AFTER the item-level trim, so a response
+        /// whose items fit but whose envelope does not is trimmed by the shaper. The
+        /// completeness verdict must see that; otherwise the envelope calls a trimmed
+        /// body complete. The fixture is exactly such a case: items fit, body does not.
+        #[test]
+        fn workspace_completeness_reflects_the_budget_shaper() {
+            use crate::diagnostics_state::CodeAggregate;
+            let aggregate = |index: usize| CodeAggregate {
+                code: format!("{index}{}", "C".repeat(260)),
+                severity: ide::SeverityBucket::Error,
+                count: 1,
+                files_affected: 1,
+            };
+            let sweep = WorkspaceSweep {
+                aggregates: vec![aggregate(1), aggregate(2), aggregate(3)],
+                files_swept: 3,
+                files_total: 3,
+                files_out_of_scope: 0,
+                files_unread: 0,
+                findings_ignored_by_author: 0,
+                author_head: None,
+                truncated: false,
+                cancelled: false,
+                baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+                baseline_epoch: "disabled".to_owned(),
+            };
+
+            let (unbudgeted, _) = workspace_findings(&sweep, 1, None);
+            assert_eq!(
+                unbudgeted["aggregates"].as_array().unwrap().len(),
+                3,
+                "positive control: without a budget nothing is dropped"
+            );
+
+            let (body, completeness) = workspace_findings(&sweep, 1, Some(256));
+            assert_eq!(body["budget_exhausted"], true, "the shaper must have trimmed the body");
+            assert_ne!(
+                completeness.to_value()["status"],
+                "complete",
+                "a trimmed body must not be announced as complete: {}",
+                completeness.to_value()
+            );
         }
 
         fn run_workspace(state: &DiagnosticsState, opts: &SweepOptions) -> Value {

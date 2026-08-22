@@ -7,6 +7,18 @@ use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
 
 pub mod transaction;
 
+/// Whether the baseline may be applied to a diagnostics set produced under `scope`.
+///
+/// A fingerprint carries the ordinal of a repeated diagnostic, and that ordinal is only
+/// stable when the classifier sees every diagnostic of the file. Under `[analysis]
+/// diff_base` the set reaching it is already line-gated, so a NEW diagnostic can inherit
+/// the ordinal — and therefore the fingerprint — of a recorded one and be suppressed as
+/// known. The CLI refuses baseline operations under a scope for the same reason; here
+/// the baseline is simply not applied, which can only show more diagnostics, never fewer.
+pub(crate) fn applies_under_scope(scope_is_active: bool) -> bool {
+    !scope_is_active
+}
+
 pub(crate) fn active_for_file(
     snapshot: &DiagnosticsBaselineSnapshot,
     project_root: &Path,
@@ -14,14 +26,25 @@ pub(crate) fn active_for_file(
     text: &str,
     diagnostics: Vec<ide::Diagnostic>,
 ) -> Vec<ide::Diagnostic> {
+    // Before any work: a project without a baseline — the default — must not pay for
+    // one. Both states below return the input unchanged, and preparing candidates for
+    // them means indexing the whole file on every publication for a discarded result.
+    if matches!(
+        snapshot,
+        DiagnosticsBaselineSnapshot::Disabled | DiagnosticsBaselineSnapshot::Error { .. }
+    ) {
+        return diagnostics;
+    }
     let Ok(relative) = path.strip_prefix(project_root) else { return diagnostics };
     let relative = relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/");
     let source_lines: Vec<_> = text.lines().collect();
+    // One index for the file, not one per diagnostic: `to_output` builds its own.
+    let line_index = line_index::LineIndex::new(text);
     let candidates: Vec<_> = diagnostics
         .iter()
         .enumerate()
         .map(|(index, diagnostic)| {
-            let output = diagnostic.to_output(text);
+            let output = diagnostic.to_output_with_index(text, &line_index);
             BaselineDiagnosticCandidate {
                 diagnostic: index,
                 path: relative.clone(),
@@ -125,6 +148,98 @@ mod tests {
             tags: Vec::new(),
             fixes: Vec::new(),
         }
+    }
+
+    /// The ordinal in a fingerprint counts repetitions within the file, so it is only
+    /// stable when the classifier sees the whole file. Under an analysis scope the set
+    /// is already line-gated, and a NEW diagnostic would inherit the ordinal — and the
+    /// fingerprint — of a recorded one. The guard is what keeps that from happening.
+    #[test]
+    fn a_scoped_set_must_not_be_classified_against_the_baseline() {
+        assert!(applies_under_scope(false), "without a scope the baseline applies");
+        assert!(!applies_under_scope(true), "under a scope it must not");
+
+        // The suppression the guard prevents, shown directly: the second occurrence of
+        // an identical line, handed over alone, takes the first one's fingerprint.
+        let root = Path::new("/workspace");
+        let path = root.join("Module.bsl");
+        let text = "Сообщить(А);\nX = 1;\nСообщить(А);\n";
+        let snippet = normalize_diagnostic_snippet("Сообщить(А);");
+        let code = DiagnosticCode::EmptyCodeBlock;
+        let baseline = DiagnosticsBaseline {
+            schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            diagnostics: vec![DiagnosticsBaselineEntry {
+                fingerprint: diagnostic_fingerprint("Module.bsl", code.as_str(), &snippet, 0),
+                path: "Module.bsl".to_owned(),
+                code: code.as_str().to_owned(),
+                snippet,
+                occurrence: 0,
+                message: code.as_str().to_owned(),
+                severity: "Warning".to_owned(),
+                range: DiagnosticsBaselineRange {
+                    start_line: 0,
+                    start_column: 0,
+                    end_line: 0,
+                    end_column: 12,
+                },
+            }],
+        };
+        let snapshot = DiagnosticsBaselineSnapshot::Ready {
+            baseline,
+            project_path: "baseline.json".to_owned(),
+            path: root.join("baseline.json"),
+            epoch: "e".to_owned(),
+        };
+        let mut third_line = diagnostic(code);
+        third_line.range = TextRange::new(20.into(), 32.into());
+        let gated = active_for_file(&snapshot, root, &path, text, vec![third_line]);
+        assert!(gated.is_empty(), "documents the very suppression the guard exists to prevent");
+    }
+
+    /// A project without a baseline is the default, and its publications must not pay
+    /// for the feature. The gate is time because the work is preparation whose result is
+    /// discarded: with the early return it is nothing, without it the file is indexed
+    /// once per diagnostic. The `Ready` run beside it is the positive control — it does
+    /// the preparation for real, so a measurement blind to it would fail here.
+    #[test]
+    fn disabled_baseline_does_not_prepare_candidates() {
+        let root = Path::new("/workspace");
+        let path = root.join("Module.bsl");
+        let text = "Сообщить(А);\n".repeat(20_000);
+        let diagnostics: Vec<_> =
+            (0..2_000).map(|_| diagnostic(DiagnosticCode::EmptyCodeBlock)).collect();
+
+        let started = std::time::Instant::now();
+        let out = active_for_file(
+            &DiagnosticsBaselineSnapshot::Disabled,
+            root,
+            &path,
+            &text,
+            diagnostics.clone(),
+        );
+        let disabled = started.elapsed();
+        assert_eq!(out.len(), diagnostics.len(), "a disabled baseline changes nothing");
+
+        let baseline = DiagnosticsBaseline {
+            schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
+            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            diagnostics: vec![],
+        };
+        let ready = DiagnosticsBaselineSnapshot::Ready {
+            baseline,
+            project_path: "baseline.json".to_owned(),
+            path: root.join("baseline.json"),
+            epoch: "e".to_owned(),
+        };
+        let started = std::time::Instant::now();
+        let _ = active_for_file(&ready, root, &path, &text, diagnostics);
+        let enabled = started.elapsed();
+
+        assert!(
+            disabled * 8 < enabled,
+            "the disabled path must not do the enabled path's work: {disabled:?} against {enabled:?}"
+        );
     }
 
     #[test]

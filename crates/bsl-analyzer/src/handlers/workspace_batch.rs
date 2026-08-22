@@ -344,13 +344,17 @@ fn compute_chunk(
         Some(pool) => analysis.workspace_diagnostics_parallel(chunk, config.clone(), pool),
         None => analysis.workspace_diagnostics(chunk, config.clone()),
     };
+    let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     computed
         .into_iter()
         .filter_map(|(file_id, diagnostics)| {
             let uri = file_paths.url_for_file_id(file_id).ok()?;
             let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let text = analysis.file_text(file_id);
-                let diagnostics = match (baseline.1, file_paths.path_for_file_id(file_id)) {
+                let diagnostics = match (
+                    baseline.1.filter(|_| baseline_applies),
+                    file_paths.path_for_file_id(file_id),
+                ) {
                     (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
                         baseline.0,
                         root,

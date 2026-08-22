@@ -34,6 +34,14 @@ pub struct FileAnalysis {
     /// per finding. Empty when the producer did not supply snippets; the reporter
     /// then falls back to a path/code/occurrence fingerprint.
     pub line_snippets: Vec<String>,
+
+    /// Ordinal of each diagnostic among identical ones in its file, index-aligned with
+    /// `diagnostics` and captured BEFORE any suppression. The Code Quality fingerprint
+    /// folds it in, and a reporter counting it over the already-suppressed list would
+    /// hand an active finding the fingerprint of a suppressed one — the very value the
+    /// baseline file holds for a different finding. Empty when the producer did not
+    /// supply it; the reporter then counts positions itself.
+    pub occurrences: Vec<u32>,
 }
 
 pub trait Reporter: Send + Sync {

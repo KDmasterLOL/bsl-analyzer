@@ -1423,13 +1423,16 @@ pub fn handle_document_diagnostic(
     if config.scope.is_some() && ctx.scope_dirty_docs.contains(&uri) {
         config.scope = None;
     }
+    let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     let ide_diagnostics = ctx.analysis.file_diagnostics_cached(file_id, config);
     let text = match ctx.mem_docs.get(&uri) {
         Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
         None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
     };
-    let ide_diagnostics = match (ctx.workspace_root.as_deref(), uri.to_file_path().ok().as_deref())
-    {
+    let ide_diagnostics = match (
+        ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+        uri.to_file_path().ok().as_deref(),
+    ) {
         (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
             &ctx.diagnostics_baseline,
             root,
@@ -1677,22 +1680,45 @@ fn workspace_report_item(
     // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
     // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
     // is a real abort and must keep unwinding.
+    // When the baseline cannot change the set, the result id is known without the file
+    // text — and an unchanged document then costs neither a read nor an index. The
+    // whole-config sweep goes through here once per file, so that read is not free.
+    // The baseline is not applied under an analysis scope — see `applies_under_scope`.
+    let baseline_applies = ctx.diagnostics_baseline.affects_diagnostics()
+        && crate::diagnostics_baseline::applies_under_scope(ctx.diagnostics_config.scope.is_some());
+    if !baseline_applies {
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
+                WorkspaceUnchangedDocumentDiagnosticReport {
+                    uri: url,
+                    version,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id,
+                    },
+                },
+            ));
+        }
+    }
+
     let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let text = match open_doc {
             Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
             None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
         };
-        let diagnostics =
-            match (ctx.workspace_root.as_deref(), ctx.file_paths.path_for_file_id(file_id)) {
-                (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
-                    &ctx.diagnostics_baseline,
-                    root,
-                    path,
-                    &text,
-                    diagnostics,
-                ),
-                _ => diagnostics,
-            };
+        let diagnostics = match (
+            ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+            ctx.file_paths.path_for_file_id(file_id),
+        ) {
+            (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+                &ctx.diagnostics_baseline,
+                root,
+                path,
+                &text,
+                diagnostics,
+            ),
+            _ => diagnostics,
+        };
         let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
         if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
             return (result_id, None);

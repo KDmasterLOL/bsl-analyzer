@@ -710,13 +710,31 @@ fn analyze_salsa(
                             // so reporters that need a line-shift-stable fingerprint
                             // do not re-read the file or rescan its text per finding.
                             let source_lines: Vec<_> = file_text.lines().collect();
-                            let line_snippets = diagnostic_outputs
+                            let line_snippets: Vec<String> = diagnostic_outputs
                                 .iter()
                                 .map(|d| {
                                     ide::diagnostics_baseline::diagnostic_line_snippet(
                                         &source_lines,
                                         d.start_line,
                                     )
+                                })
+                                .collect();
+                            // Counted here, over the FULL set: suppression by the
+                            // baseline removes entries later, and a reporter counting
+                            // afterwards would give an active finding the ordinal — and
+                            // so the fingerprint — of a suppressed one.
+                            let mut seen: std::collections::HashMap<(&str, &str), u32> =
+                                std::collections::HashMap::new();
+                            let occurrences: Vec<u32> = diagnostic_outputs
+                                .iter()
+                                .zip(line_snippets.iter())
+                                .map(|(diagnostic, snippet)| {
+                                    let ordinal = seen
+                                        .entry((diagnostic.code.as_str(), snippet.as_str()))
+                                        .or_insert(0);
+                                    let current = *ordinal;
+                                    *ordinal += 1;
+                                    current
                                 })
                                 .collect();
                             Some(FileAnalysis {
@@ -727,6 +745,7 @@ fn analyze_salsa(
                                     .to_path_buf(),
                                 diagnostics: diagnostic_outputs,
                                 line_snippets,
+                                occurrences,
                             })
                         }
                     } else {

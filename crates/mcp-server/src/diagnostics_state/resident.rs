@@ -598,7 +598,11 @@ impl DiagnosticsResident {
 
         let path_of: HashMap<FileId, String> =
             self.by_path.iter().map(|(path, id)| (*id, path.clone())).collect();
-        let workspace_root = self.workspace_root.clone();
+        // `by_path` keys are canonical, so the root must be too: given a workspace root
+        // through a symlink, a literal strip fails for EVERY file and the baseline stops
+        // matching wholesale.
+        let workspace_root =
+            self.workspace_root.canonicalize().unwrap_or_else(|_| self.workspace_root.clone());
         if let Some(error) = self.diagnostics_baseline.error_summary() {
             return WorkspaceSweep {
                 aggregates: Vec::new(),
@@ -708,6 +712,10 @@ impl DiagnosticsResident {
             && files_out_of_scope == 0
             && self.holes.is_empty()
             && self.author_filter.is_none()
+            // An analysis scope gates LINES, not just files: a file may be swept whole
+            // and still yield only the diagnostics of its changed hunks. Calling that
+            // full coverage would report every unmatched baseline entry as resolved.
+            && config.scope.is_none()
             && files_swept == files_total;
         let coverage = if complete {
             ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Full

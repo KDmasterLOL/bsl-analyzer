@@ -361,7 +361,14 @@ impl DiagnosticsState {
                 &resident.project,
                 &resident.diagnostics_baseline,
             );
-        resident.diagnostics_baseline_observation = snapshot.observation();
+        // A write landing WHILE the set is read would otherwise be lost forever: the
+        // bytes are the old ones, but the observation taken afterwards is the new file's,
+        // so no later read ever sees a difference. Re-observing the previous paths says
+        // whether the ground moved during the read; if it did, an empty mark forces the
+        // next read to load again instead of trusting this snapshot.
+        let moved_during_read = observation != resident.diagnostics_baseline.observation();
+        resident.diagnostics_baseline_observation =
+            if moved_during_read { String::new() } else { snapshot.observation() };
         resident.diagnostics_baseline = snapshot;
     }
 

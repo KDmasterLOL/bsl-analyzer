@@ -340,6 +340,13 @@ impl DiagnosticsBaselineSnapshot {
         }
     }
 
+    /// Whether this snapshot can change a file's active diagnostics. `Disabled` and
+    /// `Error` cannot, so a caller may skip everything a classification would need —
+    /// notably reading and indexing the file text.
+    pub fn affects_diagnostics(&self) -> bool {
+        matches!(self, Self::Ready { .. } | Self::ReadySet { .. })
+    }
+
     pub fn observation(&self) -> String {
         let paths = self.observation_paths();
         if paths.is_empty() {

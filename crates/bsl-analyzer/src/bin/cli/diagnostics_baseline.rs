@@ -1276,6 +1276,14 @@ fn suppress_known_files(
             snippet_index += 1;
             keep
         });
+        // Ordinals were computed over the full set and stay attached to the findings
+        // that survive: a reporter must not renumber what suppression has thinned.
+        let mut occurrence_index = 0;
+        analysis.occurrences.retain(|_| {
+            let keep = !known.contains(&(file_index, occurrence_index));
+            occurrence_index += 1;
+            keep
+        });
         if analysis.diagnostics.is_empty() {
             *file = None;
         }
@@ -1387,6 +1395,7 @@ mod tests {
                 tags: Vec::new(),
             }],
             line_snippets: vec!["x = 1;".to_owned()],
+            occurrences: vec![0],
         }
     }
 
