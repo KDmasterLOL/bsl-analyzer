@@ -366,10 +366,11 @@ struct DiagnosticsParams {
     max_findings: Option<usize>,
     /// `workspace`: cap on files swept (default 1000).
     max_files: Option<usize>,
-    /// `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each); a truncated
-    /// response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
+    /// `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
+    /// a truncated response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
     /// (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
     /// budget applies — only the action's own count caps (`max_findings`/`max_files`).
+    #[schemars(range(min = 256))]
     max_output_tokens: Option<usize>,
 }
 
@@ -1733,13 +1734,35 @@ impl McpServer {
     /// per-finding results for one `.bsl` path; `workspace` — a bounded per-code aggregate sweep
     /// of the whole config. Honours `max_output_tokens`/`max_findings` and flags truncation.
     /// Reads the resident host; while it builds it returns a retry envelope.
-    #[tool(name = "diagnostics", annotations(read_only_hint = true))]
+    #[tool(
+        name = "diagnostics",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<
+            tools::diagnostics::DiagnosticsResponseSchema,
+        >(),
+        annotations(read_only_hint = true)
+    )]
     async fn diagnostics(
         &self,
         params: Parameters<DiagnosticsParams>,
         ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let p = params.0;
+        // Only the actions that honour a budget are held to its minimum: `schema` and
+        // `status` ignore `max_output_tokens` entirely, and refusing them for a value
+        // they never read would be a refusal about nothing.
+        let budgeted = matches!(p.action.as_str(), "catalog" | "file" | "workspace");
+        if budgeted
+            && p.max_output_tokens
+                .is_some_and(|tokens| tokens < tools::diagnostics::MIN_OUTPUT_TOKENS)
+        {
+            return Err(McpError::invalid_params(
+                format!(
+                    "max_output_tokens must be at least {} for diagnostics",
+                    tools::diagnostics::MIN_OUTPUT_TOKENS
+                ),
+                None,
+            ));
+        }
         match p.action.as_str() {
             // `catalog` and `schema` are static (compile-time metadata), so they need
             // no resident analysis database and answer in either profile.
@@ -1891,7 +1914,7 @@ impl McpServer {
         let retry_diag = diag.clone();
         let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
             let sweep_cancel = std::sync::Arc::clone(session.cancel());
-            let outcome = session.read(|resident, _analysis, generation| {
+            let outcome = session.read_fanout(|resident, generation| {
                 let sweep = resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
                 if sweep.cancelled {
                     tracing::info!(
@@ -2366,8 +2389,8 @@ mod tool_descriptions {
               - locale: `catalog`: ru | en (default ru) — title language.
               - max_files: `workspace`: cap on files swept (default 1000).
               - max_findings: `file`: cap on returned findings (default 200).
-              - max_output_tokens: `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each); a truncated
-            response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
+              - max_output_tokens: `catalog`/`file`/`workspace`: output budget in tokens (~4 chars each), minimum 256;
+            a truncated response carries `budget_exhausted: true` and a `budget_hint` on how to narrow it
             (tighten `codes`/`min_severity`/range or raise the budget). When omitted, no token
             budget applies — only the action's own count caps (`max_findings`/`max_files`).
               - min_severity: `file`: inclusive severity floor error|warning|info|hint (default warning).

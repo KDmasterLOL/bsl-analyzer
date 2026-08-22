@@ -2486,10 +2486,8 @@ fn load_embeddings_from_client(
         if blob.len() != dimension * 4 {
             continue;
         }
-        let embedding = blob
-            .chunks_exact(4)
-            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-            .collect::<Vec<_>>();
+        let embedding =
+            blob.as_chunks::<4>().0.iter().copied().map(f32::from_le_bytes).collect::<Vec<_>>();
         result.insert(key, embedding);
     }
     Ok(result)

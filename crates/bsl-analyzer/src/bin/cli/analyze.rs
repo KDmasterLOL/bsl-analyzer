@@ -138,7 +138,79 @@ pub fn analyze(
         ScopeCliArgs { incremental, changed_files, git_diff, diff_filter: diff_filter_path },
         ignored_authors,
         source_set,
+        None,
     )
+}
+
+pub fn diagnostics_baseline(
+    command: super::diagnostics_baseline::DiagnosticsBaselineCommand,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let args = command.common().clone();
+    analyze_salsa(
+        args.source_dir,
+        None,
+        None,
+        args.config,
+        Vec::new(),
+        true,
+        None,
+        OutputFormat::Console,
+        None,
+        ScopeCliArgs { incremental: false, changed_files: None, git_diff: None, diff_filter: None },
+        Vec::new(),
+        super::source_set::SourceSetArgs::default(),
+        Some(command),
+    )
+}
+
+fn diagnostic_author_lines(start_line: usize, end_line: usize, end_column: usize) -> (u32, u32) {
+    let end_line = if end_line > start_line && end_column == 0 { end_line - 1 } else { end_line };
+    (start_line as u32 + 1, end_line as u32 + 1)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CoverageProof {
+    pub total: usize,
+    pub analyzed: usize,
+    pub failed: bool,
+    pub unreadable: bool,
+    pub cancelled: bool,
+    pub truncated: bool,
+    pub out_of_scope: bool,
+    pub stale: bool,
+    pub reload_incomplete: bool,
+    pub selected_diagnostic: bool,
+    pub author_filter: bool,
+}
+
+impl CoverageProof {
+    pub fn require_full(&self) -> Result<(), String> {
+        let full = self.analyzed == self.total
+            && !self.failed
+            && !self.unreadable
+            && !self.cancelled
+            && !self.truncated
+            && !self.out_of_scope
+            && !self.stale
+            && !self.reload_incomplete
+            && !self.selected_diagnostic
+            && !self.author_filter;
+        if full {
+            Ok(())
+        } else {
+            Err(format!("full diagnostics coverage required: {self:?}"))
+        }
+    }
+}
+
+fn analysis_is_full(
+    scope_active: bool,
+    incremental: bool,
+    selected_diagnostic: bool,
+    author_filter: bool,
+    has_errors: bool,
+) -> bool {
+    !scope_active && !incremental && !selected_diagnostic && !author_filter && !has_errors
 }
 
 /// Build the author filter from the CLI list (which replaces the config list,
@@ -240,6 +312,7 @@ fn analyze_salsa(
     scope_args: ScopeCliArgs,
     ignored_authors: Vec<String>,
     source_set: super::source_set::SourceSetArgs,
+    baseline_command: Option<super::diagnostics_baseline::DiagnosticsBaselineCommand>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     use std::{
         panic::{catch_unwind, AssertUnwindSafe},
@@ -313,6 +386,28 @@ fn analyze_salsa(
     // instead of the raw `-s` dir, so vendored/build copies such as
     // `.build/vendor` are not analyzed as a duplicate configuration.
     let project = project_model::Project::with_config(&source_dir, proj_config.clone())?;
+    if baseline_command.is_some() && project.diagnostics_baseline()?.is_none() {
+        return Err("[diagnostics.baseline].path is not configured".into());
+    }
+    if let Some(command) = &baseline_command {
+        command.preflight(&project)?;
+    }
+    // Validate and retain one immutable snapshot before JSONL can emit its start event.
+    // A malformed configured file therefore fails the run without a partial report.
+    let loaded_baseline = if baseline_command.is_none() {
+        let snapshot =
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(&project);
+        if let ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Error {
+            detail,
+            ..
+        } = &snapshot
+        {
+            return Err(detail.clone().into());
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     // Deliberately not gated on `--quiet`: this explains why the findings that
     // follow are wrong, and suppressing it leaves the run looking merely broken.
     if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
@@ -389,6 +484,7 @@ fn analyze_salsa(
     if let Some((path, err)) = unreadable.into_iter().next() {
         return Err(format!("failed to read BSL file {}: {err}", path.display()).into());
     }
+    ide::warm_batch_config_roots(&db, &file_ids);
 
     tracing::info!(
         "Files loaded, starting parallel diagnostics (threads: {})",
@@ -408,8 +504,9 @@ fn analyze_salsa(
         None
     };
 
+    let diagnostics = proj_config.diagnostics.rules_json();
     let mut config = DiagnosticsConfig::from_project_json(
-        &proj_config.diagnostics,
+        &diagnostics,
         proj_config.output.resolve_locale().unwrap_or_default(),
     );
 
@@ -600,50 +697,6 @@ fn analyze_salsa(
 
                         let file_line_index = line_index::LineIndex::new(&file_text);
 
-                        let diagnostics = if let Some(filter) = author_filter.as_deref() {
-                            let blame_start = std::time::Instant::now();
-                            let keep = filter.lines_kept_cached(path, file_text.as_bytes());
-                            author_blame_us.fetch_add(
-                                blame_start.elapsed().as_micros() as u64,
-                                Ordering::Relaxed,
-                            );
-                            match keep {
-                                Ok(keep) => {
-                                    let before = diagnostics.len();
-                                    author_seen.fetch_add(before, Ordering::Relaxed);
-                                    let filtered: Vec<_> = diagnostics
-                                        .into_iter()
-                                        .filter(|d| {
-                                            let start =
-                                                file_line_index.line_col(d.range.start()).line;
-                                            // Half-open range: for a non-empty range the
-                                            // last covered line comes from `end - 1`.
-                                            let end_offset = if d.range.is_empty() {
-                                                d.range.start()
-                                            } else {
-                                                d.range.end() - line_index::TextSize::from(1)
-                                            };
-                                            let end = file_line_index.line_col(end_offset).line;
-                                            keep.range_survives(start + 1, end + 1)
-                                        })
-                                        .collect();
-                                    author_dropped
-                                        .fetch_add(before - filtered.len(), Ordering::Relaxed);
-                                    filtered
-                                }
-                                Err(e) => {
-                                    let message = format!("author filter: {e}");
-                                    let mut fatal = author_fatal.lock().unwrap();
-                                    if fatal.is_none() {
-                                        *fatal = Some(message.clone());
-                                    }
-                                    return (None, timing, metrics, Some(message));
-                                }
-                            }
-                        } else {
-                            diagnostics
-                        };
-
                         let diagnostic_outputs: Vec<_> = diagnostics
                             .iter()
                             .map(|d| d.to_output_with_index(&file_text, &file_line_index))
@@ -656,16 +709,32 @@ fn analyze_salsa(
                             // still hot (this pass runs in parallel across files),
                             // so reporters that need a line-shift-stable fingerprint
                             // do not re-read the file or rescan its text per finding.
-                            let file_lines: Vec<&str> = file_text.lines().collect();
-                            let line_snippets = diagnostic_outputs
+                            let source_lines: Vec<_> = file_text.lines().collect();
+                            let line_snippets: Vec<String> = diagnostic_outputs
                                 .iter()
                                 .map(|d| {
-                                    file_lines
-                                        .get(d.start_line)
-                                        .map(|line| {
-                                            bsl_analyzer::reporters::normalize_source_line(line)
-                                        })
-                                        .unwrap_or_default()
+                                    ide::diagnostics_baseline::diagnostic_line_snippet(
+                                        &source_lines,
+                                        d.start_line,
+                                    )
+                                })
+                                .collect();
+                            // Counted here, over the FULL set: suppression by the
+                            // baseline removes entries later, and a reporter counting
+                            // afterwards would give an active finding the ordinal — and
+                            // so the fingerprint — of a suppressed one.
+                            let mut seen: std::collections::HashMap<(&str, &str), u32> =
+                                std::collections::HashMap::new();
+                            let occurrences: Vec<u32> = diagnostic_outputs
+                                .iter()
+                                .zip(line_snippets.iter())
+                                .map(|(diagnostic, snippet)| {
+                                    let ordinal = seen
+                                        .entry((diagnostic.code.as_str(), snippet.as_str()))
+                                        .or_insert(0);
+                                    let current = *ordinal;
+                                    *ordinal += 1;
+                                    current
                                 })
                                 .collect();
                             Some(FileAnalysis {
@@ -676,6 +745,7 @@ fn analyze_salsa(
                                     .to_path_buf(),
                                 diagnostics: diagnostic_outputs,
                                 line_snippets,
+                                occurrences,
                             })
                         }
                     } else {
@@ -736,22 +806,6 @@ fn analyze_salsa(
 
     let elapsed = start.elapsed();
 
-    // A fatal blame error aborts the run, but only AFTER the JSONL stream is
-    // closed properly (`file` events + `done`): consumers must never see a
-    // start-only stream. Per-file errors are already recorded in the results.
-    let author_fatal_msg = author_fatal.lock().unwrap().take();
-    if author_filter.is_some() && author_fatal_msg.is_none() {
-        let seen = author_seen.load(Ordering::Relaxed);
-        let dropped = author_dropped.load(Ordering::Relaxed);
-        let blame_secs = author_blame_us.load(Ordering::Relaxed) as f64 / 1e6;
-        tracing::info!(seen, dropped, blame_secs, "author filter applied");
-        if !quiet && !jsonl {
-            println!(
-                "Author filter: dropped {dropped} of {seen} finding(s) (blame {blame_secs:.1}s)"
-            );
-        }
-    }
-
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");
         bsl_analyzer::mem_report::print_salsa_event_report(&db, "TROUGH (post-eviction)");
@@ -778,6 +832,143 @@ fn analyze_salsa(
         }
         metrics_list.push(metrics);
         errors_list.push(error);
+    }
+
+    let baseline_summary = if baseline_command.is_none() {
+        let presentation_filter = scope_args.incremental || only_diagnostic.is_some();
+        let full = analysis_is_full(
+            scope.is_some(),
+            scope_args.incremental,
+            only_diagnostic.is_some(),
+            author_filter.is_some(),
+            errors_list.iter().any(Option::is_some),
+        );
+        let coverage = if full {
+            ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Full
+        } else {
+            let completed_files =
+                if scope.is_some() || author_filter.is_some() || presentation_filter {
+                    std::collections::BTreeSet::new()
+                } else {
+                    file_ids
+                        .iter()
+                        .zip(&errors_list)
+                        .filter(|(_, error)| error.is_none())
+                        .filter_map(|((_, path), _)| path.strip_prefix(&source_dir).ok())
+                        .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                        .collect()
+                };
+            ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Partial { completed_files }
+        };
+        let all_project_files = file_ids
+            .iter()
+            .filter_map(|(_, path)| path.strip_prefix(&source_dir).ok())
+            .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+            .collect();
+        let can_prove_partition_completion =
+            scope.is_none() && !presentation_filter && author_filter.is_none();
+        Some(super::diagnostics_baseline::classify_files_with_loaded(
+            &project,
+            &mut file_analyses,
+            coverage,
+            can_prove_partition_completion.then_some(&all_project_files),
+            loaded_baseline.as_ref().expect("normal analysis loads one baseline snapshot"),
+        )?)
+    } else {
+        None
+    };
+
+    // Baseline classification deliberately precedes the author presentation filter.
+    // Blame is expensive already, so the extra file read keeps the hot diagnostics path
+    // simple while preserving the same parallelism for projects that enable the filter.
+    if let Some(filter) = author_filter.as_deref() {
+        file_analyses
+            .par_iter_mut()
+            .zip(file_ids.par_iter())
+            .zip(errors_list.par_iter_mut())
+            .for_each(|((analysis, (_, path)), error_slot)| {
+                let Some(file) = analysis.as_mut() else { return };
+                let bytes = match fs::read(path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        let message =
+                            format!("author filter: cannot read {}: {error}", path.display());
+                        *analysis = None;
+                        *error_slot = Some(message.clone());
+                        let mut fatal = author_fatal.lock().unwrap();
+                        if fatal.is_none() {
+                            *fatal = Some(message);
+                        }
+                        return;
+                    }
+                };
+                let blame_start = std::time::Instant::now();
+                let keep = match filter.lines_kept_cached(path, &bytes) {
+                    Ok(keep) => keep,
+                    Err(error) => {
+                        let message = format!("author filter: {error}");
+                        *analysis = None;
+                        *error_slot = Some(message.clone());
+                        let mut fatal = author_fatal.lock().unwrap();
+                        if fatal.is_none() {
+                            *fatal = Some(message);
+                        }
+                        return;
+                    }
+                };
+                author_blame_us
+                    .fetch_add(blame_start.elapsed().as_micros() as u64, Ordering::Relaxed);
+                let before = file.diagnostics.len();
+                let kept: Vec<_> = file
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| {
+                        let (start, end) = diagnostic_author_lines(
+                            diagnostic.start_line,
+                            diagnostic.end_line,
+                            diagnostic.end_column,
+                        );
+                        keep.range_survives(start, end)
+                    })
+                    .collect();
+                let mut index = 0;
+                file.diagnostics.retain(|_| {
+                    let retain = kept[index];
+                    index += 1;
+                    retain
+                });
+                index = 0;
+                file.line_snippets.retain(|_| {
+                    let retain = kept[index];
+                    index += 1;
+                    retain
+                });
+                author_seen.fetch_add(before, Ordering::Relaxed);
+                author_dropped.fetch_add(before - file.diagnostics.len(), Ordering::Relaxed);
+                if file.diagnostics.is_empty() {
+                    *analysis = None;
+                }
+            });
+    }
+
+    // Both the fatal verdict and the counters are read AFTER the filter pass that
+    // produces them; reading them earlier reports an empty run and turns a
+    // fail-closed abort into a report with silently missing findings.
+    //
+    // A fatal blame error aborts the run, but only AFTER the JSONL stream is
+    // closed properly (`file` events + `done`): consumers must never see a
+    // start-only stream. Per-file errors are already recorded in the results.
+    let author_fatal_msg = author_fatal.lock().unwrap().take();
+    if author_filter.is_some() && author_fatal_msg.is_none() {
+        let seen = author_seen.load(Ordering::Relaxed);
+        let dropped = author_dropped.load(Ordering::Relaxed);
+        let blame_secs = author_blame_us.load(Ordering::Relaxed) as f64 / 1e6;
+        tracing::info!(seen, dropped, blame_secs, "author filter applied");
+        if !quiet && !jsonl {
+            println!(
+                "Author filter: dropped {dropped} of {seen} finding(s) (blame {blame_secs:.1}s)"
+            );
+        }
     }
 
     let total_diagnostics: usize =
@@ -811,7 +1002,10 @@ fn analyze_salsa(
         }
 
         let done_event =
-            DoneEvent::new(elapsed.as_secs_f64(), file_ids.len(), total_diagnostics, failed_files);
+            DoneEvent::new(elapsed.as_secs_f64(), file_ids.len(), total_diagnostics, failed_files)
+                .with_baseline(baseline_summary.clone().unwrap_or_else(
+                    ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled,
+                ));
         println!("{}", serde_json::to_string(&done_event)?);
 
         if let Some(message) = author_fatal_msg {
@@ -827,6 +1021,37 @@ fn analyze_salsa(
 
     let all_diagnostics: Vec<FileAnalysis> = file_analyses.into_iter().flatten().collect();
 
+    if let Some(command) = baseline_command {
+        let output_format = command.output_format();
+        let proof = CoverageProof {
+            total: all_file_ids.len(),
+            analyzed: file_ids.len(),
+            failed: errors_list.iter().any(Option::is_some),
+            unreadable: false,
+            cancelled: false,
+            truncated: false,
+            out_of_scope: scope.is_some(),
+            stale: false,
+            reload_incomplete: false,
+            selected_diagnostic: only_diagnostic.is_some(),
+            author_filter: author_filter.is_some(),
+        };
+        let result =
+            super::diagnostics_baseline::apply(&project, &all_diagnostics, &proof, command)?;
+        match output_format {
+            super::diagnostics_baseline::DiagnosticsBaselineOutputFormat::Text => {
+                println!("{result}");
+            }
+            super::diagnostics_baseline::DiagnosticsBaselineOutputFormat::Json => {
+                println!("{}", serde_json::to_string(&result)?);
+            }
+        }
+        if !result.success {
+            return Err("diagnostics baseline differs from current diagnostics".into());
+        }
+        return Ok(());
+    }
+
     let analysis_results = AnalysisResults {
         files_analyzed: bsl_files.len(),
         files_with_issues: all_diagnostics.len(),
@@ -835,6 +1060,8 @@ fn analyze_salsa(
         diagnostics: all_diagnostics,
         source_dir: source_dir.clone(),
         workspace_dir: workspace_dir.clone(),
+        baseline: baseline_summary
+            .unwrap_or_else(ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled),
     };
 
     std::fs::create_dir_all(&output_dir)?;
@@ -871,6 +1098,56 @@ fn analyze_salsa(
 
 #[cfg(test)]
 mod analyze_walk_tests {
+    use super::{analysis_is_full, diagnostic_author_lines, CoverageProof};
+
+    #[test]
+    fn author_filter_uses_half_open_diagnostic_end() {
+        assert_eq!(diagnostic_author_lines(0, 1, 0), (1, 1));
+        assert_eq!(diagnostic_author_lines(0, 1, 1), (1, 2));
+    }
+
+    #[test]
+    fn diagnostics_baseline_full_gate_rejects_every_incomplete_proof() {
+        let full = CoverageProof { total: 2, analyzed: 2, ..CoverageProof::default() };
+        assert!(full.require_full().is_ok());
+
+        let mut proofs = Vec::new();
+        proofs.push(CoverageProof { analyzed: 1, ..full.clone() });
+        macro_rules! denied {
+            ($($field:ident),+ $(,)?) => {$({
+                let mut proof = full.clone();
+                proof.$field = true;
+                proofs.push(proof);
+            })+};
+        }
+        denied!(
+            failed,
+            unreadable,
+            cancelled,
+            truncated,
+            out_of_scope,
+            stale,
+            reload_incomplete,
+            selected_diagnostic,
+            author_filter,
+        );
+        assert!(proofs.iter().all(|proof| proof.require_full().is_err()));
+    }
+
+    #[test]
+    fn analyze_baseline_partial_scope_marks_every_cli_filter() {
+        assert!(analysis_is_full(false, false, false, false, false));
+        for inputs in [
+            (true, false, false, false, false),
+            (false, true, false, false, false),
+            (false, false, true, false, false),
+            (false, false, false, true, false),
+            (false, false, false, false, true),
+        ] {
+            assert!(!analysis_is_full(inputs.0, inputs.1, inputs.2, inputs.3, inputs.4));
+        }
+    }
+
     #[test]
     fn the_analysis_walk_takes_a_case_variant_module_body() {
         let dir = tempfile::tempdir().unwrap();

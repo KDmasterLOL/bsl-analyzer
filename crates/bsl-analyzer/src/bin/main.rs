@@ -48,6 +48,7 @@ use cli::{
     contract::cli_surface,
     dap::run_dap_server,
     deps::{run_deps, DepsOutputFormat},
+    diagnostics_baseline::{self, DiagnosticsCommand},
     extension::{self, ExtensionCommands},
     format::run_format,
     logging::setup_logging,
@@ -139,6 +140,13 @@ enum Commands {
 
         #[command(flatten)]
         source_set: cli::source_set::SourceSetArgs,
+    },
+
+    /// Manage diagnostics baselines. For partitioned baselines, `include` enables
+    /// suppression only for selected owners; all other diagnostics remain unsuppressed.
+    Diagnostics {
+        #[command(subcommand)]
+        command: DiagnosticsCommand,
     },
 
     /// Print the machine-readable contract of this build: CLI commands and flags, MCP
@@ -339,6 +347,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
             source_set,
         ),
         Some(Commands::CheckConfig { config, source_set }) => check_config(config, source_set),
+        Some(Commands::Diagnostics { command }) => diagnostics_baseline::run(command),
         Some(Commands::Contract) => {
             println!("{}", serde_json::to_string_pretty(&mcp_server::contract::document())?);
             Ok(())
@@ -461,6 +470,21 @@ mod contract_surface {
         }
     }
 
+    #[test]
+    fn cli_contract_partitioned_baseline() {
+        let surface = surface();
+        let baseline = command(command(&surface, "diagnostics"), "baseline");
+        for name in ["create", "check", "update"] {
+            let operation = command(baseline, name);
+            let names = arg_names(operation);
+            assert!(names.contains(&"source-dir"), "{name}: {names:?}");
+            assert!(names.contains(&"config"), "{name}: {names:?}");
+            assert!(names.contains(&"format"), "{name}: {names:?}");
+            assert!(names.contains(&"partition"), "{name}: {names:?}");
+            assert_eq!(names.contains(&"from-v1"), name == "create", "{name}: {names:?}");
+        }
+    }
+
     fn render(cmd: &Value, depth: usize) -> String {
         let indent = "  ".repeat(depth);
         let mut out = String::new();
@@ -525,6 +549,24 @@ mod contract_surface {
                 extension !no-extensions
                 extension-depends-on
                 no-extensions !extension
+              diagnostics
+                baseline
+                  create
+                    config (-c)
+                    format = text | json
+                    from-v1 !partition
+                    partition !from-v1
+                    source-dir (-s)
+                  check
+                    config (-c)
+                    format = text | json
+                    partition
+                    source-dir (-s)
+                  update
+                    config (-c)
+                    format = text | json
+                    partition
+                    source-dir (-s)
               contract
               format
                 check !write

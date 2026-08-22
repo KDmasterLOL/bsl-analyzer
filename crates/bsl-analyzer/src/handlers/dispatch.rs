@@ -1,5 +1,6 @@
 use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
 
 use anyhow::Result;
 use lsp_server::{ErrorCode, Notification, Request, RequestId, Response};
@@ -156,6 +157,7 @@ impl RequestDispatcher<'_> {
             analysis,
             workspace_root: self.global_state.workspace_root.clone(),
             project: self.global_state.project.clone(),
+            diagnostics_baseline: Arc::clone(&self.global_state.diagnostics_baseline),
             diagnostics_config: self.global_state.diagnostics_config().clone(),
             position_encoding: self.global_state.position_encoding,
             supports_insert_text_mode_adjust_indentation: self
@@ -592,6 +594,7 @@ mod tests {
             analysis,
             workspace_root: state.workspace_root.clone(),
             project: state.project.clone(),
+            diagnostics_baseline: Arc::clone(&state.diagnostics_baseline),
             diagnostics_config: state.diagnostics_config().clone(),
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state

@@ -41,12 +41,14 @@ pub fn check_config(
     let diagnostics =
         mcp_server::resolve_project_baseline_diagnostics(config.parent(), &project_config);
     let project = project_model::Project::with_config(project_root, project_config.clone());
+    let diagnostics_baseline = inspect_diagnostics_baseline(&project);
     let report = build_check_config_report(
         &config,
         &project_config,
         &project,
         &diagnostics_config,
         &diagnostics,
+        &diagnostics_baseline,
         &providers,
     );
 
@@ -56,6 +58,20 @@ pub fn check_config(
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("configuration is invalid: {e}"),
+        )
+        .into());
+    }
+    if diagnostics_baseline.issue {
+        // Every failure carries its own detail — the path that is missing, the schema
+        // that is unsupported. A caller that captures only stderr sees this line and
+        // nothing else, so a constant string there is not actionable.
+        let detail = diagnostics_baseline
+            .error_detail
+            .as_deref()
+            .unwrap_or("diagnostics baseline reported an error");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("configuration is invalid: {detail}"),
         )
         .into());
     }
@@ -74,23 +90,98 @@ fn diagnostics_config_from_project(
     project_config: &project_model::ProjectConfig,
 ) -> Result<ide::DiagnosticsConfig, Box<dyn Error + Send + Sync>> {
     let locale = project_config.output.resolve_locale().unwrap_or_default();
+    let diagnostics = project_config.diagnostics.rules_json();
 
-    if project_config.diagnostics.is_null() {
+    if diagnostics.as_object().is_some_and(serde_json::Map::is_empty) {
         return Ok(ide::DiagnosticsConfig { locale, ..Default::default() });
     }
 
-    let mut cfg: ide::DiagnosticsConfig = serde_json::from_value(
-        project_config.diagnostics.clone(),
-    )
-    .map_err(|error| -> Box<dyn Error + Send + Sync> {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("failed to parse diagnostics section: {error}"),
-        )
-        .into()
-    })?;
+    let mut cfg: ide::DiagnosticsConfig =
+        serde_json::from_value(diagnostics).map_err(|error| -> Box<dyn Error + Send + Sync> {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("failed to parse diagnostics section: {error}"),
+            )
+            .into()
+        })?;
     cfg.locale = locale;
     Ok(cfg)
+}
+
+struct DiagnosticsBaselineCheck {
+    status: String,
+    issue: bool,
+    error_detail: Option<String>,
+}
+
+fn inspect_diagnostics_baseline(
+    project: &Result<project_model::Project, project_model::ProjectError>,
+) -> DiagnosticsBaselineCheck {
+    let Ok(project) = project else {
+        return DiagnosticsBaselineCheck {
+            status: "unavailable (project invalid)".to_owned(),
+            issue: false,
+            error_detail: None,
+        };
+    };
+    use ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot;
+
+    match DiagnosticsBaselineSnapshot::load(project) {
+        DiagnosticsBaselineSnapshot::Disabled => DiagnosticsBaselineCheck {
+            status: "disabled".to_owned(),
+            issue: false,
+            error_detail: None,
+        },
+        DiagnosticsBaselineSnapshot::Ready { baseline, project_path, .. } => {
+            DiagnosticsBaselineCheck {
+                status: format!(
+                    "ready: {} (schema {}, {} entries)",
+                    project_path,
+                    baseline.schema_version,
+                    baseline.diagnostics.len()
+                ),
+                issue: false,
+                error_detail: None,
+            }
+        }
+        DiagnosticsBaselineSnapshot::ReadySet { baseline, plan, project_path, .. } => {
+            let selection = match plan.selection {
+                project_model::DiagnosticsBaselineSelection::All => "all",
+                project_model::DiagnosticsBaselineSelection::Selective => "selective",
+            };
+            let enabled = plan.enabled_partition_ids.join(", ");
+            let unsuppressed = plan
+                .partitions
+                .iter()
+                .filter(|partition| {
+                    !plan.enabled_partition_ids.iter().any(|enabled| enabled == &partition.id)
+                })
+                .map(|partition| partition.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            DiagnosticsBaselineCheck {
+                status: format!(
+                    "ready: {} (schema {}, selection {selection}; enabled partitions: {enabled}; unsuppressed partitions: {})",
+                    project_path,
+                    baseline.manifest.schema_version,
+                    if unsuppressed.is_empty() { "none" } else { &unsuppressed }
+                ),
+                issue: false,
+                error_detail: None,
+            }
+        }
+        DiagnosticsBaselineSnapshot::Error { path, code, detail, .. } => {
+            let path = path.as_deref().map(|path| path.display().to_string()).unwrap_or_default();
+            let status = match code.as_str() {
+                "invalid_configuration" => format!("ERROR: invalid configuration: {detail}"),
+                "missing" => format!("ERROR: file is missing: {path}"),
+                "unreadable" => format!("ERROR: cannot read {path}: {detail}"),
+                "unsupported_schema" => format!("ERROR: {detail}: {path}"),
+                _ => format!("ERROR: invalid file {path}: {detail}"),
+            };
+            DiagnosticsBaselineCheck { status, issue: true, error_detail: Some(detail) }
+        }
+    }
 }
 
 fn baseline_diagnostics_have_issues(
@@ -113,13 +204,17 @@ fn build_check_config_report(
     project: &Result<project_model::Project, project_model::ProjectError>,
     diagnostics_config: &ide::DiagnosticsConfig,
     baseline_diagnostics: &mcp_server::BaselineConfigDiagnostics,
+    diagnostics_baseline: &DiagnosticsBaselineCheck,
     providers: &SourceProviders,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
         "Configuration is {}.",
-        if baseline_diagnostics_have_issues(baseline_diagnostics) || project.is_err() {
+        if baseline_diagnostics_have_issues(baseline_diagnostics)
+            || diagnostics_baseline.issue
+            || project.is_err()
+        {
             "invalid"
         } else {
             "valid"
@@ -269,6 +364,7 @@ fn build_check_config_report(
         "  Parameterized: {}",
         summarize_diagnostic_codes(diagnostics_config.parameters.keys().map(ToString::to_string))
     );
+    let _ = writeln!(out, "  Baseline:   {}", diagnostics_baseline.status);
     let _ = writeln!(out);
     let _ = writeln!(out, "Code lens:");
     let _ = writeln!(
@@ -343,8 +439,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        build_check_config_report, check_config, diagnostics_config_from_project, SourceProvider,
-        SourceProviders, SourceSetArgs,
+        build_check_config_report, check_config, diagnostics_config_from_project,
+        inspect_diagnostics_baseline, SourceProvider, SourceProviders, SourceSetArgs,
     };
 
     #[test]
@@ -461,16 +557,78 @@ backend = "postgres"
 
     #[test]
     fn diagnostics_section_must_be_object_when_present() {
-        let project_config: project_model::ProjectConfig = serde_json::from_str(
+        let error = serde_json::from_str::<project_model::ProjectConfig>(
             r#"{
                 "diagnostics": []
             }"#,
         )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn check_config_baseline_reports_missing_file() {
+        let dir = tempdir().unwrap();
+        let project = baseline_project(dir.path());
+        let summary = inspect_diagnostics_baseline(&project);
+        assert!(summary.issue);
+        assert!(summary.status.contains("file is missing"), "{}", summary.status);
+    }
+
+    #[test]
+    fn check_config_baseline_reports_unsupported_schema() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("baseline.json"),
+            r#"{"schema_version":99,"scope":{"source_root":"","extensions":[]},"diagnostics":[]}"#,
+        )
         .unwrap();
+        let summary = inspect_diagnostics_baseline(&baseline_project(dir.path()));
+        assert!(summary.issue);
+        assert!(
+            summary.status.contains("unsupported diagnostics baseline schema version 99"),
+            "{}",
+            summary.status
+        );
+    }
 
-        let error = diagnostics_config_from_project(&project_config).unwrap_err();
+    #[test]
+    fn check_config_baseline_reports_corrupt_file_alongside_search_baseline() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("baseline.json"), "{").unwrap();
+        let project = baseline_project(dir.path());
+        let summary = inspect_diagnostics_baseline(&project);
+        assert!(summary.issue);
+        assert!(summary.status.contains("invalid file"), "{}", summary.status);
 
-        assert!(error.to_string().contains("failed to parse diagnostics section"));
+        let project_config = project.as_ref().unwrap().config.clone();
+        let search =
+            mcp_server::resolve_project_baseline_diagnostics(Some(dir.path()), &project_config);
+        let report = build_check_config_report(
+            &dir.path().join("bsl-analyzer.toml"),
+            &project_config,
+            &project,
+            &diagnostics_config_from_project(&project_config).unwrap(),
+            &search,
+            &summary,
+            &SourceProviders {
+                configuration_root: SourceProvider::ConfigFile,
+                extensions: SourceProvider::ConfigFile,
+            },
+        );
+        assert!(report.contains("Baseline:   ERROR: invalid file"));
+        assert!(report.contains("Search baseline:"));
+    }
+
+    fn baseline_project(
+        root: &std::path::Path,
+    ) -> Result<project_model::Project, project_model::ProjectError> {
+        let config: project_model::ProjectConfig = serde_json::from_str(
+            r#"{"diagnostics":{"baseline":{"path":"baseline.json"}},"extensions":[]}"#,
+        )
+        .unwrap();
+        project_model::Project::with_config(root, config)
     }
 
     fn configuration_dir(root: &std::path::Path, rel: &str, extension: bool) {
@@ -499,12 +657,14 @@ backend = "postgres"
             ..Default::default()
         };
         let project = project_model::Project::with_config(root, project_config.clone());
+        let diagnostics_baseline = inspect_diagnostics_baseline(&project);
         build_check_config_report(
             &root.join("bsl-analyzer.toml"),
             &project_config,
             &project,
             &diagnostics_config_from_project(&project_config).unwrap(),
             &mcp_server::resolve_project_baseline_diagnostics(Some(root), &project_config),
+            &diagnostics_baseline,
             &SourceProviders {
                 configuration_root: SourceProvider::Cli,
                 extensions: SourceProvider::Cli,
@@ -573,12 +733,14 @@ backend = "postgres"
 
         let project =
             project_model::Project::with_config(std::env::temp_dir(), project_config.clone());
+        let diagnostics_baseline = inspect_diagnostics_baseline(&project);
         let report = build_check_config_report(
             std::path::Path::new("bsl-analyzer.toml"),
             &project_config,
             &project,
             &diag_config,
             &baseline,
+            &diagnostics_baseline,
             &SourceProviders {
                 configuration_root: SourceProvider::ConfigFile,
                 extensions: SourceProvider::ConfigFile,

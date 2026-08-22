@@ -1423,7 +1423,25 @@ pub fn handle_document_diagnostic(
     if config.scope.is_some() && ctx.scope_dirty_docs.contains(&uri) {
         config.scope = None;
     }
+    let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     let ide_diagnostics = ctx.analysis.file_diagnostics_cached(file_id, config);
+    let text = match ctx.mem_docs.get(&uri) {
+        Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
+        None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
+    };
+    let ide_diagnostics = match (
+        ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+        uri.to_file_path().ok().as_deref(),
+    ) {
+        (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+            &ctx.diagnostics_baseline,
+            root,
+            path,
+            &text,
+            ide_diagnostics.iter().cloned().collect(),
+        ),
+        _ => ide_diagnostics.iter().cloned().collect(),
+    };
     let result_id = crate::lsp::diagnostics_result_id(&ide_diagnostics);
 
     if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
@@ -1438,25 +1456,21 @@ pub fn handle_document_diagnostic(
     }
 
     // An open buffer's overlay text (and its cached line index) reflects unsaved edits;
-    // a closed file has neither, so fall back to the database's disk-backed text.
-    let items = match ctx.mem_docs.get(&uri) {
-        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
-            doc.line_index(),
-            doc.text(),
-            &ide_diagnostics,
-            ctx.position_encoding,
-        ),
-        None => {
-            let text = ctx.analysis.file_text(file_id);
-            let line_index = LineIndex::new(&text);
-            crate::lsp::to_proto::diagnostics_with_encoding(
-                &line_index,
-                &text,
-                &ide_diagnostics,
-                ctx.position_encoding,
-            )
-        }
+    // a closed file has neither, so fall back to the database's disk-backed text and
+    // to an index built here. Rebuilding the index for an open buffer would redo, on
+    // every keystroke-driven pull, work the document already holds.
+    let owned_line_index = ctx.mem_docs.get(&uri).is_none().then(|| LineIndex::new(&text));
+    let line_index = match (&owned_line_index, ctx.mem_docs.get(&uri)) {
+        (Some(index), _) => index,
+        (None, Some(doc)) => doc.line_index(),
+        (None, None) => unreachable!("an index is built exactly when the document is closed"),
     };
+    let items = crate::lsp::to_proto::diagnostics_with_encoding(
+        line_index,
+        &text,
+        &ide_diagnostics,
+        ctx.position_encoding,
+    );
 
     Ok(DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
         RelatedFullDocumentDiagnosticReport {
@@ -1601,7 +1615,7 @@ pub fn handle_workspace_diagnostic(
         let chunk_items: Vec<_> = computed
             .into_iter()
             .filter_map(|(file_id, diagnostics)| {
-                workspace_report_item(&ctx, file_id, &diagnostics, &previous)
+                workspace_report_item(&ctx, file_id, diagnostics.to_vec(), &previous)
             })
             .collect();
         done += chunk.len();
@@ -1639,7 +1653,7 @@ pub fn handle_workspace_diagnostic(
 fn workspace_report_item(
     ctx: &LatencyRequestContext,
     file_id: vfs::FileId,
-    diagnostics: &[ide::Diagnostic],
+    diagnostics: Vec<ide::Diagnostic>,
     previous: &FxHashMap<lsp_types::Url, String>,
 ) -> Option<lsp_types::WorkspaceDocumentDiagnosticReport> {
     use lsp_types::{
@@ -1649,13 +1663,92 @@ fn workspace_report_item(
     };
 
     let url = ctx.url_for_file_id(file_id).ok()?;
-    let result_id = crate::lsp::diagnostics_result_id(diagnostics);
     // The LSP spec wants the buffer version for an open document (and `None` only for a closed
     // one), so a client can associate or discard the report against its buffer.
     let open_doc = ctx.mem_docs.get(&url);
     let version = open_doc.map(|doc| doc.version() as i64);
 
-    if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+    // The baseline decides which diagnostics are active, so the result id — and with it
+    // the "unchanged" verdict — can only be computed after it. Conversion to LSP items
+    // is the expensive half and stays behind that verdict: an unchanged document must
+    // not pay for a report the client already has.
+    //
+    // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
+    // file has neither, so fall back to the database's disk-backed text.
+    //
+    // A closed file's disk-backed text read (and conversion) can panic if the file was
+    // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
+    // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
+    // is a real abort and must keep unwinding.
+    // When the baseline cannot change the set, the result id is known without the file
+    // text — and an unchanged document then costs neither a read nor an index. The
+    // whole-config sweep goes through here once per file, so that read is not free.
+    // The baseline is not applied under an analysis scope — see `applies_under_scope`.
+    let baseline_applies = ctx.diagnostics_baseline.affects_diagnostics()
+        && crate::diagnostics_baseline::applies_under_scope(ctx.diagnostics_config.scope.is_some());
+    if !baseline_applies {
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
+                WorkspaceUnchangedDocumentDiagnosticReport {
+                    uri: url,
+                    version,
+                    unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+                        result_id,
+                    },
+                },
+            ));
+        }
+    }
+
+    let report = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let text = match open_doc {
+            Some(doc) => std::borrow::Cow::Borrowed(doc.text()),
+            None => std::borrow::Cow::Owned(ctx.analysis.file_text(file_id).to_string()),
+        };
+        let diagnostics = match (
+            ctx.workspace_root.as_deref().filter(|_| baseline_applies),
+            ctx.file_paths.path_for_file_id(file_id),
+        ) {
+            (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+                &ctx.diagnostics_baseline,
+                root,
+                path,
+                &text,
+                diagnostics,
+            ),
+            _ => diagnostics,
+        };
+        let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
+        if previous.get(&url).map(String::as_str) == Some(result_id.as_str()) {
+            return (result_id, None);
+        }
+        let owned_line_index = open_doc.is_none().then(|| LineIndex::new(&text));
+        let line_index = match (&owned_line_index, open_doc) {
+            (Some(index), _) => index,
+            (None, Some(doc)) => doc.line_index(),
+            (None, None) => unreachable!("an index is built exactly when the document is closed"),
+        };
+        let lsp = crate::lsp::to_proto::diagnostics_with_encoding(
+            line_index,
+            &text,
+            &diagnostics,
+            ctx.position_encoding,
+        );
+        (result_id, Some(lsp))
+    }));
+    let (result_id, lsp_items) = match report {
+        Ok(report) => report,
+        Err(payload) if payload.is::<salsa::Cancelled>() => std::panic::resume_unwind(payload),
+        Err(_) => {
+            tracing::warn!(
+                file_id = file_id.0,
+                "workspace diagnostics: skipping file after a text-read panic"
+            );
+            return None;
+        }
+    };
+    let Some(lsp_items) = lsp_items else {
         return Some(WorkspaceDocumentDiagnosticReport::Unchanged(
             WorkspaceUnchangedDocumentDiagnosticReport {
                 uri: url,
@@ -1665,46 +1758,6 @@ fn workspace_report_item(
                 },
             },
         ));
-    }
-
-    // An open buffer's overlay text (and cached line index) reflects unsaved edits; a closed
-    // file has neither, so fall back to the database's disk-backed text.
-    let lsp_items = match open_doc {
-        Some(doc) => crate::lsp::to_proto::diagnostics_with_encoding(
-            doc.line_index(),
-            doc.text(),
-            diagnostics,
-            ctx.position_encoding,
-        ),
-        None => {
-            // A closed file's disk-backed text read (and conversion) can panic if the file was
-            // deleted/rewritten mid-sweep. Catch it so one racing file does not fail the whole
-            // request (and, when streaming, discard already-sent chunks); a `salsa::Cancelled`
-            // is a real abort and must keep unwinding.
-            let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let text = ctx.analysis.file_text(file_id);
-                let line_index = LineIndex::new(&text);
-                crate::lsp::to_proto::diagnostics_with_encoding(
-                    &line_index,
-                    &text,
-                    diagnostics,
-                    ctx.position_encoding,
-                )
-            }));
-            match converted {
-                Ok(lsp_items) => lsp_items,
-                Err(payload) if payload.is::<salsa::Cancelled>() => {
-                    std::panic::resume_unwind(payload)
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        file_id = file_id.0,
-                        "workspace diagnostics: skipping file after a text-read panic"
-                    );
-                    return None;
-                }
-            }
-        }
     };
 
     Some(WorkspaceDocumentDiagnosticReport::Full(WorkspaceFullDocumentDiagnosticReport {
@@ -2341,6 +2394,7 @@ mod tests {
             analysis: state.analysis_host.analysis(),
             workspace_root: state.workspace_root.clone(),
             project: state.project.clone(),
+            diagnostics_baseline: std::sync::Arc::clone(&state.diagnostics_baseline),
             diagnostics_config: state.diagnostics_config.clone(),
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state
@@ -2368,6 +2422,7 @@ mod tests {
             analysis: ide::Analysis::from_database(db),
             workspace_root: state.workspace_root.clone(),
             project: state.project.clone(),
+            diagnostics_baseline: std::sync::Arc::clone(&state.diagnostics_baseline),
             diagnostics_config: state.diagnostics_config.clone(),
             position_encoding: state.position_encoding,
             supports_insert_text_mode_adjust_indentation: state

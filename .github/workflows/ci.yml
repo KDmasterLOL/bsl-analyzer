@@ -5,6 +5,7 @@ on:
     branches: [develop]
   pull_request:
     branches: [develop]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,7 +34,33 @@ jobs:
         run: cargo build -p bsl-analyzer --bin bsl-analyzer-app
       - name: CLI MCP mode and lifecycle tests
         run: cargo test -p bsl-analyzer --bin bsl-analyzer-app cli::mcp
+      - name: Diagnostics baseline atomic create
+        run: cargo test -p bsl-analyzer diagnostics_baseline_create
+      - name: Diagnostics baseline atomic update
+        run: cargo test -p bsl-analyzer diagnostics_baseline_update
+      - name: Partitioned diagnostics baseline transaction
+        run: cargo test -p bsl-analyzer partitioned_baseline_transaction
+      - name: Selective diagnostics baseline transaction
+        run: cargo test -p bsl-analyzer selective_baseline_transaction
+      - name: Selective baseline path security
+        run: cargo test -p project-model partitioned_baseline_path_security && cargo test -p ide selective_loader_rejects_unsafe_enabled_paths_and_links
       - name: HTTP transport tests
         run: cargo test -p mcp-server --test http
       - name: Broker runtime tests
         run: cargo test -p mcp-server --test broker
+
+  partitioned-baseline-scale:
+    name: Partitioned baseline 1.6M release gate
+    # Four release runs that each materialise a 1.6M-entry object: minutes of CPU and
+    # hundreds of megabytes of disk. Kept off pull requests, where it would run on every
+    # push to every branch, and still guarding `develop` after a merge (plus on demand).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ide --release --test partitioned_baseline_scale -- --ignored
+      - run: cargo test -p ide --release --test selective_baseline_scale large_selective_baseline_load_skips_unsuppressed_objects -- --ignored --exact
+      - run: cargo test -p bsl-analyzer --release --test partitioned_baseline_scale -- --ignored
+      - run: cargo test -p bsl-analyzer --release --test selective_baseline_scale large_selective_v1_migration_streams_skipped_entries_with_bounded_rss -- --ignored --exact

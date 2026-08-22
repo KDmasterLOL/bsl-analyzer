@@ -8,6 +8,33 @@ use vfs::{FileId, Vfs, VfsPath};
 use super::workspace_sweep::{CodeAggregate, SweepOptions, WorkspaceSweep};
 use crate::cancel::RequestCancel;
 
+fn partitioned_baseline_error(
+    path: &str,
+    set: &ide::partitioned_diagnostics_baseline::DiagnosticsBaselineSetSnapshot,
+    detail: String,
+) -> ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+    ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+        state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+        selection: None,
+        partitions_enabled: None,
+        partitions_unsuppressed: None,
+        unsuppressed: None,
+        new: None,
+        known: None,
+        resolved: None,
+        path: Some(path.to_owned()),
+        schema_version: Some(
+            ide::partitioned_diagnostics_baseline::DIAGNOSTICS_BASELINE_PARTITION_SCHEMA_VERSION,
+        ),
+        manifest_schema_version: Some(set.manifest.schema_version),
+        complete: false,
+        error_code: Some("classification_error".to_owned()),
+        detail: Some(detail),
+        partitions: vec![],
+        errors: vec![],
+    }
+}
+
 /// Adapts the resident's owned [`Vfs`] to the lock-neutral [`ide_host_core::VfsWrite`]
 /// the shared metadata policy expects. The resident is only ever touched while the
 /// caller holds the state mutex (the db is `!Sync`), so a single-threaded `RefCell`
@@ -230,9 +257,20 @@ pub(crate) struct DiagnosticsResident {
     /// Blame-backed line filter pinned to one HEAD state; `None` when not
     /// configured or when the repository cannot support it (fail-open).
     pub(super) author_filter: Option<std::sync::Arc<vcs::AuthorFilter>>,
+    /// Independently reloadable diagnostics-baseline snapshot. It is not a Salsa input.
+    pub(super) diagnostics_baseline:
+        ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot,
+    pub(super) diagnostics_baseline_observation: String,
+    pub(super) project: project_model::Project,
 }
 
 impl DiagnosticsResident {
+    pub(crate) fn diagnostics_baseline(
+        &self,
+    ) -> &ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot {
+        &self.diagnostics_baseline
+    }
+
     /// The file a request names, given the root its path is spelled against.
     ///
     /// The rule itself is shared with every other file-addressed tool
@@ -523,9 +561,20 @@ impl DiagnosticsResident {
         // cancelled — and not by unwinding: a sweep that reports what it managed is
         // this call's whole shape, and the coverage numbers beside it stay honest.
         if cancel.is_cancelled() {
+            let baseline = self.diagnostics_baseline.error_summary().unwrap_or_else(|| match self
+                .diagnostics_baseline
+                .project_path()
+            {
+                Some(path) => ide::diagnostics_baseline::DiagnosticsBaselineSummary::interrupted(
+                    Some(path.to_owned()),
+                ),
+                None => ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+            });
             return WorkspaceSweep::nothing_swept(
                 self.by_path.len() + self.holes.len(),
                 self.holes.len(),
+                baseline,
+                self.diagnostics_baseline.epoch().to_owned(),
             );
         }
         let mut files: Vec<FileId> = Vec::with_capacity(self.by_path.len());
@@ -547,25 +596,35 @@ impl DiagnosticsResident {
         let truncated = in_scope > opts.max_files;
         let swept = &files[..opts.max_files.min(in_scope)];
 
-        // Author filter: blame runs inside the sweep workers (the sweep holds
-        // the state lock for its whole duration anyway), keyed back to paths.
-        let author_filter = self.author_filter.as_ref();
-        let path_of: HashMap<FileId, &str> = if author_filter.is_some() {
-            self.by_path.iter().map(|(path, id)| (*id, path.as_str())).collect()
-        } else {
-            HashMap::new()
-        };
-        let author_ignored = std::sync::atomic::AtomicUsize::new(0);
+        let path_of: HashMap<FileId, String> =
+            self.by_path.iter().map(|(path, id)| (*id, path.clone())).collect();
+        // `by_path` keys are canonical, so the root must be too: given a workspace root
+        // through a symlink, a literal strip fails for EVERY file and the baseline stops
+        // matching wholesale.
+        let workspace_root =
+            self.workspace_root.canonicalize().unwrap_or_else(|_| self.workspace_root.clone());
+        if let Some(error) = self.diagnostics_baseline.error_summary() {
+            return WorkspaceSweep {
+                aggregates: Vec::new(),
+                files_swept: 0,
+                files_total,
+                files_out_of_scope,
+                files_unread: self.holes.len(),
+                findings_ignored_by_author: 0,
+                author_head: self.author_filter.as_ref().map(|filter| filter.short_identity()),
+                truncated,
+                cancelled: false,
+                baseline: error,
+                baseline_epoch: self.diagnostics_baseline.epoch().to_owned(),
+            };
+        }
 
-        // Per file: the (code, bucket) of each diagnostic, `None` for a file skipped or
-        // unwound by cancellation. Each rayon worker owns an `Analysis` over a db clone;
-        // queries run in parallel on the shared, unmutated Salsa storage. The salsa
-        // token is per-handle, so it must be taken from the exact handle the worker
-        // queries — registered lazily on the worker's first file, and re-registered
-        // after every rayon split (`SweepWorker::clone` resets the flag). The catch
-        // keeps a cancellation unwind inside the worker: the sweep degrades to skipped
-        // files instead of a panic crossing rayon into the state lock.
-        let per_file: Vec<Option<Vec<(String, ide::SeverityBucket)>>> = swept
+        // Compute the unfiltered candidates in parallel. Baseline classification happens
+        // before severity/code/author shaping, so those presentation filters cannot hide
+        // a new finding or manufacture a resolved entry.
+        type Candidate =
+            ide::diagnostics_baseline::BaselineDiagnosticCandidate<(FileId, ide::Diagnostic)>;
+        let prepared: Vec<Option<Vec<Candidate>>> = swept
             .par_iter()
             .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
                 if !worker.registered {
@@ -578,24 +637,35 @@ impl DiagnosticsResident {
                 }
                 let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
                     let diagnostics = worker.analysis.diagnostics(file_id, config);
-                    let diagnostics = match author_filter {
-                        Some(filter) if !diagnostics.is_empty() => {
-                            let path = path_of.get(&file_id).map(Path::new);
-                            filter_by_author(
-                                &worker.analysis,
-                                file_id,
-                                path,
-                                filter,
-                                diagnostics,
-                                &author_ignored,
-                            )
-                        }
-                        _ => diagnostics,
-                    };
+                    let text = worker.analysis.file_text(file_id);
+                    let path = path_of.get(&file_id).expect("swept file has a resident path");
+                    let relative = Path::new(path)
+                        .strip_prefix(&workspace_root)
+                        .unwrap_or(Path::new(path))
+                        .to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/");
+                    let source_lines: Vec<_> = text.lines().collect();
                     diagnostics
-                        .iter()
+                        .into_iter()
                         .map(|d| {
-                            (d.code.as_str().to_string(), ide::SeverityBucket::from(d.severity))
+                            let output = d.to_output(&text);
+                            ide::diagnostics_baseline::BaselineDiagnosticCandidate {
+                                diagnostic: (file_id, d),
+                                path: relative.clone(),
+                                code: output.code,
+                                snippet: Some(ide::diagnostics_baseline::diagnostic_line_snippet(
+                                    &source_lines,
+                                    output.start_line,
+                                )),
+                                message: output.message,
+                                severity: output.severity,
+                                range: ide::diagnostics_baseline::DiagnosticsBaselineRange {
+                                    start_line: output.start_line as u32,
+                                    start_column: output.start_column as u32,
+                                    end_line: output.end_line as u32,
+                                    end_column: output.end_column as u32,
+                                },
+                            }
                         })
                         .collect()
                 }));
@@ -612,12 +682,191 @@ impl DiagnosticsResident {
             .collect();
 
         let cancelled = cancel.is_cancelled();
-        let files_swept = per_file.iter().filter(|r| r.is_some()).count();
+        let files_swept = prepared.iter().filter(|result| result.is_some()).count();
+        let completed_files: std::collections::BTreeSet<String> = if config.scope.is_some() {
+            std::collections::BTreeSet::new()
+        } else {
+            swept
+                .iter()
+                .zip(&prepared)
+                .filter(|(_, result)| result.is_some())
+                .filter_map(|(file_id, _)| path_of.get(file_id))
+                .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
+                .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+                .collect()
+        };
+        // Holes belong in this denominator for the same reason they belong in
+        // `files_total`: a partition may only be upgraded to full coverage when every
+        // file it owns was actually analysed, and an unreadable file was not. Omitting
+        // it would report that file's baseline entries as resolved — "already fixed" —
+        // on the strength of never having looked at it.
+        let all_project_files: std::collections::BTreeSet<String> = path_of
+            .values()
+            .map(String::as_str)
+            .chain(self.holes.keys().map(String::as_str))
+            .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
+            .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
+            .collect();
+        let complete = !cancelled
+            && !truncated
+            && files_out_of_scope == 0
+            && self.holes.is_empty()
+            && self.author_filter.is_none()
+            // An analysis scope gates LINES, not just files: a file may be swept whole
+            // and still yield only the diagnostics of its changed hunks. Calling that
+            // full coverage would report every unmatched baseline entry as resolved.
+            && config.scope.is_none()
+            && files_swept == files_total;
+        let coverage = if complete {
+            ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Full
+        } else {
+            ide::diagnostics_baseline::DiagnosticsBaselineCoverage::Partial { completed_files }
+        };
+        let candidates: Vec<_> = prepared.into_iter().flatten().flatten().collect();
+        let snapshot = &self.diagnostics_baseline;
+        let (active, baseline) = if let Some((set, plan, baseline_path)) = snapshot.ready_set() {
+            let wrapped: Result<Vec<_>, _> = candidates
+                .into_iter()
+                .map(|candidate| {
+                    let owner = plan.owner_for_project_path(&candidate.path).ok_or_else(|| {
+                        format!("diagnostics file has no partition owner: {}", candidate.path)
+                    })?;
+                    Ok(ide::partitioned_diagnostics_baseline::PartitionedBaselineDiagnosticCandidate {
+                        partition_id: owner.to_owned(),
+                        candidate,
+                    })
+                })
+                .collect();
+            let classified = wrapped.and_then(|wrapped| {
+                let coverage = ide::partitioned_diagnostics_baseline::partitioned_coverage(
+                    plan,
+                    &coverage,
+                    (config.scope.is_none() && self.author_filter.is_none())
+                        .then_some(&all_project_files),
+                )?;
+                ide::partitioned_diagnostics_baseline::classify_partitioned_diagnostics(
+                    set,
+                    plan,
+                    baseline_path.to_owned(),
+                    wrapped,
+                    &coverage,
+                )
+                .map_err(|error| error.to_string())
+            });
+            match classified {
+                Ok(classified) => (
+                    classified
+                        .new
+                        .into_iter()
+                        .chain(classified.unsuppressed)
+                        .map(|item| item.diagnostic)
+                        .collect::<Vec<_>>(),
+                    classified.summary,
+                ),
+                Err(error) => (Vec::new(), partitioned_baseline_error(baseline_path, set, error)),
+            }
+        } else if let Some((baseline, baseline_path)) = snapshot.ready() {
+            match ide::diagnostics_baseline::classify_diagnostics(
+                baseline,
+                baseline_path.to_owned(),
+                candidates,
+                &coverage,
+            ) {
+                Ok(classified) => (
+                    classified.new.into_iter().map(|item| item.diagnostic).collect::<Vec<_>>(),
+                    classified.summary,
+                ),
+                Err(error) => (
+                    Vec::new(),
+                    ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                        state: ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
+                        selection: None,
+                        partitions_enabled: None,
+                        partitions_unsuppressed: None,
+                        unsuppressed: None,
+                        new: None,
+                        known: None,
+                        resolved: None,
+                        path: Some(baseline_path.to_owned()),
+                        schema_version: Some(baseline.schema_version),
+                        manifest_schema_version: None,
+                        complete: false,
+                        error_code: Some("missing_snippet".to_owned()),
+                        detail: Some(error.to_string()),
+                        partitions: vec![],
+                        errors: vec![],
+                    },
+                ),
+            }
+        } else if let Some(summary) = snapshot.error_summary() {
+            (Vec::new(), summary)
+        } else {
+            (
+                candidates.into_iter().map(|candidate| candidate.diagnostic).collect::<Vec<_>>(),
+                ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+            )
+        };
+        let mut active_by_file: HashMap<FileId, Vec<ide::Diagnostic>> = HashMap::new();
+        for (file_id, diagnostic) in active {
+            active_by_file.entry(file_id).or_default().push(diagnostic);
+        }
+
+        // The author pass queries Salsa through its own db clones, so it observes
+        // cancellation exactly the way the candidate pass above does: register the
+        // clone's token, stop between files, and keep an unwind inside the worker.
+        // Without that this pass is unstoppable, and a cancellation unwind would
+        // cross rayon into the state lock as a panic.
+        let author_filter = self.author_filter.as_ref();
+        let author_ignored = std::sync::atomic::AtomicUsize::new(0);
+        let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = swept
+            .par_iter()
+            .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
+                if !worker.registered {
+                    cancel
+                        .register(salsa::Database::cancellation_token(worker.analysis.database()));
+                    worker.registered = true;
+                }
+                if cancel.is_cancelled() {
+                    return Vec::new();
+                }
+                let diagnostics = active_by_file.get(&file_id).cloned().unwrap_or_default();
+                let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                    let diagnostics = match author_filter {
+                        Some(filter) if !diagnostics.is_empty() => filter_by_author(
+                            &worker.analysis,
+                            file_id,
+                            path_of.get(&file_id).map(Path::new),
+                            filter,
+                            diagnostics,
+                            &author_ignored,
+                        ),
+                        _ => diagnostics,
+                    };
+                    diagnostics
+                        .iter()
+                        .map(|diagnostic| {
+                            (
+                                diagnostic.code.as_str().to_owned(),
+                                ide::SeverityBucket::from(diagnostic.severity),
+                            )
+                        })
+                        .collect()
+                }));
+                match caught {
+                    Ok(codes) => codes,
+                    // Same discipline as the candidate pass above: only this request's
+                    // own cancellation may degrade to an empty file. Anything else is a
+                    // real defect and must not hide behind valid-looking aggregates.
+                    Err(salsa::Cancelled::Local) => Vec::new(),
+                    Err(other) => std::panic::resume_unwind(Box::new(other)),
+                }
+            })
+            .collect();
 
         // Fold: code -> (bucket, total count, files-affected). All occurrences of a code
         // share a bucket under one config, so first-seen is representative.
         let mut map: HashMap<String, (ide::SeverityBucket, usize, usize)> = HashMap::new();
-        for file_diags in per_file.iter().flatten() {
+        for file_diags in &per_file {
             let mut seen_here: HashSet<&str> = HashSet::new();
             for (code, bucket) in file_diags {
                 let entry = map.entry(code.clone()).or_insert((*bucket, 0, 0));
@@ -653,7 +902,11 @@ impl DiagnosticsResident {
             findings_ignored_by_author: author_ignored.load(std::sync::atomic::Ordering::Relaxed),
             author_head: author_filter.map(|f| f.short_identity()),
             truncated,
-            cancelled,
+            // Re-read: cancellation can also arrive during the author pass, and a
+            // report that hid it would present a partial sweep as a complete one.
+            cancelled: cancelled || cancel.is_cancelled(),
+            baseline,
+            baseline_epoch: self.diagnostics_baseline.epoch().to_owned(),
         }
     }
 }

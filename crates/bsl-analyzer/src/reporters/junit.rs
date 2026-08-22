@@ -36,6 +36,10 @@ impl Reporter for JunitReporter {
             w,
             r#"<testsuites name="bsl-analyzer" tests="{total_tests}" failures="{total_failures}">"#
         )?;
+        // No `<properties>` here: the JUnit schema allows it only inside a `<testsuite>`,
+        // and a document with one under `<testsuites>` fails validation in the consumers
+        // this format exists for. The baseline summary is carried by the JSON and SARIF
+        // reporters, which have a place for it.
 
         let mut files: Vec<&FileAnalysis> = results.diagnostics.iter().collect();
         files.sort_by_key(|f| junit_path(&f.relative_path));
@@ -135,9 +139,9 @@ fn xml_sanitize(s: &str) -> String {
 fn escape_attr(s: &str) -> String {
     xml_sanitize(s)
         .replace('&', "&amp;")
+        .replace('"', "&quot;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
 
@@ -187,9 +191,11 @@ mod tests {
                 relative_path: PathBuf::from("a.bsl"),
                 diagnostics: vec![diag("LineLength", "Line too long", 2)],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -212,16 +218,22 @@ mod tests {
                 relative_path: PathBuf::from("a.bsl"),
                 diagnostics: vec![diag("Rule", r#"expected <Тип> & "value""#, 0)],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
+        // Asserted on the MESSAGE, not anywhere in the document: a bare `contains`
+        // passes on any quote the file happens to carry, so it could not tell whether
+        // the message itself was escaped.
         assert!(!xml.contains("<Тип>"), "raw angle brackets must be escaped");
-        assert!(xml.contains("&lt;"));
-        assert!(xml.contains("&amp;"));
-        assert!(xml.contains("&quot;"));
+        assert!(
+            xml.contains(r#"expected &lt;Тип&gt; &amp; &quot;value&quot;"#),
+            "the message must be escaped in full: {xml}"
+        );
     }
 
     #[test]
@@ -239,9 +251,11 @@ mod tests {
                 relative_path: PathBuf::from("a.bsl"),
                 diagnostics: vec![diag("R", "m", 0), diag("R", "m", 1)],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -261,9 +275,11 @@ mod tests {
                 relative_path: PathBuf::from("a.bsl"),
                 diagnostics: vec![diag("Rule", "bad\u{1}\u{8}value", 0)],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
@@ -284,13 +300,67 @@ mod tests {
                 relative_path: PathBuf::from("clean.bsl"),
                 diagnostics: vec![],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         let xml = render(&results);
 
         assert!(xml.contains(r#"<testsuite name="clean.bsl" tests="1" failures="0">"#));
         assert!(xml.contains(r#"<testcase name="clean.bsl" classname="clean.bsl"/>"#));
+    }
+
+    #[test]
+    fn junit_baseline_summary_does_not_change_test_counts() {
+        let mut results = AnalysisResults {
+            files_analyzed: 1,
+            files_with_issues: 1,
+            total_diagnostics: 1,
+            elapsed_secs: 0.1,
+            diagnostics: vec![FileAnalysis {
+                path: PathBuf::from("a.bsl"),
+                relative_path: PathBuf::from("a.bsl"),
+                diagnostics: vec![diag("Rule", "message", 0)],
+                line_snippets: vec![],
+                occurrences: Vec::new(),
+            }],
+            source_dir: PathBuf::from("."),
+            workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+        };
+        for state in [
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Partial,
+        ] {
+            if state != ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled {
+                results.baseline = ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                    state,
+                    selection: None,
+                    partitions_enabled: None,
+                    partitions_unsuppressed: None,
+                    unsuppressed: None,
+                    new: Some(1),
+                    known: Some(0),
+                    resolved: Some(0),
+                    path: Some("baseline.json".to_owned()),
+                    schema_version: Some(1),
+                    manifest_schema_version: None,
+                    complete: state == ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+                    error_code: None,
+                    detail: None,
+                    partitions: vec![],
+                    errors: vec![],
+                };
+            }
+            let xml = render(&results);
+            assert!(xml.contains(r#"tests="1" failures="1""#));
+            // The summary is deliberately absent: `<properties>` under `<testsuites>` is
+            // not valid JUnit, and the counts must stay unaffected either way.
+            assert!(!xml.contains(r#"name="diagnostics.baseline""#));
+            assert!(!xml.contains("<properties>"), "not valid under <testsuites>");
+        }
     }
 }

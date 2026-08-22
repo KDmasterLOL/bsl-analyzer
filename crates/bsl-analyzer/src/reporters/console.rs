@@ -2,6 +2,62 @@ use std::path::Path;
 
 use super::{AnalysisResults, Reporter};
 
+fn baseline_lines(baseline: &ide::diagnostics_baseline::DiagnosticsBaselineSummary) -> Vec<String> {
+    use ide::diagnostics_baseline::DiagnosticsBaselineState;
+    let state = match baseline.state {
+        DiagnosticsBaselineState::Disabled => "disabled",
+        DiagnosticsBaselineState::Full => "full",
+        DiagnosticsBaselineState::Partial => "partial",
+        DiagnosticsBaselineState::Error => "error",
+    };
+    // A project without the section keeps its previous output: printing "disabled" to
+    // everyone adds a line about a feature they never configured.
+    if matches!(baseline.state, DiagnosticsBaselineState::Disabled) {
+        return Vec::new();
+    }
+    let mut lines = vec![format!("Diagnostics baseline: {state}")];
+    if let (Some(selection), Some(enabled), Some(unsuppressed)) =
+        (baseline.selection, baseline.partitions_enabled, baseline.partitions_unsuppressed)
+    {
+        let selection = match selection {
+            project_model::DiagnosticsBaselineSelection::All => "all",
+            project_model::DiagnosticsBaselineSelection::Selective => "selective",
+        };
+        lines.push(format!(
+            "  Selection: {selection} (enabled {enabled}, unsuppressed {unsuppressed})"
+        ));
+    }
+    if let (Some(new), Some(known), Some(resolved)) =
+        (baseline.new, baseline.known, baseline.resolved)
+    {
+        let unsuppressed = baseline.unsuppressed.unwrap_or_default();
+        lines.push(format!(
+            "  New: {new}, known: {known}, resolved: {resolved}, unsuppressed: {unsuppressed}"
+        ));
+    }
+    for partition in &baseline.partitions {
+        let state = match partition.state {
+            DiagnosticsBaselineState::Disabled => "disabled",
+            DiagnosticsBaselineState::Full => "full",
+            DiagnosticsBaselineState::Partial => "partial",
+            DiagnosticsBaselineState::Error => "error",
+        };
+        let policy = match partition.policy {
+            project_model::DiagnosticsBaselinePartitionPolicy::Baseline => "baseline",
+            project_model::DiagnosticsBaselinePartitionPolicy::Unsuppressed => "unsuppressed",
+        };
+        lines.push(format!(
+            "  {}: {state} [{policy}] (new {}, known {}, resolved {}, unsuppressed {})",
+            partition.id,
+            partition.new,
+            partition.known,
+            partition.resolved,
+            partition.unsuppressed
+        ));
+    }
+    lines
+}
+
 pub struct ConsoleReporter;
 
 impl Reporter for ConsoleReporter {
@@ -14,6 +70,9 @@ impl Reporter for ConsoleReporter {
         println!("Files analyzed: {}", results.files_analyzed);
         println!("Files with issues: {}", results.files_with_issues);
         println!("Total diagnostics: {}", results.total_diagnostics);
+        for line in baseline_lines(&results.baseline) {
+            println!("{line}");
+        }
         println!("Time elapsed: {:.2}s", results.elapsed_secs);
         println!("Speed: {:.0} files/sec", results.files_analyzed as f64 / results.elapsed_secs);
 
@@ -33,5 +92,45 @@ impl Reporter for ConsoleReporter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide::diagnostics_baseline::{DiagnosticsBaselineState, DiagnosticsBaselineSummary};
+
+    #[test]
+    fn console_baseline_summary_covers_disabled_full_and_partial() {
+        assert!(
+            baseline_lines(&DiagnosticsBaselineSummary::disabled()).is_empty(),
+            "a project without the section keeps its previous output"
+        );
+        for (state, label) in [
+            (DiagnosticsBaselineState::Full, "full"),
+            (DiagnosticsBaselineState::Partial, "partial"),
+        ] {
+            let summary = DiagnosticsBaselineSummary {
+                state,
+                selection: None,
+                partitions_enabled: None,
+                partitions_unsuppressed: None,
+                unsuppressed: None,
+                new: Some(1),
+                known: Some(2),
+                resolved: Some(3),
+                path: Some("baseline.json".to_owned()),
+                schema_version: Some(1),
+                manifest_schema_version: None,
+                complete: state == DiagnosticsBaselineState::Full,
+                error_code: None,
+                detail: None,
+                partitions: vec![],
+                errors: vec![],
+            };
+            let lines = baseline_lines(&summary);
+            assert_eq!(lines[0], format!("Diagnostics baseline: {label}"));
+            assert_eq!(lines[1], "  New: 1, known: 2, resolved: 3, unsuppressed: 0");
+        }
     }
 }

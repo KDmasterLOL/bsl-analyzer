@@ -106,6 +106,24 @@ impl ResidentSession {
         })
     }
 
+    /// One read of the resident for work that fans out to database handles of its own.
+    ///
+    /// Same door as [`read`](Self::read) — same lock, same cancellation registry — but
+    /// WITHOUT attaching a handle to the calling thread. Rayon runs part of a fan-out on
+    /// the thread that started it, and a worker there queries its own clone: with an
+    /// attach in place that clone is a second database on one thread, which salsa
+    /// rejects («Cannot change database mid-query»). The fan-out registers each worker
+    /// handle itself, so it needs the registry, not the attach.
+    pub(crate) fn read_fanout<T>(
+        &self,
+        f: impl FnOnce(&DiagnosticsResident, u64) -> T,
+    ) -> ResidentOutcome<T> {
+        if self.cancel.is_cancelled() {
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::Local));
+        }
+        self.diag.read(|resident, generation| f(resident, generation))
+    }
+
     /// A read on an EMPTY database this request owns, for the answer a tool still
     /// serves when the resident is not there to answer it — the platform surface is in
     /// every handle, resident or not.

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -181,6 +181,8 @@ pub struct WorkspaceBatchPlan {
     pub file_ids: Arc<Vec<vfs::FileId>>,
     pub file_paths: crate::frozen_context::FrozenFilePaths,
     pub config: DiagnosticsConfigInput,
+    pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
+    pub workspace_root: Option<PathBuf>,
     pub position_encoding: PositionEncoding,
     pub chunk_size: usize,
     /// Bounded rayon pool (≈ `ncpu/2`) the chunk computes on, so the batch never saturates
@@ -234,6 +236,8 @@ pub struct GlobalState {
     pub mem_docs: MemDocs,
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
+    pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
+    pub(crate) diagnostics_baseline_notification_ledger: BTreeSet<String>,
     pub shutdown_requested: bool,
 
     pub loader_receiver: Receiver<loader::Message>,
@@ -430,6 +434,10 @@ impl GlobalState {
             mem_docs: MemDocs::default(),
             workspace_root: None,
             project: None,
+            diagnostics_baseline: Arc::new(
+                ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::Disabled,
+            ),
+            diagnostics_baseline_notification_ledger: BTreeSet::new(),
             shutdown_requested: false,
             loader,
             loader_receiver,
@@ -781,6 +789,7 @@ impl GlobalState {
             mem_docs: self.mem_docs.clone(),
             workspace_root: self.workspace_root.clone(),
             project: self.project.clone(),
+            diagnostics_baseline: Arc::clone(&self.diagnostics_baseline),
             diagnostics_config: self.diagnostics_config.clone(),
             position_encoding: self.position_encoding,
             vfs_done: self.vfs_done,
@@ -797,6 +806,7 @@ pub struct GlobalStateSnapshot {
     pub mem_docs: MemDocs,
     pub workspace_root: Option<PathBuf>,
     pub project: Option<Project>,
+    pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
     pub vfs_done: bool,
@@ -986,7 +996,7 @@ mod vfs_race_tests {
                     loader::Entry::Directories(dirs) => {
                         dirs.include.iter().map(|p| p.to_string()).collect::<Vec<_>>()
                     }
-                    loader::Entry::Files(_) => Vec::new(),
+                    loader::Entry::Files(_) | loader::Entry::WatchOnlyFiles(_) => Vec::new(),
                 })
                 .collect()
         };

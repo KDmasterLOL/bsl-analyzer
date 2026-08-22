@@ -19,6 +19,16 @@ bsl-metadata = { path = "../bsl-metadata" }
 stdx.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
+cap-std.workspace = true
+cap-fs-ext.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+] }
 
 [dev-dependencies]
 expect-test.workspace = true

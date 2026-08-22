@@ -106,6 +106,7 @@ struct NotifyActor {
     sender: loader::Sender,
     shutdown: Arc<AtomicBool>,
     watched_file_entries: FxHashSet<AbsPathBuf>,
+    watched_only_file_entries: FxHashSet<AbsPathBuf>,
     watched_dir_entries: Vec<loader::Directories>,
     watcher: Option<(RecommendedWatcher, Receiver<NotifyEvent>)>,
 }
@@ -145,6 +146,7 @@ impl NotifyActor {
             shutdown,
             watched_dir_entries: Vec::new(),
             watched_file_entries: FxHashSet::default(),
+            watched_only_file_entries: FxHashSet::default(),
             watcher: None,
         }
     }
@@ -182,6 +184,7 @@ impl NotifyActor {
 
                         self.watched_dir_entries.clear();
                         self.watched_file_entries.clear();
+                        self.watched_only_file_entries.clear();
 
                         self.send(loader::Message::Progress {
                             n_total: 0,
@@ -303,24 +306,26 @@ impl NotifyActor {
                         });
 
                         drop(watch_tx);
-                        tracing::debug!("Setting up file watchers...");
-                        let watch_count = watch_rx.len();
-                        for path in watch_rx {
-                            self.watch(&path);
-                        }
-                        tracing::debug!("Finished setting up {} file watchers", watch_count);
-
                         drop(entry_tx);
                         for entry in entry_rx {
                             match entry {
                                 loader::Entry::Files(files) => {
                                     self.watched_file_entries.extend(files)
                                 }
+                                loader::Entry::WatchOnlyFiles(files) => {
+                                    self.watched_only_file_entries.extend(files)
+                                }
                                 loader::Entry::Directories(dir) => {
                                     self.watched_dir_entries.push(dir)
                                 }
                             }
                         }
+                        tracing::debug!("Setting up file watchers...");
+                        let watch_count = watch_rx.len();
+                        for path in watch_rx {
+                            self.watch(&path);
+                        }
+                        tracing::debug!("Finished setting up {} file watchers", watch_count);
                         tracing::debug!("File watching setup complete");
                     }
                     Message::Invalidate(path) => {
@@ -422,6 +427,18 @@ impl NotifyActor {
                     let contents = read(file.as_path());
                     on_file_loaded();
                     push_loaded(file, contents);
+                }
+            }
+            loader::Entry::WatchOnlyFiles(files) => {
+                for file in files {
+                    if shutdown.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if do_watch {
+                        watch(file.as_ref());
+                    }
+                    on_file_loaded();
+                    push_watch_only(file);
                 }
             }
             loader::Entry::Directories(dirs) => {
@@ -606,7 +623,20 @@ impl NotifyActor {
     /// emits its own removal event, which IS handled, so this only affects
     /// backends that collapse a subtree delete into one directory event.
     fn classify_event_path(&self, path: &AbsPathBuf) -> EventPathAction {
-        match fs::metadata(path) {
+        if self.watched_only_file_entries.contains(path) {
+            return EventPathAction::WatchOnly;
+        }
+        // Symlinks are followed here, as the initial scan follows them (`follow_links`):
+        // a `.bsl` reached through a link is loaded at startup, so its later edits must
+        // arrive too. Baseline files, the reason the type is inspected at all, are
+        // answered by the exact-match check above and never reach this point.
+        match fs::metadata(path).or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Err(error)
+            } else {
+                fs::symlink_metadata(path)
+            }
+        }) {
             Ok(meta) => {
                 if meta.file_type().is_dir() {
                     if self.watched_dir_entries.iter().any(|dir| dir.contains_dir(path)) {
@@ -654,6 +684,9 @@ impl NotifyActor {
         if self.watched_file_entries.contains(path) {
             return Some(loader::LoadMode::LoadContent);
         }
+        if self.watched_only_file_entries.contains(path) {
+            return Some(loader::LoadMode::WatchOnly);
+        }
         let mut found: Option<loader::LoadMode> = None;
         for dir in &self.watched_dir_entries {
             if let Some(m) = dir.classify_file(path) {
@@ -672,7 +705,7 @@ impl NotifyActor {
 
     fn count_files_in_entry(entry: &loader::Entry, cancel: &AtomicBool) -> usize {
         match entry {
-            loader::Entry::Files(files) => files.len(),
+            loader::Entry::Files(files) | loader::Entry::WatchOnlyFiles(files) => files.len(),
             loader::Entry::Directories(dirs) => {
                 let roots: Vec<&std::path::Path> =
                     dirs.include.iter().map(|p| p.as_path().as_ref()).collect();
@@ -702,9 +735,38 @@ impl NotifyActor {
         }
     }
 
+    /// What to hand `notify` for `path`, or `None` when it is already covered.
+    ///
+    /// A single file cannot be watched on its own, so an exactly-listed one is watched
+    /// through its directory. That directory must NOT be registered non-recursively when
+    /// a recursive watch over it already exists: `notify` replaces the mode of a path it
+    /// already watches, so the narrower registration would silently drop events for
+    /// every subdirectory — and the baseline lives in the project root by default,
+    /// which is exactly such a directory. Events for the file arrive through the
+    /// recursive watch anyway; `classify_event_path` recognises it by its own list.
+    fn watch_target(&self, path: &Path) -> Option<(std::path::PathBuf, RecursiveMode)> {
+        let exact = self
+            .watched_file_entries
+            .iter()
+            .chain(&self.watched_only_file_entries)
+            .any(|entry| entry.as_path() == path);
+        if !exact {
+            return Some((path.to_path_buf(), RecursiveMode::Recursive));
+        }
+        let parent = path.parent().unwrap_or(path);
+        let covered = Utf8PathBuf::from_path_buf(parent.to_path_buf())
+            .ok()
+            .and_then(|parent| AbsPathBuf::try_from(parent).ok())
+            .is_some_and(|parent| {
+                self.watched_dir_entries.iter().any(|dir| dir.contains_dir(&parent))
+            });
+        (!covered).then(|| (parent.to_path_buf(), RecursiveMode::NonRecursive))
+    }
+
     fn watch(&mut self, path: &Path) {
+        let Some((target, mode)) = self.watch_target(path) else { return };
         if let Some((watcher, _)) = &mut self.watcher {
-            log_notify_error(watcher.watch(path, RecursiveMode::Recursive));
+            log_notify_error(watcher.watch(&target, mode));
         }
     }
 
@@ -1051,6 +1113,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_watch_only_files_are_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = AbsPathBuf::assert_utf8(dir.path().join("baseline.json"));
+        std::fs::write(path.as_path(), b"secret").unwrap();
+        let loaded = Mutex::new(Vec::new());
+        let watched = Mutex::new(Vec::new());
+        NotifyActor::load_entry(
+            |_| {},
+            loader::Entry::WatchOnlyFiles(vec![path.clone()]),
+            false,
+            |_| {},
+            || {},
+            |files| loaded.lock().unwrap().extend(files),
+            LOADED_CHUNK_BYTES,
+            |files| watched.lock().unwrap().extend(files),
+            WATCH_ONLY_CHUNK_PATHS,
+            &AtomicBool::new(false),
+        );
+        assert!(loaded.into_inner().unwrap().is_empty());
+        assert_eq!(watched.into_inner().unwrap(), vec![path]);
+    }
+
+    #[test]
     fn watch_only_chunking_respects_path_threshold() {
         let (_guard, root) = fixture_mixed(0, 7, 64);
         let dirs = loader::Directories {
@@ -1152,6 +1237,72 @@ mod tests {
         assert_eq!(actor.classify_watched_path(&bsl), Some(loader::LoadMode::LoadContent));
         assert_eq!(actor.classify_watched_path(&xml), Some(loader::LoadMode::WatchOnly));
         assert_eq!(actor.classify_watched_path(&other), None);
+    }
+
+    /// The initial scan follows symlinks, so a source file reached through one is
+    /// loaded — and its later edits have to arrive as content, not be ignored. Baseline
+    /// files keep their exact-match handling and are unaffected.
+    #[test]
+    fn classify_event_path_follows_a_symlinked_source() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["json"]);
+        let mut actor = actor_with_watched_dirs(vec![dirs]);
+        let join = |name: &str| {
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join(name))
+        };
+
+        let real = join("real.bsl");
+        std::fs::write(AsRef::<std::path::Path>::as_ref(&real), b"x").unwrap();
+        let link = join("Link.bsl");
+        std::os::unix::fs::symlink("real.bsl", AsRef::<std::path::Path>::as_ref(&link)).unwrap();
+        assert_eq!(actor.classify_event_path(&real), EventPathAction::LoadContent);
+        assert_eq!(
+            actor.classify_event_path(&link),
+            EventPathAction::LoadContent,
+            "a symlinked source must still deliver its content"
+        );
+
+        // A baseline file listed exactly stays watch-only, symlink or not.
+        let baseline = join("baseline.json");
+        std::fs::write(AsRef::<std::path::Path>::as_ref(&baseline), b"{}").unwrap();
+        actor.watched_only_file_entries.insert(baseline.clone());
+        assert_eq!(actor.classify_event_path(&baseline), EventPathAction::WatchOnly);
+    }
+
+    /// An exactly-listed file inside a recursively watched directory must not
+    /// re-register that directory: `notify` would replace the recursive mode with the
+    /// narrower one and stop delivering events from every subdirectory. The baseline
+    /// file sits in the project root by default, so this is the ordinary case.
+    #[test]
+    fn watch_target_keeps_a_recursive_directory_recursive() {
+        let (_g, root) = fixture_mixed(0, 0, 0);
+        let dirs = dirs_for(&root, &["bsl"], &["json"]);
+        let mut actor = actor_with_watched_dirs(vec![dirs]);
+        let inside =
+            AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("baseline.json"));
+        actor.watched_only_file_entries.insert(inside.clone());
+
+        assert_eq!(
+            actor.watch_target(inside.as_ref() as &std::path::Path),
+            None,
+            "the recursive watch already covers it"
+        );
+
+        // A directory is still registered recursively.
+        let subdir = AbsPathBuf::assert_utf8(AsRef::<std::path::Path>::as_ref(&root).join("sub"));
+        assert_eq!(
+            actor.watch_target(subdir.as_ref() as &std::path::Path),
+            Some(((subdir.as_ref() as &std::path::Path).to_path_buf(), RecursiveMode::Recursive))
+        );
+
+        // A file OUTSIDE every watched directory still needs its own parent watch.
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = AbsPathBuf::assert_utf8(outside_dir.path().join("baseline.json"));
+        actor.watched_only_file_entries.insert(outside.clone());
+        assert_eq!(
+            actor.watch_target(outside.as_ref() as &std::path::Path),
+            Some((outside_dir.path().to_path_buf(), RecursiveMode::NonRecursive))
+        );
     }
 
     #[test]

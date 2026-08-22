@@ -17,6 +17,7 @@ pub struct AnalysisResults {
     pub diagnostics: Vec<FileAnalysis>,
     pub source_dir: PathBuf,
     pub workspace_dir: PathBuf,
+    pub baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
 }
 
 #[derive(Debug, Clone)]
@@ -33,13 +34,14 @@ pub struct FileAnalysis {
     /// per finding. Empty when the producer did not supply snippets; the reporter
     /// then falls back to a path/code/occurrence fingerprint.
     pub line_snippets: Vec<String>,
-}
 
-/// Collapses surrounding and repeated whitespace in a source line so that
-/// cosmetic reformatting around a finding does not change its Code Quality
-/// fingerprint. Shared by the producer (analysis) and the fingerprint contract.
-pub fn normalize_source_line(line: &str) -> String {
-    line.split_whitespace().collect::<Vec<_>>().join(" ")
+    /// Ordinal of each diagnostic among identical ones in its file, index-aligned with
+    /// `diagnostics` and captured BEFORE any suppression. The Code Quality fingerprint
+    /// folds it in, and a reporter counting it over the already-suppressed list would
+    /// hand an active finding the fingerprint of a suppressed one — the very value the
+    /// baseline file holds for a different finding. Empty when the producer did not
+    /// supply it; the reporter then counts positions itself.
+    pub occurrences: Vec<u32>,
 }
 
 pub trait Reporter: Send + Sync {

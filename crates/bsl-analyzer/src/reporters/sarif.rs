@@ -58,9 +58,13 @@ impl Serialize for Run<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut run = serializer.serialize_struct("run", 2)?;
+        let mut run = serializer.serialize_struct("run", 3)?;
         run.serialize_field("tool", &Tool { results: self.results })?;
         run.serialize_field("results", &ResultsSeq { results: self.results })?;
+        run.serialize_field(
+            "properties",
+            &serde_json::json!({ "baseline": self.results.baseline }),
+        )?;
         run.end()
     }
 }
@@ -392,16 +396,19 @@ mod tests {
                         diag("UnusedLocalVariable", "Information"),
                     ],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
                 FileAnalysis {
                     path: PathBuf::from("b.bsl"),
                     relative_path: PathBuf::from("b.bsl"),
                     diagnostics: vec![diag("LineLength", "Warning")],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
             ],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
 
         SarifReporter.report(&results, temp.path()).expect("write sarif");
@@ -431,6 +438,7 @@ mod tests {
                     relative_path: PathBuf::from("b.bsl"),
                     diagnostics: vec![diag_at("LineLength", 0, 0)],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
                 FileAnalysis {
                     path: PathBuf::from("a.bsl"),
@@ -441,10 +449,12 @@ mod tests {
                         diag_at("LineLength", 1, 0),
                     ],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
             ],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
 
         SarifReporter.report(&results, temp.path()).expect("write sarif");
@@ -485,6 +495,49 @@ mod tests {
         assert_eq!(sarif_level("Warning"), "warning");
         assert_eq!(sarif_level("Information"), "note");
         assert_eq!(sarif_level("Hint"), "note");
+    }
+
+    #[test]
+    fn sarif_baseline_summary_lives_in_run_properties_only() {
+        let temp = TempDir::new().unwrap();
+        let mut results = sample_results();
+        for state in [
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+            ide::diagnostics_baseline::DiagnosticsBaselineState::Partial,
+        ] {
+            results.baseline = if state
+                == ide::diagnostics_baseline::DiagnosticsBaselineState::Disabled
+            {
+                ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled()
+            } else {
+                ide::diagnostics_baseline::DiagnosticsBaselineSummary {
+                    state,
+                    selection: None,
+                    partitions_enabled: None,
+                    partitions_unsuppressed: None,
+                    unsuppressed: None,
+                    new: Some(1),
+                    known: Some(2),
+                    resolved: Some(3),
+                    path: Some("baseline.json".to_owned()),
+                    schema_version: Some(1),
+                    manifest_schema_version: None,
+                    complete: state == ide::diagnostics_baseline::DiagnosticsBaselineState::Full,
+                    error_code: None,
+                    detail: None,
+                    partitions: vec![],
+                    errors: vec![],
+                }
+            };
+            SarifReporter.report(&results, temp.path()).unwrap();
+            let sarif: Value = serde_json::from_slice(
+                &std::fs::read(temp.path().join("bsl-analyzer.sarif")).unwrap(),
+            )
+            .unwrap();
+            assert!(sarif["runs"][0]["properties"]["baseline"]["state"].is_string());
+            assert!(sarif["runs"][0]["results"][0].get("baselineState").is_none());
+        }
     }
 
     #[test]
@@ -538,9 +591,11 @@ mod tests {
                     tags: vec![],
                 }],
                 line_snippets: vec![],
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         }
     }
 }

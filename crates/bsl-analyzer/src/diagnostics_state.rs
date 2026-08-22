@@ -60,7 +60,8 @@ impl GlobalState {
         project: &project_model::Project,
         locale: Locale,
     ) -> DiagnosticsConfigInput {
-        let config = ide::DiagnosticsConfig::from_project_json(&project.config.diagnostics, locale);
+        let diagnostics = project.config.diagnostics.rules_json();
+        let config = ide::DiagnosticsConfig::from_project_json(&diagnostics, locale);
 
         let disabled: Vec<String> = config.disabled.iter().map(|code| code.to_string()).collect();
         let enabled: Vec<String> = config.enabled.iter().map(|code| code.to_string()).collect();

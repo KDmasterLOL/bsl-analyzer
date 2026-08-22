@@ -200,6 +200,8 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         file_ids: Arc::new(file_ids),
         file_paths,
         config: state.diagnostics_config().clone(),
+        diagnostics_baseline: Arc::clone(&state.diagnostics_baseline),
+        workspace_root: state.workspace_root.clone(),
         position_encoding: state.position_encoding,
         chunk_size,
         pool,
@@ -218,7 +220,17 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
 /// cache, and returns a [`Task::WorkspaceBatchChunk`]; the event loop applies the push,
 /// trims the LRU, and advances the cursor.
 fn dispatch_next_chunk(state: &mut GlobalState) {
-    let (generation, chunk_index, config, file_paths, position_encoding, pool, chunk) = {
+    let (
+        generation,
+        chunk_index,
+        config,
+        diagnostics_baseline,
+        workspace_root,
+        file_paths,
+        position_encoding,
+        pool,
+        chunk,
+    ) = {
         let plan = state.workspace_batch_plan.as_ref().expect("plan present when dispatching");
         let start = plan.next_chunk * plan.chunk_size;
         let end = (start + plan.chunk_size).min(plan.file_ids.len());
@@ -227,6 +239,8 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
             plan.generation,
             plan.next_chunk,
             plan.config.clone(),
+            Arc::clone(&plan.diagnostics_baseline),
+            plan.workspace_root.clone(),
             plan.file_paths.clone(),
             plan.position_encoding,
             plan.pool.clone(),
@@ -244,7 +258,15 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
         let started_at = Instant::now();
         // Catch everything so the worker always reports back and never wedges the batch.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compute_chunk(&analysis, &chunk, &config, &file_paths, position_encoding, pool.as_deref())
+            compute_chunk(
+                &analysis,
+                &chunk,
+                &config,
+                (&diagnostics_baseline, workspace_root.as_deref()),
+                &file_paths,
+                position_encoding,
+                pool.as_deref(),
+            )
         }));
 
         // Release the parser green-node cache (a thread-local not owned by Salsa) so the
@@ -310,6 +332,7 @@ fn compute_chunk(
     analysis: &ide::Analysis,
     chunk: &[vfs::FileId],
     config: &DiagnosticsConfigInput,
+    baseline: (&ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot, Option<&Path>),
     file_paths: &FrozenFilePaths,
     position_encoding: PositionEncoding,
     pool: Option<&rayon::ThreadPool>,
@@ -321,23 +344,38 @@ fn compute_chunk(
         Some(pool) => analysis.workspace_diagnostics_parallel(chunk, config.clone(), pool),
         None => analysis.workspace_diagnostics(chunk, config.clone()),
     };
+    let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     computed
         .into_iter()
         .filter_map(|(file_id, diagnostics)| {
             let uri = file_paths.url_for_file_id(file_id).ok()?;
-            let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
             let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let text = analysis.file_text(file_id);
+                let diagnostics = match (
+                    baseline.1.filter(|_| baseline_applies),
+                    file_paths.path_for_file_id(file_id),
+                ) {
+                    (Some(root), Some(path)) => crate::diagnostics_baseline::active_for_file(
+                        baseline.0,
+                        root,
+                        path,
+                        &text,
+                        diagnostics.to_vec(),
+                    ),
+                    _ => diagnostics.to_vec(),
+                };
+                let result_id = crate::lsp::diagnostics_result_id(&diagnostics);
                 let line_index = LineIndex::new(&text);
-                crate::lsp::to_proto::diagnostics_with_encoding(
+                let diagnostics = crate::lsp::to_proto::diagnostics_with_encoding(
                     &line_index,
                     &text,
                     &diagnostics,
                     position_encoding,
-                )
+                );
+                (result_id, diagnostics)
             }));
-            let lsp = match converted {
-                Ok(lsp) => lsp,
+            let (result_id, lsp) = match converted {
+                Ok(converted) => converted,
                 Err(payload) if payload.is::<salsa::Cancelled>() => {
                     std::panic::resume_unwind(payload)
                 }

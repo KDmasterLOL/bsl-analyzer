@@ -1357,6 +1357,7 @@ fn build_latency_ctx(env: &mut BenchEnv) -> LatencyRequestContext {
         analysis: state.analysis_host.analysis(),
         workspace_root: state.workspace_root.clone(),
         project: state.project.clone(),
+        diagnostics_baseline: Arc::clone(&state.diagnostics_baseline),
         diagnostics_config: state.diagnostics_config.clone(),
         position_encoding: state.position_encoding,
         supports_insert_text_mode_adjust_indentation: state

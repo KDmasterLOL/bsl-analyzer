@@ -315,7 +315,7 @@ fn decode_base64_utf8(s: &str) -> Option<String> {
     let bytes = base64_decode(s.as_bytes())?;
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
         let u16s: Vec<u16> =
-            bytes[2..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            bytes[2..].as_chunks::<2>().0.iter().copied().map(u16::from_le_bytes).collect();
         Some(String::from_utf16_lossy(&u16s))
     } else {
         let mut s = String::new();

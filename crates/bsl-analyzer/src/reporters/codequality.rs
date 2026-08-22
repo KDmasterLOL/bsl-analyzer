@@ -4,7 +4,9 @@ use std::path::Path;
 
 use serde::ser::{Serialize, SerializeSeq, Serializer};
 
-use super::{normalize_source_line, AnalysisResults, FileAnalysis, Reporter};
+use ide::diagnostics_baseline::{diagnostic_fingerprint, normalize_diagnostic_snippet};
+
+use super::{AnalysisResults, FileAnalysis, Reporter};
 
 /// GitLab Code Quality reporter (CodeClimate JSON schema).
 ///
@@ -57,7 +59,7 @@ impl Serialize for CodeQualitySeq<'_> {
                 if file.line_snippets.is_empty() && !file.diagnostics.is_empty() {
                     std::fs::read_to_string(&file.path)
                         .ok()
-                        .map(|text| text.lines().map(normalize_source_line).collect())
+                        .map(|text| text.lines().map(normalize_diagnostic_snippet).collect())
                 } else {
                     None
                 };
@@ -89,15 +91,19 @@ impl Serialize for CodeQualitySeq<'_> {
             // because the fingerprint is already scoped by path.
             let mut occurrences: HashMap<(&str, &str), u32> = HashMap::new();
 
-            for (diagnostic, snippet) in rows {
-                let occurrence = occurrences.entry((&diagnostic.code, snippet)).or_insert(0);
-                let fingerprint = fingerprint(
+            for (index, (diagnostic, snippet)) in rows.into_iter().enumerate() {
+                // The producer's ordinal wins when it is there: it was counted before
+                // the baseline suppressed anything, and counting again here would give
+                // an active finding the fingerprint of a suppressed one.
+                let counted = occurrences.entry((&diagnostic.code, snippet)).or_insert(0);
+                let occurrence = file.occurrences.get(index).copied().unwrap_or(*counted);
+                *counted += 1;
+                let fingerprint = diagnostic_fingerprint(
                     &cq_path(&file.relative_path),
                     &diagnostic.code,
                     snippet,
-                    *occurrence,
+                    occurrence,
                 );
-                *occurrence += 1;
 
                 seq.serialize_element(&Issue {
                     description: &diagnostic.message,
@@ -184,22 +190,6 @@ fn cq_severity(severity: &str) -> &'static str {
     }
 }
 
-/// Line-number-independent fingerprint. `snippet` is the normalized source line
-/// captured at analysis time; when it is empty (producer supplied none) the
-/// `(path, code, occurrence)` triple still yields a stable value that survives
-/// line shifts.
-fn fingerprint(path: &str, code: &str, snippet: &str, occurrence: u32) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(path.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(code.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(snippet.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(&occurrence.to_le_bytes());
-    hasher.finalize().to_hex().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -247,10 +237,56 @@ mod tests {
                 relative_path: PathBuf::from(rel),
                 diagnostics,
                 line_snippets: snippets.iter().map(|s| s.to_string()).collect(),
+                occurrences: Vec::new(),
             }],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         }
+    }
+
+    /// The fingerprint folds in the ordinal of a repeated finding. When the baseline has
+    /// suppressed an earlier duplicate, the survivor must keep ITS ordinal: renumbering
+    /// would hand it the fingerprint the baseline file holds for the suppressed one.
+    #[test]
+    fn suppressed_duplicates_do_not_shift_the_fingerprint() {
+        let snippet = "// aaaa";
+        let file = |occurrences: Vec<u32>, count: usize| FileAnalysis {
+            path: PathBuf::from("a.bsl"),
+            relative_path: PathBuf::from("a.bsl"),
+            diagnostics: (0..count).map(|_| diag_at("LineLength", "Warning", 0)).collect(),
+            line_snippets: (0..count).map(|_| snippet.to_owned()).collect(),
+            occurrences,
+        };
+        let render = |analysis: FileAnalysis| {
+            let results = AnalysisResults {
+                files_analyzed: 1,
+                files_with_issues: 1,
+                total_diagnostics: analysis.diagnostics.len(),
+                elapsed_secs: 0.0,
+                diagnostics: vec![analysis],
+                source_dir: PathBuf::from("."),
+                workspace_dir: PathBuf::from("."),
+                baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
+            };
+            serde_json::to_value(CodeQualitySeq { results: &results }).unwrap()
+        };
+
+        let full = render(file(vec![0, 1, 2], 3));
+        let third = full.as_array().unwrap()[2]["fingerprint"].clone();
+
+        // Two earlier duplicates suppressed: one finding left, ordinal 2.
+        let survivor = render(file(vec![2], 1));
+        assert_eq!(
+            survivor.as_array().unwrap()[0]["fingerprint"],
+            third,
+            "the survivor keeps the fingerprint it had in the full set"
+        );
+
+        // Without the producer's ordinals the reporter counts positions itself, which is
+        // exactly the behaviour that shifts the fingerprint.
+        let renumbered = render(file(Vec::new(), 1));
+        assert_ne!(renumbered.as_array().unwrap()[0]["fingerprint"], third);
     }
 
     #[test]
@@ -325,9 +361,11 @@ mod tests {
                     relative_path: PathBuf::from("a.bsl"),
                     diagnostics: vec![diag_at("Rule", "Warning", 2)],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 }],
                 source_dir: PathBuf::from("."),
                 workspace_dir: PathBuf::from("."),
+                baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
             };
             CodeQualityReporter.report(&results, temp.path()).unwrap();
             read_report(&temp)[0]["fingerprint"].as_str().unwrap().to_string()
@@ -369,16 +407,19 @@ mod tests {
                     relative_path: PathBuf::from("b.bsl"),
                     diagnostics: vec![diag_at("R", "Warning", 0)],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
                 FileAnalysis {
                     path: PathBuf::from("a.bsl"),
                     relative_path: PathBuf::from("a.bsl"),
                     diagnostics: vec![diag_at("Z", "Warning", 5), diag_at("A", "Warning", 5)],
                     line_snippets: vec![],
+                    occurrences: Vec::new(),
                 },
             ],
             source_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
+            baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
         };
         CodeQualityReporter.report(&results, temp.path()).unwrap();
         let report = read_report(&temp);

@@ -307,6 +307,7 @@ impl DiagnosticsState {
         // read serves the current (stale) resident meanwhile. After `poll_drift`, the
         // generation read under the lock matches the resident content `f` will query.
         self.poll_drift();
+        self.refresh_diagnostics_baseline();
 
         // Snapshot the drift scan BEFORE taking the inner lock (scan → inner order,
         // matching `freshness`), so the freshness verdict and the result are computed
@@ -346,6 +347,29 @@ impl DiagnosticsState {
             DiagnosticsStatus::Disabled => ResidentOutcome::Disabled,
             DiagnosticsStatus::Failed(msg) => ResidentOutcome::Failed(msg.clone()),
         }
+    }
+
+    fn refresh_diagnostics_baseline(&self) {
+        let mut inner = lock_recover(&self.inner);
+        let Some(resident) = inner.resident.as_mut() else { return };
+        let observation = resident.diagnostics_baseline.observation();
+        if observation == resident.diagnostics_baseline_observation {
+            return;
+        }
+        let snapshot =
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load_reusing(
+                &resident.project,
+                &resident.diagnostics_baseline,
+            );
+        // A write landing WHILE the set is read would otherwise be lost forever: the
+        // bytes are the old ones, but the observation taken afterwards is the new file's,
+        // so no later read ever sees a difference. Re-observing the previous paths says
+        // whether the ground moved during the read; if it did, an empty mark forces the
+        // next read to load again instead of trusting this snapshot.
+        let moved_during_read = observation != resident.diagnostics_baseline.observation();
+        resident.diagnostics_baseline_observation =
+            if moved_during_read { String::new() } else { snapshot.observation() };
+        resident.diagnostics_baseline = snapshot;
     }
 
     /// The resident's current generation, bumped on every build / reload / incremental
@@ -598,8 +622,9 @@ impl DiagnosticsState {
         // `ProjectSnapshot` already registers canonical roots, matching the
         // canonical `.bsl` universe the scan produces.
         let configs = snapshot.configs.clone();
+        let diagnostics = project.config.diagnostics.rules_json();
         let mut config = ide::DiagnosticsConfig::from_project_json(
-            &project.config.diagnostics,
+            &diagnostics,
             project.config.output.resolve_locale().unwrap_or_default(),
         );
         // `[analysis].diff_base`: restrict diagnostics to the vendor diff. Computed
@@ -673,6 +698,9 @@ impl DiagnosticsState {
         let config_fp = config_identity(config_files_fp, &snapshot.configs);
 
         let topology = crate::graph::scan::topology_u64(&snapshot.configs);
+        let diagnostics_baseline =
+            ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot::load(&project);
+        let diagnostics_baseline_observation = diagnostics_baseline.observation();
         Ok(ResidentBuild {
             resident: DiagnosticsResident {
                 db,
@@ -686,6 +714,9 @@ impl DiagnosticsState {
                 scope_identity,
                 ignored_authors,
                 author_filter,
+                diagnostics_baseline,
+                diagnostics_baseline_observation,
+                project,
             },
             stats,
             config_fp,
