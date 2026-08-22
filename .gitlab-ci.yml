@@ -190,6 +190,11 @@ release:
 github-sync:
   stage: publish
   image: ${CI_IMAGE}
+  # Классификация релиза в github-sync.sh требует локального разрешения тега, а
+  # глобальный GIT_DEPTH: 1 оставляет его на усмотрение раннера. Джоба ручная и
+  # редкая — полный клон здесь дешевле, чем синк, молча решивший, что релиза нет.
+  variables:
+    GIT_DEPTH: 0
   tags:
     - autoscale
   needs:
