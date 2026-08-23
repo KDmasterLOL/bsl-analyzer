@@ -455,10 +455,8 @@ mod contract_surface {
             .get_arguments()
             .find(|arg| arg.get_long() == Some("allowed_hosts"))
             .expect("mcp serve declares --allowed_hosts");
-        let help = allowed_hosts
-            .get_long_help()
-            .expect("--allowed_hosts carries long help")
-            .to_string();
+        let help =
+            allowed_hosts.get_long_help().expect("--allowed_hosts carries long help").to_string();
 
         assert!(help.contains("Host header"), "{help}");
         assert!(help.contains("replaces"), "{help}");

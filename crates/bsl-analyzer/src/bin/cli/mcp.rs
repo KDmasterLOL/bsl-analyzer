@@ -471,10 +471,7 @@ fn warn_on_wildcard_allowlist(allowed_hosts: &[String]) {
 
 fn load_http_options(path: &Path) -> Result<HttpServeOptions, io::Error> {
     let contents = std::fs::read_to_string(path).map_err(|error| {
-        io::Error::new(
-            error.kind(),
-            format!("failed to read --config {}: {error}", path.display()),
-        )
+        io::Error::new(error.kind(), format!("failed to read --config {}: {error}", path.display()))
     })?;
     toml::from_str(&contents).map_err(|error| {
         io::Error::new(
@@ -486,7 +483,10 @@ fn load_http_options(path: &Path) -> Result<HttpServeOptions, io::Error> {
 
 fn validate_http_options(options: HttpServeOptions) -> Result<HttpServeOptions, io::Error> {
     if options.port == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "config port must be in 1..=65535"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "config port must be in 1..=65535",
+        ));
     }
 
     // A blank entry satisfies no `Host` at all, so counting it towards the allowlist
@@ -1684,9 +1684,8 @@ mod tests {
     #[test]
     fn http_config_loads_allowed_hosts_array() {
         let mut args = serve_args(McpServeMode::Http, None);
-        args.config = Some(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-http.toml"),
-        );
+        args.config =
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-http.toml"));
         let options = validate_serve_args(&args)
             .expect("valid HTTP TOML")
             .expect("HTTP mode returns options");
@@ -1695,16 +1694,8 @@ mod tests {
         assert_eq!(options.port, 8021);
         assert_eq!(
             options.allowed_hosts,
-            [
-                "localhost",
-                "127.0.0.1",
-                "::1",
-                "10.9.9.10",
-                "mcp-server",
-                "mcp-server.local",
-            ]
+            ["localhost", "127.0.0.1", "::1", "10.9.9.10", "mcp-server", "mcp-server.local",]
         );
-
     }
 
     #[test]
