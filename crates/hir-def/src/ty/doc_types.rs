@@ -882,6 +882,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_name_comma_after_a_collection_splits_before_the_collection() {
+        // `Массив из A, B` is written for BOTH readings in real configurations: sometimes one
+        // array whose element is either type, sometimes an array OR an unrelated alternative.
+        // The split-first reading is kept deliberately, because the alternative one buries a
+        // dominating `Произвольный`/`Any` inside the element, where it stops keeping the slot
+        // permissive: `Массив из Строка, Произвольный` would become a plain array and flag every
+        // map-style use of the value. Measured on a real configuration: claiming the whole list
+        // for the collection added 14 mismatches and fixed none.
+        let parsed = parse_type_name("Массив из Строка, Произвольный");
+        match parsed {
+            TypeRef::Union(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], TypeRef::Array(Some(_))));
+                assert_eq!(members[1], TypeRef::Any, "the dominating arm must stay at top level");
+            }
+            other => panic!("expected a union, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_type_name_keeps_valid_members_of_mixed_comma_list() {
         let parsed = parse_type_name("СправочникСсылка.Номенклатура, совсем не тип");
         match parsed {
