@@ -24,7 +24,7 @@ pub use semantic_symbol::{
 };
 pub use type_facade::{
     form_element_type, kernel_type_label, module_implicit_field_names, module_implicit_fields,
-    Field, HirFieldOrigin, Type,
+    platform_data, Field, HirFieldOrigin, Type,
 };
 
 pub use hir_def::execution_env;

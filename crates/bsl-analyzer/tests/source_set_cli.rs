@@ -450,7 +450,7 @@ fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<Strin
     let _ = child.wait();
 
     let mut names: Vec<String> = body
-        .match_indices("разрешить модуль '")
+        .match_indices("разрешить получателя вызова '")
         .map(|(at, needle)| {
             let rest = &body[at + needle.len()..];
             rest[..rest.find('\'').unwrap_or(0)].to_owned()

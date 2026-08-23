@@ -74,7 +74,12 @@ pub trait Builders: TypeKernelDb {
     }
 
     fn structure(&self, keys: Option<Arc<[Name]>>) -> TypeId {
-        self.intern_type(TypeKind::Structure(StructureFacet { keys, fields: None, origin: None }))
+        self.intern_type(TypeKind::Structure(StructureFacet {
+            keys,
+            fields: None,
+            origin: None,
+            closed: false,
+        }))
     }
 
     /// A structure whose keys/value-types are known (inferred from a literal `Новый Структура` /
@@ -86,6 +91,21 @@ pub trait Builders: TypeKernelDb {
             keys: Some(keys),
             fields: Some(projection),
             origin: Some(origin),
+            closed: false,
+        }))
+    }
+
+    /// A typed structure whose non-empty projection is proven complete.
+    fn structure_typed_closed(&self, projection: Arc<Projection>, origin: TypeOrigin) -> TypeId {
+        if projection.fields.is_empty() {
+            return self.structure_typed(projection, origin);
+        }
+        let keys: Arc<[Name]> = projection.fields.iter().map(|f| f.name.clone()).collect();
+        self.intern_type(TypeKind::Structure(StructureFacet {
+            keys: Some(keys),
+            fields: Some(projection),
+            origin: Some(origin),
+            closed: true,
         }))
     }
 
@@ -318,6 +338,7 @@ mod tests {
         assert!(facet.keys.is_none());
         assert!(facet.fields.is_none());
         assert!(facet.origin.is_none());
+        assert!(!facet.closed);
     }
 
     #[test]
@@ -356,9 +377,26 @@ mod tests {
         assert_eq!(fields.fields[0].ty, str_ty);
         assert_eq!(fields.fields[1].ty, num_ty);
         assert_eq!(facet.origin, Some(TypeOrigin::BslLiteral));
+        assert!(!facet.closed, "existing typed builder stays open");
         // `keys` is derived from field order for name-only consumers.
         let keys = facet.keys.as_ref().expect("typed structure derives keys");
         assert_eq!(keys.as_ref(), &["Город".to_string(), "Индекс".to_string()]);
+
+        let closed = db.structure_typed_closed(mk(), TypeOrigin::BslLiteral);
+        let TypeKind::Structure(closed_facet) = db.lookup_type(closed) else {
+            panic!("not a structure")
+        };
+        assert!(closed_facet.closed);
+        assert_ne!(a, closed, "completeness participates in interning");
+
+        let empty =
+            Arc::new(Projection::new(Arc::from([]), ProjectionOrigin::StructureLiteral, None));
+        let TypeKind::Structure(empty_facet) =
+            db.lookup_type(db.structure_typed_closed(empty, TypeOrigin::BslLiteral))
+        else {
+            panic!("not a structure")
+        };
+        assert!(!empty_facet.closed, "an empty structure cannot be closed");
     }
 
     #[test]

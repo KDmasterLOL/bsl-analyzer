@@ -125,6 +125,22 @@ HHH
     }
 
     #[test]
+    fn typoed_end_if_reports_only_its_own_range() {
+        let code = "Процедура Тест()\nЕсли Истина Тогда\nКонецЕслли;\nКонецПроцедуры";
+        let typo = "КонецЕслли";
+        let start = code.find(typo).expect("typo") as u32;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        let parse_errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.code == DiagnosticCode::ParseError).collect();
+
+        assert_eq!(parse_errors.len(), 1, "{parse_errors:?}");
+        assert_eq!(
+            parse_errors[0].range,
+            ide_db::TextRange::new(start.into(), (start + typo.len() as u32).into())
+        );
+    }
+
+    #[test]
     fn test_parse_error_eof_fixture() {
         let code = r#"Процедура ОтключитьСканерШтрихкодов() Экспорт
 

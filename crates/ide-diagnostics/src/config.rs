@@ -93,10 +93,14 @@ impl DiagnosticsConfig {
     /// is driven. A malformed config logs a warning and falls back to defaults rather
     /// than failing the analysis.
     pub fn from_project_json(diagnostics: &serde_json::Value, locale: Locale) -> Self {
-        let mut config: Self = serde_json::from_value(diagnostics.clone()).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to deserialize project diagnostics config; using defaults");
+        let mut config: Self = if diagnostics.is_null() {
             Self::default()
-        });
+        } else {
+            serde_json::from_value(diagnostics.clone()).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to deserialize project diagnostics config; using defaults");
+                Self::default()
+            })
+        };
         config.locale = locale;
         config
     }
@@ -350,6 +354,48 @@ impl DiagnosticsConfig {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tracing::{span, Event, Id, Metadata, Subscriber};
+
+    struct WarningCounter(Arc<AtomicUsize>);
+
+    impl Subscriber for WarningCounter {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _: &span::Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &span::Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+
+    fn parse_with_warning_count(
+        raw: &serde_json::Value,
+        locale: Locale,
+    ) -> (DiagnosticsConfig, usize) {
+        let warnings = Arc::new(AtomicUsize::new(0));
+        let config = tracing::subscriber::with_default(WarningCounter(warnings.clone()), || {
+            DiagnosticsConfig::from_project_json(raw, locale)
+        });
+        (config, warnings.load(Ordering::Relaxed))
+    }
 
     /// The shared project-config parser turns the raw `[diagnostics]` value into the
     /// same effective config every runtime mode consumes: a `parameters` entry of
@@ -363,8 +409,9 @@ mod tests {
                 "LineLength": { "maxLineLength": 150 },
             }
         });
-        let config = DiagnosticsConfig::from_project_json(&raw, Locale::En);
+        let (config, warnings) = parse_with_warning_count(&raw, Locale::En);
 
+        assert_eq!(warnings, 0);
         assert!(config.is_disabled(DiagnosticCode::Typo), "a `false` param disables the code");
         assert_eq!(
             config.get_int(DiagnosticCode::LineLength, "maxLineLength"),
@@ -378,18 +425,29 @@ mod tests {
     /// defaults while still stamping the locale.
     #[test]
     fn from_project_json_falls_back_on_garbage() {
-        let config = DiagnosticsConfig::from_project_json(&json!("not an object"), Locale::Ru);
+        let (config, warnings) = parse_with_warning_count(&json!("not an object"), Locale::Ru);
+        assert_eq!(warnings, 1);
         assert!(config.disabled.is_empty());
         assert!(config.parameters.is_empty());
         assert_eq!(config.locale, Locale::Ru);
     }
 
-    /// An absent `[diagnostics]` section (serde null) yields defaults, not a panic.
+    /// An absent `[diagnostics]` section (serde null) yields defaults without warning.
     #[test]
     fn from_project_json_handles_null() {
-        let config =
-            DiagnosticsConfig::from_project_json(&serde_json::Value::Null, Locale::default());
+        let (config, warnings) = parse_with_warning_count(&serde_json::Value::Null, Locale::En);
+        assert_eq!(warnings, 0);
         assert!(config.disabled.is_empty());
         assert!(config.enabled.is_empty());
+        assert_eq!(config.locale, Locale::En);
+    }
+
+    #[test]
+    fn from_project_json_accepts_empty_object_without_warning() {
+        let (config, warnings) = parse_with_warning_count(&json!({}), Locale::Ru);
+        assert_eq!(warnings, 0);
+        assert!(config.disabled.is_empty());
+        assert!(config.enabled.is_empty());
+        assert_eq!(config.locale, Locale::Ru);
     }
 }

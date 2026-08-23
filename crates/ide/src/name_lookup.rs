@@ -1211,7 +1211,7 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
 /// whole collections and nothing narrower — so this is a linear scan, the same
 /// one `syntax_help` already performs.
 fn from_platform(db: &RootDatabaseImpl, merge: &mut Merge<'_>) -> Vec<NameCandidate> {
-    let platform = bsl_platform::PlatformData::instance();
+    let platform = hir::platform_data();
     let mut out = Vec::new();
 
     let mut push = |canonical: &str,
@@ -1296,7 +1296,7 @@ fn platform_owner_display(type_name: &str) -> Option<String> {
     if type_name.is_empty() {
         return None;
     }
-    let platform = bsl_platform::PlatformData::instance();
+    let platform = hir::platform_data();
     Some(
         platform
             .get_type(type_name)

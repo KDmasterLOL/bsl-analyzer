@@ -74,6 +74,10 @@ pub struct Field {
     pub origin: HirFieldOrigin,
 }
 
+pub fn platform_data() -> &'static PlatformData {
+    PlatformData::instance()
+}
+
 #[derive(Debug)]
 pub struct Type<'db, DB> {
     db: &'db DB,

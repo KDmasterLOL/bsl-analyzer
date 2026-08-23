@@ -9,14 +9,21 @@
 //! as a genuine result.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::{Json, Router};
+use mcp_server::{serve_stream, McpProfile, McpServer, OnecConnection, SharedState};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
+use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -47,17 +54,54 @@ fn stage_workspace() -> TempDir {
         "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции\n",
     )
     .expect("write module body");
+    std::fs::create_dir_all(root.join("CommonForms").join("Настройки")).expect("mkdir common form");
     dir
 }
 
 async fn workspace_client(root: &Path) -> Client {
-    let server = McpServer::new(
-        McpProfile::Workspace,
-        SharedState::workspace(root.to_path_buf()).expect("valid workspace project"),
-    );
+    let state = SharedState::workspace(root.to_path_buf()).expect("valid workspace project");
+    workspace_client_with_state(state).await
+}
+
+async fn workspace_client_with_state(state: SharedState) -> Client {
+    let server = McpServer::new(McpProfile::Workspace, state);
     let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
     tokio::spawn(serve_stream(server, server_io));
     ().serve(client_io).await.expect("session initialized")
+}
+
+struct RejectingLiveService {
+    url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    task: JoinHandle<()>,
+}
+
+impl RejectingLiveService {
+    async fn start() -> Self {
+        async fn reject(
+            State(requests): State<Arc<Mutex<Vec<Value>>>>,
+            Json(body): Json<Value>,
+        ) -> (StatusCode, &'static str) {
+            requests.lock().expect("request log").push(body);
+            (StatusCode::BAD_REQUEST, "unsupported metadata collection")
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let app =
+            Router::new().route("/metadata-structure", post(reject)).with_state(requests.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind live fixture");
+        let url = format!("http://{}", listener.local_addr().expect("fixture address"));
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve live fixture");
+        });
+        Self { url, requests, task }
+    }
+}
+
+impl Drop for RejectingLiveService {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 async fn call(client: &Client, args: &[(&str, Value)]) -> CallToolResult {
@@ -71,6 +115,125 @@ async fn call(client: &Client, args: &[(&str, Value)]) -> CallToolResult {
 
 fn text_of(result: &CallToolResult) -> &str {
     result.content[0].raw.as_text().expect("text content").text.as_str()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_list_publishes_the_mode_dependent_object_type_contract() {
+    let ws = stage_workspace();
+    let client = workspace_client(ws.path()).await;
+    let tools = client.list_tools(Default::default()).await.expect("tools/list");
+    let metadata = tools.tools.iter().find(|tool| tool.name == "metadata").expect("metadata tool");
+
+    let description = metadata
+        .description
+        .as_deref()
+        .expect("metadata description")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(description.contains("source mode or auto without `connection`"), "{description}");
+    assert!(description.contains("infobase mode or auto with `connection`"), "{description}");
+    assert!(description.contains("source-only managed form"), "{description}");
+
+    let properties = metadata.input_schema["properties"].as_object().expect("input properties");
+    let object_type = properties["object_type"]["description"]
+        .as_str()
+        .expect("object_type doc")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(object_type.contains("`mode=source`"), "{object_type}");
+    assert!(object_type.contains("`mode=infobase`"), "{object_type}");
+    assert!(object_type.contains("without singular/plural conversion"), "{object_type}");
+
+    let mut fields: Vec<&str> = properties.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        [
+            "action",
+            "connection",
+            "filter",
+            "form_name",
+            "max_items",
+            "max_output_tokens",
+            "meta_type",
+            "mode",
+            "name_mask",
+            "object_name",
+            "object_type",
+        ],
+        "the documentation-only change must not alter the input schema",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_and_auto_without_connection_keep_form_on_the_source_path() {
+    let ws = stage_workspace();
+    let live = RejectingLiveService::start().await;
+    let mut state = SharedState::workspace(ws.path().to_path_buf()).expect("valid workspace");
+    state.add_onec_connection(
+        "live".into(),
+        OnecConnection::new(onec_client::Client::new(&live.url, "", ""), false),
+    );
+    let client = workspace_client_with_state(state).await;
+
+    let source = call(
+        &client,
+        &[
+            ("action", json!("form")),
+            ("mode", json!("source")),
+            ("connection", json!("live")),
+            ("object_type", json!("CommonForm")),
+        ],
+    )
+    .await;
+    assert!(text_of(&source).contains("Настройки"), "explicit source mode must read XML");
+
+    let auto = call(
+        &client,
+        &[("action", json!("form")), ("mode", json!("auto")), ("object_type", json!("CommonForm"))],
+    )
+    .await;
+    assert!(text_of(&auto).contains("Настройки"), "auto without connection must read XML");
+    assert!(live.requests.lock().expect("request log").is_empty(), "source paths touched live 1C");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn infobase_and_auto_with_connection_pass_object_type_through_once() {
+    let ws = stage_workspace();
+    let live = RejectingLiveService::start().await;
+    let mut state = SharedState::workspace(ws.path().to_path_buf()).expect("valid workspace");
+    state.add_onec_connection(
+        "live".into(),
+        OnecConnection::new(onec_client::Client::new(&live.url, "", ""), false),
+    );
+    let client = workspace_client_with_state(state).await;
+
+    for (mode, object_type) in [("infobase", "Справочники"), ("auto", "Справочник")]
+    {
+        let arguments = Map::from_iter([
+            ("action".into(), json!("object")),
+            ("mode".into(), json!(mode)),
+            ("connection".into(), json!("live")),
+            ("object_type".into(), json!(object_type)),
+            ("object_name".into(), json!("Партнеры")),
+        ]);
+        let error = client
+            .call_tool(CallToolRequestParams::new("metadata").with_arguments(arguments))
+            .await
+            .expect_err("the fixture rejects the live request");
+        assert!(error.to_string().contains("unsupported metadata collection"), "{error}");
+    }
+
+    assert_eq!(
+        *live.requests.lock().expect("request log"),
+        [
+            json!({"meta_type": "Справочники", "name": "Партнеры"}),
+            json!({"meta_type": "Справочник", "name": "Партнеры"}),
+        ],
+        "plural and invalid singular forms must each reach the live service unchanged, once",
+    );
 }
 
 /// A call issued while the resident builds answers with the retry envelope, and one issued
