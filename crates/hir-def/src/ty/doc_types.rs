@@ -297,45 +297,28 @@ fn is_identifier_like(s: &str) -> bool {
     (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let s_lower = s.fold_lower();
-    let prefix_lower = prefix.fold_lower();
-
-    if !s_lower.starts_with(&prefix_lower) {
-        return None;
-    }
-
-    let prefix_chars = prefix.chars().count();
-    let tail_start = s.char_indices().nth(prefix_chars).map(|(idx, _)| idx).unwrap_or(s.len());
-
-    Some(&s[tail_start..])
+/// Splits `<коллекция> из <Тип>` into its head and tail. The two words are matched independently:
+/// documentation mixes the languages freely (`Structure из …`, `Массив of …`), and a form one
+/// parser recognises while the other does not silently costs the slot its documented fields.
+fn split_collection(name: &str) -> Option<(&str, &str)> {
+    let lower = name.fold_lower();
+    [" из ", " of "].iter().find_map(|marker| {
+        lower.find(marker).map(|pos| (name[..pos].trim(), name[pos + marker.len()..].trim()))
+    })
 }
 
 fn parse_collection_of(name: &str) -> Option<TypeRef> {
-    for prefix in ["Массив из ", "Array of "] {
-        if let Some(tail) = strip_prefix_ci(name, prefix) {
-            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
+    let (head, element) = split_collection(name)?;
+    match head.fold_lower().as_str() {
+        "массив" | "array" | "фиксированныймассив" | "fixedarray" => {
+            Some(TypeRef::Array(Some(Box::new(parse_type_name(element)))))
         }
+        "соответствие" | "map" => Some(TypeRef::Map(None)),
+        // The value type of `Структура из КлючИЗначение` has nowhere to go, but the structure
+        // itself must still be recognised.
+        "структура" | "structure" => Some(TypeRef::Builtin(BuiltinTypeRef::Structure)),
+        _ => None,
     }
-    for prefix in ["ФиксированныйМассив из ", "FixedArray of "] {
-        if let Some(tail) = strip_prefix_ci(name, prefix) {
-            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
-        }
-    }
-    for prefix in ["Соответствие из ", "Map of "] {
-        if strip_prefix_ci(name, prefix).is_some() {
-            return Some(TypeRef::Map(None));
-        }
-    }
-    // The value type of `Структура из КлючИЗначение` has nowhere to go, but the structure itself
-    // must still be recognised: the structured doc parser reads this form as a structure, and a
-    // slot the two parsers type differently loses its documented fields.
-    for prefix in ["Структура из ", "Structure of "] {
-        if strip_prefix_ci(name, prefix).is_some() {
-            return Some(TypeRef::Builtin(BuiltinTypeRef::Structure));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -1000,13 +983,29 @@ mod tests {
     }
 
     #[test]
-    fn strip_prefix_ci_handles_cyrillic_round_trip() {
-        let tail = strip_prefix_ci("Массив из Строка", "Массив из ").unwrap();
-        assert_eq!(tail, "Строка");
+    fn split_collection_reads_cyrillic_and_mixed_case() {
+        // Byte offsets and case folding both have to survive Cyrillic: the marker is found in the
+        // folded text and then cut out of the original.
+        assert_eq!(split_collection("Массив из Строка"), Some(("Массив", "Строка")));
+        assert_eq!(split_collection("маССив ИЗ Число"), Some(("маССив", "Число")));
+        assert_eq!(
+            split_collection("Structure из КлючИЗначение"),
+            Some(("Structure", "КлючИЗначение"))
+        );
+        assert_eq!(split_collection("Массив"), None);
+    }
 
-        let tail_mixed = strip_prefix_ci("маССив ИЗ Число", "Массив из ").unwrap();
-        assert_eq!(tail_mixed, "Число");
-
-        assert!(strip_prefix_ci("Соответствие из X", "Массив из ").is_none());
+    #[test]
+    fn parse_type_name_reads_the_marker_in_either_language() {
+        assert_eq!(
+            parse_type_name("Structure из КлючИЗначение"),
+            builtin(BuiltinTypeRef::Structure)
+        );
+        assert_eq!(
+            parse_type_name("Массив of Строка"),
+            TypeRef::Array(Some(Box::new(builtin(BuiltinTypeRef::String))))
+        );
+        // A head that names no collection stays what it was: prose in the type position.
+        assert_eq!(parse_type_name("Данные из справочника"), TypeRef::Unknown);
     }
 }

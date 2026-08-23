@@ -243,3 +243,53 @@ fn fields_documented_under_an_array_stay_off_the_bare_structure_beside_it() {
     let on_element = labels(&element);
     assert!(on_element.iter().any(|l| l == "Поле"), "field missing on the element: {on_element:?}");
 }
+
+#[test]
+fn a_structure_documented_without_fields_keeps_the_keys_the_body_proves() {
+    // Documentation that only names `Структура` says less than the body does. Letting the name
+    // stand alone would erase the keys the constructor proves, and documentation must add, never
+    // remove.
+    for documented in [
+        "// Возвращаемое значение:\n//   Структура - параметры соединения.\n",
+        "// Возвращаемое значение:\n//   Структура из КлючИЗначение - параметры.\n",
+    ] {
+        let labels = labels(&complete(&format!(
+            "//- /test.bsl\n\
+{documented}Функция ПараметрыСоединения()\n\
+\tПар = Новый Структура(\"Таймаут, Адрес\");\n\
+\tВозврат Пар;\n\
+КонецФункции\n\
+\n\
+Процедура Тест()\n\
+\tСтр = ПараметрыСоединения();\n\
+\tСтр.$0\n\
+КонецПроцедуры\n"
+        )));
+        assert!(labels.iter().any(|l| l == "Таймаут"), "key from the body lost: {labels:?}");
+    }
+
+    // The control: once the documentation does carry fields, they are the answer and the body's
+    // keys give way — otherwise the assertion above would pass on a build that ignores docs.
+    let documented = labels(&complete(
+        "//- /test.bsl\n// Возвращаемое значение:\n//   Структура из КлючИЗначение:\n//    * Ключ - Строка - имя.\nФункция ПараметрыСоединения()\n\tПар = Новый Структура(\"Таймаут, Адрес\");\n\tВозврат Пар;\nКонецФункции\n\nПроцедура Тест()\n\tСтр = ПараметрыСоединения();\n\tСтр.$0\nКонецПроцедуры\n",
+    ));
+    assert!(documented.iter().any(|l| l == "Ключ"), "documented field missing: {documented:?}");
+    assert!(!documented.iter().any(|l| l == "Таймаут"), "documentation must win: {documented:?}");
+}
+
+#[test]
+fn the_collection_marker_is_read_in_either_language() {
+    // Documentation mixes the languages (`Structure из …`, `Массив of …`). Recognising one pairing
+    // in one parser and another pairing in the other is exactly the disagreement that silently
+    // costs a slot its fields.
+    let labels = labels(&complete(
+        "\n//- /test.bsl\n\
+// Параметры:\n\
+//   Данные - Structure из КлючИЗначение:\n\
+//    * Ключ - Строка - имя таблицы.\n\
+Процедура Обработать(Данные) Экспорт\n\
+\tДанные.$0\n\
+КонецПроцедуры\n",
+    ));
+    assert!(labels.iter().any(|l| l == "Ключ"), "documented field missing: {labels:?}");
+}

@@ -114,7 +114,8 @@ fn declaration_fragment(text: &str) -> Option<&str> {
     (!fragment.is_empty()).then_some(fragment)
 }
 
-/// The collection name in front of an `из` / `of` tail, if the name carries one.
+/// The collection name in front of an `из` / `of` tail, if the name carries one. The marker is
+/// matched in either language regardless of the head's language: documentation mixes them.
 fn collection_head(name: &str) -> Option<&str> {
     let lower = name.fold_lower();
     [" из ", " of "].iter().find_map(|marker| lower.find(marker).map(|pos| name[..pos].trim()))
