@@ -1,0 +1,3 @@
+host = "0.0.0.0"
+port = 8021
+allowed_hosts = ["localhost", "127.0.0.1", "::1", "10.9.9.10", "mcp-server", "mcp-server.local"]
