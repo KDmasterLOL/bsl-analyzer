@@ -955,13 +955,12 @@ fn parse_return_type_name(type_part: &str) -> Option<(String, Option<String>)> {
 }
 
 fn parse_collection_type(type_part: &str) -> Option<(String, String)> {
-    let lower = type_part.fold_lower();
     for (marker, normalized_prefix) in [(" из ", "из"), (" of ", "of")] {
-        let Some(marker_pos) = lower.find(marker) else {
+        let Some(at) = stdx::case::find_ignore_case(type_part, marker) else {
             continue;
         };
-        let collection_type = type_part[..marker_pos].trim();
-        let element_type = type_part[marker_pos + marker.len()..].trim();
+        let collection_type = type_part[..at.start].trim();
+        let element_type = type_part[at.end..].trim();
 
         if collection_type.is_empty() || element_type.is_empty() {
             return None;
@@ -1042,15 +1041,10 @@ fn parse_simple_section(lines: &[String]) -> Vec<String> {
 }
 
 fn parse_deprecated_section(keyword_line: &str, following_lines: &[String]) -> Option<String> {
-    let lower = keyword_line.fold_lower();
-
-    let after_keyword = if let Some(pos) = lower.find("устарела") {
-        &keyword_line[pos + "устарела".len()..]
-    } else if let Some(pos) = lower.find("deprecated") {
-        &keyword_line[pos + "deprecated".len()..]
-    } else {
-        ""
-    };
+    let after_keyword = ["устарела", "deprecated"]
+        .iter()
+        .find_map(|keyword| stdx::case::find_ignore_case(keyword_line, keyword))
+        .map_or("", |at| &keyword_line[at.end..]);
 
     let info_on_same_line = after_keyword
         .trim_start_matches(|c: char| c == '.' || c == ':' || c.is_whitespace())

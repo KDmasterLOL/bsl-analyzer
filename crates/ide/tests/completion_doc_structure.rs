@@ -293,3 +293,38 @@ fn the_collection_marker_is_read_in_either_language() {
     ));
     assert!(labels.iter().any(|l| l == "Ключ"), "documented field missing: {labels:?}");
 }
+
+#[test]
+fn an_optional_structure_documented_without_fields_keeps_the_keys_the_body_proves() {
+    // `Неопределено, Структура` is how an optional result is written. The untyped structure then
+    // stands in a union arm, and filling only a bare one leaves the common case documented into
+    // silence.
+    let body = "Функция ПараметрыСоединения()\n\
+\tПар = Новый Структура(\"Таймаут, Адрес\");\n\
+\tВозврат Пар;\n\
+КонецФункции\n\
+\n\
+Процедура Тест()\n\
+\tСтр = ПараметрыСоединения();\n\
+\tСтр.$0\n\
+КонецПроцедуры\n";
+
+    let optional = labels(&complete(&format!(
+        "//- /test.bsl\n// Возвращаемое значение:\n//   Неопределено, Структура - параметры соединения.\n{body}"
+    )));
+    assert!(optional.iter().any(|l| l == "Таймаут"), "key from the body lost: {optional:?}");
+
+    // The control that keeps the assertion above honest: documentation that declares a collection
+    // is a statement about the shape, and the body's structure must not overwrite it.
+    let collection = labels(&complete(&format!(
+        "//- /test.bsl\n// Возвращаемое значение:\n//   Массив из Структура - строки таблицы.\n{body}"
+    )));
+    assert!(
+        collection.iter().any(|l| l == "Добавить"),
+        "the documented Массив must stand: {collection:?}"
+    );
+    assert!(
+        !collection.iter().any(|l| l == "Таймаут"),
+        "keys leaked past the array: {collection:?}"
+    );
+}

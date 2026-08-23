@@ -86,23 +86,22 @@ fn collection_element<'a>(name: &'a str, description: Option<&'a str>) -> Option
 }
 
 fn collection_element_from_name(name: &str) -> Option<&str> {
-    let lower = name.fold_lower();
     for marker in [" из ", " of "] {
-        let Some(marker_pos) = lower.find(marker) else {
+        let Some(at) = stdx::case::find_ignore_case(name, marker) else {
             continue;
         };
-        if is_array_name(&name[..marker_pos]) {
-            return declaration_fragment(&name[marker_pos + marker.len()..]);
+        if is_array_name(&name[..at.start]) {
+            return declaration_fragment(&name[at.end..]);
         }
     }
     None
 }
 
 fn collection_element_from_description(description: &str) -> Option<&str> {
-    let lower = description.fold_lower();
     for prefix in ["из ", "of "] {
-        if lower.starts_with(prefix) {
-            return declaration_fragment(&description[prefix.len()..]);
+        match stdx::case::find_ignore_case(description, prefix) {
+            Some(at) if at.start == 0 => return declaration_fragment(&description[at.end..]),
+            _ => continue,
         }
     }
     None
@@ -117,8 +116,9 @@ fn declaration_fragment(text: &str) -> Option<&str> {
 /// The collection name in front of an `из` / `of` tail, if the name carries one. The marker is
 /// matched in either language regardless of the head's language: documentation mixes them.
 fn collection_head(name: &str) -> Option<&str> {
-    let lower = name.fold_lower();
-    [" из ", " of "].iter().find_map(|marker| lower.find(marker).map(|pos| name[..pos].trim()))
+    [" из ", " of "].iter().find_map(|marker| {
+        stdx::case::find_ignore_case(name, marker).map(|at| name[..at.start].trim())
+    })
 }
 
 fn is_array_name(name: &str) -> bool {

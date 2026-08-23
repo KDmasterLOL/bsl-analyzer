@@ -130,6 +130,51 @@ pub fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
     }
 }
 
+/// Case-insensitive substring search reporting the match's byte range **in the haystack**.
+///
+/// The range is the point: folding a copy and searching there gives an offset into the copy, and
+/// `İ`, `K`, `Å` and `ẞ` all change their byte length when folded. Applying such an offset back to
+/// the original slices at the wrong place — or inside a char, which panics. Folding one char at a
+/// time keeps every offset a real offset into `haystack`.
+///
+/// `needle_lower` must already be per-char-lowercase, the same contract
+/// [`contains_ignore_case`] has. An empty needle matches at 0.
+pub fn find_ignore_case(haystack: &str, needle_lower: &str) -> Option<std::ops::Range<usize>> {
+    debug_assert_eq!(
+        needle_lower,
+        fold_lower_per_char(needle_lower),
+        "needle_lower must already be per-char-lowercase"
+    );
+
+    if needle_lower.is_empty() {
+        return Some(0..0);
+    }
+
+    for (start, _) in haystack.char_indices() {
+        if let Some(len) = match_len_ignore_case(&haystack[start..], needle_lower) {
+            return Some(start..start + len);
+        }
+    }
+    None
+}
+
+/// The number of haystack bytes matching `needle` from the start, if it matches at all. Each
+/// haystack char is compared as one folded char, so the byte count stays exact.
+fn match_len_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
+    let mut needle_chars = needle.chars();
+    let mut consumed = 0;
+    for (index, candidate) in haystack.char_indices() {
+        let Some(expected) = needle_chars.next() else {
+            return Some(consumed);
+        };
+        if fold_one(candidate) != expected {
+            return None;
+        }
+        consumed = index + candidate.len_utf8();
+    }
+    needle_chars.next().is_none().then_some(consumed)
+}
+
 /// Folds a single char the same way [`fold_lower_per_char`] would, for the
 /// [`contains_ignore_case`] first-char filter (which only ever needs one
 /// output char, never a multi-char expansion).
@@ -351,6 +396,34 @@ mod tests {
         assert_eq!(
             contains_ignore_case("xİy", "i\u{307}"),
             fold_lower_per_char("xİy").contains("i\u{307}")
+        );
+    }
+}
+
+#[cfg(test)]
+mod find_ignore_case_tests {
+    use super::find_ignore_case;
+
+    #[test]
+    fn the_range_is_valid_in_the_haystack_not_in_a_folded_copy() {
+        // Every char here changes its byte length when lowercased, so an offset taken from a
+        // folded copy would land in the wrong place — inside a char for `İ`.
+        for head in ["İ", "K", "Å", "ẞ"] {
+            let text = format!("{head} из Строка");
+            let found = find_ignore_case(&text, " из ").expect("marker is there");
+            assert_eq!(&text[found.clone()], " из ", "range must cut the marker itself");
+            assert_eq!(&text[found.end..], "Строка");
+        }
+    }
+
+    #[test]
+    fn folds_both_sides_and_reports_absence() {
+        // Cyrillic is two bytes per char: the head is 12 bytes, the marker itself 6.
+        assert_eq!(find_ignore_case("Массив ИЗ Строка", " из "), Some(12..18));
+        assert_eq!(find_ignore_case("МассивСтрок", " из "), None);
+        assert_eq!(
+            find_ignore_case("хвост в конце из ", " из "),
+            Some(("хвост в конце".len())..("хвост в конце из ".len()))
         );
     }
 }

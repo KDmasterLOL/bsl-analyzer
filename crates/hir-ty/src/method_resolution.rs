@@ -306,7 +306,10 @@ pub(crate) fn materialise_signature_enriched(
     // keys the body proves are the only thing anyone can use. Reading the body for it keeps the
     // rule that documentation adds and never removes.
     let unknown = sig.ret == db.unknown();
-    if unknown || is_fieldless_structure(db, sig.ret) {
+    // The untyped structure may stand alone or in a union arm — `Неопределено, Структура` is how an
+    // optional result is written — and both must be filled, or documenting the obvious still costs
+    // the caller the keys.
+    if unknown || crate::lower::doc_structure::has_bare_untyped_structure(db, sig.ret) {
         let method_input = hir_def::MethodIdInput::new(db, method_id);
         let inferred = crate::method_graph::method_return_type_query(db, method_input);
         if unknown {
@@ -314,15 +317,13 @@ pub(crate) fn materialise_signature_enriched(
                 sig.ret = inferred;
             }
         } else if has_structure_fields(db, inferred) {
-            sig.ret = inferred;
+            // Only the untyped structure is replaced: an arm the documentation declares as
+            // something else, and a structure documented under a collection, stay as declared.
+            sig.ret = crate::lower::doc_structure::substitute_bare(db, sig.ret, inferred);
         }
     }
 
     sig
-}
-
-fn is_fieldless_structure(db: &dyn TypeKernelDb, ty: TypeId) -> bool {
-    matches!(db.lookup_type(ty), bsl_types::kind::TypeKind::Structure(facet) if facet.fields.is_none())
 }
 
 fn has_structure_fields(db: &dyn TypeKernelDb, ty: TypeId) -> bool {

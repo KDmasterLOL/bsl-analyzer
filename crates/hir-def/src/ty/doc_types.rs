@@ -301,9 +301,9 @@ fn is_identifier_like(s: &str) -> bool {
 /// documentation mixes the languages freely (`Structure из …`, `Массив of …`), and a form one
 /// parser recognises while the other does not silently costs the slot its documented fields.
 fn split_collection(name: &str) -> Option<(&str, &str)> {
-    let lower = name.fold_lower();
     [" из ", " of "].iter().find_map(|marker| {
-        lower.find(marker).map(|pos| (name[..pos].trim(), name[pos + marker.len()..].trim()))
+        stdx::case::find_ignore_case(name, marker)
+            .map(|at| (name[..at.start].trim(), name[at.end..].trim()))
     })
 }
 
@@ -993,6 +993,21 @@ mod tests {
             Some(("Structure", "КлючИЗначение"))
         );
         assert_eq!(split_collection("Массив"), None);
+    }
+
+    #[test]
+    fn a_head_whose_case_folding_changes_its_length_does_not_break_the_split() {
+        // `İ`, `K` and `Å` change their byte length when lowercased. Reading the marker's offset
+        // out of a folded copy cuts the original at the wrong byte — inside a char, which panics
+        // right in the middle of parsing a doc-comment.
+        assert_eq!(parse_type_name("İ из Строка"), TypeRef::Unknown);
+        assert_eq!(parse_type_name("Å из Строка"), TypeRef::Unknown);
+        assert_eq!(
+            parse_type_name("Массив из Å"),
+            TypeRef::Array(Some(Box::new(TypeRef::Name(QualifiedName::from_segments([
+                Name::new("Å")
+            ])))))
+        );
     }
 
     #[test]

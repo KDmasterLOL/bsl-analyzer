@@ -107,6 +107,25 @@ fn substitute_at(db: &dyn TypeKernelDb, base: TypeId, structure: TypeId, depth: 
     }
 }
 
+/// Puts a structure into every untyped structure the slot carries directly — a bare one, or one
+/// standing in a union arm. Used where the richer structure comes from the body rather than from
+/// the documentation, so it carries no collection depth of its own.
+pub(crate) fn substitute_bare(db: &dyn TypeKernelDb, base: TypeId, structure: TypeId) -> TypeId {
+    substitute_at(db, base, structure, 0)
+}
+
+/// Whether the slot has an untyped structure that [`substitute_bare`] would fill.
+pub(crate) fn has_bare_untyped_structure(db: &dyn TypeKernelDb, ty: TypeId) -> bool {
+    use bsl_types::kind::TypeKind;
+    match db.lookup_type(ty) {
+        TypeKind::Structure(facet) => facet.fields.is_none(),
+        TypeKind::Union(members) => {
+            members.iter().any(|member| has_bare_untyped_structure(db, *member))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a lowered type carries a documented structure anywhere a member lookup can reach it:
 /// directly, as an array element, or in one arm of a union. The union arm is the common shape —
 /// `Параметры - Неопределено, Структура:` documents a structure beside its absent value.
