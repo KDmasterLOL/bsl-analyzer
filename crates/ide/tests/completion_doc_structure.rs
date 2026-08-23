@@ -133,3 +133,113 @@ fn second_level_of_documented_nesting_is_not_offered() {
     let labels = labels(&items);
     assert!(!labels.iter().any(|l| l == "Город"), "second level is not parsed: {labels:?}");
 }
+
+#[test]
+fn documented_structure_beside_undefined_completes_inside_its_own_body() {
+    // `Неопределено, Структура:` is how an optional structure parameter is written in practice, and
+    // the documented structure then sits in a union arm rather than alone.
+    let items = complete(
+        "\n//- /test.bsl\n\
+// Параметры:\n\
+//   Параметры - Неопределено, Структура:\n\
+//    * Адрес - Строка - адрес сервера.\n\
+Процедура Обработать(Параметры) Экспорт\n\
+\tПараметры.$0\n\
+КонецПроцедуры\n",
+    );
+    let labels = labels(&items);
+    assert!(labels.iter().any(|l| l == "Адрес"), "documented field missing: {labels:?}");
+}
+
+#[test]
+fn structure_of_a_value_type_completes_its_documented_fields() {
+    // `Структура из <Тип>` names the type of the values, not of the structure: the fields still
+    // come from the bullets, and the slot is still a structure.
+    let items = complete(
+        "\n//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl\n\
+// Возвращаемое значение:\n\
+//   Структура Из КлючИЗначение - таблицы отчёта:\n\
+//    * Ключ - Строка - имя таблицы.\n\
+//    * Значение - Число - число строк.\n\
+Функция Данные() Экспорт\n\
+\tВозврат Новый Структура;\n\
+КонецФункции\n\
+//- /test.bsl\n\
+Процедура Тест()\n\
+\tР = ПервыйОбщийМодуль.Данные();\n\
+\tР.$0\n\
+КонецПроцедуры\n",
+    );
+    let labels = labels(&items);
+    assert!(labels.iter().any(|l| l == "Ключ"), "documented field Ключ missing: {labels:?}");
+    assert!(
+        labels.iter().any(|l| l == "Значение"),
+        "documented field Значение missing: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l == "Вставить"),
+        "platform Структура methods must still be offered: {labels:?}"
+    );
+}
+
+#[test]
+fn structure_of_a_value_type_completes_on_a_parameter() {
+    // The return path loses the `из …` tail into the description while a parameter keeps it in the
+    // type, so the two slots reach the documentation parser differently.
+    let items = complete(
+        "\n//- /test.bsl\n\
+// Параметры:\n\
+//   Данные - Структура из КлючИЗначение:\n\
+//    * Ключ - Строка - имя таблицы.\n\
+Процедура Обработать(Данные) Экспорт\n\
+\tДанные.$0\n\
+КонецПроцедуры\n",
+    );
+    let labels = labels(&items);
+    assert!(labels.iter().any(|l| l == "Ключ"), "documented field missing: {labels:?}");
+}
+
+#[test]
+fn fields_documented_under_an_array_stay_off_the_bare_structure_beside_it() {
+    // Two untyped structures in one slot, one set of bullets: they describe the array element, and
+    // the alternative that is just `Структура` must not inherit them.
+    let items = complete(
+        "\n//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl\n\
+// Возвращаемое значение:\n\
+//   - Структура - без детализации\n\
+//   - Массив из Структура:\n\
+//    * Поле - Строка - только у элемента массива.\n\
+Функция Разное() Экспорт\n\
+\tВозврат Новый Структура;\n\
+КонецФункции\n\
+//- /test.bsl\n\
+Процедура Тест()\n\
+\tР = ПервыйОбщийМодуль.Разное();\n\
+\tР.$0\n\
+КонецПроцедуры\n",
+    );
+    let on_slot = labels(&items);
+    assert!(!on_slot.iter().any(|l| l == "Поле"), "field of the array element leaked: {on_slot:?}");
+
+    // The absence above is only worth anything next to the place the field must appear: iterating
+    // the same slot reaches the array element, and there `Поле` is documented.
+    let element = complete(
+        "\n//- /CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl\n\
+// Возвращаемое значение:\n\
+//   - Структура - без детализации\n\
+//   - Массив из Структура:\n\
+//    * Поле - Строка - только у элемента массива.\n\
+Функция Разное() Экспорт\n\
+\tВозврат Новый Структура;\n\
+КонецФункции\n\
+//- /test.bsl\n\
+Процедура Тест()\n\
+\tР = ПервыйОбщийМодуль.Разное();\n\
+\tДля Каждого Элемент Из Р Цикл\n\
+\t\tЭлемент.$0\n\
+\tКонецЦикла;\n\
+КонецПроцедуры\n",
+    );
+    let on_element = labels(&element);
+    assert!(on_element.iter().any(|l| l == "Поле"), "field missing on the element: {on_element:?}");
+}

@@ -115,3 +115,39 @@ fn rejects_prose_and_malformed_see_targets() {
         ));
     }
 }
+
+#[test]
+fn structure_of_a_value_type_is_a_structure_with_its_documented_fields() {
+    // A parameter keeps the `из <Тип>` tail inside the type name, and the tail names the values,
+    // not the container: the slot is still the structure its bullets describe.
+    let docs = parse_docs(&[
+        "Параметры:",
+        "  Данные - Структура из КлючИЗначение:",
+        "   * Ключ - Строка - имя таблицы.",
+        "Возвращаемое значение:",
+        "  Structure of KeyAndValue - таблицы:",
+        "   * Значение - Число - число строк.",
+    ]);
+
+    let parameter = parse_type_expr(&docs.parameters[0].types[0]);
+    let Some(DocTypeExpr::Structure { fields }) = parameter else {
+        panic!("parameter must lower to a structure, got {parameter:?}");
+    };
+    assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Ключ"]);
+
+    let returned = parse_type_expr(&docs.returned_value[0]);
+    let Some(DocTypeExpr::Structure { fields }) = returned else {
+        panic!("return must lower to a structure, got {returned:?}");
+    };
+    assert_eq!(fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Значение"]);
+}
+
+#[test]
+fn a_collection_that_is_not_a_structure_keeps_its_own_lowering() {
+    // The `из` tail alone must not turn every collection into a structure.
+    assert!(matches!(
+        parse_type_expr(&TypeDoc::simple("Массив из Строка".to_string(), None)),
+        Some(DocTypeExpr::Array(_))
+    ));
+    assert!(parse_type_expr(&TypeDoc::simple("Соответствие из Строка".to_string(), None)).is_none());
+}

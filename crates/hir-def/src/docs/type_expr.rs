@@ -52,7 +52,11 @@ fn parse_non_hyperlink_type(
     }
 
     let name = name.trim().trim_end_matches(':').trim();
-    if is_structure_name(name) {
+    // `Структура из КлючИЗначение` names a structure whose values share a type. The kernel has no
+    // place for that value type, so the tail is dropped and the slot stays the structure its
+    // bullets describe — the return path already arrives here with the tail moved into the
+    // description, and a parameter keeps it in the name.
+    if is_structure_name(name) || collection_head(name).is_some_and(is_structure_name) {
         return Some(DocTypeExpr::Structure { fields: parse_fields(fields) });
     }
 
@@ -108,6 +112,12 @@ fn declaration_fragment(text: &str) -> Option<&str> {
     let fragment = text.split_once(" - ").map_or(text, |(fragment, _)| fragment);
     let fragment = fragment.trim().trim_end_matches(':').trim();
     (!fragment.is_empty()).then_some(fragment)
+}
+
+/// The collection name in front of an `из` / `of` tail, if the name carries one.
+fn collection_head(name: &str) -> Option<&str> {
+    let lower = name.fold_lower();
+    [" из ", " of "].iter().find_map(|marker| lower.find(marker).map(|pos| name[..pos].trim()))
 }
 
 fn is_array_name(name: &str) -> bool {

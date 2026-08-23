@@ -279,8 +279,8 @@ fn enrich_with_documented_structure(
         let Some(expr) = hir_def::docs::parse_type_expr(type_doc) else {
             continue;
         };
-        if let Some(structure) = crate::lower::doc_structure::doc_structure_ty(db, &expr) {
-            enriched = crate::lower::doc_structure::substitute(db, enriched, structure);
+        if let Some(documented) = crate::lower::doc_structure::doc_structure_ty(db, &expr) {
+            enriched = crate::lower::doc_structure::substitute(db, enriched, &documented);
         }
     }
     enriched

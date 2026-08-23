@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::path::QualifiedName;
-use crate::type_ref::TypeRef;
+use crate::type_ref::{BuiltinTypeRef, TypeRef};
 use crate::Name;
 use stdx::case::CaseExt;
 
@@ -327,6 +327,14 @@ fn parse_collection_of(name: &str) -> Option<TypeRef> {
             return Some(TypeRef::Map(None));
         }
     }
+    // The value type of `Структура из КлючИЗначение` has nowhere to go, but the structure itself
+    // must still be recognised: the structured doc parser reads this form as a structure, and a
+    // slot the two parsers type differently loses its documented fields.
+    for prefix in ["Структура из ", "Structure of "] {
+        if strip_prefix_ci(name, prefix).is_some() {
+            return Some(TypeRef::Builtin(BuiltinTypeRef::Structure));
+        }
+    }
     None
 }
 
@@ -550,6 +558,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_name_recognises_structure_of_t() {
+        // The value type has nowhere to go in the kernel, but the structure must survive: the
+        // structured doc parser reads this same slot as a structure, and a slot the two parsers
+        // type differently loses its documented fields.
+        assert_eq!(
+            parse_type_name("Структура из КлючИЗначение"),
+            builtin(BuiltinTypeRef::Structure)
+        );
+        assert_eq!(parse_type_name("Structure of KeyAndValue"), builtin(BuiltinTypeRef::Structure));
+        assert_eq!(parse_type_name("Структура"), builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
     fn parse_type_name_recognises_array_of_t_russian() {
         let parsed = parse_type_name("Массив из Строка");
         assert_eq!(
@@ -666,10 +687,10 @@ mod tests {
 
     #[test]
     fn parse_method_doc_types_unnamed_return_bullet_stays_permissive() {
-        // The second alternative carries no ` - ` separator and ends in a period, so it does not
-        // parse. Folding it in as `Unknown` would let the kernel canonicalise the union down to
-        // `Неопределено`, and every guarded use of the real structure would be flagged.
-        let doc = "\n// Возвращаемое значение:\n                   //   - Неопределено - если не пройдены проверки.\n                   //   - Структура Из КлючИЗначение.\n";
+        // The second alternative is prose: it carries no ` - ` separator and names no type.
+        // Folding it in as `Unknown` would let the kernel canonicalise the union down to
+        // `Неопределено`, and every guarded use of the real value would be flagged.
+        let doc = "\n// Возвращаемое значение:\n                   //   - Неопределено - если не пройдены проверки.\n                   //   - Значение любого типа.\n";
 
         let hints = parse_method_doc_types(doc).unwrap();
         match hints.ret {
@@ -679,6 +700,23 @@ mod tests {
                 assert_eq!(parts[1], TypeRef::Any, "the unnamed alternative must dominate");
             }
             other => panic!("expected a permissive union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_names_a_structure_of_a_value_type() {
+        // `Структура Из КлючИЗначение.` names a type, unlike the prose above: it must come out as
+        // the structure it is, so the documented fields have an untyped structure to fill.
+        let doc = "\n// Возвращаемое значение:\n                   //   - Неопределено - если не пройдены проверки.\n                   //   - Структура Из КлючИЗначение.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        match hints.ret {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::Undefined));
+                assert_eq!(parts[1], TypeRef::Builtin(BuiltinTypeRef::Structure));
+            }
+            other => panic!("expected a union, got {other:?}"),
         }
     }
 
