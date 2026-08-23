@@ -13,7 +13,7 @@ use bsl_types::kind::TypeId;
 use crate::call_resolution::{resolve_candidates, ArgumentParameter, CallRejection, CallSelection};
 use crate::db::HirDatabase;
 use crate::infer::{CallArgBinding, InferenceDiagnostic};
-use crate::narrow::{narrowed_type_at, NarrowState};
+use crate::narrow::{narrowed_type_at, refine_by_ternary_guard, NarrowState};
 
 #[cfg(test)]
 mod tests;
@@ -96,7 +96,7 @@ pub fn arg_diagnostics_query(
             .args
             .iter()
             .zip(pre_types)
-            .map(|(arg_id, base)| narrow_arg(db, narrow, body, *arg_id, base))
+            .map(|(arg_id, base)| narrow_arg(db, narrowing_enabled, narrow, body, *arg_id, base))
             .collect::<Vec<_>>();
         narrow_arg_ns += narrow_arg_start.elapsed().as_nanos();
 
@@ -215,18 +215,22 @@ fn log_owner_stats(
 
 fn narrow_arg(
     db: &dyn HirDatabase,
+    narrowing_enabled: bool,
     narrow: Option<&dataflow::DataflowResult<NarrowState>>,
     body: &Body,
     expr_id: ExprId,
     base: TypeId,
 ) -> TypeId {
-    let Some(result) = narrow else {
+    if !narrowing_enabled {
         return base;
-    };
+    }
     let Expr::Path(name) = body.expr(expr_id) else {
         return base;
     };
-    narrowed_type_at(db, result, body, expr_id.to_idx(), name).unwrap_or(base)
+    let flow = narrow
+        .and_then(|result| narrowed_type_at(db, result, body, expr_id.to_idx(), name))
+        .unwrap_or(base);
+    refine_by_ternary_guard(db, body, expr_id.to_idx(), name, flow)
 }
 
 fn resolve_body(module_bodies: &hir_def::ModuleBodies, owner: DefWithBodyId) -> Option<&Body> {
