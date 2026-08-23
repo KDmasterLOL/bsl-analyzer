@@ -316,18 +316,20 @@ pub(crate) fn materialise_signature_enriched(
             if inferred != db.unknown() {
                 sig.ret = inferred;
             }
-        } else if has_structure_fields(db, inferred) {
-            // Only the untyped structure is replaced: an arm the documentation declares as
-            // something else, and a structure documented under a collection, stay as declared.
-            sig.ret = crate::lower::doc_structure::substitute_bare(db, sig.ret, inferred);
+        } else {
+            // The body proves its keys on the path that returns a structure; the other paths of an
+            // optional result contribute nothing to the documented structure and are left out.
+            let proven = crate::lower::doc_structure::structures_with_fields(db, inferred);
+            if !proven.is_empty() {
+                let structure = if proven.len() == 1 { proven[0] } else { db.union(proven) };
+                // Only the untyped structure is replaced: an arm the documentation declares as
+                // something else, and a structure documented under a collection, stay as declared.
+                sig.ret = crate::lower::doc_structure::substitute_bare(db, sig.ret, structure);
+            }
         }
     }
 
     sig
-}
-
-fn has_structure_fields(db: &dyn TypeKernelDb, ty: TypeId) -> bool {
-    matches!(db.lookup_type(ty), bsl_types::kind::TypeKind::Structure(facet) if facet.fields.is_some())
 }
 
 #[cfg(test)]

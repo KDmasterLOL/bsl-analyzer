@@ -104,30 +104,7 @@ pub fn fold_lower_per_char(s: &str) -> String {
 /// either side. An empty `needle_lower` matches everywhere, like
 /// [`str::contains`].
 pub fn contains_ignore_case(haystack: &str, needle_lower: &str) -> bool {
-    debug_assert_eq!(
-        needle_lower,
-        fold_lower_per_char(needle_lower),
-        "needle_lower must already be per-char-lowercase"
-    );
-
-    let Some(needle_first) = needle_lower.chars().next() else {
-        return true;
-    };
-
-    let mut window = haystack.chars();
-    loop {
-        let mut probe = window.clone();
-        let Some(h) = probe.next() else { return false };
-
-        // First-char filter: most candidate positions fail here, so the full
-        // window comparison (and its multi-char-expansion bookkeeping) only
-        // runs when it might actually match.
-        if fold_one(h) == needle_first && window_matches(window.clone(), needle_lower) {
-            return true;
-        }
-
-        window.next();
-    }
+    find_ignore_case(haystack, needle_lower).is_some()
 }
 
 /// Case-insensitive substring search reporting the match's byte range **in the haystack**.
@@ -150,7 +127,16 @@ pub fn find_ignore_case(haystack: &str, needle_lower: &str) -> Option<std::ops::
         return Some(0..0);
     }
 
-    for (start, _) in haystack.char_indices() {
+    let Some(needle_first) = needle_lower.chars().next() else {
+        return Some(0..0);
+    };
+
+    for (start, candidate) in haystack.char_indices() {
+        // First-char filter: most positions fail here, so the full comparison only runs where it
+        // might actually match.
+        if fold_one(candidate) != needle_first {
+            continue;
+        }
         if let Some(len) = match_len_ignore_case(&haystack[start..], needle_lower) {
             return Some(start..start + len);
         }
@@ -158,21 +144,43 @@ pub fn find_ignore_case(haystack: &str, needle_lower: &str) -> Option<std::ops::
     None
 }
 
-/// The number of haystack bytes matching `needle` from the start, if it matches at all. Each
-/// haystack char is compared as one folded char, so the byte count stays exact.
+/// The number of haystack bytes matching `needle` from the start, if it matches at all.
+///
+/// The count is in haystack bytes, never in folded ones, so a char whose lowercase mapping is
+/// longer or shorter (`İ`, `K`) still yields a count that lands on a char boundary. A multi-char
+/// expansion is consumed the way [`fold_lower_per_char`] would produce it, so this and the search
+/// built on it answer the same question the old window comparison did.
 fn match_len_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
     let mut needle_chars = needle.chars();
+    let mut pending: Option<std::char::ToLowercase> = None;
+    let mut haystack_chars = haystack.char_indices();
     let mut consumed = 0;
-    for (index, candidate) in haystack.char_indices() {
+
+    loop {
         let Some(expected) = needle_chars.next() else {
             return Some(consumed);
         };
-        if fold_one(candidate) != expected {
+        let folded = match pending.as_mut().and_then(Iterator::next) {
+            Some(folded) => folded,
+            None => {
+                pending = None;
+                let (index, candidate) = haystack_chars.next()?;
+                consumed = index + candidate.len_utf8();
+                match fold_char_fast(candidate) {
+                    Some(folded) => folded,
+                    None => {
+                        let mut expansion = candidate.to_lowercase();
+                        let first = expansion.next()?;
+                        pending = Some(expansion);
+                        first
+                    }
+                }
+            }
+        };
+        if folded != expected {
             return None;
         }
-        consumed = index + candidate.len_utf8();
     }
-    needle_chars.next().is_none().then_some(consumed)
 }
 
 /// Folds a single char the same way [`fold_lower_per_char`] would, for the
@@ -181,47 +189,6 @@ fn match_len_ignore_case(haystack: &str, needle: &str) -> Option<usize> {
 #[inline]
 fn fold_one(c: char) -> char {
     fold_char_fast(c).unwrap_or_else(|| c.to_lowercase().next().unwrap_or(c))
-}
-
-/// Compares a haystack char window (starting at `hay`) against `needle`
-/// (already per-char-lowercase) using per-char fold semantics. Handles a
-/// haystack char whose lowercase mapping expands to multiple chars (e.g.
-/// Turkish `İ`) by queuing the expansion's remaining chars in `pending`
-/// before pulling the next haystack char — the same multi-char handling
-/// `fold_lower_per_char` does via `String`, without allocating here.
-fn window_matches(mut hay: std::str::Chars<'_>, needle: &str) -> bool {
-    let mut needle_chars = needle.chars();
-    let mut pending: Option<std::char::ToLowercase> = None;
-
-    loop {
-        let Some(expected) = needle_chars.next() else { return true };
-
-        let actual = match pending.as_mut().and_then(|iter| iter.next()) {
-            Some(c) => c,
-            // `pending` was `None`, or its expansion is spent — either way,
-            // clear it and pull the next haystack char.
-            None => {
-                pending = None;
-                match hay.next() {
-                    None => return false,
-                    Some(h) => match fold_char_fast(h) {
-                        Some(fc) => fc,
-                        None => {
-                            let mut lc = h.to_lowercase();
-                            let first =
-                                lc.next().expect("char::to_lowercase yields at least one char");
-                            pending = Some(lc);
-                            first
-                        }
-                    },
-                }
-            }
-        };
-
-        if actual != expected {
-            return false;
-        }
-    }
 }
 
 #[cold]
@@ -413,6 +380,36 @@ mod find_ignore_case_tests {
             let found = find_ignore_case(&text, " из ").expect("marker is there");
             assert_eq!(&text[found.clone()], " из ", "range must cut the marker itself");
             assert_eq!(&text[found.end..], "Строка");
+        }
+    }
+
+    #[test]
+    fn a_multi_char_expansion_is_found_whole() {
+        // `İ` lowercases to two chars, `i` plus a combining dot. A needle spelling that expansion
+        // out must match, and the reported range must cover the whole original char.
+        let found = find_ignore_case("xİy", "i\u{307}").expect("the expansion is there");
+        assert_eq!(&"xİy"[found.clone()], "İ");
+        assert_eq!(found, 1..3);
+    }
+
+    #[test]
+    fn the_search_answers_exactly_what_contains_answers() {
+        // The two share a contract, and a divergence between them is invisible at the call site:
+        // the same input must never be present for one and absent for the other.
+        for (haystack, needle) in [
+            ("xİy", "i\u{307}"),
+            ("xİy", "i"),
+            ("Массив ИЗ Строка", " из "),
+            ("МассивСтрок", " из "),
+            ("Å из Строка", " из "),
+            ("", " из "),
+            ("что угодно", ""),
+        ] {
+            assert_eq!(
+                super::find_ignore_case(haystack, needle).is_some(),
+                super::contains_ignore_case(haystack, needle),
+                "разошлись на {haystack:?} / {needle:?}"
+            );
         }
     }
 

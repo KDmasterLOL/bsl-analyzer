@@ -114,6 +114,20 @@ pub(crate) fn substitute_bare(db: &dyn TypeKernelDb, base: TypeId, structure: Ty
     substitute_at(db, base, structure, 0)
 }
 
+/// The structures carrying fields that a type holds directly: itself, or the arms of a union.
+/// A method that returns `Неопределено` on one path and a structure on another has both in one
+/// type, and only the structure can fill a documented slot.
+pub(crate) fn structures_with_fields(db: &dyn TypeKernelDb, ty: TypeId) -> Vec<TypeId> {
+    use bsl_types::kind::TypeKind;
+    match db.lookup_type(ty) {
+        TypeKind::Structure(facet) if facet.fields.is_some() => vec![ty],
+        TypeKind::Union(members) => {
+            members.iter().flat_map(|member| structures_with_fields(db, *member)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
 /// Whether the slot has an untyped structure that [`substitute_bare`] would fill.
 pub(crate) fn has_bare_untyped_structure(db: &dyn TypeKernelDb, ty: TypeId) -> bool {
     use bsl_types::kind::TypeKind;

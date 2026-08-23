@@ -328,3 +328,35 @@ fn an_optional_structure_documented_without_fields_keeps_the_keys_the_body_prove
         "keys leaked past the array: {collection:?}"
     );
 }
+
+#[test]
+fn an_optional_body_still_proves_its_keys() {
+    // A method that answers `Неопределено` on one path and a structure on another has both in one
+    // inferred type. The keys live on the structure alone, and documenting the result must not cost
+    // the caller everything the body proved.
+    let body = "Функция ПараметрыСоединения(Флаг)\n\
+\tЕсли Флаг Тогда\n\
+\t\tВозврат Неопределено;\n\
+\tКонецЕсли;\n\
+\tПар = Новый Структура(\"Таймаут, Адрес\");\n\
+\tВозврат Пар;\n\
+КонецФункции\n\
+\n\
+Процедура Тест()\n\
+\tСтр = ПараметрыСоединения(Ложь);\n\
+\tСтр.$0\n\
+КонецПроцедуры\n";
+
+    for documented in [
+        "// Возвращаемое значение:\n//   Неопределено, Структура - параметры соединения.\n",
+        "// Возвращаемое значение:\n//   Структура - параметры соединения.\n",
+    ] {
+        let labels = labels(&complete(&format!("//- /test.bsl\n{documented}{body}")));
+        assert!(labels.iter().any(|l| l == "Таймаут"), "key from the body lost: {labels:?}");
+    }
+
+    // The control: the same body without documentation is where the keys come from, so the
+    // assertions above cannot pass on a build that has lost them altogether.
+    let undocumented = labels(&complete(&format!("//- /test.bsl\n{body}")));
+    assert!(undocumented.iter().any(|l| l == "Таймаут"), "body keys missing: {undocumented:?}");
+}
