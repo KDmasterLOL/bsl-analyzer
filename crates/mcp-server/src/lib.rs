@@ -28,6 +28,9 @@ pub use graph_query::{GraphDb, GraphDbContextProvider};
 pub use http::{serve_http, wildcard_allowed_hosts, MAX_HTTP_REQUEST_BODY_BYTES};
 use state::WorkspaceSearchMode;
 pub use state::{OnecConnection, SharedState};
+pub use tools::platform::{
+    build_reference_documents, reference_documents_fingerprint, REFERENCE_DOCUMENT_SCHEMA_VERSION,
+};
 
 pub async fn serve_stdio(server: McpServer) -> anyhow::Result<()> {
     serve_stream(server, rmcp::transport::stdio()).await
@@ -109,12 +112,11 @@ struct MetadataParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct SearchParams {
-    /// Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
-    /// `search_docs` | `status`.
-    action: String,
-    /// Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
-    query: Option<String>,
+struct LegacySearchQueryParams {
+    /// Free-text query.
+    #[schemars(length(min = 1))]
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    query: String,
     /// Cap on returned hits (default 10, max 50).
     limit: Option<usize>,
     /// Output budget in tokens (~4 chars each) for the text listing and the structured hits
@@ -124,7 +126,147 @@ struct SearchParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
-struct SyntaxHelpParams {
+struct LegacySearchStatusParams {}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DocsSearchParams {
+    /// Free-text query for the selected search action.
+    #[schemars(length(min = 1))]
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    query: String,
+    /// Cap on returned platform-reference hits (default 10, max 50).
+    limit: Option<usize>,
+    /// Output budget in tokens (~4 chars each) for text and structured content together.
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ListPlatformParams {
+    /// Optional platform entity kind: type, method, property, constructor, or global_function.
+    kind: Option<tools::platform::PlatformReferenceKind>,
+    /// Optional case-insensitive substring of the Russian or English platform entity name.
+    name: Option<String>,
+    /// Output budget in tokens (~4 chars each) for text and structured content together.
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(transform = document_search_action)]
+enum WorkspaceSearchParams {
+    SearchCode(LegacySearchQueryParams),
+    Status(LegacySearchStatusParams),
+    ListPlatform(ListPlatformParams),
+    FindDocs(DocsSearchParams),
+    SearchDocs(DocsSearchParams),
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "action", rename_all = "snake_case")]
+#[schemars(transform = document_search_action)]
+enum ReferenceSearchParams {
+    FindDocs(LegacySearchQueryParams),
+    SearchDocs(LegacySearchQueryParams),
+    Status(LegacySearchStatusParams),
+    ListPlatform(ListPlatformParams),
+}
+
+fn document_search_action(schema: &mut schemars::Schema) {
+    fn visit(object: &mut serde_json::Map<String, serde_json::Value>) {
+        if let Some(properties) =
+            object.get_mut("properties").and_then(serde_json::Value::as_object_mut)
+        {
+            if let Some(action) =
+                properties.get_mut("action").and_then(serde_json::Value::as_object_mut)
+            {
+                action.insert(
+                    "description".to_string(),
+                    serde_json::Value::String(
+                        "Requested search, platform-listing, or lifecycle action.".to_string(),
+                    ),
+                );
+            }
+        }
+        for value in object.values_mut() {
+            match value {
+                serde_json::Value::Object(child) => visit(child),
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        if let serde_json::Value::Object(child) = value {
+                            visit(child);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    visit(schema.ensure_object());
+}
+
+enum SearchCommand {
+    SearchCode(LegacySearchQueryParams),
+    Status,
+    ListPlatform(ListPlatformParams),
+    FindDocs { query: String, limit: Option<usize>, max_output_tokens: Option<usize> },
+    SearchDocs { query: String, limit: Option<usize>, max_output_tokens: Option<usize> },
+}
+
+impl From<WorkspaceSearchParams> for SearchCommand {
+    fn from(params: WorkspaceSearchParams) -> Self {
+        match params {
+            WorkspaceSearchParams::SearchCode(params) => Self::SearchCode(params),
+            WorkspaceSearchParams::Status(_) => Self::Status,
+            WorkspaceSearchParams::ListPlatform(params) => Self::ListPlatform(params),
+            WorkspaceSearchParams::FindDocs(params) => Self::FindDocs {
+                query: params.query,
+                limit: params.limit,
+                max_output_tokens: params.max_output_tokens,
+            },
+            WorkspaceSearchParams::SearchDocs(params) => Self::SearchDocs {
+                query: params.query,
+                limit: params.limit,
+                max_output_tokens: params.max_output_tokens,
+            },
+        }
+    }
+}
+
+impl From<ReferenceSearchParams> for SearchCommand {
+    fn from(params: ReferenceSearchParams) -> Self {
+        match params {
+            ReferenceSearchParams::FindDocs(params) => Self::FindDocs {
+                query: params.query,
+                limit: params.limit,
+                max_output_tokens: params.max_output_tokens,
+            },
+            ReferenceSearchParams::SearchDocs(params) => Self::SearchDocs {
+                query: params.query,
+                limit: params.limit,
+                max_output_tokens: params.max_output_tokens,
+            },
+            ReferenceSearchParams::Status(_) => Self::Status,
+            ReferenceSearchParams::ListPlatform(params) => Self::ListPlatform(params),
+        }
+    }
+}
+
+fn deserialize_non_empty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        return Err(serde::de::Error::custom("must not be empty"));
+    }
+    Ok(value)
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct SyntaxHelpByNameParams {
     /// Platform member name to look up, e.g. `СтрНайти` or a type method.
     name: String,
     /// Owning platform type when `name` is a member of a specific type (optional).
@@ -134,6 +276,78 @@ struct SyntaxHelpParams {
     /// pointing at the single-member lookup, and the card's listings take what is left
     /// (`budget_exhausted` says when they were cut). Default 6000.
     max_output_tokens: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SyntaxHelpByReferenceIdParams {
+    /// Exact stable identifier returned by `search(action="list_platform")`.
+    #[schemars(length(min = 1))]
+    #[serde(deserialize_with = "deserialize_non_empty_string")]
+    reference_id: String,
+    /// Output budget in tokens (~4 chars each) for Markdown and structured content together.
+    max_output_tokens: Option<usize>,
+}
+
+#[derive(JsonSchema)]
+#[serde(untagged)]
+#[schemars(transform = syntax_help_xor_schema)]
+#[allow(dead_code)] // schema-only mirror; runtime deserialization enforces the same XOR below
+enum SyntaxHelpParamsSchema {
+    ByName(SyntaxHelpByNameParams),
+    ByReferenceId(SyntaxHelpByReferenceIdParams),
+}
+
+enum SyntaxHelpParams {
+    ByName(SyntaxHelpByNameParams),
+    ByReferenceId(SyntaxHelpByReferenceIdParams),
+}
+
+impl<'de> Deserialize<'de> for SyntaxHelpParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("syntax_help params must be an object"))?;
+        if object.contains_key("reference_id") {
+            if object.contains_key("name") || object.contains_key("type_name") {
+                return Err(serde::de::Error::custom(
+                    "reference_id cannot be combined with name or type_name",
+                ));
+            }
+            serde_json::from_value(value).map(Self::ByReferenceId).map_err(serde::de::Error::custom)
+        } else {
+            serde_json::from_value(value).map(Self::ByName).map_err(serde::de::Error::custom)
+        }
+    }
+}
+
+impl JsonSchema for SyntaxHelpParams {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "SyntaxHelpParams".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        generator.subschema_for::<SyntaxHelpParamsSchema>()
+    }
+}
+
+fn syntax_help_xor_schema(schema: &mut schemars::Schema) {
+    let object = schema.ensure_object();
+    let Some(mut branches) = object
+        .remove("anyOf")
+        .or_else(|| object.remove("oneOf"))
+        .and_then(|value| value.as_array().cloned())
+    else {
+        return;
+    };
+    if let Some(legacy_branch) = branches.first_mut().and_then(serde_json::Value::as_object_mut) {
+        legacy_branch.insert("not".to_owned(), serde_json::json!({"required": ["reference_id"]}));
+    }
+    object.insert("oneOf".to_owned(), serde_json::Value::Array(branches));
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -236,6 +450,7 @@ struct GraphParams {
 }
 
 #[derive(Deserialize, JsonSchema)]
+#[schemars(transform = symbol_info_input_schema)]
 struct SymbolInfoParams {
     /// Qualified name of the symbol (primary input): a common-module method
     /// (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), a metadata object (`Справочник.Товары`)
@@ -261,11 +476,61 @@ struct SymbolInfoParams {
     /// is always a summary and is added when the call graph is ready.
     #[serde(default)]
     include: Vec<String>,
+    /// Keep only members of this machine kind; does not affect symbol resolution or `include`.
+    member_kind: Option<SymbolMemberKindFilter>,
+    /// Keep only members with this exact case-insensitive name.
+    member_name: Option<String>,
     /// Type/label language: `ru` (default) or `en`.
     locale: Option<String>,
     /// Output budget in tokens (~4 chars each); an over-budget member list is trimmed and the
     /// response carries `truncated: true` with a `budget_hint` (default 6000).
     max_output_tokens: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum SymbolMemberKindFilter {
+    Attribute,
+    TabularSection,
+    Method,
+    Variable,
+    Property,
+    FormAttribute,
+    FormElement,
+    Handler,
+}
+
+impl SymbolMemberKindFilter {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attribute => "attribute",
+            Self::TabularSection => "tabular_section",
+            Self::Method => "method",
+            Self::Variable => "variable",
+            Self::Property => "property",
+            Self::FormAttribute => "form_attribute",
+            Self::FormElement => "form_element",
+            Self::Handler => "handler",
+        }
+    }
+}
+
+fn symbol_info_input_schema(schema: &mut schemars::Schema) {
+    schema.ensure_object().insert(
+        "oneOf".to_owned(),
+        serde_json::json!([
+            {
+                "required": ["symbol"],
+                "not": {"anyOf": [
+                    {"required": ["root_id"]},
+                    {"required": ["path"]},
+                    {"required": ["line"]},
+                    {"required": ["column"]}
+                ]}
+            },
+            {"required": ["path", "line"]}
+        ]),
+    );
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -654,13 +919,19 @@ impl McpServer {
     /// The router a profile serves under `gate`. Exposed without state so the declaration
     /// can be compared against the composition a launch actually produces.
     pub fn gated_router(profile: McpProfile, gate: &ToolGate) -> ToolRouter<Self> {
+        let mut router = Self::profile_router(profile);
+        for name in &gate.hidden {
+            router.disable_route(name.clone());
+        }
+        router
+    }
+
+    pub(crate) fn profile_router(profile: McpProfile) -> ToolRouter<Self> {
         let mut router = match profile {
             McpProfile::Workspace => Self::workspace_tool_router(),
             McpProfile::Reference => Self::reference_tool_router(),
         };
-        for name in &gate.hidden {
-            router.disable_route(name.clone());
-        }
+        router.merge(Self::shared_tool_router());
         router
     }
 
@@ -853,12 +1124,11 @@ impl McpServer {
         })
     }
 
-    /// Hybrid lexical + semantic code search across the project source. Use when you need to
-    /// find code by meaning or a free-form phrase ("where the reserve for an order is built")
-    /// or when the exact symbol name is unknown. Not for walking call relationships — that is
-    /// `graph` (callers/callees by durable id) — and not for analyzer findings — that is
-    /// `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
-    /// 10, max 50); `status` — index readiness. While the index warms up it returns a retry
+    /// Search project code or the built-in platform reference from the workspace profile.
+    /// Actions: `search_code` searches project source; `find_docs`/`search_docs` search platform
+    /// reference text; `list_platform` lists exact platform entities; `status` reports project
+    /// code-index readiness. Not for walking call relationships — use `graph` — or analyzer
+    /// findings — use `diagnostics`. While an index warms up its search action returns a retry
     /// envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
     /// the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
     /// line_start, line_end, location, symbol, kind, graph_id, snippet, snippet_truncated_lines}],
@@ -870,14 +1140,17 @@ impl McpServer {
     /// absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
     /// durable id to pass to `graph`. `total` is the ranked list before the output budget cut
     /// it (already bounded by `limit`), not the configuration-wide match count.
-    #[tool(name = "search", annotations(read_only_hint = true))]
+    #[tool(
+        name = "search",
+        output_schema = tools::search::search_output_schema(),
+        annotations(read_only_hint = true)
+    )]
     async fn workspace_search(
         &self,
-        params: Parameters<SearchParams>,
+        params: Parameters<WorkspaceSearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        match p.action.as_str() {
-            "status" => {
+        match SearchCommand::from(params.0) {
+            SearchCommand::Status => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
                 let semantic_runtime = self.state.semantic_runtime();
@@ -907,11 +1180,12 @@ impl McpServer {
             }
             // `search_code` is the unified lexical+semantic code search (smart-fused: exact-symbol
             // tier then semantic tail).
-            "search_code" => {
-                let query = require(p.query, "query", &p.action)?;
-                let limit = p.limit.unwrap_or(10).min(50);
-                let max_output_tokens =
-                    p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+            SearchCommand::SearchCode(params) => {
+                let query = params.query;
+                let limit = params.limit.unwrap_or(10).min(50);
+                let max_output_tokens = params
+                    .max_output_tokens
+                    .unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
                 let engine = self.state.search_engine().clone();
                 let semantic_runtime = self.state.semantic_runtime();
                 let workspace_search_mode = self.state.workspace_search_mode();
@@ -953,7 +1227,59 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(contract::unknown_action(McpProfile::Workspace, "search", other)),
+            SearchCommand::ListPlatform(params) => tools::platform::list_platform(
+                params.kind,
+                params.name.as_deref(),
+                params.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+            ),
+            command @ (SearchCommand::FindDocs { .. } | SearchCommand::SearchDocs { .. }) => {
+                self.state.ensure_reference_loading();
+                if let crate::state::ReferenceSearchLifecycle::Failed { message, reason_code } =
+                    self.state.reference_lifecycle()
+                {
+                    return Err(McpError::internal_error(
+                        format!("reference search initialization failed: {message}"),
+                        Some(serde_json::json!({"reasonCode": reason_code})),
+                    ));
+                }
+                let semantic = matches!(&command, SearchCommand::SearchDocs { .. });
+                let (query, limit, max_output_tokens) = match command {
+                    SearchCommand::FindDocs { query, limit, max_output_tokens }
+                    | SearchCommand::SearchDocs { query, limit, max_output_tokens } => {
+                        (query, limit, max_output_tokens)
+                    }
+                    _ => unreachable!(),
+                };
+                let engine = self.state.reference_search_engine();
+                let baseline = self.state.reference_baseline_view();
+                let configured = baseline.configured;
+                let external = baseline.external;
+                tokio::task::spawn_blocking(move || {
+                    if semantic {
+                        tools::search::search_docs(
+                            &engine,
+                            configured.as_ref(),
+                            external,
+                            &query,
+                            limit.unwrap_or(10).min(50),
+                            max_output_tokens
+                                .unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+                        )
+                    } else {
+                        tools::search::find_docs(
+                            &engine,
+                            configured.as_ref(),
+                            external,
+                            &query,
+                            limit.unwrap_or(10).min(50),
+                            max_output_tokens
+                                .unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+                        )
+                    }
+                })
+                .await
+                .map_err(|error| McpError::internal_error(format!("Task error: {error}"), None))?
+            }
         }
     }
 
@@ -1435,7 +1761,11 @@ impl McpServer {
     /// `graph` with the returned `graph_id`). Reads the resident host; while it builds it returns
     /// a retry envelope. The `usages` summary needs the call graph; if it is still indexing the
     /// core card is still served with `usages_unavailable`.
-    #[tool(name = "symbol_info", annotations(read_only_hint = true))]
+    #[tool(
+        name = "symbol_info",
+        output_schema = tools::symbol_info::symbol_info_output_schema(),
+        annotations(read_only_hint = true)
+    )]
     async fn symbol_info(
         &self,
         params: Parameters<SymbolInfoParams>,
@@ -1444,7 +1774,22 @@ impl McpServer {
         use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
-        if p.symbol.is_none() && p.path.is_none() {
+        if p.symbol.as_deref().is_some_and(|symbol| !ide::is_well_formed_symbol(symbol)) {
+            return Err(McpError::invalid_params(
+                "'symbol' must be a dot-separated sequence of identifiers",
+                None,
+            ));
+        }
+        let has_position_field =
+            p.root_id.is_some() || p.path.is_some() || p.line.is_some() || p.column.is_some();
+        let has_complete_position = p.path.is_some() && p.line.is_some();
+        if has_position_field && !has_complete_position {
+            return Err(McpError::invalid_params(
+                "positional context requires both 'path' and 'line'",
+                None,
+            ));
+        }
+        if p.symbol.is_none() && !has_complete_position {
             return Err(McpError::invalid_params(
                 "one of 'symbol' or 'path'+'line' is required",
                 None,
@@ -1461,6 +1806,8 @@ impl McpServer {
         let locale = tools::symbol_info::locale_from(p.locale.as_deref())?;
         let max_output_tokens =
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+        let member_kind = p.member_kind.map(SymbolMemberKindFilter::as_str);
+        let member_name = p.member_name.clone();
         let symbol = p.symbol.clone();
         let root_id = p.root_id.clone();
         let path = p.path.clone();
@@ -1515,7 +1862,7 @@ impl McpServer {
                     (card, roots, unread_files, freshness)
                 }
                 ResidentOutcome::Loading => {
-                    return Ok(tools::metadata::loading(&session.status_report()))
+                    return Ok(tools::symbol_info::loading(&session.status_report()))
                 }
                 ResidentOutcome::Disabled => {
                     return Err(McpError::invalid_params(
@@ -1524,10 +1871,7 @@ impl McpServer {
                     ))
                 }
                 ResidentOutcome::Failed(msg) => {
-                    return Err(McpError::internal_error(
-                        format!("symbol_info database: {msg}"),
-                        None,
-                    ))
+                    return Err(tools::symbol_info::database_error(msg))
                 }
             };
 
@@ -1544,13 +1888,20 @@ impl McpServer {
             };
 
             match card {
-                Some(card) => Ok(tools::symbol_info::render_card(
-                    &card,
-                    gdb,
-                    tools::symbol_info::DEFAULT_TOP_MODULES,
-                    max_output_tokens,
-                    &stamp,
-                )),
+                Some(mut card) => {
+                    tools::symbol_info::filter_members(
+                        &mut card,
+                        member_kind,
+                        member_name.as_deref(),
+                    );
+                    Ok(tools::symbol_info::render_card(
+                        &card,
+                        gdb,
+                        tools::symbol_info::DEFAULT_TOP_MODULES,
+                        max_output_tokens,
+                        &stamp,
+                    ))
+                }
                 None => {
                     // Resident miss: offer the name dictionary's candidates for an
                     // imprecise name. The lookup runs under the resident lock — it
@@ -1583,7 +1934,7 @@ impl McpServer {
                         // The resident was evicted between the card read and this
                         // one; a retry envelope is the honest answer, not a miss
                         // with no candidates.
-                        _ => Ok(tools::metadata::loading(&session.status_report())),
+                        _ => Ok(tools::symbol_info::loading(&session.status_report())),
                     }
                 }
             }
@@ -2032,21 +2383,25 @@ impl McpServer {
     /// platform API documentation by keyword or meaning. For project code search use the
     /// workspace profile's `search`; for one platform member's signature use `syntax_help`.
     /// Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
-    /// max 50); `status` — index readiness. While the index warms up it returns a retry
+    /// max 50); `list_platform` — exact built-in entity listing; `status` — index readiness.
+    /// While the index warms up a doc search returns a retry
     /// envelope. Hits arrive twice: a listing for people in the text block, and the same hits
     /// in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
     /// line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
     /// budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
     /// text layout may be reformatted in any release. `score` is the ranker's own number —
     /// comparable within one response, meaningless across searches or backends.
-    #[tool(name = "search", annotations(read_only_hint = true))]
+    #[tool(
+        name = "search",
+        output_schema = tools::search::search_output_schema(),
+        annotations(read_only_hint = true)
+    )]
     async fn reference_search(
         &self,
-        params: Parameters<SearchParams>,
+        params: Parameters<ReferenceSearchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        match p.action.as_str() {
-            "status" => {
+        match SearchCommand::from(params.0) {
+            SearchCommand::Status => {
                 let engine = self.state.search_engine().clone();
                 let progress = self.state.index_progress().clone();
                 let semantic_runtime = self.state.semantic_runtime();
@@ -2070,66 +2425,61 @@ impl McpServer {
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            "find_docs" | "search_docs" => {
-                let query = require(p.query, "query", &p.action)?;
-                let limit = p.limit.unwrap_or(10).min(50);
+            command @ (SearchCommand::FindDocs { .. } | SearchCommand::SearchDocs { .. }) => {
+                if let crate::state::ReferenceSearchLifecycle::Failed { message, reason_code } =
+                    self.state.reference_lifecycle()
+                {
+                    return Err(McpError::internal_error(
+                        format!("reference search initialization failed: {message}"),
+                        Some(serde_json::json!({"reasonCode": reason_code})),
+                    ));
+                }
+                let semantic = matches!(&command, SearchCommand::SearchDocs { .. });
+                let (query, limit, max_output_tokens) = match command {
+                    SearchCommand::FindDocs { query, limit, max_output_tokens }
+                    | SearchCommand::SearchDocs { query, limit, max_output_tokens } => {
+                        (query, limit, max_output_tokens)
+                    }
+                    _ => unreachable!(),
+                };
+                let limit = limit.unwrap_or(10).min(50);
                 let max_output_tokens =
-                    p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+                    max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
                 let engine = self.state.search_engine().clone();
                 let baseline = self.state.baseline_view();
                 let configured_baseline = baseline.configured;
                 let external_baseline = baseline.external;
-                let action = p.action.clone();
-                tokio::task::spawn_blocking(move || match action.as_str() {
-                    "find_docs" => tools::search::find_docs(
-                        &engine,
-                        configured_baseline.as_ref(),
-                        external_baseline.clone(),
-                        &query,
-                        limit,
-                        max_output_tokens,
-                    ),
-                    "search_docs" => tools::search::search_docs(
-                        &engine,
-                        configured_baseline.as_ref(),
-                        external_baseline,
-                        &query,
-                        limit,
-                        max_output_tokens,
-                    ),
-                    _ => unreachable!(),
+                tokio::task::spawn_blocking(move || {
+                    if semantic {
+                        tools::search::search_docs(
+                            &engine,
+                            configured_baseline.as_ref(),
+                            external_baseline,
+                            &query,
+                            limit,
+                            max_output_tokens,
+                        )
+                    } else {
+                        tools::search::find_docs(
+                            &engine,
+                            configured_baseline.as_ref(),
+                            external_baseline,
+                            &query,
+                            limit,
+                            max_output_tokens,
+                        )
+                    }
                 })
                 .await
                 .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
             }
-            other => Err(contract::unknown_action(McpProfile::Reference, "search", other)),
+            SearchCommand::ListPlatform(params) => tools::platform::list_platform(
+                params.kind,
+                params.name.as_deref(),
+                params.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+            ),
+            SearchCommand::SearchCode(_) => unreachable!("reference schema excludes search_code"),
         }
-    }
-
-    /// Look up one platform member's reference card — signature, parameters, and description —
-    /// from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
-    /// want its exact signature. For free-text doc discovery use `search`; for broader
-    /// conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-    /// the member belongs to a specific platform type, optional `max_output_tokens` bounding the
-    /// response. Successful responses retain the compatibility Markdown and add a versioned
-    /// structured card, so clients never need to parse the rendering.
-    #[tool(
-        name = "syntax_help",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<
-            tools::platform::SyntaxHelpResponse,
-        >(),
-        annotations(read_only_hint = true)
-    )]
-    async fn syntax_help(
-        &self,
-        params: Parameters<SyntaxHelpParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let p = params.0;
-        tools::platform::bsl_syntax_help(
-            &p.name,
-            p.type_name.as_deref(),
-            p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
-        )
     }
 
     /// Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
@@ -2147,6 +2497,35 @@ impl McpServer {
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
         )
         .await
+    }
+}
+
+#[tool_router(router = shared_tool_router)]
+impl McpServer {
+    /// Look up one platform member's reference card — signature, parameters, and description —
+    /// from the built-in platform data. Available in both profiles. Use `name` with optional
+    /// `type_name` for the legacy lookup, or the mutually exclusive `reference_id` returned by
+    /// `search(action="list_platform")` for an exact entity.
+    #[tool(
+        name = "syntax_help",
+        output_schema = tools::platform::syntax_help_output_schema(),
+        annotations(read_only_hint = true)
+    )]
+    async fn syntax_help(
+        &self,
+        params: Parameters<SyntaxHelpParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match params.0 {
+            SyntaxHelpParams::ByName(p) => tools::platform::bsl_syntax_help(
+                &p.name,
+                p.type_name.as_deref(),
+                p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+            ),
+            SyntaxHelpParams::ByReferenceId(p) => tools::platform::bsl_syntax_help_by_reference_id(
+                &p.reference_id,
+                p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+            ),
+        }
     }
 }
 
@@ -2244,6 +2623,230 @@ impl ServerHandler for McpServer {
 mod surface_guards {
     use super::*;
 
+    fn tool_input_schema(profile: McpProfile, name: &str) -> serde_json::Value {
+        let router = McpServer::gated_router(profile, &ToolGate::for_launch(profile, &[]));
+        let tools = router.list_all();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} is not served by {}", profile.as_str()));
+        serde_json::Value::Object(tool.input_schema.as_ref().clone())
+    }
+
+    fn tool_output_schema(profile: McpProfile, name: &str) -> serde_json::Value {
+        let router = McpServer::gated_router(profile, &ToolGate::for_launch(profile, &[]));
+        let tool = router
+            .list_all()
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap_or_else(|| panic!("{name} is not served by {}", profile.as_str()))
+            .clone();
+        serde_json::Value::Object(
+            tool.output_schema.expect("published outputSchema").as_ref().clone(),
+        )
+    }
+
+    fn string_values<'a>(value: &'a serde_json::Value, key: &str, out: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(value) = object.get(key).and_then(serde_json::Value::as_str) {
+                    out.push(value);
+                }
+                for value in object.values() {
+                    string_values(value, key, out);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    string_values(value, key, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn array_for_key<'a>(
+        value: &'a serde_json::Value,
+        key: &str,
+    ) -> Option<&'a Vec<serde_json::Value>> {
+        match value {
+            serde_json::Value::Object(object) => object
+                .get(key)
+                .and_then(serde_json::Value::as_array)
+                .or_else(|| object.values().find_map(|value| array_for_key(value, key))),
+            serde_json::Value::Array(values) => {
+                values.iter().find_map(|value| array_for_key(value, key))
+            }
+            _ => None,
+        }
+    }
+
+    fn required_sets<'a>(value: &'a serde_json::Value, out: &mut Vec<Vec<&'a str>>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                if let Some(required) = object.get("required").and_then(serde_json::Value::as_array)
+                {
+                    out.push(required.iter().filter_map(serde_json::Value::as_str).collect());
+                }
+                for value in object.values() {
+                    required_sets(value, out);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    required_sets(value, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn profile_search_inputs_are_tagged_and_legacy_branches_stay_permissive() {
+        let workspace_schema = tool_input_schema(McpProfile::Workspace, "search");
+        let reference_schema = tool_input_schema(McpProfile::Reference, "search");
+        assert_eq!(workspace_schema["oneOf"].as_array().map(Vec::len), Some(5));
+        assert_eq!(reference_schema["oneOf"].as_array().map(Vec::len), Some(4));
+
+        let mut workspace_actions = Vec::new();
+        string_values(&workspace_schema, "const", &mut workspace_actions);
+        for action in ["search_code", "status", "list_platform", "find_docs", "search_docs"] {
+            assert!(workspace_actions.contains(&action), "missing {action}: {workspace_schema}");
+        }
+        let mut reference_actions = Vec::new();
+        string_values(&reference_schema, "const", &mut reference_actions);
+        assert!(!reference_actions.contains(&"search_code"));
+        for action in ["status", "list_platform", "find_docs", "search_docs"] {
+            assert!(reference_actions.contains(&action), "missing {action}: {reference_schema}");
+        }
+        assert!(workspace_schema.to_string().contains("\"minLength\":1"));
+        for kind in ["type", "method", "property", "constructor", "global_function"] {
+            assert!(workspace_schema.to_string().contains(&format!("\"{kind}\"")));
+        }
+
+        assert!(serde_json::from_value::<WorkspaceSearchParams>(serde_json::json!({
+            "action": "search_code", "query": "x", "future": true
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<ReferenceSearchParams>(serde_json::json!({
+            "action": "find_docs", "query": "x", "future": true
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<WorkspaceSearchParams>(serde_json::json!({
+            "action": "list_platform", "future": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<WorkspaceSearchParams>(serde_json::json!({
+            "action": "find_docs", "query": "x", "future": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<WorkspaceSearchParams>(serde_json::json!({
+            "action": "search_code", "query": ""
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<ReferenceSearchParams>(serde_json::json!({
+            "action": "search_code", "query": "x"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn profile_search_outputs_publish_every_discriminated_branch() {
+        let workspace = tool_output_schema(McpProfile::Workspace, "search");
+        let reference = tool_output_schema(McpProfile::Reference, "search");
+        assert_eq!(workspace, reference);
+        let encoded = workspace.to_string();
+        for value in [
+            "search_code",
+            "find_docs",
+            "search_docs",
+            "list_platform",
+            "status",
+            "not_ready",
+            "ready",
+            "loading",
+            "busy",
+            "failed",
+        ] {
+            assert!(encoded.contains(&format!("\"{value}\"")), "missing {value}: {encoded}");
+        }
+        assert!(encoded.contains("\"schema_version\""));
+    }
+
+    #[test]
+    fn symbol_info_output_schema_requires_discriminators_and_member_branches() {
+        let schema = tool_output_schema(McpProfile::Workspace, "symbol_info");
+        assert_eq!(array_for_key(&schema, "oneOf").map(Vec::len), Some(4), "{schema}");
+
+        let mut constants = Vec::new();
+        string_values(&schema, "const", &mut constants);
+        for value in ["1", "ok", "not_found", "ambiguous", "loading"] {
+            assert!(constants.contains(&value), "missing const {value}: {schema}");
+        }
+
+        let mut required = Vec::new();
+        required_sets(&schema, &mut required);
+        assert!(required.iter().any(|keys| {
+            ["availability", "type", "type_variants"].iter().all(|key| keys.contains(key))
+        }));
+        assert!(required
+            .iter()
+            .any(|keys| ["availability", "signature"].iter().all(|key| keys.contains(key))));
+    }
+
+    #[test]
+    fn syntax_help_input_is_an_xor_with_a_closed_reference_branch() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let schema = tool_input_schema(profile, "syntax_help");
+            assert_eq!(array_for_key(&schema, "oneOf").map(Vec::len), Some(2), "{schema}");
+            assert!(schema.to_string().contains("reference_id"));
+            assert!(schema.to_string().contains("additionalProperties"));
+            assert!(schema.to_string().contains("max_output_tokens"));
+        }
+
+        assert!(serde_json::from_value::<SyntaxHelpParams>(serde_json::json!({
+            "name": "Массив", "future": true
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<SyntaxHelpParams>(serde_json::json!({
+            "reference_id": "type::x~digest", "max_output_tokens": 100
+        }))
+        .is_ok());
+        assert!(serde_json::from_value::<SyntaxHelpParams>(serde_json::json!({
+            "reference_id": "type::x~digest", "future": true
+        }))
+        .is_err());
+        assert!(serde_json::from_value::<SyntaxHelpParams>(serde_json::json!({
+            "name": "Массив", "reference_id": "type::x~digest"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn symbol_info_input_schema_accepts_name_with_optional_complete_position() {
+        let schema = tool_input_schema(McpProfile::Workspace, "symbol_info");
+        let branches = schema["oneOf"].as_array().expect("symbol_info oneOf");
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], serde_json::json!(["symbol"]));
+        assert_eq!(branches[1]["required"], serde_json::json!(["path", "line"]));
+        assert!(schema["properties"].get("root_id").is_some());
+        assert!(schema["properties"].get("column").is_some());
+        let encoded = schema.to_string();
+        for kind in [
+            "attribute",
+            "tabular_section",
+            "method",
+            "variable",
+            "property",
+            "form_attribute",
+            "form_element",
+            "handler",
+        ] {
+            assert!(encoded.contains(&format!("\"{kind}\"")), "missing {kind}: {schema}");
+        }
+        assert!(schema["properties"].get("member_name").is_some());
+    }
+
     /// The routing prose must not send a client to a tool this process may not be serving.
     ///
     /// Forward guard: the build declares no opt-in tool yet, so the loop body does not run
@@ -2285,7 +2888,8 @@ mod tool_descriptions {
             let _ = writeln!(out, "## {}", tool.name);
             let _ =
                 writeln!(out, "{}", tool.description.as_deref().unwrap_or("<MISSING DESCRIPTION>"));
-            if let Some(props) = tool.input_schema.get("properties").and_then(|v| v.as_object()) {
+            let props = contract::schema_properties(&tool.input_schema);
+            if !props.is_empty() {
                 let mut keys: Vec<&String> = props.keys().collect();
                 keys.sort();
                 for key in keys {
@@ -2308,7 +2912,12 @@ mod tool_descriptions {
     /// `anchor_root_id` is a legitimate word elsewhere in the same text.
     #[test]
     fn the_references_description_defers_to_the_answers_own_hint() {
-        let tools = McpServer::workspace_tool_router().list_all();
+        let enabled = vec!["references".to_string()];
+        let router = McpServer::gated_router(
+            McpProfile::Workspace,
+            &ToolGate::for_launch(McpProfile::Workspace, &enabled),
+        );
+        let tools = router.list_all();
         let references = tools
             .iter()
             .find(|tool| tool.name == "references")
@@ -2345,7 +2954,12 @@ mod tool_descriptions {
 
     #[test]
     fn workspace_tools_contract() {
-        let rendered = render(&McpServer::workspace_tool_router().list_all());
+        let router = McpServer::gated_router(
+            McpProfile::Workspace,
+            &ToolGate::for_launch(McpProfile::Workspace, &[]),
+        );
+        let rendered = render(&router.list_all());
+        assert!(!rendered.contains("<no doc>"), "every published parameter needs prose docs");
         expect![[r###"
             ## debug
             Drive a live 1C debugger session: attach, set breakpoints, step, and inspect state. Use
@@ -2535,89 +3149,12 @@ mod tool_descriptions {
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
 
-            ## references
-            Every occurrence of ONE symbol across the workspace, each labelled with what it does
-            at its site (`declaration` | `call` | `write` | `read`). Use to answer "who uses X",
-            "is this method called anywhere", "where is this variable written" before renaming or
-            deleting. Pass `symbol` (a qualified name — `ОбщегоНазначения.Метод`,
-            `Справочник.Товары.ОбновитьКэш` — exported members only, plus form-module methods as
-            `Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — or a short unique name); for a
-            local, a parameter or a non-exported member pass `path` with `line_content` — the text
-            of the line as you read it, which is checked against the file before anything is
-            counted — or `path`+`line` when you trust the coordinates. The answer always says which of five things happened in
-            `outcome`: `resolved` (the list IS the answer, and an empty list is a proven zero unless
-            `total_is_lower_bound` or `freshness.completeness` says the walk was cut short or
-            could not read everything),
-            `ambiguous` (several declarations answer to that name — the answer's
-            `resolution_hint` names the axis that separates THESE ones: a root, a qualified
-            `symbol`, or a `root_id`+`path` pair with the text of a line), `not_found` (nothing matched exactly), `unsupported_symbol` (the
-            name resolves to something no reference walk enumerates — a metadata object, a
-            platform member, a module as a whole), `anchor_stale` (the quoted line does not
-            describe that file any more — `anchor_stale.reason` says how, and the freshness
-            envelope says which revision you diverged from). Narrow a large answer with `area_root_id`,
-            `area_path_prefix` or `kinds` and walk the per-file `files` histogram; there is no
-            cursor. Not for the caller graph of a method (use `graph` with its `graph_id`) or for
-            finding code by meaning (use `search`). Reads the resident host; while it builds it
-            returns a retry envelope.
-              - anchor_root_id: `symbol`: which root to look for the DECLARATION in. The way out of
-            `outcome: "ambiguous"`, when a configuration and an extension declare the same name.
-            Not a filter on the answer — that is `area_root_id`.
-              - area_path_prefix: Show only references under this root-relative directory prefix (e.g.
-            `CommonModules/Продажи`). Combine with `area_root_id`: one relative path lives in
-            every root that repeats the configuration's layout.
-              - area_root_id: Show only references from this root. Narrows the ANSWER, not the anchor: a symbol
-            declared in the configuration and used from an extension takes `anchor_root_id: ""`
-            with `area_root_id: "<extension>"`.
-              - column: `path`: 0-based offset within the line, counted in UTF-16 units — the unit every
-            column this server publishes is counted in, so a `range.start_character` out of any
-            answer goes straight back in. Defaults to 0 for a `path`+`line`
-            anchor; beside `line_content` it has NO default and narrows only when you pass it —
-            sending one picks the token under it and refuses when that token is not in your quote,
-            which is the opposite of what the quote is for.
-              - include_declaration: Whether the declaration itself is one of the references (default: true).
-              - include_preview: Add a one-line `snippet` of source to every reference (default false). Decoration
-            only: it is paid for out of whatever budget the answer leaves, so the references, the
-            `total` and the per-file histogram are the same either way, and previews that did not
-            fit are counted in `previews_omitted`.
-              - kinds: Keep only these kinds: any of `declaration` | `call` | `write` | `read`. Empty = all.
-              - limit: Cap on returned references (default 50, max 500). `total` is counted before it, and
-            the per-file histogram covers everything the limit hid.
-              - line: `path`: 0-based line of the occurrence to anchor on.
-              - line_content: `path`: the text of the line the occurrence is on, as you read it — any substring that
-            carries at least one whole identifier (a quote cutting a name in half certifies
-            nothing and is refused by name). Checked against the file before anything is counted,
-            so a file edited since you read it answers `outcome: "anchor_stale"` instead of a
-            confident list about whatever token now stands at your coordinates. Makes `line`
-            optional — and `line` beside it never CHOOSES: when the quote names one symbol the
-            answer is that symbol wherever it moved (`anchor.relocated_from_line`), and when it
-            names several the answer is `ambiguous` with `pointed_by_line` on the place your line
-            stood at.
-              - max_files: Cap on candidate files walked (default 2000, max 10000). Reaching it makes `total` a
-            lower bound and sets `narrowing_comparable: false`.
-              - max_output_tokens: Output budget in tokens (~4 chars each), default 6000; a trimmed response says so in
-            `freshness.completeness`.
-              - path: Anchor on a file for what no name addresses (a local, a parameter, a non-exported
-            member): absolute or workspace-relative `.bsl` path, or a path relative to `root_id`.
-            Needs `line_content` (the text of the line, checked against the file) or `line` (bare
-            coordinates, taken on trust) — either alone will do, and together they narrow.
-              - root_id: `path`: the source root that path is spelled against, as carried by every `search`
-            code hit. Omit for a path already spelled against the workspace; `""` names the
-            configuration.
-              - symbol: Qualified name of the symbol whose references you want: a common-module method
-            (`ОбщегоНазначения.ЗначениеРеквизитаОбъекта`), an object/manager module method
-            (`Справочник.Товары.ОбновитьКэш`), a form-module method
-            (`Документ.Заказ.Форма.ФормаДокумента.ПриОткрытии` — those need no `Экспорт`, since
-            handlers never have it), or a short unique name. Case-insensitive. Any OTHER member
-            declared without `Экспорт` has no qualified name — `symbol_info` reads the same
-            spelling the same way — so reach it by `path` with `line_content`.
-
             ## search
-            Hybrid lexical + semantic code search across the project source. Use when you need to
-            find code by meaning or a free-form phrase ("where the reserve for an order is built")
-            or when the exact symbol name is unknown. Not for walking call relationships — that is
-            `graph` (callers/callees by durable id) — and not for analyzer findings — that is
-            `diagnostics`. Actions: `search_code` — the search (`query` required; `limit` default
-            10, max 50); `status` — index readiness. While the index warms up it returns a retry
+            Search project code or the built-in platform reference from the workspace profile.
+            Actions: `search_code` searches project source; `find_docs`/`search_docs` search platform
+            reference text; `list_platform` lists exact platform entities; `status` reports project
+            code-index readiness. Not for walking call relationships — use `graph` — or analyzer
+            findings — use `diagnostics`. While an index warms up its search action returns a retry
             envelope; retry shortly. Hits arrive twice: a listing for people in the text block, and
             the same hits in `structuredContent` — `{schema_version, hits: [{rank, modality, root_id, path,
             line_start, line_end, location, symbol, kind, graph_id, snippet, snippet_truncated_lines}],
@@ -2629,13 +3166,12 @@ mod tool_descriptions {
             absent facts — no `symbol` is a file/header chunk, no `graph_id` means the hit has no
             durable id to pass to `graph`. `total` is the ranked list before the output budget cut
             it (already bounded by `limit`), not the configuration-wide match count.
-              - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
-            `search_docs` | `status`.
-              - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
-            together; over-budget results are truncated at a hit boundary with a note telling you to
-            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
-              - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
+              - action: Requested search, platform-listing, or lifecycle action.
+              - kind: Optional platform entity kind: type, method, property, constructor, or global_function.
+              - limit: Cap on returned platform-reference hits (default 10, max 50).
+              - max_output_tokens: Output budget in tokens (~4 chars each) for text and structured content together.
+              - name: Optional case-insensitive substring of the Russian or English platform entity name.
+              - query: Free-text query for the selected search action.
 
             ## symbol_info
             One symbol's consolidated card: kind, signature, type, doc, definition site, and a
@@ -2660,6 +3196,8 @@ mod tool_descriptions {
               - locale: Type/label language: `ru` (default) or `en`.
               - max_output_tokens: Output budget in tokens (~4 chars each); an over-budget member list is trimmed and the
             response carries `truncated: true` with a `budget_hint` (default 6000).
+              - member_kind: Keep only members of this machine kind; does not affect symbol resolution or `include`.
+              - member_name: Keep only members with this exact case-insensitive name.
               - path: Positional fallback for locals/parameters that have no qualified name: absolute or
             workspace-relative `.bsl` path, or a path relative to `root_id`. Requires `line`.
               - root_id: `path`: the source root that path is spelled against, as carried by every `search`
@@ -2672,12 +3210,27 @@ mod tool_descriptions {
             (`Документ.ЗаказКлиента.Провести`), or a platform member (`СтрНайти`, `Массив.Добавить`).
             Case-insensitive; the MdoType keyword accepts singular or plural, RU or EN.
 
+            ## syntax_help
+            Look up one platform member's reference card — signature, parameters, and description —
+            from the built-in platform data. Available in both profiles. Use `name` with optional
+            `type_name` for the legacy lookup, or the mutually exclusive `reference_id` returned by
+            `search(action="list_platform")` for an exact entity.
+              - max_output_tokens: Output budget in tokens (~4 chars each) for Markdown and structured content together.
+              - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
+              - reference_id: Exact stable identifier returned by `search(action="list_platform")`.
+              - type_name: Owning platform type when `name` is a member of a specific type (optional).
+
         "###]].assert_eq(&rendered);
     }
 
     #[test]
     fn reference_tools_contract() {
-        let rendered = render(&McpServer::reference_tool_router().list_all());
+        let router = McpServer::gated_router(
+            McpProfile::Reference,
+            &ToolGate::for_launch(McpProfile::Reference, &[]),
+        );
+        let rendered = render(&router.list_all());
+        assert!(!rendered.contains("<no doc>"), "every published parameter needs prose docs");
         expect![[r###"
             ## its_help
             Ask the ITS expert-help knowledge base a natural-language question about the 1C platform
@@ -2693,34 +3246,29 @@ mod tool_descriptions {
             platform API documentation by keyword or meaning. For project code search use the
             workspace profile's `search`; for one platform member's signature use `syntax_help`.
             Actions: `find_docs` / `search_docs` — doc search (`query` required; `limit` default 10,
-            max 50); `status` — index readiness. While the index warms up it returns a retry
+            max 50); `list_platform` — exact built-in entity listing; `status` — index readiness.
+            While the index warms up a doc search returns a retry
             envelope. Hits arrive twice: a listing for people in the text block, and the same hits
             in `structuredContent` — `{schema_version, hits: [{rank, score, path, line_start,
             line_end, symbol, kind, snippet, snippet_truncated_lines}], shown, total,
             budget_exhausted?}`. Read the structured form: it is the versioned contract, whereas the
             text layout may be reformatted in any release. `score` is the ranker's own number —
             comparable within one response, meaningless across searches or backends.
-              - action: Workspace profile: `search_code` | `status`. Reference profile: `find_docs` |
-            `search_docs` | `status`.
+              - action: Requested search, platform-listing, or lifecycle action.
+              - kind: Optional platform entity kind: type, method, property, constructor, or global_function.
               - limit: Cap on returned hits (default 10, max 50).
-              - max_output_tokens: Output budget in tokens (~4 chars each) for the text listing and the structured hits
-            together; over-budget results are truncated at a hit boundary with a note telling you to
-            raise `limit` or narrow the query, and `budget_exhausted: true` (default 6000).
-              - query: Free-text query. Required for `search_code`/`find_docs`/`search_docs`.
+              - max_output_tokens: Output budget in tokens (~4 chars each) for text and structured content together.
+              - name: Optional case-insensitive substring of the Russian or English platform entity name.
+              - query: Free-text query.
 
             ## syntax_help
             Look up one platform member's reference card — signature, parameters, and description —
-            from the built-in platform data. Use when you know the member name (e.g. `СтрНайти`) and
-            want its exact signature. For free-text doc discovery use `search`; for broader
-            conceptual guidance use `its_help`. Params: `name` (required), optional `type_name` when
-            the member belongs to a specific platform type, optional `max_output_tokens` bounding the
-            response. Successful responses retain the compatibility Markdown and add a versioned
-            structured card, so clients never need to parse the rendering.
-              - max_output_tokens: Output budget in tokens (~4 chars each) covering the compatibility Markdown and the
-            structured card together: the Markdown is truncated at a line boundary with a note
-            pointing at the single-member lookup, and the card's listings take what is left
-            (`budget_exhausted` says when they were cut). Default 6000.
+            from the built-in platform data. Available in both profiles. Use `name` with optional
+            `type_name` for the legacy lookup, or the mutually exclusive `reference_id` returned by
+            `search(action="list_platform")` for an exact entity.
+              - max_output_tokens: Output budget in tokens (~4 chars each) for Markdown and structured content together.
               - name: Platform member name to look up, e.g. `СтрНайти` or a type method.
+              - reference_id: Exact stable identifier returned by `search(action="list_platform")`.
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 
         "###]].assert_eq(&rendered);

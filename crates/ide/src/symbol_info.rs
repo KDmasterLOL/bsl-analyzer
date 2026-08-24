@@ -9,13 +9,20 @@
 
 pub(crate) mod form;
 
-use bsl_metadata::MdoType;
+use bsl_metadata::{AttributeType, MdoType};
+use bsl_platform::{PlatformCatalogStatus, PlatformGlobalCatalog};
+use hir::execution_env::EnvFlags;
 use hir::{
-    compute_execution_context, kernel_type_label, method_return_type, DefDatabase, Definition,
-    ExecutionContext, ManagerType, MethodId, ModuleId, Name, Semantics,
+    compute_execution_context, execution_environment_at, kernel_type_label, method_return_type,
+    root_metadata_object_type, root_metadata_ref_type, root_object_manager_type, DefDatabase,
+    Definition, ExecutionContext, HirFieldOrigin, ManagerType, MethodId, ModuleId, Name, Semantics,
+    Type as HirType,
 };
 use ide_db::base_db::{Locale, RootQueryDb, SourceDatabase, SourceRootId};
-use ide_db::RootDatabaseImpl;
+use ide_db::{
+    effective_module_exports_query, EffectiveMetadataMemberValue, EffectiveModuleRole,
+    RootDatabaseImpl,
+};
 use line_index::{LineColRange, LineIndex};
 use symbol_info::{build_signature, render_declaration, CalleeKind, MethodKind, SymbolSignature};
 use syntax::TextRange;
@@ -85,7 +92,127 @@ pub struct SymbolMember {
     pub name: String,
     /// `Реквизит`, `ТабличнаяЧасть`, `Измерение`, `Ресурс`, …
     pub kind: String,
+    pub member_kind: &'static str,
     pub ty: Option<String>,
+    pub type_variants: Vec<SymbolTypeVariant>,
+    pub signature: Option<SymbolMemberSignature>,
+    pub origin: SymbolMemberOrigin,
+    pub source_extension: Option<String>,
+    pub availability: SymbolMemberAvailability,
+}
+
+impl SymbolMember {
+    pub fn metadata(
+        name: impl Into<String>,
+        kind: impl Into<String>,
+        member_kind: &'static str,
+        ty: Option<String>,
+    ) -> Self {
+        let type_variants = ty
+            .as_ref()
+            .map(|presentation| {
+                vec![SymbolTypeVariant {
+                    presentation: presentation.clone(),
+                    technical_name: None,
+                    resolution: "unresolved",
+                    reason: Some("technical_name_unavailable".to_string()),
+                }]
+            })
+            .unwrap_or_default();
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            member_kind,
+            ty,
+            type_variants,
+            signature: None,
+            origin: SymbolMemberOrigin::Metadata,
+            source_extension: None,
+            availability: SymbolMemberAvailability::not_evaluated(None),
+        }
+    }
+
+    pub fn callable(
+        name: impl Into<String>,
+        kind: impl Into<String>,
+        member_kind: &'static str,
+        presentation: impl Into<String>,
+        origin: SymbolMemberOrigin,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            kind: kind.into(),
+            member_kind,
+            ty: None,
+            type_variants: Vec::new(),
+            signature: Some(SymbolMemberSignature { presentation: presentation.into() }),
+            origin,
+            source_extension: None,
+            availability: SymbolMemberAvailability::not_evaluated(None),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolTypeVariant {
+    pub presentation: String,
+    pub technical_name: Option<String>,
+    pub resolution: &'static str,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolMemberSignature {
+    pub presentation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolMemberOrigin {
+    Metadata,
+    Module,
+    Platform,
+}
+
+impl SymbolMemberOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Metadata => "metadata",
+            Self::Module => "module",
+            Self::Platform => "platform",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolMemberAvailability {
+    pub contexts: Option<Vec<&'static str>>,
+    pub context_status: SymbolMemberContextStatus,
+    pub reason: Option<String>,
+}
+
+impl SymbolMemberAvailability {
+    pub fn not_evaluated(contexts: Option<Vec<&'static str>>) -> Self {
+        Self { contexts, context_status: SymbolMemberContextStatus::NotEvaluated, reason: None }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolMemberContextStatus {
+    NotEvaluated,
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+impl SymbolMemberContextStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotEvaluated => "not_evaluated",
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The definition site of a symbol whose source is a BSL file.
@@ -168,6 +295,19 @@ pub fn symbol_info(db: &RootDatabaseImpl, req: &SymbolInfoRequest) -> Option<Sym
         return resolve_position(db, pos, req);
     }
     None
+}
+
+/// A qualified symbol is a dot-separated sequence of BSL-like identifiers.
+/// Keep keywords accepted for compatibility: this checks shape, not whether a
+/// segment may be declared as a new identifier.
+pub fn is_well_formed_symbol(symbol: &str) -> bool {
+    let symbol = symbol.trim();
+    !symbol.is_empty()
+        && symbol.split('.').all(|segment| {
+            let mut chars = segment.trim().chars();
+            chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+                && chars.all(|c| c.is_alphanumeric() || c == '_')
+        })
 }
 
 // --- qualified-name resolution ----------------------------------------------------------
@@ -253,6 +393,10 @@ fn resolve_pair(
         }
     }
 
+    if let Some(facet) = parse_applied_facet(a) {
+        return applied_facet_card(db, symbol, facet, b, req);
+    }
+
     // Whole metadata object (`Справочник.Товары`).
     if let Some(mdo_type) = parse_mdo_type(a) {
         if let Some(card) = object_card(db, symbol, mdo_type, b, req) {
@@ -272,6 +416,502 @@ fn resolve_pair(
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppliedFacet {
+    Object(MdoType),
+    Reference(MdoType),
+    Manager(MdoType),
+}
+
+impl AppliedFacet {
+    fn mdo_type(self) -> MdoType {
+        match self {
+            Self::Object(mdo_type) | Self::Reference(mdo_type) | Self::Manager(mdo_type) => {
+                mdo_type
+            }
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Object(MdoType::Catalog) => "СправочникОбъект",
+            Self::Reference(MdoType::Catalog) => "СправочникСсылка",
+            Self::Manager(MdoType::Catalog) => "СправочникМенеджер",
+            Self::Object(MdoType::DataProcessor) => "ОбработкаОбъект",
+            _ => unreachable!("only declared applied facets are constructed"),
+        }
+    }
+}
+
+fn parse_applied_facet(segment: &str) -> Option<AppliedFacet> {
+    match segment.to_lowercase().as_str() {
+        "справочникобъект" => Some(AppliedFacet::Object(MdoType::Catalog)),
+        "справочникссылка" => Some(AppliedFacet::Reference(MdoType::Catalog)),
+        "справочникменеджер" => Some(AppliedFacet::Manager(MdoType::Catalog)),
+        "обработкаобъект" => Some(AppliedFacet::Object(MdoType::DataProcessor)),
+        _ => None,
+    }
+}
+
+fn applied_facet_card(
+    db: &RootDatabaseImpl,
+    symbol: &str,
+    facet: AppliedFacet,
+    name: &str,
+    req: &SymbolInfoRequest,
+) -> Option<SymbolInfoCard> {
+    let mdo_type = facet.mdo_type();
+    let object = match req.position {
+        Some(position) => db.resolve_metadata_object_for_file(position.file_id, mdo_type, name),
+        None => db.resolve_metadata_object_across_roots(mdo_type, name),
+    }?;
+    let mut card = if matches!(facet, AppliedFacet::Object(_)) {
+        object_card(db, symbol, mdo_type, name, req)?
+    } else {
+        let mut card = SymbolInfoCard::empty(symbol.to_string(), "metadata object");
+        card.container = Some(SymbolContainer {
+            kind: facet.label().to_string(),
+            name: object.name.clone(),
+            context: None,
+        });
+        card.signature = Some(format!("{}.{}", facet.label(), object.name));
+        card
+    };
+    card.container.as_mut()?.kind = facet.label().to_string();
+    let members = match facet {
+        AppliedFacet::Object(_) => applied_object_members(db, mdo_type, name, req),
+        AppliedFacet::Reference(_) => applied_reference_members(db, mdo_type, name, req),
+        AppliedFacet::Manager(_) => applied_manager_members(db, mdo_type, name, req),
+    };
+    card.members = collect_applied_members(members, None);
+    let availability = MemberAvailabilityContext::from_request(db, req);
+    for member in &mut card.members {
+        if member.origin != SymbolMemberOrigin::Platform {
+            member.availability = availability.evaluate(None, false);
+        }
+    }
+    Some(card)
+}
+
+fn applied_object_members(
+    db: &RootDatabaseImpl,
+    mdo_type: MdoType,
+    object_name: &str,
+    req: &SymbolInfoRequest,
+) -> Vec<SymbolMember> {
+    let mut members = Vec::new();
+
+    let metadata = match req.position {
+        Some(position) => {
+            db.effective_metadata_members_for_file(position.file_id, mdo_type, object_name)
+        }
+        None => db.effective_metadata_members_across_roots(mdo_type, object_name),
+    };
+    if let Some(metadata) = metadata {
+        members.extend(metadata.iter().map(|candidate| {
+            let mut member = match &candidate.member {
+                EffectiveMetadataMemberValue::Attribute(attribute) => static_metadata_member(
+                    db,
+                    attribute.name.clone(),
+                    "Реквизит",
+                    "attribute",
+                    &attribute.attr_type,
+                ),
+                EffectiveMetadataMemberValue::TabularSection(section) => SymbolMember::metadata(
+                    section.name(),
+                    "ТабличнаяЧасть",
+                    "tabular_section",
+                    None,
+                ),
+            };
+            member.source_extension = candidate.source_extension.clone();
+            member
+        }));
+    }
+
+    members.extend(module_export_members(
+        db,
+        EffectiveModuleRole::Object,
+        mdo_type,
+        object_name,
+        None,
+        req.position.map(|position| position.file_id),
+    ));
+
+    if let (Some(file_id), Some(type_id)) = (
+        metadata_object_file(db, mdo_type, object_name),
+        root_metadata_object_type(db, mdo_type, object_name),
+    ) {
+        members.extend(platform_receiver_members(db, file_id, type_id, req));
+    }
+
+    members
+}
+
+fn applied_reference_members(
+    db: &RootDatabaseImpl,
+    mdo_type: MdoType,
+    object_name: &str,
+    req: &SymbolInfoRequest,
+) -> Vec<SymbolMember> {
+    let mut members = Vec::new();
+    let metadata = match req.position {
+        Some(position) => {
+            db.effective_metadata_members_for_file(position.file_id, mdo_type, object_name)
+        }
+        None => db.effective_metadata_members_across_roots(mdo_type, object_name),
+    };
+    if let Some(metadata) = metadata {
+        members.extend(metadata.iter().filter_map(|candidate| {
+            let EffectiveMetadataMemberValue::Attribute(attribute) = &candidate.member else {
+                return None;
+            };
+            let mut member = static_metadata_member(
+                db,
+                attribute.name.clone(),
+                "Реквизит",
+                "attribute",
+                &attribute.attr_type,
+            );
+            member.source_extension = candidate.source_extension.clone();
+            Some(member)
+        }));
+    }
+    if let (Some(file_id), Some(type_id)) = (
+        metadata_object_file(db, mdo_type, object_name),
+        root_metadata_ref_type(db, mdo_type, object_name),
+    ) {
+        members.extend(platform_receiver_members(db, file_id, type_id, req));
+    }
+    members
+}
+
+fn static_metadata_member(
+    db: &RootDatabaseImpl,
+    name: impl Into<String>,
+    kind: impl Into<String>,
+    member_kind: &'static str,
+    attr_type: &AttributeType,
+) -> SymbolMember {
+    let mut member = SymbolMember::metadata(name, kind, member_kind, Some(attr_type.to_string()));
+    member.type_variants = static_type_variants(db, attr_type);
+    member
+}
+
+fn static_type_variants(
+    db: &RootDatabaseImpl,
+    attr_type: &AttributeType,
+) -> Vec<SymbolTypeVariant> {
+    if let AttributeType::Composite { types } = attr_type {
+        return types.iter().flat_map(|ty| static_type_variants(db, ty)).collect();
+    }
+
+    let technical_name = match attr_type {
+        AttributeType::String { .. } => Some("Строка".to_string()),
+        AttributeType::Number { .. } => Some("Число".to_string()),
+        AttributeType::Boolean => Some("Булево".to_string()),
+        AttributeType::Date | AttributeType::DateTime => Some("Дата".to_string()),
+        AttributeType::Ref { mdo_type, name } => root_metadata_ref_type(db, *mdo_type, name)
+            .map(|type_id| kernel_type_label(db, type_id, Locale::Ru, false)),
+        AttributeType::AnyRef => Some("ЛюбаяСсылка".to_string()),
+        AttributeType::Uuid => Some("УникальныйИдентификатор".to_string()),
+        AttributeType::ValueStorage => Some("ХранилищеЗначения".to_string()),
+        AttributeType::DefinedType { name } => Some(format!("ОпределяемыйТип.{name}")),
+        AttributeType::Platform(kind) => Some(kind.russian_name().to_string()),
+        AttributeType::PlatformNamed(name) if !name.is_empty() => Some(name.clone()),
+        AttributeType::AnyObjectRef { .. }
+        | AttributeType::PlatformNamed(_)
+        | AttributeType::Unknown
+        | AttributeType::Composite { .. } => None,
+    };
+    let resolution = if technical_name.is_some() { "static" } else { "unresolved" };
+    vec![SymbolTypeVariant {
+        presentation: attr_type.to_string(),
+        technical_name,
+        resolution,
+        reason: (resolution == "unresolved").then(|| "static_type_unresolved".to_string()),
+    }]
+}
+
+fn applied_manager_members(
+    db: &RootDatabaseImpl,
+    mdo_type: MdoType,
+    object_name: &str,
+    req: &SymbolInfoRequest,
+) -> Vec<SymbolMember> {
+    let mut members = module_export_members(
+        db,
+        EffectiveModuleRole::Manager,
+        mdo_type,
+        object_name,
+        None,
+        req.position.map(|position| position.file_id),
+    );
+    if let (Some(file_id), Some(type_id)) = (
+        metadata_object_file(db, mdo_type, object_name),
+        root_object_manager_type(db, mdo_type, object_name),
+    ) {
+        members.extend(platform_receiver_members(db, file_id, type_id, req));
+    }
+    members
+}
+
+fn module_export_members(
+    db: &RootDatabaseImpl,
+    role: EffectiveModuleRole,
+    mdo_type: MdoType,
+    object_name: &str,
+    form_name: Option<&str>,
+    visibility_file: Option<FileId>,
+) -> Vec<SymbolMember> {
+    let exports = effective_module_exports_query(
+        db,
+        CONFIG_SOURCE_ROOT,
+        visibility_file,
+        role,
+        mdo_type,
+        object_name.to_string(),
+        form_name.map(str::to_owned),
+    );
+    let methods = exports.methods.iter().map(|candidate| {
+        let params = candidate
+            .method
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let keyword =
+            if candidate.method.is_function { "Функция" } else { "Процедура" };
+        let mut member = SymbolMember::callable(
+            candidate.name.as_str(),
+            "Метод",
+            "method",
+            format!("{keyword} {}({params}) Экспорт", candidate.name.as_str()),
+            SymbolMemberOrigin::Module,
+        );
+        member.source_extension = candidate.source_extension.clone();
+        member
+    });
+    let variables = exports.variables.iter().map(|candidate| {
+        let mut member = SymbolMember::metadata(
+            candidate.variable.name.as_str(),
+            "Переменная",
+            "property",
+            Some("Неизвестно".to_string()),
+        );
+        member.origin = SymbolMemberOrigin::Module;
+        member.source_extension = candidate.source_extension.clone();
+        member
+    });
+    methods.chain(variables).collect()
+}
+
+fn platform_receiver_members(
+    db: &RootDatabaseImpl,
+    file_id: FileId,
+    type_id: hir::TypeId,
+    req: &SymbolInfoRequest,
+) -> Vec<SymbolMember> {
+    let receiver = HirType::from_id(db, file_id, type_id);
+    let availability = MemberAvailabilityContext::from_request(db, req);
+    let fields = receiver.fields().into_iter().filter_map(|field| {
+        let (kind, member_kind) = match field.origin {
+            HirFieldOrigin::StandardAttribute => ("СтандартныйРеквизит", "attribute"),
+            HirFieldOrigin::PlatformProperty => ("Свойство", "property"),
+            _ => return None,
+        };
+        let mut member = SymbolMember::metadata(
+            field.name.as_str(),
+            kind,
+            member_kind,
+            Some(type_label(db, field.ty, req.locale).unwrap_or_else(|| "Неизвестно".into())),
+        );
+        let technical_name = type_label(db, field.ty, Locale::Ru);
+        member.type_variants = vec![SymbolTypeVariant {
+            presentation: member.ty.clone().unwrap_or_else(|| "Неизвестно".to_string()),
+            resolution: if technical_name.is_some() { "static" } else { "unresolved" },
+            reason: technical_name.is_none().then(|| "static_type_unresolved".to_string()),
+            technical_name,
+        }];
+        member.origin = SymbolMemberOrigin::Platform;
+        member.availability = availability.evaluate(field.env, true);
+        Some(member)
+    });
+    let methods = receiver.methods().into_iter().map(|method| {
+        let params =
+            method.params.iter().map(|param| param.name.as_str()).collect::<Vec<_>>().join(", ");
+        let mut member = SymbolMember::callable(
+            method.name.as_str(),
+            "Метод",
+            "method",
+            format!("{}({params})", method.name.as_str()),
+            SymbolMemberOrigin::Platform,
+        );
+        member.availability = availability.evaluate(method.env, true);
+        member
+    });
+    fields.chain(methods).collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemberAvailabilityContext {
+    has_position: bool,
+    caller: EnvFlags,
+    checked: EnvFlags,
+    platform_catalog_complete: bool,
+}
+
+impl MemberAvailabilityContext {
+    fn from_request(db: &RootDatabaseImpl, req: &SymbolInfoRequest) -> Self {
+        let caller = req
+            .position
+            .and_then(|position| {
+                crate::name_lookup::offset_for_line_col(
+                    db,
+                    position.file_id,
+                    position.line,
+                    position.column,
+                )
+                .map(|offset| execution_environment_at(db, position.file_id, offset))
+            })
+            .unwrap_or(EnvFlags::EMPTY);
+        let target = db.target_platform_version();
+        Self {
+            has_position: req.position.is_some(),
+            caller,
+            checked: db.env_options().checked_environments,
+            platform_catalog_complete: matches!(
+                PlatformGlobalCatalog::instance().status_for_target(target.as_deref()),
+                PlatformCatalogStatus::Complete
+            ),
+        }
+    }
+
+    fn evaluate(
+        self,
+        declarative: Option<EnvFlags>,
+        from_platform_catalog: bool,
+    ) -> SymbolMemberAvailability {
+        let contexts = declarative.map(env_contexts);
+        if !self.has_position {
+            return SymbolMemberAvailability::not_evaluated(contexts);
+        }
+        let Some(declarative) = declarative else {
+            return SymbolMemberAvailability {
+                contexts,
+                context_status: SymbolMemberContextStatus::Unknown,
+                reason: Some("declarative_context_unknown".to_string()),
+            };
+        };
+        if from_platform_catalog && !self.platform_catalog_complete {
+            return SymbolMemberAvailability {
+                contexts,
+                context_status: SymbolMemberContextStatus::Unknown,
+                reason: Some("platform_catalog_unverified".to_string()),
+            };
+        }
+        if self.caller.is_empty() {
+            return SymbolMemberAvailability {
+                contexts,
+                context_status: SymbolMemberContextStatus::Unknown,
+                reason: Some("module_context_unknown".to_string()),
+            };
+        }
+        let unavailable = !(self.caller.without(declarative) & self.checked).is_empty();
+        SymbolMemberAvailability {
+            contexts,
+            context_status: if unavailable {
+                SymbolMemberContextStatus::Unavailable
+            } else {
+                SymbolMemberContextStatus::Available
+            },
+            reason: None,
+        }
+    }
+}
+
+fn env_contexts(environment: EnvFlags) -> Vec<&'static str> {
+    environment
+        .iter()
+        .map(|environment| match environment {
+            EnvFlags::THIN_CLIENT => "thin_client",
+            EnvFlags::WEB_CLIENT => "web_client",
+            EnvFlags::THICK_CLIENT_MANAGED => "thick_client_managed",
+            EnvFlags::THICK_CLIENT_ORDINARY => "thick_client_ordinary",
+            EnvFlags::SERVER => "server",
+            EnvFlags::MOBILE_CLIENT => "mobile_client",
+            EnvFlags::EXTERNAL_CONNECTION => "external_connection",
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
+fn metadata_object_file(
+    db: &RootDatabaseImpl,
+    mdo_type: MdoType,
+    object_name: &str,
+) -> Option<FileId> {
+    let paths = db.all_config_paths();
+    let base_first = paths
+        .iter()
+        .filter(|(label, _)| label.is_none())
+        .chain(paths.iter().filter(|(label, _)| label.is_some()));
+    for (_, root) in base_first {
+        let Some(listing) = db.metadata_listing(&root.to_string_lossy()) else { continue };
+        if let Some(entry) = listing
+            .entries(db)
+            .iter()
+            .find(|entry| entry.kind == mdo_type && name_eq(&entry.name, object_name))
+        {
+            return Some(entry.main);
+        }
+    }
+    None
+}
+
+fn applied_facet_member_card(
+    db: &RootDatabaseImpl,
+    symbol: &str,
+    facet: AppliedFacet,
+    object: &str,
+    member: &str,
+    req: &SymbolInfoRequest,
+) -> Option<SymbolInfoCard> {
+    let mut card = applied_facet_card(db, symbol, facet, object, req)?;
+    card.members = collect_applied_members(card.members, Some(member));
+    if card.members.is_empty() {
+        return None;
+    }
+    card.kind = "member candidates";
+    card.signature = Some(format!("{} candidate(s)", card.members.len()));
+    Some(card)
+}
+
+fn collect_applied_members(
+    candidates: Vec<SymbolMember>,
+    exact_name: Option<&str>,
+) -> Vec<SymbolMember> {
+    let mut candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| exact_name.is_none_or(|name| name_eq(&candidate.name, name)))
+        .collect();
+    candidates.sort_by_key(|candidate| {
+        (
+            candidate.name.to_lowercase(),
+            match candidate.origin {
+                SymbolMemberOrigin::Metadata => 0,
+                SymbolMemberOrigin::Module => 1,
+                SymbolMemberOrigin::Platform => 2,
+            },
+            candidate.member_kind,
+            candidate.source_extension.clone(),
+            candidate.kind.clone(),
+        )
+    });
+    candidates
+}
+
 /// `<MdoType>.<Object>.<Member>`: a metadata attribute, or an object/manager module method.
 fn resolve_triple(
     db: &RootDatabaseImpl,
@@ -281,6 +921,9 @@ fn resolve_triple(
     c: &str,
     req: &SymbolInfoRequest,
 ) -> Option<SymbolInfoCard> {
+    if let Some(facet) = parse_applied_facet(a) {
+        return applied_facet_member_card(db, symbol, facet, b, c, req);
+    }
     let mdo_type = parse_mdo_type(a)?;
 
     // Attribute / tabular field on the metadata object (type + ownership).
@@ -364,18 +1007,16 @@ fn object_card(
     });
     let mut members = Vec::new();
     for attr in &obj.attributes {
-        members.push(SymbolMember {
-            name: attr.name.clone(),
-            kind: "Реквизит".to_string(),
-            ty: Some(attr.attr_type.to_string()),
-        });
+        members.push(static_metadata_member(
+            db,
+            attr.name.clone(),
+            "Реквизит",
+            "attribute",
+            &attr.attr_type,
+        ));
     }
     for ts in &obj.tabular_sections {
-        members.push(SymbolMember {
-            name: ts.name().to_string(),
-            kind: "ТабличнаяЧасть".to_string(),
-            ty: None,
-        });
+        members.push(SymbolMember::metadata(ts.name(), "ТабличнаяЧасть", "tabular_section", None));
     }
     card.signature = Some(format!(
         "{}.{} — {} реквизит(ов), {} табличн. част(и)",
@@ -404,25 +1045,19 @@ fn register_card(
     });
     let mut members = Vec::new();
     for d in reg.dimensions() {
-        members.push(SymbolMember {
-            name: d.name().to_string(),
-            kind: "Измерение".to_string(),
-            ty: register_member_type(d.attr_type(), d.type_str()),
-        });
+        members.push(register_symbol_member(
+            db,
+            d.name(),
+            "Измерение",
+            d.attr_type(),
+            d.type_str(),
+        ));
     }
     for r in reg.resources() {
-        members.push(SymbolMember {
-            name: r.name().to_string(),
-            kind: "Ресурс".to_string(),
-            ty: register_member_type(r.attr_type(), r.type_str()),
-        });
+        members.push(register_symbol_member(db, r.name(), "Ресурс", r.attr_type(), r.type_str()));
     }
     for a in reg.attributes() {
-        members.push(SymbolMember {
-            name: a.name().to_string(),
-            kind: "Реквизит".to_string(),
-            ty: register_member_type(a.attr_type(), a.type_str()),
-        });
+        members.push(register_symbol_member(db, a.name(), "Реквизит", a.attr_type(), a.type_str()));
     }
     card.signature = Some(format!(
         "{}.{} — {} измерен., {} ресурс., {} реквизит.",
@@ -484,6 +1119,19 @@ fn register_member_type(
     (!type_str.is_empty()).then(|| type_str.to_string())
 }
 
+fn register_symbol_member(
+    db: &RootDatabaseImpl,
+    name: &str,
+    kind: &str,
+    attr_type: Option<&AttributeType>,
+    type_str: &str,
+) -> SymbolMember {
+    attr_type.map_or_else(
+        || SymbolMember::metadata(name, kind, "attribute", register_member_type(None, type_str)),
+        |attr_type| static_metadata_member(db, name, kind, "attribute", attr_type),
+    )
+}
+
 fn attribute_card(
     db: &RootDatabaseImpl,
     symbol: &str,
@@ -519,10 +1167,8 @@ fn attribute_card(
             card.members = ts
                 .attributes()
                 .iter()
-                .map(|a| SymbolMember {
-                    name: a.name().to_string(),
-                    kind: "Реквизит".to_string(),
-                    ty: Some(a.attr_type().to_string()),
+                .map(|a| {
+                    static_metadata_member(db, a.name(), "Реквизит", "attribute", a.attr_type())
                 })
                 .collect();
             return Some(card);
@@ -787,4 +1433,149 @@ fn file_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
     let source_root = db.source_root_input(CONFIG_SOURCE_ROOT).root(db);
     let vfs_path = source_root.file_set().path_for_file(&file_id)?;
     Some(vfs_path.as_path().to_str()?.replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod applied_member_collector_tests {
+    use super::*;
+
+    fn candidates() -> Vec<SymbolMember> {
+        let metadata = SymbolMember::metadata(
+            "Состояние",
+            "Реквизит",
+            "attribute",
+            Some("Строка".to_string()),
+        );
+        let mut module = SymbolMember::metadata(
+            "состояние",
+            "Переменная",
+            "property",
+            Some("Неизвестно".to_string()),
+        );
+        module.origin = SymbolMemberOrigin::Module;
+        module.source_extension = Some("РасширениеА".to_string());
+        let platform = SymbolMember::callable(
+            "Состояние",
+            "Метод",
+            "method",
+            "Состояние()",
+            SymbolMemberOrigin::Platform,
+        );
+        let other =
+            SymbolMember::metadata("Артикул", "Реквизит", "attribute", Some("Строка".to_string()));
+        vec![platform, other, module, metadata]
+    }
+
+    #[test]
+    fn full_and_exact_collection_share_stable_source_preserving_order() {
+        let full = collect_applied_members(candidates(), None);
+        assert_eq!(full.len(), 4);
+        assert_eq!(full[0].name, "Артикул");
+        assert_eq!(full[1].origin, SymbolMemberOrigin::Metadata);
+        assert_eq!(full[2].origin, SymbolMemberOrigin::Module);
+        assert_eq!(full[2].member_kind, "property");
+        assert_eq!(full[3].origin, SymbolMemberOrigin::Platform);
+
+        let exact = collect_applied_members(candidates(), Some("СОСТОЯНИЕ"));
+        assert_eq!(exact.len(), 3, "same-name candidates from every source survive");
+        assert_eq!(
+            exact.iter().map(|m| m.origin).collect::<Vec<_>>(),
+            [
+                SymbolMemberOrigin::Metadata,
+                SymbolMemberOrigin::Module,
+                SymbolMemberOrigin::Platform,
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_collection_reports_a_miss_as_an_empty_result() {
+        assert!(collect_applied_members(candidates(), Some("НетТакого"),).is_empty());
+    }
+
+    #[test]
+    fn composite_static_type_keeps_each_machine_variant() {
+        let db = RootDatabaseImpl::new();
+        let variants = static_type_variants(
+            &db,
+            &AttributeType::Composite {
+                types: vec![
+                    AttributeType::Number { precision: 10, scale: 2 },
+                    AttributeType::Ref {
+                        mdo_type: MdoType::Catalog,
+                        name: "Контрагенты".to_string(),
+                    },
+                ],
+            },
+        );
+
+        assert_eq!(variants.len(), 2);
+        assert_eq!(variants[0].technical_name.as_deref(), Some("Число"));
+        assert_eq!(variants[0].resolution, "static");
+        assert!(variants[1]
+            .technical_name
+            .as_deref()
+            .is_some_and(|name| name.contains("СправочникСсылка.Контрагенты")));
+    }
+
+    #[test]
+    fn availability_evaluates_client_server_without_filtering_members() {
+        let context = |caller, platform_catalog_complete| MemberAvailabilityContext {
+            has_position: true,
+            caller,
+            checked: EnvFlags::ALL,
+            platform_catalog_complete,
+        };
+        let server = context(EnvFlags::SERVER, true).evaluate(Some(EnvFlags::SERVER), true);
+        assert_eq!(server.context_status, SymbolMemberContextStatus::Available);
+        let client = context(EnvFlags::THIN_CLIENT, true).evaluate(Some(EnvFlags::SERVER), true);
+        assert_eq!(client.context_status, SymbolMemberContextStatus::Unavailable);
+
+        let members = [server, client];
+        assert_eq!(members.len(), 2, "availability annotates candidates; it never filters them");
+    }
+
+    #[test]
+    fn availability_expands_generic_thick_and_reports_unknown_inputs() {
+        let generic_thick =
+            EnvFlags::from_platform_context(Some(&bsl_platform::ContextAvailability {
+                thick_client: true,
+                thin_client: false,
+                web_client: false,
+                server: false,
+                mobile_client: false,
+                external_connection: false,
+            }));
+        assert_eq!(env_contexts(generic_thick), ["thick_client_managed", "thick_client_ordinary"]);
+
+        let no_catalog = MemberAvailabilityContext {
+            has_position: true,
+            caller: EnvFlags::SERVER,
+            checked: EnvFlags::ALL,
+            platform_catalog_complete: false,
+        }
+        .evaluate(Some(EnvFlags::SERVER), true);
+        assert_eq!(no_catalog.context_status, SymbolMemberContextStatus::Unknown);
+        assert_eq!(no_catalog.reason.as_deref(), Some("platform_catalog_unverified"));
+
+        let no_position = MemberAvailabilityContext {
+            has_position: false,
+            caller: EnvFlags::EMPTY,
+            checked: EnvFlags::ALL,
+            platform_catalog_complete: true,
+        }
+        .evaluate(Some(EnvFlags::ALL), true);
+        assert_eq!(no_position.context_status, SymbolMemberContextStatus::NotEvaluated);
+        assert_eq!(no_position.contexts.as_ref().map(Vec::len), Some(7));
+
+        let unknown_declaration = MemberAvailabilityContext {
+            has_position: true,
+            caller: EnvFlags::SERVER,
+            checked: EnvFlags::ALL,
+            platform_catalog_complete: true,
+        }
+        .evaluate(None, false);
+        assert_eq!(unknown_declaration.context_status, SymbolMemberContextStatus::Unknown);
+        assert!(unknown_declaration.contexts.is_none());
+    }
 }

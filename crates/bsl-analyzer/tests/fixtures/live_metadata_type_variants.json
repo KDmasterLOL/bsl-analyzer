@@ -1,0 +1,41 @@
+{
+  "_fixture": {
+    "version": "1",
+    "producer_contract": "typeVariants-v1",
+    "legacy_consumer_release": "v0.2.70",
+    "legacy_consumer_commit": "d7e50c494995ee8dee742a6236b16134d2a42e87",
+    "legacy_onec_client_source_sha256": "2d3afd71024f10162c97666a895852784121d8270a117e0212a717efee9905b2"
+  },
+  "ru": {
+    "name": "Товары",
+    "full_name": "Справочник.Товары",
+    "synonym": "Товары",
+    "futureField": {"ignored": true},
+    "Реквизиты": [
+      {"name":"Primitive","synonym":"Primitive","type":"Строка","typeVariants":[{"technicalName":"Строка","presentation":"Строка"}]},
+      {"name":"Platform","synonym":"Platform","type":"УникальныйИдентификатор","typeVariants":[{"technicalName":"УникальныйИдентификатор","presentation":"УникальныйИдентификатор"}]},
+      {"name":"Applied","synonym":"Applied","type":"СправочникСсылка.Товары","typeVariants":[{"technicalName":"СправочникСсылка.Товары","presentation":"СправочникСсылка.Товары"}]},
+      {"name":"ReportApplied","synonym":"ReportApplied","type":"ОтчётОбъект.Продажи","typeVariants":[{"technicalName":"ОтчетОбъект.Продажи","presentation":"ОтчётОбъект.Продажи"}]},
+      {"name":"Composite","synonym":"Composite","type":"Строка, СправочникСсылка.Товары","typeVariants":[{"technicalName":"Строка","presentation":"Строка"},{"technicalName":"СправочникСсылка.Товары","presentation":"СправочникСсылка.Товары"}]},
+      {"name":"SamePresentation","synonym":"SamePresentation","type":"Объект, Объект","typeVariants":[{"technicalName":"СправочникСсылка.А","presentation":"Объект"},{"technicalName":"СправочникСсылка.Б","presentation":"Объект"}]},
+      {"name":"Unsupported","synonym":"Unsupported","type":"ДвоичныеДанные","typeVariants":[{"technicalName":null,"presentation":"ДвоичныеДанные"}]},
+      {"name":"FutureUnknown","synonym":"FutureUnknown","type":"БудущийТип","typeVariants":[{"technicalName":"БудущийТип","presentation":"БудущийТип","futureVariantField":true}]}
+    ]
+  },
+  "en": {
+    "name": "Товары",
+    "full_name": "Catalog.Products",
+    "synonym": "Products",
+    "futureField": {"ignored": true},
+    "Реквизиты": [
+      {"name":"Primitive","synonym":"Primitive","type":"String","typeVariants":[{"technicalName":"Строка","presentation":"String"}]},
+      {"name":"Platform","synonym":"Platform","type":"UUID","typeVariants":[{"technicalName":"УникальныйИдентификатор","presentation":"UUID"}]},
+      {"name":"Applied","synonym":"Applied","type":"CatalogRef.Products","typeVariants":[{"technicalName":"СправочникСсылка.Товары","presentation":"CatalogRef.Products"}]},
+      {"name":"ReportApplied","synonym":"ReportApplied","type":"ReportObject.Sales","typeVariants":[{"technicalName":"ОтчетОбъект.Продажи","presentation":"ReportObject.Sales"}]},
+      {"name":"Composite","synonym":"Composite","type":"String, CatalogRef.Products","typeVariants":[{"technicalName":"Строка","presentation":"String"},{"technicalName":"СправочникСсылка.Товары","presentation":"CatalogRef.Products"}]},
+      {"name":"SamePresentation","synonym":"SamePresentation","type":"Object, Object","typeVariants":[{"technicalName":"СправочникСсылка.А","presentation":"Object"},{"technicalName":"СправочникСсылка.Б","presentation":"Object"}]},
+      {"name":"Unsupported","synonym":"Unsupported","type":"BinaryData","typeVariants":[{"technicalName":null,"presentation":"BinaryData"}]},
+      {"name":"FutureUnknown","synonym":"FutureUnknown","type":"FutureType","typeVariants":[{"technicalName":"БудущийТип","presentation":"FutureType","futureVariantField":true}]}
+    ]
+  }
+}

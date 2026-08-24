@@ -938,6 +938,7 @@ fn render_global_function(function: &GlobalFunction) -> CompletionItem {
 }
 
 fn get_keyword_info(keyword: &str) -> (String, String) {
+    // allow: keyword docs (M3 exception)
     if let Some(keyword_docs) = bsl_platform::PlatformData::instance().get_keyword_docs(keyword) {
         let mut doc = format!("{} / {}\n\n", keyword_docs.keyword_ru, keyword_docs.keyword_en);
 

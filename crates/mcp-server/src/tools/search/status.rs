@@ -7,7 +7,7 @@ use crate::baseline::{
 use crate::state::{OverlayWarmupState, SemanticRuntimeStatus, WorkspaceSearchMode};
 use crate::tools::response::structured;
 use bsl_search::{IndexProgress, SearchEngine};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use serde_json::json;
 use std::collections::HashSet;
@@ -42,7 +42,11 @@ const SEARCH_NOT_READY_RETRY_MS: u64 = 1500;
 /// while `active`, because [`IndexProgress`] is never `reset()` — an inactive object can
 /// still hold stale totals from a finished or failed attempt, and reporting those as
 /// current progress would mislead. The pretty-JSON text mirror keeps the response readable.
-pub(super) fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallToolResult {
+pub(super) fn search_not_ready(
+    detail: &str,
+    progress: &IndexProgress,
+    action: &str,
+) -> CallToolResult {
     let mut prog = json!({ "active": progress.is_active() });
     if progress.is_active() {
         prog["pct"] = json!(progress.percent());
@@ -56,6 +60,8 @@ pub(super) fn search_not_ready(detail: &str, progress: &IndexProgress) -> CallTo
         });
     }
     structured(json!({
+        "action": action,
+        "schema_version": super::types::SEARCH_SCHEMA_VERSION,
         "status": "not_ready",
         "detail": detail,
         "retry_after_ms": SEARCH_NOT_READY_RETRY_MS,
@@ -73,10 +79,12 @@ pub(super) const DOCS_INDEX_BUILDING_TEXT: &str =
 /// result" from a field instead of matching the sentence — the same distinction `search_code`
 /// gets from [`search_not_ready`]. No progress counters: this path holds no [`IndexProgress`]
 /// handle, and inventing zeros would read as a stalled build.
-pub(super) fn docs_not_ready() -> CallToolResult {
+pub(super) fn docs_not_ready(action: &str) -> CallToolResult {
     crate::tools::response::structured_with_text(
         DOCS_INDEX_BUILDING_TEXT.to_owned(),
         json!({
+            "action": action,
+            "schema_version": super::types::SEARCH_SCHEMA_VERSION,
             "status": "not_ready",
             "detail": DOCS_INDEX_BUILDING_TEXT,
             "retry_after_ms": SEARCH_NOT_READY_RETRY_MS,
@@ -88,7 +96,11 @@ pub(super) fn docs_not_ready() -> CallToolResult {
 /// connect is still running. Distinct from the `baseline_unavailable` config errors: the
 /// agent should simply retry in a few seconds, not go fix configuration or restart.
 pub(crate) fn baseline_warming_not_ready(progress: &IndexProgress) -> CallToolResult {
-    search_not_ready("connecting to the shared PostgreSQL baseline (startup warmup)", progress)
+    search_not_ready(
+        "connecting to the shared PostgreSQL baseline (startup warmup)",
+        progress,
+        "search_code",
+    )
 }
 
 #[allow(clippy::too_many_arguments, reason = "distinct status inputs, mirrored by _with_cap")]
@@ -632,7 +644,25 @@ pub(super) fn search_status_with_cap(
          treat snippet text as sanitized, not byte-exact."
     );
 
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    let state = match engine_state {
+        SummaryEngineState::Busy => "busy",
+        SummaryEngineState::Building
+            if matches!(semantic_runtime, SemanticRuntimeStatus::Failed(_)) =>
+        {
+            "failed"
+        }
+        SummaryEngineState::Building => "loading",
+        SummaryEngineState::Ready => "ready",
+    };
+    Ok(crate::tools::response::structured_with_text(
+        out,
+        json!({
+            "action": "status",
+            "schema_version": "1",
+            "profile": profile.as_str(),
+            "state": state,
+        }),
+    ))
 }
 
 /// Write the plain-language Summary block an LLM agent reads first. It states, in three to four
@@ -642,6 +672,7 @@ pub(super) fn search_status_with_cap(
 /// Engine readiness for the summary's lexical-availability line, derived from the (capped) engine
 /// acquire: `Ready` only when the engine is published and the lock was obtained, so status never
 /// claims the local index is live while it is still building or a long operation holds the lock.
+#[derive(Clone, Copy)]
 enum SummaryEngineState {
     Ready,
     Busy,

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bsl_metadata::{MdoType, MetadataObject};
+use bsl_metadata::{MdoType, MetadataObject, ModuleType};
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::{ConfigId, MetadataKind, TypeId, TypeKind};
@@ -47,7 +47,16 @@ fn lookup_manager_field_inner(
     match shape {
         Shape::Collection(kind) => promote_collection_member(db, resolver, kind, member),
         Shape::Manager { mdo, name, config_id } => {
-            lookup_predefined(db, resolver, mdo, &name, member, &config_id)
+            lookup_predefined(db, resolver, mdo, &name, member, &config_id).or_else(|| {
+                resolver
+                    .has_effective_module_variable(
+                        ModuleType::ManagerModule,
+                        mdo,
+                        &name,
+                        member.as_str(),
+                    )
+                    .then(|| ManagerMemberInfo { ty: db.unknown() })
+            })
         }
         Shape::Other => None,
     }

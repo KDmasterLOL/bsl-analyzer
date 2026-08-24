@@ -84,8 +84,10 @@ pub use references::{
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
-    symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
-    SymbolInfoSections, SymbolMember, SymbolPosition,
+    is_well_formed_symbol, symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard,
+    SymbolInfoRequest, SymbolInfoSections, SymbolMember, SymbolMemberAvailability,
+    SymbolMemberContextStatus, SymbolMemberOrigin, SymbolMemberSignature, SymbolPosition,
+    SymbolTypeVariant,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 

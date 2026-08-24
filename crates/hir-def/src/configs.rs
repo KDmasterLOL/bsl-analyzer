@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bsl_metadata::{
     AttributeType, Configuration, EventSubscription, HTTPService, MdoType, MetadataObject,
-    Register, Role, ScheduledJob, Subsystem, WebService,
+    ModuleType, Register, Role, ScheduledJob, Subsystem, WebService,
 };
 use vfs::FileId;
 
@@ -242,6 +242,17 @@ pub trait ConfigsDatabase: DefDatabase {
     /// not know its kind (e.g. a `Движения.<Register>` movement touch). Same
     /// per-MDO granularity and base + own-extension scoping as [`resolve_register`].
     fn resolve_register_by_name(&self, file_id: FileId, name: &str) -> Option<Arc<Register>>;
+
+    /// Whether the effective object/manager module surface visible to `file_id`
+    /// exports `variable_name` for the metadata object.
+    fn has_effective_module_variable(
+        &self,
+        file_id: FileId,
+        module_type: ModuleType,
+        mdo_type: MdoType,
+        object_name: &str,
+        variable_name: &str,
+    ) -> bool;
 
     /// Resolve the underlying type of the defined type `name` visible to
     /// `file_id`, at per-defined-type Salsa granularity. Base + the file's own

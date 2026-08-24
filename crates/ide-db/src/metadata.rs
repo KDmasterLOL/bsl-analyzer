@@ -361,6 +361,11 @@ pub struct WorkspaceConfigsSnapshot {
     /// for independent extensions — which keeps the pre-dependency semantics:
     /// a file sees the base plus its own extension only.
     pub closures: Vec<Vec<usize>>,
+    /// Global root order for whole-workspace composition: base first, then
+    /// extensions in dependencies-before-dependents order. Indices point into
+    /// `paths`; unlike `closures`, this is the designer-wide view used when no
+    /// file anchors visibility.
+    pub topological_order: Vec<usize>,
     /// Topology fingerprint (full hex digest) when built from a validated
     /// project; `None` for legacy path-only registration.
     pub fingerprint: Option<String>,
@@ -375,7 +380,8 @@ impl WorkspaceConfigsSnapshot {
             .map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
             .collect();
         let closures = vec![Vec::new(); paths.len()];
-        Self { paths, canonical_paths, closures, fingerprint: None }
+        let topological_order = (0..paths.len()).collect();
+        Self { paths, canonical_paths, closures, topological_order, fingerprint: None }
     }
 
     /// The full shape from a validated project: base first, then extensions in
@@ -395,10 +401,14 @@ impl WorkspaceConfigsSnapshot {
             // is the base root, so every index shifts by one.
             closures.push(node.closure().iter().map(|id| id.index() + 1).collect());
         }
+        let topological_order = std::iter::once(0)
+            .chain(topology.topological_order().iter().map(|id| id.index() + 1))
+            .collect();
         Self {
             paths,
             canonical_paths,
             closures,
+            topological_order,
             fingerprint: Some(topology.fingerprint().to_hex()),
         }
     }

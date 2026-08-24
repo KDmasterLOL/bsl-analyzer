@@ -2039,11 +2039,11 @@ mod tests {
     #[test]
     fn enable_tool_rejects_a_name_from_the_other_profile() {
         let mut args = serve_args(McpServeMode::Stdio, None);
-        args.enable_tools = vec!["syntax_help".to_owned()];
+        args.enable_tools = vec!["its_help".to_owned()];
 
-        let err = validate_serve_args(&args).expect_err("syntax_help is not a workspace tool");
+        let err = validate_serve_args(&args).expect_err("its_help is not a workspace tool");
 
-        assert!(err.to_string().contains("syntax_help"), "{err}");
+        assert!(err.to_string().contains("its_help"), "{err}");
     }
 
     #[test]

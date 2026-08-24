@@ -1,5 +1,6 @@
 pub use crate::field_enum::FieldInfo;
 
+use bsl_metadata::{MdoType, ModuleType};
 use bsl_types::builders::Builders;
 use bsl_types::facet::FormDataFacet;
 use bsl_types::intern::TypeKernelDb;
@@ -269,10 +270,43 @@ fn lookup_field_on_metadata_ref(
     field_name: &Name,
 ) -> Option<FieldInfo> {
     let needle = field_name.as_str();
-    enumerate_fields_inner(db, resolver, effective_ty).into_iter().find(|f| {
+    let metadata_field = enumerate_fields_inner(db, resolver, effective_ty).into_iter().find(|f| {
         stdx::case::eq_ignore_case(f.name.as_str(), needle)
             || f.name_en.as_ref().is_some_and(|en| stdx::case::eq_ignore_case(en.as_str(), needle))
-    })
+    });
+    if metadata_field.is_some() {
+        return metadata_field;
+    }
+
+    let TypeKind::MetadataRef(facet) = db.lookup_type(effective_ty) else { return None };
+    let mdo_type = match facet.kind {
+        MetadataKind::CatalogObject => MdoType::Catalog,
+        MetadataKind::DocumentObject => MdoType::Document,
+        MetadataKind::ExchangePlanObject => MdoType::ExchangePlan,
+        MetadataKind::ChartOfAccountsObject => MdoType::ChartOfAccounts,
+        MetadataKind::TaskObject => MdoType::Task,
+        MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
+        MetadataKind::DataProcessorObject => MdoType::DataProcessor,
+        MetadataKind::ReportObject => MdoType::Report,
+        MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
+        MetadataKind::ChartOfCalculationTypesObject => MdoType::ChartOfCalculationTypes,
+        _ => return None,
+    };
+    resolver
+        .has_effective_module_variable(
+            ModuleType::ObjectModule,
+            mdo_type,
+            facet.name.as_str(),
+            needle,
+        )
+        .then(|| FieldInfo {
+            name: field_name.clone(),
+            name_en: None,
+            ty: db.unknown(),
+            value_ty: None,
+            is_readonly: false,
+            origin: crate::field_enum::FieldOrigin::UserAttribute,
+        })
 }
 
 fn lookup_field_in_query_projection(

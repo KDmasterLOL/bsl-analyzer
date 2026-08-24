@@ -88,8 +88,13 @@ const METADATA_ACTIONS: &[ActionDecl] = &[
     action("status", &[]),
 ];
 
-const WORKSPACE_SEARCH_ACTIONS: &[ActionDecl] =
-    &[action("search_code", &["query"]), action("status", &[])];
+const WORKSPACE_SEARCH_ACTIONS: &[ActionDecl] = &[
+    action("search_code", &["query"]),
+    action("status", &[]),
+    action("list_platform", &[]),
+    action("find_docs", &["query"]),
+    action("search_docs", &["query"]),
+];
 
 const QUERY_ACTIONS: &[ActionDecl] =
     &[action("validate", &["query"]), action("execute", &["query"]), action("schema", &[])];
@@ -130,12 +135,30 @@ const DIAGNOSTICS_ACTIONS: &[ActionDecl] = &[
     action("workspace", &[]),
 ];
 
-const REFERENCE_SEARCH_ACTIONS: &[ActionDecl] =
-    &[action("find_docs", &["query"]), action("search_docs", &["query"]), action("status", &[])];
+const REFERENCE_SEARCH_ACTIONS: &[ActionDecl] = &[
+    action("find_docs", &["query"]),
+    action("search_docs", &["query"]),
+    action("status", &[]),
+    action("list_platform", &[]),
+];
+
+const SYNTAX_HELP: ToolDecl = ToolDecl {
+    name: "syntax_help",
+    actions: &[],
+    note: Some("exactly one of `name` or `reference_id` is required"),
+    output_schema_version: Some("2"),
+    default_enabled: true,
+};
 
 const WORKSPACE_TOOLS: &[ToolDecl] = &[
     tool("metadata", METADATA_ACTIONS),
-    tool("search", WORKSPACE_SEARCH_ACTIONS),
+    ToolDecl {
+        name: "search",
+        actions: WORKSPACE_SEARCH_ACTIONS,
+        note: None,
+        output_schema_version: Some("4"),
+        default_enabled: true,
+    },
     tool("query", QUERY_ACTIONS),
     tool("execute", EXECUTE_ACTIONS),
     tool("event_log", &[]),
@@ -145,7 +168,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "symbol_info",
         actions: &[],
         note: Some("one of `symbol` or `path`+`line` is required"),
-        output_schema_version: None,
+        output_schema_version: Some("1"),
         default_enabled: true,
     },
     ToolDecl {
@@ -169,17 +192,18 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         default_enabled: true,
     },
     tool("outline", &[]),
+    SYNTAX_HELP,
 ];
 
 const REFERENCE_TOOLS: &[ToolDecl] = &[
-    tool("search", REFERENCE_SEARCH_ACTIONS),
     ToolDecl {
-        name: "syntax_help",
-        actions: &[],
+        name: "search",
+        actions: REFERENCE_SEARCH_ACTIONS,
         note: None,
-        output_schema_version: Some("1"),
+        output_schema_version: Some("4"),
         default_enabled: true,
     },
+    SYNTAX_HELP,
     tool("its_help", &[]),
 ];
 
@@ -300,10 +324,7 @@ pub fn mcp_surface() -> Value {
 /// additive on purpose — folding opt-in tools into `tools` with a flag would change the
 /// meaning of a field consumers already read as "what I will get", which is a major bump.
 fn profile_surface(profile: McpProfile) -> Value {
-    let router = match profile {
-        McpProfile::Workspace => McpServer::workspace_tool_router(),
-        McpProfile::Reference => McpServer::reference_tool_router(),
-    };
+    let router = McpServer::profile_router(profile);
     let listed = router.list_all();
     let entries = |default_enabled: bool| -> Vec<Value> {
         tools_of(profile)
@@ -360,14 +381,9 @@ fn action_surface(decl: &ActionDecl) -> Value {
 /// `tools/list`, and carrying them here would make every reworded sentence read as a
 /// contract change — exactly the failure mode this declaration exists to end.
 fn params_surface(schema: &Map<String, Value>) -> Value {
-    let required: BTreeSet<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return Value::Array(Vec::new());
-    };
+    let shape = schema_shape(schema);
+    let props = &shape.properties;
+    let required = &shape.required;
     let mut names: Vec<&String> = props.keys().collect();
     names.sort();
     Value::Array(
@@ -388,6 +404,69 @@ fn params_surface(schema: &Map<String, Value>) -> Value {
             })
             .collect(),
     )
+}
+
+#[derive(Default)]
+struct SchemaShape {
+    properties: Map<String, Value>,
+    required: BTreeSet<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn schema_properties(schema: &Map<String, Value>) -> Map<String, Value> {
+    schema_shape(schema).properties
+}
+
+fn schema_shape(schema: &Map<String, Value>) -> SchemaShape {
+    shape_from_value(schema, &Value::Object(schema.clone()), 0)
+}
+
+fn shape_from_value(root: &Map<String, Value>, schema: &Value, depth: usize) -> SchemaShape {
+    if depth > 16 {
+        return SchemaShape::default();
+    }
+    let Some(object) = schema.as_object() else { return SchemaShape::default() };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(name) = reference.strip_prefix("#/$defs/") {
+            if let Some(target) =
+                root.get("$defs").and_then(Value::as_object).and_then(|defs| defs.get(name))
+            {
+                return shape_from_value(root, target, depth + 1);
+            }
+        }
+    }
+
+    let mut shape = SchemaShape::default();
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        shape.properties.extend(properties.clone());
+    }
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        shape.required.extend(required.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+        for branch in all_of {
+            let branch = shape_from_value(root, branch, depth + 1);
+            shape.properties.extend(branch.properties);
+            shape.required.extend(branch.required);
+        }
+    }
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(union) = object.get(keyword).and_then(Value::as_array) {
+            let branches: Vec<_> =
+                union.iter().map(|branch| shape_from_value(root, branch, depth + 1)).collect();
+            for branch in &branches {
+                shape.properties.extend(branch.properties.clone());
+            }
+            if let Some(first) = branches.first() {
+                let mut common = first.required.clone();
+                for branch in &branches[1..] {
+                    common.retain(|name| branch.required.contains(name));
+                }
+                shape.required.extend(common);
+            }
+        }
+    }
+    shape
 }
 
 fn accepts_null(schema: &Value) -> bool {
@@ -438,22 +517,16 @@ mod tests {
     use expect_test::expect;
 
     fn schema_props(profile: McpProfile, tool: &str) -> Map<String, Value> {
-        let router = match profile {
-            McpProfile::Workspace => McpServer::workspace_tool_router(),
-            McpProfile::Reference => McpServer::reference_tool_router(),
-        };
+        let router = McpServer::profile_router(profile);
         let listed = router.list_all();
         let found = listed.iter().find(|t| t.name == tool).unwrap_or_else(|| {
             panic!("tool '{tool}' is declared but the router does not serve it")
         });
-        found.input_schema.get("properties").and_then(Value::as_object).cloned().unwrap_or_default()
+        schema_properties(&found.input_schema)
     }
 
     fn output_schema(profile: McpProfile, tool: &str) -> Option<Value> {
-        let router = match profile {
-            McpProfile::Workspace => McpServer::workspace_tool_router(),
-            McpProfile::Reference => McpServer::reference_tool_router(),
-        };
+        let router = McpServer::profile_router(profile);
         router
             .list_all()
             .iter()
@@ -589,10 +662,7 @@ mod tests {
     #[test]
     fn declaration_covers_every_served_tool() {
         for profile in [McpProfile::Workspace, McpProfile::Reference] {
-            let router = match profile {
-                McpProfile::Workspace => McpServer::workspace_tool_router(),
-                McpProfile::Reference => McpServer::reference_tool_router(),
-            };
+            let router = McpServer::profile_router(profile);
             let mut served: Vec<String> =
                 router.list_all().iter().map(|t| t.name.to_string()).collect();
             served.sort();
@@ -611,10 +681,11 @@ mod tests {
                     let schema = output_schema(profile, decl.name).unwrap_or_else(|| {
                         panic!("{}/{} has no outputSchema", profile.as_str(), decl.name)
                     });
-                    assert_eq!(
-                        schema["type"],
-                        "object",
-                        "{}/{} outputSchema must describe object responses",
+                    assert!(
+                        schema
+                            .as_object()
+                            .is_some_and(|schema| !schema_properties(schema).is_empty()),
+                        "{}/{} outputSchema has no object-shaped branch",
                         profile.as_str(),
                         decl.name
                     );
@@ -747,14 +818,25 @@ mod tests {
                           {
                             "name": "status",
                             "required": []
+                          },
+                          {
+                            "name": "list_platform",
+                            "required": []
                           }
                         ],
                         "name": "search",
+                        "output_schema_fingerprint": "blake3:dcd30e696ea1070a8dbe44f7a2da4bc069f4ff83d49f3ab7a580a9cc963bba3a",
+                        "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
-                            "required": true,
+                            "required": false,
                             "type": "string"
+                          },
+                          {
+                            "name": "kind",
+                            "required": false,
+                            "type": "any"
                           },
                           {
                             "name": "limit",
@@ -769,8 +851,13 @@ mod tests {
                             "type": "integer"
                           },
                           {
-                            "name": "query",
+                            "name": "name",
                             "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "query",
                             "required": false,
                             "type": "string"
                           }
@@ -779,8 +866,9 @@ mod tests {
                       {
                         "actions": [],
                         "name": "syntax_help",
-                        "output_schema_fingerprint": "blake3:6cab7da33f83233f74680c7f276749f8625af0a67f00758449f3032c873af0ba",
-                        "output_schema_version": "1",
+                        "note": "exactly one of `name` or `reference_id` is required",
+                        "output_schema_fingerprint": "blake3:8a212815b8e90e95f79b13325d18b264233cbe387eeb7efe229a3dda1e1da250",
+                        "output_schema_version": "2",
                         "params": [
                           {
                             "name": "max_output_tokens",
@@ -790,7 +878,12 @@ mod tests {
                           },
                           {
                             "name": "name",
-                            "required": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "reference_id",
+                            "required": false,
                             "type": "string"
                           },
                           {
@@ -1031,14 +1124,37 @@ mod tests {
                           {
                             "name": "status",
                             "required": []
+                          },
+                          {
+                            "name": "list_platform",
+                            "required": []
+                          },
+                          {
+                            "name": "find_docs",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "search_docs",
+                            "required": [
+                              "query"
+                            ]
                           }
                         ],
                         "name": "search",
+                        "output_schema_fingerprint": "blake3:dcd30e696ea1070a8dbe44f7a2da4bc069f4ff83d49f3ab7a580a9cc963bba3a",
+                        "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
-                            "required": true,
+                            "required": false,
                             "type": "string"
+                          },
+                          {
+                            "name": "kind",
+                            "required": false,
+                            "type": "any"
                           },
                           {
                             "name": "limit",
@@ -1053,8 +1169,13 @@ mod tests {
                             "type": "integer"
                           },
                           {
-                            "name": "query",
+                            "name": "name",
                             "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "query",
                             "required": false,
                             "type": "string"
                           }
@@ -1499,6 +1620,8 @@ mod tests {
                         "actions": [],
                         "name": "symbol_info",
                         "note": "one of `symbol` or `path`+`line` is required",
+                        "output_schema_fingerprint": "blake3:4b5f3122c310343fd4d47e1342fbf761d7a38048c67aa6a48b16de9069bee1e1",
+                        "output_schema_version": "1",
                         "params": [
                           {
                             "name": "column",
@@ -1528,6 +1651,17 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "integer"
+                          },
+                          {
+                            "name": "member_kind",
+                            "required": false,
+                            "type": "any"
+                          },
+                          {
+                            "name": "member_name",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
                           },
                           {
                             "name": "path",
@@ -1673,6 +1807,37 @@ mod tests {
                           },
                           {
                             "name": "root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "syntax_help",
+                        "note": "exactly one of `name` or `reference_id` is required",
+                        "output_schema_fingerprint": "blake3:8a212815b8e90e95f79b13325d18b264233cbe387eeb7efe229a3dda1e1da250",
+                        "output_schema_version": "2",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "name",
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "reference_id",
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "type_name",
                             "nullable": true,
                             "required": false,
                             "type": "string"

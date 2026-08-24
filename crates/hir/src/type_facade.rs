@@ -10,7 +10,8 @@ use hir_def::Name;
 use hir_ty::lower::type_string::{lower_param_type_string_typeid, lower_return_type_string_typeid};
 use hir_ty::method_lookup::platform_type_key_id;
 use hir_ty::{
-    enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_method, FieldInfo, FieldOrigin,
+    enumerate_fields, is_assignable, is_ref_ty, lookup_field, lookup_manager_field, lookup_method,
+    platform_methods_for_manager, platform_methods_for_metadata_kind, FieldInfo, FieldOrigin,
 };
 use std::sync::Arc;
 use stdx::case::CaseExt;
@@ -22,6 +23,7 @@ pub struct Method {
     pub english_name: Name,
     pub return_ty: Option<TypeId>,
     pub params: Vec<MethodParam>,
+    pub env: Option<hir_def::execution_env::EnvFlags>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +31,67 @@ pub struct MethodParam {
     pub name: Name,
     pub ty: Option<TypeId>,
     pub optional: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformNameKind {
+    GlobalFunction,
+    Type,
+    Method,
+    Property,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlatformNameEntry<'a> {
+    pub kind: PlatformNameKind,
+    pub name: &'a str,
+    pub english_name: &'a str,
+    pub owner: Option<&'a str>,
+}
+
+/// The platform name surface exposed to IDE consumers through the HIR facade.
+pub fn platform_name_entries() -> Vec<PlatformNameEntry<'static>> {
+    let platform = PlatformData::instance();
+    let mut entries = Vec::with_capacity(
+        platform.all_global_functions().len()
+            + platform.all_types().len()
+            + platform.all_methods().len()
+            + platform.all_properties().len(),
+    );
+
+    entries.extend(platform.all_global_functions().iter().map(|function| PlatformNameEntry {
+        kind: PlatformNameKind::GlobalFunction,
+        name: &function.name,
+        english_name: &function.english_name,
+        owner: None,
+    }));
+    entries.extend(platform.all_types().iter().map(|ty| PlatformNameEntry {
+        kind: PlatformNameKind::Type,
+        name: &ty.name,
+        english_name: &ty.english_name,
+        owner: None,
+    }));
+    entries.extend(platform.all_methods().iter().map(|method| PlatformNameEntry {
+        kind: PlatformNameKind::Method,
+        name: &method.name,
+        english_name: &method.english_name,
+        owner: platform_owner_display(platform, &method.type_name),
+    }));
+    entries.extend(platform.all_properties().iter().map(|property| PlatformNameEntry {
+        kind: PlatformNameKind::Property,
+        name: &property.name,
+        english_name: &property.english_name,
+        owner: platform_owner_display(platform, &property.type_name),
+    }));
+    entries
+}
+
+fn platform_owner_display<'a>(platform: &'a PlatformData, type_name: &'a str) -> Option<&'a str> {
+    if type_name.is_empty() {
+        None
+    } else {
+        Some(platform.get_type(type_name).map_or(type_name, |ty| ty.name.as_str()))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +135,7 @@ pub struct Field {
     pub value_ty: Option<TypeId>,
     pub is_readonly: bool,
     pub origin: HirFieldOrigin,
+    pub env: Option<hir_def::execution_env::EnvFlags>,
 }
 
 #[derive(Debug)]
@@ -176,8 +240,18 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         let obj_resolver = hir_ty::DbObjectResolver::new(self.db, self.file_id);
         let id = lookup_field(self.db, &obj_resolver, self.id, field_name)
             .map(|info| info.ty)
+            .or_else(|| {
+                lookup_manager_field(self.db, &obj_resolver, self.id, field_name)
+                    .map(|info| info.ty)
+            })
             .unwrap_or_else(|| self.db.unknown());
         Self::from_id(self.db, self.file_id, id)
+    }
+
+    pub fn has_field(&self, field_name: &Name) -> bool {
+        let obj_resolver = hir_ty::DbObjectResolver::new(self.db, self.file_id);
+        lookup_field(self.db, &obj_resolver, self.id, field_name).is_some()
+            || lookup_manager_field(self.db, &obj_resolver, self.id, field_name).is_some()
     }
 
     pub fn methods(&self) -> Vec<Method> {
@@ -196,6 +270,24 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             return methods;
         }
 
+        let metadata_kind = match self.kind() {
+            TypeKind::MetadataRef(facet) => Some(facet.kind),
+            TypeKind::MetadataObject(facet) => Some(facet.kind),
+            _ => None,
+        };
+        if let Some(kind) = metadata_kind {
+            return platform_methods_for_metadata_kind(kind)
+                .iter()
+                .map(|method| method_dto_from_platform(self.db, method))
+                .collect();
+        }
+        if let TypeKind::ObjectManager(facet) = self.kind() {
+            return platform_methods_for_manager(facet.mdo)
+                .iter()
+                .map(|method| method_dto_from_platform(self.db, method))
+                .collect();
+        }
+
         let Some(type_key) = platform_type_key_id(self.db, self.id) else {
             return Vec::new();
         };
@@ -211,6 +303,10 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
         enumerate_fields(self.db, &obj_resolver, self.id)
             .into_iter()
             .map(|info| Field {
+                env: match info.origin {
+                    FieldOrigin::PlatformProperty { env } => Some(env),
+                    _ => None,
+                },
                 name: info.name.clone(),
                 english_name: info.name_en.clone().unwrap_or_else(|| info.name.clone()),
                 ty: info.ty,
@@ -246,6 +342,39 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
     }
 }
 
+pub fn root_metadata_object_type(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    name: &str,
+) -> Option<TypeId> {
+    use bsl_types::testing::RootConfigCtx;
+
+    let kind = MetadataKind::object_kind_for(mdo_type)?;
+    Some(db.metadata_object(kind, name.to_string(), &RootConfigCtx))
+}
+
+pub fn root_metadata_ref_type(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    name: &str,
+) -> Option<TypeId> {
+    use bsl_types::testing::RootConfigCtx;
+
+    let kind = MetadataKind::ref_kind_for(mdo_type)?;
+    Some(db.metadata_ref(kind, name.to_string(), &RootConfigCtx))
+}
+
+pub fn root_object_manager_type(
+    db: &dyn TypeKernelDb,
+    mdo_type: MdoType,
+    name: &str,
+) -> Option<TypeId> {
+    use bsl_types::testing::RootConfigCtx;
+
+    mdo_type.manager_type_prefix()?;
+    Some(db.object_manager(mdo_type, name.to_string(), &RootConfigCtx))
+}
+
 pub fn kernel_type_label(
     db: &dyn TypeKernelDb,
     id: TypeId,
@@ -262,6 +391,10 @@ pub fn kernel_type_label(
 
 fn field_from_info(info: FieldInfo) -> Field {
     Field {
+        env: match info.origin {
+            FieldOrigin::PlatformProperty { env } => Some(env),
+            _ => None,
+        },
         name: info.name.clone(),
         english_name: info.name_en.unwrap_or_else(|| info.name.clone()),
         ty: info.ty,
@@ -317,7 +450,53 @@ fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> M
         english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
         return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string_typeid(db, ret)),
         params,
+        env: Some(hir_def::execution_env::EnvFlags::from_platform_context(method.context.as_ref())),
     }
+}
+
+pub fn execution_environment_at<DB: hir_ty::db::HirDatabase>(
+    db: &DB,
+    file_id: FileId,
+    offset: syntax::TextSize,
+) -> hir_def::execution_env::EnvFlags {
+    use hir_def::execution_env::{self, EnvFlags};
+
+    let options = db.env_options();
+    let metadata = db.module_metadata(hir_def::ModuleId::new(file_id));
+    let item_tree = db.item_tree(file_id);
+    let method_at_cursor = crate::bare_root::method_item_at(&item_tree, offset);
+    if let Some((_, item)) = method_at_cursor {
+        let annotations = match item {
+            hir_def::item_tree::ModItem::Procedure(index) => {
+                &item_tree.procedure(*index).annotations
+            }
+            hir_def::item_tree::ModItem::Function(index) => &item_tree.function(*index).annotations,
+            hir_def::item_tree::ModItem::Variable(_) => unreachable!(),
+        };
+        if annotations.iter().any(|annotation| {
+            matches!(
+                annotation.kind,
+                hir_def::item_tree::AnnotationKind::Before
+                    | hir_def::item_tree::AnnotationKind::After
+                    | hir_def::item_tree::AnnotationKind::Instead
+                    | hir_def::item_tree::AnnotationKind::ChangeAndValidate
+            )
+        }) {
+            return EnvFlags::EMPTY;
+        }
+    }
+
+    let mut environment = match method_at_cursor {
+        Some((local_id, _)) => execution_env::method_env(&item_tree, local_id, &metadata, &options),
+        None => execution_env::module_code_env(&metadata, &options),
+    };
+    if !environment.is_empty() {
+        let conditionals = db.conditional_tree(file_id);
+        if !conditionals.is_empty() {
+            environment = environment & execution_env::conditional_env_at(&conditionals, offset);
+        }
+    }
+    environment
 }
 
 fn fallback_name(name: &str, fallback: &str) -> Name {
@@ -351,6 +530,23 @@ mod tests {
         db.set_file_source_root(file_id, SourceRootId(0));
         db.set_file_text(file_id, "");
         (db, file_id)
+    }
+
+    #[test]
+    fn platform_name_entries_cover_every_kind_and_localize_owners() {
+        let entries = platform_name_entries();
+        for kind in [
+            PlatformNameKind::GlobalFunction,
+            PlatformNameKind::Type,
+            PlatformNameKind::Method,
+            PlatformNameKind::Property,
+        ] {
+            assert!(entries.iter().any(|entry| entry.kind == kind), "missing {kind:?}");
+        }
+        assert!(entries.iter().any(|entry| {
+            entry.kind == PlatformNameKind::Method
+                && entry.owner.is_some_and(|owner| !owner.is_ascii())
+        }));
     }
 
     fn designer_fixture_path() -> PathBuf {
@@ -575,10 +771,10 @@ mod tests {
     }
 
     #[test]
-    fn methods_empty_for_ref_types_at_m3() {
+    fn methods_list_prefixed_platform_methods_for_metadata_refs() {
         let (db, file_id) = empty_db();
         let cat = t(&db, file_id, metadata_ref(&db, MetadataKind::CatalogRef, "X"));
-        assert!(cat.methods().is_empty());
+        assert!(!cat.methods().is_empty());
         assert!(t(&db, file_id, db.number(None, None)).methods().is_empty());
     }
 

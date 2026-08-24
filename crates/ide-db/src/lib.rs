@@ -4,6 +4,7 @@ pub use syntax::TextRange;
 pub use vfs;
 
 pub mod database;
+pub mod effective_exports;
 pub mod effects;
 pub mod features;
 pub mod metadata;
@@ -22,7 +23,10 @@ pub use hir::SdblHirEntries;
 pub use hir::CommonModuleBodies;
 pub use types::SymbolKind;
 
-pub use database::{GraphConfigCache, RootDatabaseImpl, VisibleRoots};
+pub use database::{
+    EffectiveMetadataMember, EffectiveMetadataMemberValue, GraphConfigCache, RootDatabaseImpl,
+    VisibleRoots,
+};
 pub use root_db::RootDatabase;
 
 pub use provider::AnalysisProvider;
@@ -38,6 +42,11 @@ pub use queries::{
 pub use effects::{
     method_effect_summary_query, module_effect_summaries_query, module_security_state_query,
     ModuleEffectSummaries, ModuleSecurityState,
+};
+
+pub use effective_exports::{
+    effective_module_exports_query, EffectiveMethodExport, EffectiveModuleExports,
+    EffectiveModuleRole, EffectiveVariableExport, ExportComposition,
 };
 
 pub use metadata::build_module_metadata;

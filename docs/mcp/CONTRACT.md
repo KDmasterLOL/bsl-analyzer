@@ -30,8 +30,8 @@ uri: bsl-analyzer://contract
 
 ```jsonc
 {
-  "contract_version": "1.11",
-  "build_version": "0.2.62",
+  "contract_version": "1.13",
+  "build_version": "0.2.70",
   "mcp": {
     "profiles": {
       "workspace": {
@@ -102,6 +102,12 @@ uri: bsl-analyzer://contract
 ```
 
 Пояснения к полям:
+
+- В контракте `1.13` `search` публикует `output_schema_version="4"`,
+  `syntax_help` — `"2"`, `symbol_info` — `"1"`. `syntax_help` и справочные
+  действия `search(action=find_docs|search_docs|list_platform|status)` доступны
+  не только в `reference`, но и в `workspace`; отдельный профиль `reference`
+  остаётся совместимым, но больше не обязателен для справки платформы.
 
 - `tools` — то, что сервер отдаёт в `tools/list` при обычном запуске;
   `opt_in_tools` — то, что эта же сборка умеет, но отдаёт только по явному
