@@ -1309,10 +1309,15 @@ impl McpServer {
         // `status` reports the graph lifecycle (and kicks the lazy build) so an agent can start
         // it and poll progress instead of reading a flat `loading` envelope from a data action.
         if p.action == "status" {
-            graph.ensure_loading();
-            let report = tokio::task::spawn_blocking(move || graph.status_report())
-                .await
-                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
+            // `ensure_loading` consults the lease and so reads a file under a lock; it belongs
+            // on the blocking pool for the same reason `status_report` does. `status` is the
+            // documented polling path, so this is the most frequently reached lease read there is.
+            let report = tokio::task::spawn_blocking(move || {
+                graph.ensure_loading();
+                graph.status_report()
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
             return Ok(tools::graph::status(&report));
         }
 

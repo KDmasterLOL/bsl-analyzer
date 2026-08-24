@@ -3027,14 +3027,6 @@ impl SearchEngine {
         Ok((hits, overlay.hidden_paths.clone()))
     }
 
-    pub fn workspace_overlay_lexical_hits_read_only(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
-        self.workspace_overlay_lexical_hits_fenced(query, limit, false)
-    }
-
     /// [`Self::workspace_overlay_lexical_hits`] with the refresh under the caller's fence.
     pub fn workspace_overlay_lexical_hits_fenced(
         &self,
@@ -3097,14 +3089,6 @@ impl SearchEngine {
         }
         let hits = semantic_hits(&overlay, query_embedding, limit);
         Ok((hits, overlay.hidden_paths.clone()))
-    }
-
-    pub fn workspace_overlay_semantic_hits_with_embedding_read_only(
-        &self,
-        query_embedding: &[f32],
-        limit: usize,
-    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
-        self.workspace_overlay_semantic_hits_with_embedding_fenced(query_embedding, limit, false)
     }
 
     /// [`Self::workspace_overlay_semantic_hits_with_embedding`] with the refresh under the
@@ -3222,15 +3206,6 @@ impl SearchEngine {
         }
 
         self.search_persisted_with_embedding(query_embedding, limit, collection)
-    }
-
-    pub fn search_with_embedding_read_only(
-        &self,
-        query_embedding: &[f32],
-        limit: usize,
-        collection: Option<&str>,
-    ) -> Result<Vec<SearchHit>, SearchError> {
-        self.search_with_embedding_fenced(query_embedding, limit, collection, false)
     }
 
     /// [`Self::search_with_embedding`] with the overlay refresh under the caller's fence.
@@ -3384,15 +3359,6 @@ impl SearchEngine {
         }
 
         self.text_search_persisted(query, limit, collection)
-    }
-
-    pub fn text_search_read_only(
-        &self,
-        query: &str,
-        limit: usize,
-        collection: Option<&str>,
-    ) -> Result<Vec<SearchHit>, SearchError> {
-        self.text_search_fenced(query, limit, collection, false)
     }
 
     /// [`Self::text_search`] with the overlay refresh under the caller's fence.
