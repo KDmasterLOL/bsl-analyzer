@@ -2308,13 +2308,19 @@ mod graph_supersession_contract {
         let server = McpServer::new(McpProfile::Workspace, state);
         let newer = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
 
-        let schema = server.graph(params("schema", None)).await.expect("schema stays static");
+        let schema = server
+            .graph(params("schema", None), tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("schema stays static");
         assert!(schema.structured_content.is_some());
 
         for (action, id) in
             [("overview", None), ("node", Some("method/CommonModule.X.Y")), ("overview", None)]
         {
-            let error = server.graph(params(action, id)).await.expect_err(action);
+            let error = server
+                .graph(params(action, id), tokio_util::sync::CancellationToken::new())
+                .await
+                .expect_err(action);
             assert_eq!(error.message, crate::graph::SUPERSEDED_GRAPH_ERROR, "{action}");
         }
 
