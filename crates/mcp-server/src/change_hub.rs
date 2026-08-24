@@ -359,7 +359,13 @@ pub(crate) struct DrainBatch {
     pub(crate) rescan_required: bool,
     through_seq: u64,
     start_pos: u64,
-    generation: u64,
+    /// Identity of the reconcile debt this batch drained. The debt is cleared on
+    /// acknowledgement only if it is still the SAME one: a debt incurred while the sink was
+    /// applying belongs to the next batch, and clearing it here would drop a reconcile nobody
+    /// ran. A shared counter of unrelated activity cannot answer this — every ordinary file
+    /// event bumps it, so a slow apply would never clear its debt and a genuine second
+    /// overflow, which bumps nothing when a window is already open, would be cleared away.
+    pending_seq: u64,
 }
 
 /// Per-cursor state held by the accumulator.
@@ -371,6 +377,9 @@ struct CursorState {
     /// than only in the shared window is what lets a debt exist for one consumer alone —
     /// a debt nobody can name is a debt no health can report.
     pending: Option<DegradeReason>,
+    /// Bumped every time `pending` is armed, so an acknowledgement can tell the debt it
+    /// drained from one incurred while it was applying.
+    pending_seq: u64,
 }
 
 /// Bounded, seq-tagged accumulator. Entries coalesce by canonical path so the map
@@ -401,6 +410,8 @@ struct Accumulator {
     /// external state cannot tell one request per tick from one per target — while
     /// the cost is real: a consumer answers each with a full tree walk.
     rescans_requested: u64,
+    /// Source of `CursorState::pending_seq`. Monotonic, bumped only where a debt is armed.
+    next_pending_seq: u64,
 }
 
 impl Accumulator {
@@ -416,6 +427,7 @@ impl Accumulator {
             degrade_reason: None,
             setup_failed: false,
             rescans_requested: 0,
+            next_pending_seq: 0,
         }
     }
 
@@ -436,7 +448,13 @@ impl Accumulator {
         // anyone else still holds, so charging it a full reconcile would be charging it
         // for somebody else's silence.
         let pending = force.or_else(|| self.degrade_reason.clone());
-        self.cursors.insert(id, CursorState { pos: self.max_seq(), pending });
+        let pending_seq = if pending.is_some() {
+            self.next_pending_seq += 1;
+            self.next_pending_seq
+        } else {
+            0
+        };
+        self.cursors.insert(id, CursorState { pos: self.max_seq(), pending, pending_seq });
         id
     }
 
@@ -492,11 +510,16 @@ impl Accumulator {
                 self.entries.clear();
                 return;
             };
+            let seq = self.next_pending_seq + 1;
             if let Some(cursor) = self.cursors.get_mut(&id) {
                 cursor.pos = max;
                 // `get_or_insert`, not an overwrite: an open window's reason is the more
                 // informative of the two, and this cursor owes one reconcile either way.
-                cursor.pending.get_or_insert(DegradeReason::CursorLagged);
+                if cursor.pending.is_none() {
+                    cursor.pending = Some(DegradeReason::CursorLagged);
+                    cursor.pending_seq = seq;
+                    self.next_pending_seq = seq;
+                }
                 self.generation += 1;
             }
             self.reclaim();
@@ -514,11 +537,19 @@ impl Accumulator {
             self.entries.clear();
         }
         let mut changed = newly;
+        let mut next_pending = self.next_pending_seq;
         for cursor in self.cursors.values_mut() {
             // Overwritten, unlike a lag debt: this is the newest thing that went wrong,
             // and it is what a consumer asking why it must reconcile should be told.
+            //
+            // The identity is bumped even when a debt was already owed. A second overflow
+            // inside an open window is a second full tree walk the consumer has not run, so
+            // it must not be settled by an acknowledgement of the first.
+            next_pending += 1;
+            cursor.pending_seq = next_pending;
             changed |= cursor.pending.replace(reason.clone()).is_none();
         }
+        self.next_pending_seq = next_pending;
         self.degrade_reason = Some(reason.clone());
         if changed {
             self.generation += 1;
@@ -544,7 +575,7 @@ impl Accumulator {
             rescan_required,
             through_seq: max,
             start_pos: pos,
-            generation: self.generation,
+            pending_seq: self.cursors.get(&id).map(|cursor| cursor.pending_seq).unwrap_or(0),
         }
     }
 
@@ -554,7 +585,7 @@ impl Accumulator {
             return;
         }
         cursor.pos = batch.through_seq;
-        if batch.rescan_required && self.generation == batch.generation {
+        if batch.rescan_required && cursor.pending_seq == batch.pending_seq {
             cursor.pending.take();
         }
         self.close_window_if_settled();
@@ -3880,6 +3911,39 @@ mod tests {
         assert!(acc.entries.len() <= acc.cap, "the cap still bounds the accumulator");
     }
 
+    /// An ordinary edit landing while the sink applies its batch must not keep the reconcile
+    /// debt alive: the sink DID run the walk it was asked for. Keyed on shared activity this
+    /// never settles, because a slow apply guarantees events in its own window.
+    #[test]
+    fn an_unrelated_event_during_apply_still_settles_the_debt() {
+        let mut acc = Accumulator::new(8);
+        let cursor = acc.subscribe(None);
+        acc.enter_rescan(true, DegradeReason::Overflow);
+        let batch = acc.materialize(cursor);
+        assert!(batch.rescan_required);
+
+        let edited = PathBuf::from("/edited.bsl");
+        acc.record(edited.clone(), edited, ChangeKind::MaybeChanged);
+        acc.acknowledge(&batch);
+
+        assert!(!acc.materialize(cursor).rescan_required, "the walk that ran settled its debt");
+    }
+
+    /// The mirror case: a genuine second overflow inside an already-open window is a second
+    /// walk nobody has run, so acknowledging the first batch must not settle it.
+    #[test]
+    fn a_second_overflow_during_apply_outlives_the_first_ack() {
+        let mut acc = Accumulator::new(8);
+        let cursor = acc.subscribe(None);
+        acc.enter_rescan(true, DegradeReason::Overflow);
+        let batch = acc.materialize(cursor);
+
+        acc.enter_rescan(true, DegradeReason::Overflow);
+        acc.acknowledge(&batch);
+
+        assert!(acc.materialize(cursor).rescan_required, "the second overflow still owes a walk");
+    }
+
     #[test]
     fn materialized_batch_advances_only_after_ack() {
         let mut acc = Accumulator::new(8);
@@ -3898,7 +3962,7 @@ mod tests {
         acc.acknowledge(&batch);
         let next = acc.materialize(cursor);
         assert_eq!(next.entries.len(), 1, "drift newer than the checkpoint remains pending");
-        assert!(next.rescan_required, "a changed generation keeps the rescan obligation");
+        assert!(!next.rescan_required, "the walk that ran settled its own debt");
 
         acc.acknowledge(&next);
         let empty = acc.materialize(cursor);

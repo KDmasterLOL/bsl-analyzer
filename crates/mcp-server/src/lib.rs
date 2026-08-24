@@ -1316,9 +1316,18 @@ impl McpServer {
             return Ok(tools::graph::status(&report));
         }
 
-        // Lazily trigger the background load on first use.
-        graph.ensure_loading();
-        let superseded = graph.is_superseded();
+        // Lazily trigger the background load on first use. Both calls consult the workspace
+        // lease, which reads the lease record under a lock — file I/O that must not run on an
+        // async worker thread, exactly as `status_report` above does not.
+        let superseded = {
+            let graph = graph.clone();
+            tokio::task::spawn_blocking(move || {
+                graph.ensure_loading();
+                graph.is_superseded()
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+        };
 
         // `resolve` is a name lookup, not a graph traversal: the platform answers it
         // with no index at all and the resident's tables answer it without the graph,

@@ -3032,10 +3032,27 @@ impl SearchEngine {
         query: &str,
         limit: usize,
     ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        self.workspace_overlay_lexical_hits_fenced(query, limit, false)
+    }
+
+    /// [`Self::workspace_overlay_lexical_hits`] with the refresh under the caller's fence.
+    pub fn workspace_overlay_lexical_hits_fenced(
+        &self,
+        query: &str,
+        limit: usize,
+        refresh: bool,
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
         if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
-        let overlay = self.workspace_overlay_snapshot()?;
+        let overlay = if refresh {
+            self.refresh_workspace_overlay_snapshot(false)?
+        } else {
+            self.workspace_overlay_snapshot()?
+        };
+        if refresh && overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
         Ok((lexical_hits(&overlay, query, limit), overlay.hidden_paths))
     }
 
@@ -3087,10 +3104,28 @@ impl SearchEngine {
         query_embedding: &[f32],
         limit: usize,
     ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        self.workspace_overlay_semantic_hits_with_embedding_fenced(query_embedding, limit, false)
+    }
+
+    /// [`Self::workspace_overlay_semantic_hits_with_embedding`] with the refresh under the
+    /// caller's fence.
+    pub fn workspace_overlay_semantic_hits_with_embedding_fenced(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        refresh: bool,
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
         if self.workspace_roots.is_none() || self.embedder.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
-        let overlay = self.workspace_overlay_snapshot()?;
+        let overlay = if refresh {
+            self.refresh_workspace_overlay_snapshot(false)?
+        } else {
+            self.workspace_overlay_snapshot()?
+        };
+        if refresh && overlay.is_empty() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
         Ok((semantic_hits(&overlay, query_embedding, limit), overlay.hidden_paths))
     }
 
@@ -3195,9 +3230,20 @@ impl SearchEngine {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<SearchHit>, SearchError> {
+        self.search_with_embedding_fenced(query_embedding, limit, collection, false)
+    }
+
+    /// [`Self::search_with_embedding`] with the overlay refresh under the caller's fence.
+    pub fn search_with_embedding_fenced(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        collection: Option<&str>,
+        refresh: bool,
+    ) -> Result<Vec<SearchHit>, SearchError> {
         if collection == Some("code") {
             if let Some(hits) =
-                self.search_with_workspace_overlay_embedding(query_embedding, limit, false)?
+                self.search_with_workspace_overlay_embedding(query_embedding, limit, refresh)?
             {
                 return Ok(hits);
             }
@@ -3346,8 +3392,23 @@ impl SearchEngine {
         limit: usize,
         collection: Option<&str>,
     ) -> Result<Vec<SearchHit>, SearchError> {
+        self.text_search_fenced(query, limit, collection, false)
+    }
+
+    /// [`Self::text_search`] with the overlay refresh under the caller's fence.
+    ///
+    /// `refresh` is the caller's answer to "may this process still maintain the shared caches".
+    /// True restores the lazy disk read of paths the resident prefetch could not serve; false
+    /// serves the last published overlay, which is what a superseded daemon must do.
+    pub fn text_search_fenced(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+        refresh: bool,
+    ) -> Result<Vec<SearchHit>, SearchError> {
         if collection == Some("code") {
-            if let Some(hits) = self.text_search_with_workspace_overlay(query, limit, false)? {
+            if let Some(hits) = self.text_search_with_workspace_overlay(query, limit, refresh)? {
                 return Ok(hits);
             }
         }
@@ -4117,6 +4178,42 @@ mod tests {
             .load_overlay_embedding_cache("test", 3)
             .unwrap()
             .is_empty());
+    }
+
+    /// A path the resident prefetch could not serve stays dirty, and reading it from disk is
+    /// the query's own job. The two fences must therefore classify the SAME edit differently:
+    /// a daemon that may still maintain the caches sees it, a superseded one serves the last
+    /// publication. Asserting only one direction would pass with the refresh deleted outright.
+    #[test]
+    fn only_the_fenced_off_query_misses_a_dirty_edit() {
+        fn hits_after_dirty_edit(refresh: bool) -> usize {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path();
+            let file = workspace.join("CommonModule.bsl");
+            fs::write(&file, "\u{41f}\u{440}\u{43e}\u{446}\u{435}\u{434}\u{443}\u{440}\u{430} \u{421}\u{442}\u{430}\u{440}\u{430}\u{44f}()\n\u{41a}\u{43e}\u{43d}\u{435}\u{446}\u{41f}\u{440}\u{43e}\u{446}\u{435}\u{434}\u{443}\u{440}\u{44b}").unwrap();
+            let mut engine = SearchEngine::fts_only(&workspace.join("bsl-search.db")).unwrap();
+            engine.index_directory_fts(workspace).unwrap();
+            engine.set_workspace_root(workspace);
+            engine.prime_workspace_overlay().unwrap();
+
+            fs::write(&file, "\u{41f}\u{440}\u{43e}\u{446}\u{435}\u{434}\u{443}\u{440}\u{430} \u{41d}\u{43e}\u{432}\u{430}\u{44f}()\n\u{41a}\u{43e}\u{43d}\u{435}\u{446}\u{41f}\u{440}\u{43e}\u{446}\u{435}\u{434}\u{443}\u{440}\u{44b}").unwrap();
+            assert!(engine.mark_workspace_path_dirty(&file).unwrap(), "the edit is marked dirty");
+            engine
+                .text_search_fenced(
+                    "\u{41d}\u{43e}\u{432}\u{430}\u{44f}",
+                    10,
+                    Some("code"),
+                    refresh,
+                )
+                .unwrap()
+                .len()
+        }
+        assert_eq!(hits_after_dirty_edit(true), 1, "an owner reads the dirty path from disk");
+        assert_eq!(
+            hits_after_dirty_edit(false),
+            0,
+            "a superseded daemon serves what was published"
+        );
     }
 
     #[test]

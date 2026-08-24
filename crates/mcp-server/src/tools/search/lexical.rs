@@ -35,6 +35,11 @@ pub(super) fn lexical_code_hits_fenced(
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
     crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
+    // The prefetch serves only what the resident can hand over: it is capped per query, and it
+    // resolves nothing while the resident is booting, rebuilding or failed. Everything it left
+    // dirty is the query's own to read from disk — which is why a healthy owner must keep the
+    // refreshing path. Read-only is the SUPERSEDED daemon's path, not everyone's.
+    let refresh = lease.may_maintain_caches();
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
@@ -71,7 +76,7 @@ pub(super) fn lexical_code_hits_fenced(
         match guard.as_ref() {
             Some(engine) => {
                 let direct_start = std::time::Instant::now();
-                let direct = try_direct_lexical_code(engine, &source, query, limit);
+                let direct = try_direct_lexical_code(engine, &source, query, limit, refresh);
                 tracing::debug!(
                     elapsed_ms = direct_start.elapsed().as_millis() as u64,
                     query_len = query.len(),
@@ -107,10 +112,11 @@ pub(super) fn lexical_code_hits_fenced(
                             ));
                         }
                         let fallback_start = std::time::Instant::now();
-                        let hits =
-                            engine.text_search_read_only(query, limit, Some("code")).map_err(
-                                |e| McpError::internal_error(format!("search error: {e}"), None),
-                            )?;
+                        let hits = engine
+                            .text_search_fenced(query, limit, Some("code"), refresh)
+                            .map_err(|e| {
+                            McpError::internal_error(format!("search error: {e}"), None)
+                        })?;
                         tracing::debug!(
                             elapsed_ms = fallback_start.elapsed().as_millis() as u64,
                             query_len = query.len(),
@@ -139,7 +145,7 @@ pub(super) fn lexical_code_hits_fenced(
             ));
         };
         engine
-            .text_search_read_only(query, limit, Some("code"))
+            .text_search_fenced(query, limit, Some("code"), refresh)
             .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?
     };
 
@@ -182,6 +188,7 @@ fn try_direct_lexical_code(
     source: &ExternalBaselineService,
     query: &str,
     limit: usize,
+    refresh: bool,
 ) -> DirectResult {
     let snapshot = match source.resolve_snapshot() {
         Ok(Some((_, s))) => s,
@@ -196,7 +203,7 @@ fn try_direct_lexical_code(
         }
     };
     let (overlay_hits, hidden_paths) =
-        match engine.workspace_overlay_lexical_hits_read_only(query, limit) {
+        match engine.workspace_overlay_lexical_hits_fenced(query, limit, refresh) {
             Ok(r) => r,
             Err(e) => {
                 warn!("direct lexical: overlay query failed: {e}");

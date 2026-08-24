@@ -646,7 +646,7 @@ pub(super) fn prefetch_resident_overlay(
 ) {
     // Once terminal, every later query is a pure resident-snapshot read. This atomic check avoids
     // resident work and, importantly, never reopens the lease file after supersession is latched.
-    if lease.is_superseded() || lease.is_released() {
+    if !lease.may_maintain_caches() {
         return;
     }
     let (source, roots, dirty) = {

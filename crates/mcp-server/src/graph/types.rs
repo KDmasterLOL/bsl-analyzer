@@ -55,10 +55,18 @@ pub(crate) struct GraphPublishSignal {
 pub(crate) struct GraphPublishOutcome {
     pub(crate) topology_handled: bool,
     pub(crate) roots_handled: bool,
+    /// Whether the bounded consume of dirty context marks actually RAN.
+    ///
+    /// Distinct from `topology_handled`, which reports whether a REQUESTED topology refresh was
+    /// satisfied and is therefore vacuously true whenever none was requested. A leftover-marks
+    /// obligation is carried by the caller, not by a persistent flag, so dropping it on the
+    /// vacuous answer loses it for the life of the process.
+    pub(crate) marks_consumed: bool,
 }
 
 impl GraphPublishOutcome {
-    pub(crate) const HANDLED: Self = Self { topology_handled: true, roots_handled: true };
+    pub(crate) const HANDLED: Self =
+        Self { topology_handled: true, roots_handled: true, marks_consumed: true };
 }
 
 /// What a [`crate::graph::GraphState::nudge_rebuild`] scheduled. Surfaced so the single-flight

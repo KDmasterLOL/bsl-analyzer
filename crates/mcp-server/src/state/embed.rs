@@ -218,15 +218,16 @@ impl SharedState {
                     &lease,
                     &signal,
                 );
-            let topology_handled = Self::refresh_search_contexts_after_graph_with_cache(
-                &search_engine,
-                &cache,
-                &semantic_runtime,
-                &index_progress,
-                &embed_flight,
-                &lease,
-                signal,
-            );
+            let (topology_handled, marks_consumed) =
+                Self::refresh_search_contexts_after_graph_with_cache(
+                    &search_engine,
+                    &cache,
+                    &semantic_runtime,
+                    &index_progress,
+                    &embed_flight,
+                    &lease,
+                    signal,
+                );
             // Context refresh may have NULLed more chunks, so kick after both mutations and let
             // the existing single-flights absorb all pending work in one rerun.
             if pending_collection_embeddings {
@@ -243,7 +244,7 @@ impl SharedState {
                     retry.kick_fresh();
                 }
             }
-            crate::graph::GraphPublishOutcome { topology_handled, roots_handled }
+            crate::graph::GraphPublishOutcome { topology_handled, roots_handled, marks_consumed }
         })
     }
 
@@ -736,7 +737,7 @@ impl SharedState {
         embed_flight: &Arc<EmbedFlight>,
         lease: &crate::workspace_lease::WorkspaceLease,
         signal: crate::graph::GraphPublishSignal,
-    ) -> bool {
+    ) -> (bool, bool) {
         let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root);
         Self::refresh_search_contexts_after_graph_with_cache(
             engine,
@@ -757,7 +758,7 @@ impl SharedState {
         embed_flight: &Arc<EmbedFlight>,
         lease: &crate::workspace_lease::WorkspaceLease,
         signal: crate::graph::GraphPublishSignal,
-    ) -> bool {
+    ) -> (bool, bool) {
         let crate::graph::GraphPublishSignal {
             drift_pending,
             build_start_seq,
@@ -774,14 +775,14 @@ impl SharedState {
             tracing::debug!(
                 "graph drift still pending; deferring search context refresh to the next publish"
             );
-            return !topology_changed;
+            return (!topology_changed, false);
         }
         let graph_path = cache.graph_db_path();
         let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
             Ok(db) => db,
             Err(e) => {
                 tracing::debug!("graph unavailable for search context refresh: {e}");
-                return !topology_changed;
+                return (!topology_changed, false);
             }
         };
         // The file we just opened is not necessarily the build that fired this hook: a
@@ -796,11 +797,11 @@ impl SharedState {
                     published_topology = topology,
                     "graph database on disk is not the published build; skipping context refresh"
                 );
-                return !topology_changed;
+                return (!topology_changed, false);
             }
         }
         let provider = crate::graph_query::GraphDbContextProvider::new(graph_db);
-        let (cleared_embeddings, topology_handled) =
+        let (cleared_embeddings, topology_handled, marks_consumed) =
             match Self::apply_workspace_search(engine, lease, |engine| {
                 // A topology change re-shapes visibility for EVERY document, with no
                 // per-object mark to go by: mark the whole collection and widen the
@@ -821,10 +822,15 @@ impl SharedState {
                         ),
                         Err(e) => {
                             tracing::warn!("failed to mark collection for topology refresh: {e}");
-                            return (0, false);
+                            return (0, false, false);
                         }
                     }
                 }
+                // `marks_consumed` answers a different question from `topology_handled`: not
+                // "was a REQUESTED topology refresh satisfied" — vacuously true whenever none was
+                // requested — but "did the bounded consume actually run". A leftover obligation
+                // may only be dropped on the second, and the two part company on every failure.
+                let mut marks_consumed = true;
                 let cleared = match engine.refresh_dirty_contexts(&provider, seq_bound) {
                     Ok(stats) if stats.paths_cleared > 0 => {
                         tracing::info!(
@@ -840,14 +846,15 @@ impl SharedState {
                         tracing::warn!("search context refresh failed: {e}");
                         // The marks persist; the topology request is satisfied by them
                         // staying dirty for the next publish's bounded consume.
+                        marks_consumed = false;
                         0
                     }
                 };
-                (cleared, true)
+                (cleared, true, marks_consumed)
             }) {
                 super::WorkspaceSearchApply::Applied(result) => result,
                 super::WorkspaceSearchApply::Retry | super::WorkspaceSearchApply::Terminal => {
-                    return !topology_changed
+                    return (!topology_changed, false)
                 }
             };
         // Re-rendered chunks had their live embedding NULLed; without a re-embed they serve
@@ -862,7 +869,7 @@ impl SharedState {
                 lease,
             );
         }
-        topology_handled
+        (topology_handled, marks_consumed)
     }
 
     /// After a context refresh NULLed live embeddings, re-embed the pending chunks through the
@@ -2081,7 +2088,7 @@ mod tests {
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
             Arc::new(move |signal: crate::graph::GraphPublishSignal| {
-                let handled = SharedState::refresh_search_contexts_after_graph(
+                let (handled, marks_consumed) = SharedState::refresh_search_contexts_after_graph(
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
@@ -2091,7 +2098,11 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+                crate::graph::GraphPublishOutcome {
+                    topology_handled: handled,
+                    roots_handled: true,
+                    marks_consumed,
+                }
             })
                 as Arc<
                     dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
@@ -2181,7 +2192,7 @@ mod tests {
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
             Arc::new(move |signal: crate::graph::GraphPublishSignal| {
-                let handled = SharedState::refresh_search_contexts_after_graph(
+                let (handled, marks_consumed) = SharedState::refresh_search_contexts_after_graph(
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
@@ -2191,7 +2202,11 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+                crate::graph::GraphPublishOutcome {
+                    topology_handled: handled,
+                    roots_handled: true,
+                    marks_consumed,
+                }
             })
                 as Arc<
                     dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
@@ -2305,7 +2320,7 @@ mod tests {
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
             Arc::new(move |signal: crate::graph::GraphPublishSignal| {
-                let handled = SharedState::refresh_search_contexts_after_graph(
+                let (handled, marks_consumed) = SharedState::refresh_search_contexts_after_graph(
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
@@ -2315,7 +2330,11 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+                crate::graph::GraphPublishOutcome {
+                    topology_handled: handled,
+                    roots_handled: true,
+                    marks_consumed,
+                }
             })
                 as Arc<
                     dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome
@@ -2427,7 +2446,7 @@ mod tests {
             let embed_flight = Arc::clone(&embed_flight);
             let fired = Arc::clone(&fired);
             Arc::new(move |signal: crate::graph::GraphPublishSignal| {
-                let handled = SharedState::refresh_search_contexts_after_graph(
+                let (handled, marks_consumed) = SharedState::refresh_search_contexts_after_graph(
                     &engine_arc,
                     &workspace,
                     &semantic_runtime,
@@ -2437,7 +2456,11 @@ mod tests {
                     signal,
                 );
                 fired.fetch_add(1, Ordering::SeqCst);
-                crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+                crate::graph::GraphPublishOutcome {
+                    topology_handled: handled,
+                    roots_handled: true,
+                    marks_consumed,
+                }
             })
                 as Arc<
                     dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome

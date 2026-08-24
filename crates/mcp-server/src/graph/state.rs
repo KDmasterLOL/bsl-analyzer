@@ -368,7 +368,22 @@ impl GraphState {
     /// bound is what keeps the consumption correct: only marks at or below it — drifts this
     /// build already reflects — may be cleared.
     pub(super) fn notify_published(&self, build_start_seq: i64, topology_changed: bool) {
-        if !self.lease.owns_caches_now() {
+        // `topology_changed` arrives as an ARGUMENT and lives nowhere else: `inner.published`
+        // already carries the new topology, so a later publish recomputes it as `false` and the
+        // whole-collection re-render never happens again. Park it in the standing flag before
+        // any refusal can return, or a transient one silently costs the process its re-render.
+        //
+        // Terminal supersession is the one case where losing it is correct: a superseded
+        // daemon publishes nothing more, and accepting obligations it can never discharge would
+        // misreport it as merely behind. A latched atomic, so this costs no lease read.
+        // The ownership check runs FIRST because it is what latches supersession: asking
+        // `is_superseded` before it would read a verdict that has not been formed yet and park
+        // an obligation on a daemon that is already terminal.
+        let owns = self.lease.owns_caches_now();
+        if topology_changed && !self.lease.is_superseded() {
+            self.pending_topology_refresh.store(true, Ordering::SeqCst);
+        }
+        if !owns {
             return;
         }
         // Idle pooled read handles belong to the superseded file; drop them now so
@@ -398,7 +413,7 @@ impl GraphState {
         // the `swap`. The STORED bound (never a live read) is what keeps the consume from clearing
         // a mark stamped after the capture: that mark is a new drift with its own nudge→publish.
         let leftover_bound = self.leftover_bound.swap(0, Ordering::SeqCst);
-        if leftover_bound != 0 && !self.fire_hook(leftover_bound, false, false).topology_handled {
+        if leftover_bound != 0 && !self.fire_hook(leftover_bound, false, false).marks_consumed {
             self.leftover_bound.fetch_max(leftover_bound, Ordering::SeqCst);
         }
     }
@@ -497,13 +512,17 @@ impl GraphState {
     /// (`drift_pending`) leaves the one-shot armed so that reload's publish handles it against
     /// the fresher graph.
     pub(crate) fn consume_leftover_marks(&self, leftover_bound: i64) {
-        if !self.lease.owns_caches_now() {
+        // Same shape as `notify_published`: the bound is argument-carried, so it is armed
+        // before a TRANSIENT refusal can drop it. `fetch_max`, not `store`, so a concurrent
+        // arming of a higher bound is not walked back. A terminally superseded daemon takes on
+        // nothing new — it has no publish left to discharge it with.
+        let owns = self.lease.owns_caches_now();
+        if !self.lease.is_superseded() {
+            self.leftover_bound.fetch_max(leftover_bound, Ordering::SeqCst);
+        }
+        if !owns {
             return;
         }
-        // Arm first (store the captured bound), then observe state, so a build publishing
-        // concurrently either runs the follow-up itself or leaves it for the immediate consume
-        // below — the `swap` to `0` in both paths keeps it single-shot.
-        self.leftover_bound.store(leftover_bound, Ordering::SeqCst);
         // `published_stale` outlives `drift_pending`: if the stale boot's pre-claimed
         // catch-up FAILS, the slot drops to `Failed` and `drift_pending` no longer
         // holds — but the snapshot still predates the marks' causes, so the one-shot
@@ -513,7 +532,7 @@ impl GraphState {
             && !self.published_stale()
         {
             let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
-            if bound != 0 && !self.fire_hook(bound, false, false).topology_handled {
+            if bound != 0 && !self.fire_hook(bound, false, false).marks_consumed {
                 self.leftover_bound.fetch_max(bound, Ordering::SeqCst);
             }
         }
@@ -1099,6 +1118,62 @@ mod tests {
         assert!(lock_recover(&graph.inner).published.is_none());
     }
 
+    /// `topology_changed` reaches `notify_published` as an ARGUMENT and is durable nowhere
+    /// else: `inner.published` already carries the new topology, so a later publish recomputes
+    /// it as `false` and the whole-collection re-render is never requested again. A refusal
+    /// that is merely transient — the record wiped with `.build` while a peer holds the lock —
+    /// must therefore park it before returning.
+    ///
+    /// Paired with the terminal case, which must NOT park it: a superseded daemon has no
+    /// publish left to discharge the obligation with. Without both halves this passes for a
+    /// version that simply always parks.
+    #[test]
+    fn a_transient_refusal_keeps_the_topology_obligation() {
+        fn refuse_and_report(terminal: bool) -> (bool, bool) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().to_path_buf();
+            let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&root);
+            let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+            let graph = GraphState::for_workspace(root.clone()).with_lease(lease.clone());
+            {
+                let mut inner = lock_recover(&graph.inner);
+                inner.status = GraphStatus::Ready { files: 0 };
+                inner.published = Some(Published {
+                    generation: 1,
+                    fingerprint: crate::graph_db::GraphFp::default(),
+                    stale: false,
+                    reload: ReloadState::Idle,
+                    force_stale: false,
+                    search_roots: None,
+                });
+            }
+
+            let _holder = if terminal {
+                // A live foreign owner: the refusal latches and is irreversible.
+                Some(crate::workspace_lease::WorkspaceLease::claim_cache(&cache))
+            } else {
+                // `.build` wiped plus a busy lock: ownership is unavailable this instant only.
+                std::fs::remove_file(cache.lease_path()).unwrap();
+                crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+                    &cache,
+                    std::time::Duration::from_secs(3),
+                );
+                None
+            };
+            lease.invalidate_verdict_for_test();
+            graph.notify_published(0, true);
+            (graph.pending_topology_refresh.load(Ordering::SeqCst), lease.is_superseded())
+        }
+
+        let (parked, superseded) = refuse_and_report(false);
+        assert!(parked, "a transient refusal parks the argument-carried obligation");
+        assert!(!superseded, "and the refusal really was transient");
+
+        let (parked, superseded) = refuse_and_report(true);
+        assert!(superseded, "a live foreign owner is terminal");
+        assert!(!parked, "a superseded daemon takes on no obligation it can never discharge");
+    }
+
     #[test]
     fn superseded_late_publish_is_fenced() {
         let dir = tempfile::tempdir().unwrap();
@@ -1155,7 +1230,13 @@ mod tests {
             *newer_in_hook.lock().unwrap() =
                 Some(crate::workspace_lease::WorkspaceLease::claim(&root_in_hook));
             assert!(refusal_lease_in_hook.with_ownership(|| ()).is_none());
-            GraphPublishOutcome { topology_handled: false, roots_handled: true }
+            // As the production hook answers it: no topology refresh was REQUESTED, so that
+            // question is vacuously satisfied, while the consume plainly did not run.
+            GraphPublishOutcome {
+                topology_handled: true,
+                roots_handled: true,
+                marks_consumed: false,
+            }
         });
         let refusal_graph = GraphState::for_workspace(refusal_root)
             .with_lease(refusal_lease.clone())
@@ -1285,7 +1366,11 @@ mod tests {
                 } else {
                     true
                 };
-                GraphPublishOutcome { topology_handled, roots_handled: true }
+                GraphPublishOutcome {
+                    topology_handled,
+                    roots_handled: true,
+                    marks_consumed: topology_handled,
+                }
             }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
         };
         let graph = GraphState::disabled().with_publish_hook(hook);
@@ -1541,6 +1626,7 @@ mod tests {
         let outcome = Arc::new(Mutex::new(GraphPublishOutcome {
             topology_handled: false,
             roots_handled: true,
+            marks_consumed: true,
         }));
         let seen = Arc::new(Mutex::new(Vec::new()));
         let hook = {
@@ -1570,8 +1656,11 @@ mod tests {
         assert!(graph.pending_topology_refresh.load(Ordering::SeqCst));
         assert!(!graph.pending_roots_refresh.load(Ordering::SeqCst));
 
-        *outcome.lock().unwrap() =
-            GraphPublishOutcome { topology_handled: true, roots_handled: false };
+        *outcome.lock().unwrap() = GraphPublishOutcome {
+            topology_handled: true,
+            roots_handled: false,
+            marks_consumed: true,
+        };
         graph.flush_pending_topology_refresh();
         assert!(!graph.pending_topology_refresh.load(Ordering::SeqCst));
         graph.notify_published(0, false);

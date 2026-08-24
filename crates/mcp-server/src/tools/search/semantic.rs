@@ -47,6 +47,9 @@ pub(super) fn semantic_code_hits_fenced(
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
     crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
+    // See `lexical_code_hits_fenced`: the prefetch is capped and resident-dependent, so a
+    // healthy owner still owes the query its own disk read of whatever stayed dirty.
+    let refresh = lease.may_maintain_caches();
     let guard = match try_acquire_engine(engine) {
         Ok(g) => g,
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
@@ -224,8 +227,14 @@ pub(super) fn semantic_code_hits_fenced(
         // the search call.
         let source = external_baseline.as_ref().expect("resolved_baseline=Some implies Some");
         let direct_start = std::time::Instant::now();
-        let direct =
-            run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit);
+        let direct = run_direct_semantic(
+            engine,
+            source,
+            &snapshot,
+            mid,
+            d,
+            DirectSemanticQuery { embedding: &query_embedding, limit, refresh },
+        );
         tracing::debug!(
             elapsed_ms = direct_start.elapsed().as_millis() as u64,
             "search.code: run_direct_semantic (under lock)"
@@ -250,7 +259,7 @@ pub(super) fn semantic_code_hits_fenced(
         return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineRequired));
     }
 
-    match engine.search_with_embedding_read_only(&query_embedding, limit, Some("code")) {
+    match engine.search_with_embedding_fenced(&query_embedding, limit, Some("code"), refresh) {
         Ok(hits) => Ok(CodeHits::Ready { hits, roots }),
         Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
     }
@@ -291,17 +300,25 @@ fn resolve_direct_semantic(
 /// Called under the engine lock after [`resolve_direct_semantic`] confirmed readiness and the
 /// embed completed. The snapshot and model identity were resolved in the lock-free phase and are
 /// passed in directly; no second `resolve_snapshot` call is made.
+struct DirectSemanticQuery<'a> {
+    embedding: &'a [f32],
+    limit: usize,
+    /// Whether this process may still maintain the shared caches, and so whether the overlay
+    /// may be refreshed from disk before the query reads it.
+    refresh: bool,
+}
+
 fn run_direct_semantic(
     engine: &SearchEngine,
     source: &ExternalBaselineService,
     snapshot: &bsl_search::Snapshot,
     model_id: &str,
     dim: usize,
-    query_embedding: &[f32],
-    limit: usize,
+    query: DirectSemanticQuery<'_>,
 ) -> DirectResult {
+    let DirectSemanticQuery { embedding: query_embedding, limit, refresh } = query;
     let (overlay_hits, hidden_paths) = match engine
-        .workspace_overlay_semantic_hits_with_embedding_read_only(query_embedding, limit)
+        .workspace_overlay_semantic_hits_with_embedding_fenced(query_embedding, limit, refresh)
     {
         Ok(r) => r,
         Err(e) => {

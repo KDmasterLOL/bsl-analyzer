@@ -390,7 +390,16 @@ impl WorkspaceLease {
         // whenever `.build` was cleared. Re-claiming an unowned workspace is [`Self::recheck`]'s
         // job, where the loser of that race learns it lost.
         match read_record(path) {
-            Some(record) if record.token == mine => Some(write()),
+            Some(record) if record.token == mine => {
+                // Release the process-local lifecycle lock BEFORE the write. The fence a
+                // shared rename needs is the FILE lock, still held by `_guard`; `checked_at`
+                // only serialises this process's own verdict bookkeeping. Holding it across a
+                // caller-supplied closure hands an unbounded wait to every other lease call —
+                // `release()` takes it first, so a deliberate shutdown would queue behind an
+                // FTS rebuild or a schema migration instead of giving up after `LOCK_WAIT`.
+                drop(checked_at);
+                Some(write())
+            }
             Some(record) if !is_stale(&record) => {
                 self.latch_superseded(&record);
                 self.inner.owns.store(false, Ordering::SeqCst);
@@ -403,6 +412,18 @@ impl WorkspaceLease {
                 None
             }
         }
+    }
+
+    /// Whether this daemon may still MAINTAIN the shared derived caches — refresh the overlay
+    /// from disk, restamp fingerprints, write the Store. Only the two terminal states say no;
+    /// a transient refusal (an unwritten claim, a busy lock) must not answer here, or an
+    /// interactive query would silently serve load-time content for the rest of the process.
+    ///
+    /// Deliberately cheaper than [`Self::owns_caches`]: two atomic loads, no lease file read.
+    /// A query path asks this on every call, and the write it guards is fenced again — under
+    /// the lock, against the record — by [`Self::with_ownership`] before anything shared moves.
+    pub(crate) fn may_maintain_caches(&self) -> bool {
+        !self.inner.superseded.load(Ordering::SeqCst) && !self.inner.released.load(Ordering::SeqCst)
     }
 
     pub(crate) fn is_superseded(&self) -> bool {
@@ -706,6 +727,44 @@ mod tests {
     /// before it. A daemon whose record has been outbid runs nothing, however recently its
     /// cached verdict said otherwise — otherwise a build that started while it owned the
     /// workspace would rename itself over what the new owner had just published.
+    /// A deliberate shutdown must not queue behind a long fenced write. The FILE lock is the
+    /// fence a shared rename needs and it is bounded by `LOCK_WAIT`; the process-local verdict
+    /// lock is not bounded by anything, so holding it across the caller's closure would make
+    /// `release()` wait out an FTS rebuild or a schema migration.
+    ///
+    /// The idle measurement is the positive control: without it a `release()` that always
+    /// blocked, and one that never did, would read the same.
+    #[test]
+    fn release_does_not_wait_out_a_long_fenced_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let idle = WorkspaceLease::claim(dir.path());
+        let started = Instant::now();
+        idle.release();
+        let idle_cost = started.elapsed();
+        assert!(idle_cost < LOCK_WAIT, "an uncontended release is cheap: {idle_cost:?}");
+
+        let busy_dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(busy_dir.path());
+        let writer = lease.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let write = std::thread::spawn(move || {
+            writer.with_ownership(|| {
+                entered_tx.send(()).unwrap();
+                std::thread::sleep(LOCK_WAIT * 2);
+            })
+        });
+        entered_rx.recv().unwrap();
+
+        let started = Instant::now();
+        lease.release();
+        let blocked_cost = started.elapsed();
+        write.join().unwrap().expect("the fenced write itself still went through");
+        assert!(
+            blocked_cost < LOCK_WAIT * 2,
+            "release waited out the whole closure: {blocked_cost:?}"
+        );
+    }
+
     #[test]
     fn publish_fence_latches_supersession() {
         let dir = tempfile::tempdir().unwrap();
