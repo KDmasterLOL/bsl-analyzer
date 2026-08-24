@@ -25,6 +25,34 @@ use std::{
 /// seconds and wakes the waiter through the slot's condvar immediately.
 const BASELINE_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// How long a boot-time apply keeps retrying a REFUSED ownership claim before giving up.
+///
+/// Generous next to `VERDICT_TTL`, because what it waits out is real and recoverable: a peer
+/// still holding the lease lock, or this daemon's own claim that has not landed yet. Finite,
+/// because neither of those is guaranteed to end — a wedged peer, a read-only cache directory
+/// or a failing `write_record` leaves the lease UNCLAIMED forever, which is neither ownership
+/// nor supersession. Without a deadline the boot thread waits there for the life of the
+/// process, publishing nothing and reporting nothing; with one, the caller's existing error
+/// path turns it into a visible `Failed`.
+const STARTUP_APPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a refused boot apply does next.
+enum StartupRetry {
+    /// The refusal may yet clear; the caller has already waited out a verdict window.
+    Again,
+    /// Ownership is gone for good — this process must stop trying.
+    Terminal,
+    /// Neither owned nor terminal for longer than [`STARTUP_APPLY_TIMEOUT`].
+    TimedOut,
+}
+
+fn startup_apply_timed_out() -> bsl_search::SearchError {
+    bsl_search::SearchError::Index(format!(
+        "workspace cache ownership was neither granted nor terminally lost within {} s;          the startup publication was abandoned",
+        STARTUP_APPLY_TIMEOUT.as_secs()
+    ))
+}
+
 impl SharedState {
     /// The workspace search mode implied by the baseline bootstrap: configured INTENT,
     /// never connect success. EVERY postgres-configured outcome — a deferred connect
@@ -260,13 +288,17 @@ impl SharedState {
                 // a whole-config graph build mid-session, on the first `graph`/`symbol_info`
                 // call. Start it here instead — ahead of the baseline connect wait, which the
                 // graph does not depend on. (Other early exits are covered by the catch-all
-                // start after the init returns.)
+                // starts on each way out of the init below.)
                 //
                 // Mode-gated on purpose: in SqliteLocal an eager kick would win the
                 // `Idle → Loading` transition that `try_begin_external_build` needs, the fused
                 // claim would fail, and one parse pass producing both graph and search chunks
                 // would degrade into two. A warm graph cache makes either start cheap —
                 // `run_load` publishes the cached build instead of rebuilding.
+                if matches!(mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
+                    graph.ensure_loading();
+                }
+
                 // Postgres mode needs the baseline connect's outcome before it can load
                 // the manifest; waiting HERE keeps the wait on this background thread
                 // (never a request path) and off the slot's lock. On timeout the init
@@ -396,25 +428,46 @@ impl SharedState {
                 // Host publication follows the long-lived order used by incremental mutations:
                 // engine mutex first, then the lease lifecycle mutex and file lock inside the
                 // callback. Status becomes visible in the same admitted group as the engine.
-                let mut guard = match search_engine.lock() {
-                    Ok(guard) => guard,
-                    Err(error) => {
+                //
+                // Both are taken and released PER ATTEMPT. `search_engine` is the single mutex
+                // every search query and every background writer goes through, so holding it
+                // across the retry's sleeps would turn a transient, recoverable lease refusal
+                // into a stall of the whole search subsystem — the very thing the overlay prime
+                // above avoids by running before the engine is shared.
+                let mut pending = Some(init.engine);
+                let deadline = std::time::Instant::now() + STARTUP_APPLY_TIMEOUT;
+                let published = loop {
+                    let mut guard = match search_engine.lock() {
+                        Ok(guard) => guard,
+                        Err(error) => {
+                            Self::set_semantic_runtime_status(
+                                &semantic_runtime,
+                                SemanticRuntimeStatus::Failed(format!(
+                                    "workspace search engine lock error: {error}"
+                                )),
+                            );
+                            return;
+                        }
+                    };
+                    let admitted = lease.with_ownership(|| {
+                        let engine = pending.take().expect("publication runs once");
+                        graph.set_mark_seq_source(engine.mark_seq_handle());
+                        *guard = Some(engine);
                         Self::set_semantic_runtime_status(
                             &semantic_runtime,
-                            SemanticRuntimeStatus::Failed(format!(
-                                "workspace search engine lock error: {error}"
-                            )),
+                            status_after_publish.clone(),
                         );
-                        return;
+                    });
+                    drop(guard);
+                    if admitted.is_some() {
+                        break Ok(Some(()));
+                    }
+                    match Self::startup_retry(&lease, deadline) {
+                        StartupRetry::Again => {}
+                        StartupRetry::Terminal => break Ok(None),
+                        StartupRetry::TimedOut => break Err(startup_apply_timed_out()),
                     }
                 };
-                let published = Self::startup_apply_once(&lease, || {
-                    graph.set_mark_seq_source(init.engine.mark_seq_handle());
-                    *guard = Some(init.engine);
-                    Self::set_semantic_runtime_status(&semantic_runtime, status_after_publish);
-                    Ok(())
-                });
-                drop(guard);
                 match published {
                     Ok(Some(())) => {}
                     Ok(None) => {
@@ -697,17 +750,46 @@ impl SharedState {
 
     pub(super) fn startup_apply<T>(
         lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnMut() -> Result<T, bsl_search::SearchError>,
+    ) -> Option<Result<T, bsl_search::SearchError>> {
+        Self::startup_apply_until(lease, std::time::Instant::now() + STARTUP_APPLY_TIMEOUT, apply)
+    }
+
+    /// [`Self::startup_apply`] with the give-up point supplied, so a test can reach the
+    /// abandonment branch without waiting out [`STARTUP_APPLY_TIMEOUT`].
+    fn startup_apply_until<T>(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        deadline: std::time::Instant,
         mut apply: impl FnMut() -> Result<T, bsl_search::SearchError>,
     ) -> Option<Result<T, bsl_search::SearchError>> {
         loop {
             if let Some(result) = lease.with_ownership(&mut apply) {
                 return Some(result);
             }
-            if lease.is_superseded() || lease.is_released() {
-                return None;
+            match Self::startup_retry(lease, deadline) {
+                StartupRetry::Again => {}
+                StartupRetry::Terminal => return None,
+                StartupRetry::TimedOut => return Some(Err(startup_apply_timed_out())),
             }
-            std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
         }
+    }
+
+    /// What a refused boot apply should do next.
+    ///
+    /// Sleeps for [`VERDICT_TTL`] before answering [`StartupRetry::Again`], so a caller holding
+    /// other locks can drop them around this call and hold nothing while it waits.
+    fn startup_retry(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        deadline: std::time::Instant,
+    ) -> StartupRetry {
+        if lease.is_superseded() || lease.is_released() {
+            return StartupRetry::Terminal;
+        }
+        if std::time::Instant::now() >= deadline {
+            return StartupRetry::TimedOut;
+        }
+        std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
+        StartupRetry::Again
     }
 
     fn startup_apply_once<T>(
@@ -1466,6 +1548,42 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    /// A refusal that is neither ownership nor supersession must not be waited on forever.
+    /// An UNCLAIMED lease under a held lock is exactly that state: `with_ownership` refuses,
+    /// `is_superseded`/`is_released` stay false, and the heartbeat's own re-claim cannot land
+    /// either. Without a deadline the boot thread sits here for the life of the process.
+    ///
+    /// The positive control is the same lease with the lock released: the retry must still
+    /// SUCCEED there, or the test would also pass for a version that gave up immediately.
+    #[test]
+    fn a_refusal_that_never_resolves_gives_up_with_a_reason() {
+        let dir = tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+        let owner = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let _held = owner.hold_file_lock_for_test();
+
+        let stuck = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(!stuck.is_superseded() && !stuck.is_released(), "neither owned nor terminal");
+
+        let soon = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        match SharedState::startup_apply_until(&stuck, soon, || Ok(())) {
+            Some(Err(error)) => assert!(
+                error.to_string().contains("neither granted nor terminally lost"),
+                "the abandonment says why: {error}"
+            ),
+            other => panic!("expected a reasoned give-up, got {other:?}"),
+        }
+
+        // Positive control: the same lease, once the lock frees, still publishes. Without this
+        // the test would also pass for a version that never retried at all.
+        drop(_held);
+        let generous = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        assert!(
+            matches!(SharedState::startup_apply_until(&stuck, generous, || Ok(())), Some(Ok(()))),
+            "a refusal that clears is still retried to success"
+        );
+    }
 
     #[test]
     fn startup_constructor_fence_distinguishes_retry_terminal_and_error() {

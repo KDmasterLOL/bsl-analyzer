@@ -14,6 +14,6 @@ mod types;
 
 pub use docs::{find_docs, search_docs};
 #[allow(unused_imports)]
-pub use hybrid::{hybrid_code, hybrid_code_fenced};
+pub use hybrid::hybrid_code_fenced;
 pub(crate) use status::baseline_warming_not_ready;
 pub use status::search_status;

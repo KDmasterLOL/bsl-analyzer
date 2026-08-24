@@ -709,13 +709,15 @@ impl McpServer {
         // would otherwise be told the action does not exist. Rendered by the shared renderer,
         // so it is byte-identical to `diagnostics status`: one resident, one status shape.
         if p.action == "status" {
-            let diag = self.state.diagnostics();
-            diag.ensure_loading();
-            return Ok(tools::resident::status(
-                &diag.status_report(),
-                self.state.owns_caches(),
-                self.state.standalone_extension_notice().as_deref(),
-            ));
+            let state = self.state.clone();
+            let (report, owns, notice) = tokio::task::spawn_blocking(move || {
+                let diag = state.diagnostics();
+                diag.ensure_loading();
+                (diag.status_report(), state.owns_caches(), state.standalone_extension_notice())
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
+            return Ok(tools::resident::status(&report, owns, notice.as_deref()));
         }
 
         let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
@@ -1366,7 +1368,15 @@ impl McpServer {
         }
 
         let Some(snapshot) = graph.snapshot() else {
-            if superseded || graph.is_superseded() {
+            let superseded = if superseded {
+                true
+            } else {
+                let graph = graph.clone();
+                tokio::task::spawn_blocking(move || graph.is_superseded())
+                    .await
+                    .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+            };
+            if superseded {
                 return Err(McpError::internal_error(crate::graph::SUPERSEDED_GRAPH_ERROR, None));
             }
             return Ok(tools::graph::loading(None));
@@ -1492,7 +1502,14 @@ impl McpServer {
         // best-effort snapshot: `None` when it is not `Ready`, in which case the core card is
         // still served (with `usages_unavailable`).
         let graph = self.state.graph().clone();
-        graph.ensure_loading();
+        {
+            // `ensure_loading` consults the lease, and `owns_caches_now` bypasses the verdict
+            // cache: an unconditional lease-file read, plus up to `LOCK_WAIT` under contention.
+            let graph = graph.clone();
+            tokio::task::spawn_blocking(move || graph.ensure_loading())
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
+        }
 
         let started = std::time::Instant::now();
         let outcome = crate::diagnostics_state::resident_call(diag.clone(), ct, move |session| {
@@ -1799,13 +1816,15 @@ impl McpServer {
             // `status` reports the resident lifecycle (and kicks the lazy build) so an
             // agent can start it and poll progress instead of a flat `loading`.
             "status" => {
-                let diag = self.state.diagnostics();
-                diag.ensure_loading();
-                Ok(tools::resident::status(
-                    &diag.status_report(),
-                    self.state.owns_caches(),
-                    self.state.standalone_extension_notice().as_deref(),
-                ))
+                let state = self.state.clone();
+                let (report, owns, notice) = tokio::task::spawn_blocking(move || {
+                    let diag = state.diagnostics();
+                    diag.ensure_loading();
+                    (diag.status_report(), state.owns_caches(), state.standalone_extension_notice())
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?;
+                Ok(tools::resident::status(&report, owns, notice.as_deref()))
             }
             "file" => self.diagnostics_file(p, ct).await,
             "workspace" => self.diagnostics_workspace(p, ct).await,

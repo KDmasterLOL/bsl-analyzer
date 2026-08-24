@@ -35,7 +35,7 @@ fn hits_budget(max_output_tokens: usize, note: Option<&str>) -> usize {
 // per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
 // context struct would not make more obscure than the flat list.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // unmanaged compatibility wrapper
+#[cfg(test)]
 pub fn hybrid_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,

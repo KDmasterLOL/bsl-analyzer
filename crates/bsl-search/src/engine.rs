@@ -2951,11 +2951,19 @@ impl SearchEngine {
             // a mid-pass failure. The callback holds the host ownership barrier for this one
             // atomic SQLite batch; a refusal stops before touching the shared store.
             let admitted = Self::fenced_value(apply, || {
-                store.save_overlay_embedding_cache(
+                // The cache row is an optimisation, not an answer: a re-embed replaces the
+                // vector, so a failed write costs a recomputation and can never lie durably.
+                // Failing the pass over it would throw away every vector this pass already paid
+                // the network for — and, since the caller answers `Failed` with a backoff retry,
+                // pay for them again on every round while a durable write failure persists.
+                // A refused FENCE is different and still stops the pass: see `admitted` below.
+                if let Err(error) = store.save_overlay_embedding_cache(
                     embedder.model(),
                     embedder.dim(),
                     &batch_persist,
-                )?;
+                ) {
+                    tracing::warn!("failed to persist overlay embedding batch: {error}");
+                }
                 Ok(())
             })?;
             if admitted.is_none() {

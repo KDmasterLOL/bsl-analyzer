@@ -581,12 +581,18 @@ impl Accumulator {
 
     fn acknowledge(&mut self, batch: &DrainBatch) {
         let Some(cursor) = self.cursors.get_mut(&batch.cursor.id) else { return };
-        if cursor.pos != batch.start_pos {
-            return;
-        }
-        cursor.pos = batch.through_seq;
+        // Two independent questions, and answering them with one guard loses the debt.
+        //
+        // The debt is settled by its own identity: the sink ran the walk this batch carried,
+        // and nothing about the cursor's POSITION bears on that. `make_room` force-advances the
+        // slowest cursor under ordinary churn, which is not a reincurred debt.
         if batch.rescan_required && cursor.pending_seq == batch.pending_seq {
             cursor.pending.take();
+        }
+        // The checkpoint, in contrast, may only move from where this batch started: a cursor
+        // already advanced past it would be rewound, replaying entries the sink never saw.
+        if cursor.pos == batch.start_pos {
+            cursor.pos = batch.through_seq;
         }
         self.close_window_if_settled();
         self.reclaim();
@@ -3914,6 +3920,29 @@ mod tests {
     /// An ordinary edit landing while the sink applies its batch must not keep the reconcile
     /// debt alive: the sink DID run the walk it was asked for. Keyed on shared activity this
     /// never settles, because a slow apply guarantees events in its own window.
+    /// The same invariant under a FULL accumulator, where `make_room` force-advances the
+    /// applying cursor. The sibling test above keeps `cap = 8` and never fills, so it cannot
+    /// see a position guard swallowing the settled debt.
+    #[test]
+    fn a_reclaim_during_apply_still_settles_the_debt() {
+        let mut acc = Accumulator::new(1);
+        let cursor = acc.subscribe(None);
+        let first = PathBuf::from("/first.bsl");
+        acc.record(first.clone(), first, ChangeKind::MaybeChanged);
+        acc.enter_rescan(false, DegradeReason::Overflow);
+        let batch = acc.materialize(cursor);
+        assert!(batch.rescan_required);
+
+        let second = PathBuf::from("/second.bsl");
+        acc.record(second.clone(), second, ChangeKind::MaybeChanged);
+        acc.acknowledge(&batch);
+
+        assert!(
+            !acc.materialize(cursor).rescan_required,
+            "reclaiming capacity is not a second overflow"
+        );
+    }
+
     #[test]
     fn an_unrelated_event_during_apply_still_settles_the_debt() {
         let mut acc = Accumulator::new(8);

@@ -704,7 +704,14 @@ fn publish_or_discard(graph: &GraphState, tmp_path: &Path, out_path: &Path) -> a
         Some(renamed) => Ok(renamed?),
         None => {
             let _ = std::fs::remove_file(tmp_path);
-            graph.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Not for a terminal supersession: a superseded graph never builds again, so arming
+            // it states an intention it can never act on. `record_load_failure` already draws
+            // this line, and `ensure_loading` reads the flag only behind its own supersession
+            // gate — the two must agree, or a later consumer added without re-deriving that gate
+            // resurrects a real re-arm-after-supersession.
+            if !graph.is_superseded() {
+                graph.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             anyhow::bail!(
                 "this daemon could not establish ownership of the workspace's derived caches \
                  when the graph build finished; the build was discarded instead of published"
