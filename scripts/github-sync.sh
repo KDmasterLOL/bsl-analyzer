@@ -8,8 +8,10 @@
 
 set -euo pipefail
 
-GITHUB_REPO="git@github.com:itrous/bsl-analyzer.git"
-GITHUB_REPO_SLUG="itrous/bsl-analyzer"
+# Значения по умолчанию боевые; переопределение существует ради теста: без него
+# разрушительный путь — push, тег, gh release edit — не покрыт ничем.
+GITHUB_REPO="${GITHUB_SYNC_REPO:-git@github.com:itrous/bsl-analyzer.git}"
+GITHUB_REPO_SLUG="${GITHUB_SYNC_REPO_SLUG:-itrous/bsl-analyzer}"
 GITHUB_BRANCH="develop"
 
 # Только ОТСЛЕЖИВАЕМЫЕ пути, которым не место в публичном зеркале: дерево берётся
@@ -42,6 +44,10 @@ NOTES_FILE=""
 SKIP_SUMMARY=false
 LAST_GH_TAG=""
 SOURCE_COMMIT=""
+SOURCE_DESCRIBE=""
+RELEASE_TARGET=""
+STATE_SYNC_REASON=""
+FORCE_RELEASE=false
 ARCHIVE_PATHSPECS=()
 
 
@@ -67,6 +73,48 @@ get_version() {
     grep -m1 'version = ' "$PROJECT_ROOT/Cargo.toml" | sed 's/.*"\(.*\)".*/\1/'
 }
 
+# Версия из Cargo.toml отвечает на вопрос «какая версия лежит в дереве», а не «это ли
+# дерево выпущено»: между релизами она не меняется. Различает их только тег исходного
+# репозитория — на зеркале коммиты сквошенные, и sha там не совпадают по построению.
+# Решение принимается один раз: его читают и создание тега, и notes, и сообщение коммита.
+classify_release_target() {
+    if $FORCE_RELEASE; then
+        RELEASE_TARGET="release"
+        log_warn "--force-release: тег и notes обновляются без проверки дерева"
+        return
+    fi
+
+    local tag_commit
+    tag_commit=$(git -C "$PROJECT_ROOT" rev-parse --verify --quiet "${COMMIT_TAG}^{commit}" || true)
+
+    if [[ -z "$tag_commit" ]]; then
+        RELEASE_TARGET="state-sync"
+        STATE_SYNC_REASON="тега $COMMIT_TAG в исходном репозитории нет"
+        log_warn "Синк состояния: $STATE_SYNC_REASON — тег и notes на зеркале не трогаю"
+        log_warn "(осознанный обход: --force-release)"
+        return
+    fi
+
+    if [[ "$tag_commit" != "$SOURCE_COMMIT" ]]; then
+        RELEASE_TARGET="state-sync"
+        STATE_SYNC_REASON="тег $COMMIT_TAG указывает на $(git -C "$PROJECT_ROOT" rev-parse --short "$tag_commit"), а синхронизируется $(git -C "$PROJECT_ROOT" rev-parse --short "$SOURCE_COMMIT")"
+        log_warn "Синк состояния: $STATE_SYNC_REASON — тег и notes на зеркале не трогаю"
+        log_warn "(осознанный обход: --force-release)"
+        return
+    fi
+
+    RELEASE_TARGET="release"
+    log_info "Дерево совпадает с тегом $COMMIT_TAG — синк релиза"
+}
+
+release_commit_subject() {
+    if [[ "$RELEASE_TARGET" == release ]]; then
+        printf 'Release %s' "$COMMIT_TAG"
+    else
+        printf 'Sync %s' "$SOURCE_DESCRIBE"
+    fi
+}
+
 setup_ssh_for_ci() {
     if [[ -z "${GITHUB_SSH_KEY:-}" ]]; then
         return
@@ -79,6 +127,11 @@ setup_ssh_for_ci() {
 }
 
 fetch_last_github_tag() {
+    # Значение читает только release-путь. Требовать ради него авторизацию gh в синке
+    # состояния нельзя: без gh режим работает, и падать с gh без токена он не должен.
+    if [[ "$RELEASE_TARGET" != release ]]; then
+        return
+    fi
     if ! command -v gh >/dev/null 2>&1; then
         log_warn "gh CLI не найден — пропускаем определение последнего тега"
         return
@@ -91,14 +144,23 @@ fetch_last_github_tag() {
     local out rc
     out=$(gh release list \
         --repo "$GITHUB_REPO_SLUG" \
-        --limit 1 \
-        --json tagName --jq '.[0].tagName // ""' 2>&1) && rc=0 || rc=$?
+        --limit 10 \
+        --json tagName --jq '.[].tagName' 2>&1) && rc=0 || rc=$?
     if (( rc != 0 )); then
         log_error "gh release list завершился с ошибкой (rc=$rc): $out"
         exit 1
     fi
 
-    LAST_GH_TAG="$out"
+    # База берётся мимо самого синхронизируемого тега: повторный синк уже выпущенного
+    # релиза сравнивал бы его с самим собой и вырождался в compare/<tag>...<tag>.
+    # Отбор идёт здесь, а не в '--jq', чтобы его исполнял этот скрипт, а не gh.
+    local candidate
+    while IFS= read -r candidate; do
+        if [[ -n "$candidate" && "$candidate" != "$COMMIT_TAG" ]]; then
+            LAST_GH_TAG="$candidate"
+            break
+        fi
+    done <<<"$out"
     if [[ -n "$LAST_GH_TAG" ]]; then
         log_info "Последний релиз на GitHub: $LAST_GH_TAG"
     else
@@ -111,6 +173,20 @@ generate_release_notes() {
     local base_tag="$2"
 
     NOTES_FILE=$(mktemp)
+
+    if [[ "$RELEASE_TARGET" != release ]]; then
+        log_info "Синк состояния — release notes не генерируем"
+        : > "$NOTES_FILE"
+        return
+    fi
+
+    # Отбор базы уже исключил сам тег, поэтому сработать это не может: срабатывание
+    # означает ошибку отбора, и тогда пустые notes лучше сравнения тега с самим собой.
+    if [[ "$base_tag" == "$new_tag" ]]; then
+        log_warn "База notes совпала с $new_tag — сравнивать не с чем, notes пустые"
+        : > "$NOTES_FILE"
+        return
+    fi
 
     if $SKIP_SUMMARY; then
         log_info "Флаг --no-summary — пропускаем генерацию release notes"
@@ -211,7 +287,7 @@ compose_release_body() {
         : > "$out"
     fi
 
-    if [[ -n "$base_tag" ]]; then
+    if [[ -n "$base_tag" && "$base_tag" != "$new_tag" ]]; then
         {
             [[ -s "$out" ]] && printf '\n'
             printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n' \
@@ -307,6 +383,9 @@ for arg in "$@"; do
         --no-summary)
             SKIP_SUMMARY=true
             ;;
+        --force-release)
+            FORCE_RELEASE=true
+            ;;
         v*)
             TAG="$arg"
             ;;
@@ -336,15 +415,24 @@ log_info "GitHub: $GITHUB_REPO"
 SOURCE_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
 log_info "Источник дерева: $(git -C "$PROJECT_ROOT" rev-parse --short "$SOURCE_COMMIT")"
 
+# Считается здесь, а не на месте сборки сообщения коммита: там уже сделан cd в клон
+# зеркала, где этого sha нет — сквош истории исходных коммитов не содержит.
+SOURCE_DESCRIBE=$(git -C "$PROJECT_ROOT" describe --tags --always "$SOURCE_COMMIT")
+
 build_archive_pathspecs
 assert_tree_committed
+classify_release_target
 fetch_last_github_tag
 generate_release_notes "$COMMIT_TAG" "$LAST_GH_TAG"
 
 RELEASE_BODY_FILE=$(mktemp)
 # shellcheck disable=SC2064
 trap "rm -f '$RELEASE_BODY_FILE'; cleanup" EXIT
-compose_release_body "$COMMIT_TAG" "$LAST_GH_TAG" "$RELEASE_BODY_FILE"
+# Только для релиза: строка Full Changelog дописывается независимо от пустоты notes,
+# и в сообщении синк-коммита это была бы релизная ссылка на нерелизное дерево.
+if [[ "$RELEASE_TARGET" == release ]]; then
+    compose_release_body "$COMMIT_TAG" "$LAST_GH_TAG" "$RELEASE_BODY_FILE"
+fi
 
 if $DRY_RUN; then
     log_warn "DRY RUN — изменения не будут отправлены"
@@ -359,7 +447,11 @@ if $DRY_RUN; then
     DRY_LIST=$(git -C "$PROJECT_ROOT" archive "$SOURCE_COMMIT" -- "${ARCHIVE_PATHSPECS[@]}" | tar -t)
     log_info "Файлов уедет в зеркало: $(printf '%s\n' "$DRY_LIST" | grep -cv '/$' || true)"
     echo ""
-    log_info "Будет создан коммит: \"Release $COMMIT_TAG\""
+    log_info "Режим: $RELEASE_TARGET"
+    log_info "Будет создан коммит: \"$(release_commit_subject)\""
+    if [[ "$RELEASE_TARGET" != release ]]; then
+        log_info "Тег $COMMIT_TAG и release notes на зеркале не трогаются"
+    fi
     if [[ -s "$RELEASE_BODY_FILE" ]]; then
         echo ""
         log_info "Release notes:"
@@ -452,7 +544,7 @@ git diff --cached --stat | tail -1
 
 COMMIT_MSG_FILE=$(mktemp)
 {
-    printf 'Release %s\n' "$COMMIT_TAG"
+    printf '%s\n' "$(release_commit_subject)"
     if [[ -s "$RELEASE_BODY_FILE" ]]; then
         printf '\n'
         cat "$RELEASE_BODY_FILE"
@@ -465,7 +557,9 @@ rm -f "$COMMIT_MSG_FILE"
 log_info "Отправка в GitHub..."
 git push -u origin "$GITHUB_BRANCH"
 
-if git ls-remote --tags origin "$COMMIT_TAG" | grep -q "$COMMIT_TAG"; then
+if [[ "$RELEASE_TARGET" != release ]]; then
+    log_warn "Синк состояния — тег $COMMIT_TAG не создаём"
+elif git ls-remote --tags origin "$COMMIT_TAG" | grep -q "$COMMIT_TAG"; then
     log_warn "Тег $COMMIT_TAG уже существует, пропускаем создание"
 else
     git tag -a "$COMMIT_TAG" -m "Release $COMMIT_TAG"
@@ -473,8 +567,12 @@ else
     log_ok "Тег $COMMIT_TAG создан"
 fi
 
-publish_release_notes "$COMMIT_TAG" "$RELEASE_BODY_FILE"
+if [[ "$RELEASE_TARGET" == release ]]; then
+    publish_release_notes "$COMMIT_TAG" "$RELEASE_BODY_FILE"
+else
+    log_warn "Синк состояния: $STATE_SYNC_REASON — release notes не трогаю"
+fi
 
 log_ok "Синхронизация завершена!"
-log_ok "Коммит: Release $COMMIT_TAG"
+log_ok "Коммит: $(release_commit_subject)"
 log_ok "URL: https://github.com/itrous/bsl-analyzer"

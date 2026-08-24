@@ -1735,6 +1735,32 @@ impl RootDatabaseImpl {
         acc.map(Arc::new)
     }
 
+    /// The defined-type counterpart of [`Self::resolve_metadata_object_across_roots`], for a
+    /// consumer with no file anchor.
+    ///
+    /// The composition differs from its two neighbours and cannot be copied from them: a
+    /// metadata object folds each extension's overlay into the base, whereas an extension
+    /// **replaces** a defined type's underlying type wholesale (see
+    /// [`metadata::resolve_defined_type`]). So the last root that defines the name wins
+    /// outright, and the base is consulted only when no extension defines it — the same
+    /// replacement semantics [`Self::resolve_defined_type_for_file`] applies along a file's
+    /// visibility chain, widened here to the whole configuration.
+    pub fn resolve_defined_type_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
+        let mut found = None;
+        for root in self.ordered_config_roots() {
+            let Some(listing) = self.metadata_listing(&root) else { continue };
+            if let Some(underlying) =
+                metadata::resolve_defined_type(self, listing, name.to_string())
+            {
+                found = Some((*underlying).clone());
+            }
+        }
+        found
+    }
+
     /// Resolve an event subscription by name across base + every extension. Event
     /// subscriptions carry no extension-overlay merge (mirroring
     /// [`Self::resolve_event_subscription_for_file`], which reads the main listing only),

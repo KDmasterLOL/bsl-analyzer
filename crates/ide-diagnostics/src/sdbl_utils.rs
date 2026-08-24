@@ -1,8 +1,11 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
 
+/// Takes the configuration rather than a [`DiagnosticsContext`]: every SDBL rule needs the
+/// project's severities, tags and parameters, and none of them needs the file. That is what
+/// lets the same 18 rules serve a query embedded in a module and a bare query text.
 pub type SdblDispatchFn = fn(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &SdblPositionMapper,
     query_text: &str,
@@ -10,7 +13,7 @@ pub type SdblDispatchFn = fn(
 );
 
 pub fn dispatch_simple(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     code: DiagnosticCode,
     message: &str,
     range: TextRange,
@@ -21,9 +24,9 @@ pub fn dispatch_simple(
     diagnostics.push(Diagnostic {
         code,
         message: message.to_string(),
-        severity: ctx.severity(code),
+        severity: config.severity(code),
         range: mapper.map_range(range, query_text),
-        tags: ctx.tags(code),
+        tags: config.tags(code),
         fixes: vec![],
     });
 }
@@ -50,15 +53,29 @@ pub fn collect_sdbl_via_dispatch(
         let mapper = SdblPositionMapper::from_query_info(query_info, &bsl_source, &line_starts);
 
         for hir_diag in sdbl_package.all_diagnostics() {
-            dispatch_fn(ctx, hir_diag, &mapper, &query_info.query_text, &mut diagnostics);
+            dispatch_fn(ctx.config, hir_diag, &mapper, &query_info.query_text, &mut diagnostics);
         }
     }
 
     diagnostics
 }
 
+/// Where a query's own coordinates have to land.
+///
+/// Two modes, because there are two kinds of query and only one of them sits inside
+/// something else. `Standalone` is not `Embedded` with zeroed offsets: the embedded
+/// projection adds one for the opening quote and re-anchors every continuation line on its
+/// `|`, so feeding it the query text as its own source would still shift every range.
 #[derive(Debug, Clone)]
-pub struct SdblPositionMapper<'a> {
+pub enum SdblPositionMapper<'a> {
+    /// The query is a BSL string literal in a module; ranges project into the module's text.
+    Embedded(EmbeddedMapper<'a>),
+    /// The query IS the document; its ranges are already the answer.
+    Standalone,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmbeddedMapper<'a> {
     bsl_source: &'a str,
 
     bsl_literal_line: u32,
@@ -80,7 +97,13 @@ impl<'a> SdblPositionMapper<'a> {
 
         let line_starts = build_line_index(bsl_source);
 
-        Self { bsl_source, bsl_literal_line, bsl_literal_col, line_starts, quote_corrections }
+        Self::Embedded(EmbeddedMapper {
+            bsl_source,
+            bsl_literal_line,
+            bsl_literal_col,
+            line_starts,
+            quote_corrections,
+        })
     }
 
     pub fn new_from_range_with_line_index(
@@ -97,7 +120,13 @@ impl<'a> SdblPositionMapper<'a> {
 
         let line_starts = line_starts.to_vec();
 
-        Self { bsl_source, bsl_literal_line, bsl_literal_col, line_starts, quote_corrections }
+        Self::Embedded(EmbeddedMapper {
+            bsl_source,
+            bsl_literal_line,
+            bsl_literal_col,
+            line_starts,
+            quote_corrections,
+        })
     }
 
     pub fn from_query_info(
@@ -114,6 +143,8 @@ impl<'a> SdblPositionMapper<'a> {
     }
 
     pub fn map_range(&self, sdbl_range: TextRange, sdbl_text: &str) -> TextRange {
+        let Self::Embedded(this) = self else { return sdbl_range };
+
         let sdbl_line_starts = build_line_index(sdbl_text);
 
         let (sdbl_start_line, sdbl_start_col) = byte_offset_to_line_col_fast(
@@ -127,7 +158,7 @@ impl<'a> SdblPositionMapper<'a> {
         let sdbl_start = u32::from(sdbl_range.start()) as usize;
         let sdbl_end = u32::from(sdbl_range.end()) as usize;
 
-        let start_correction: usize = self
+        let start_correction: usize = this
             .quote_corrections
             .iter()
             .filter(|(pos, _)| {
@@ -138,7 +169,7 @@ impl<'a> SdblPositionMapper<'a> {
             .map(|(_, chars)| chars)
             .sum();
 
-        let end_correction: usize = self
+        let end_correction: usize = this
             .quote_corrections
             .iter()
             .filter(|(pos, _)| {
@@ -149,15 +180,15 @@ impl<'a> SdblPositionMapper<'a> {
             .map(|(_, chars)| chars)
             .sum();
 
-        let bsl_literal_line = self.bsl_literal_line;
-        let bsl_literal_col = self.bsl_literal_col;
+        let bsl_literal_line = this.bsl_literal_line;
+        let bsl_literal_col = this.bsl_literal_col;
 
         let bsl_start_line = bsl_literal_line + sdbl_start_line;
         let bsl_start_col = if sdbl_start_line == 0 {
             bsl_literal_col + sdbl_start_col + 1 + (start_correction as u32)
         } else {
             let bsl_line_text =
-                get_line_text(self.bsl_source, &self.line_starts, bsl_start_line as usize);
+                get_line_text(this.bsl_source, &this.line_starts, bsl_start_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
                 (pipe_pos as u32) + 1 + sdbl_start_col + (start_correction as u32)
             } else {
@@ -170,7 +201,7 @@ impl<'a> SdblPositionMapper<'a> {
             bsl_literal_col + sdbl_end_col + 1 + (end_correction as u32)
         } else {
             let bsl_line_text =
-                get_line_text(self.bsl_source, &self.line_starts, bsl_end_line as usize);
+                get_line_text(this.bsl_source, &this.line_starts, bsl_end_line as usize);
             if let Some(pipe_pos) = bsl_line_text.find('|') {
                 (pipe_pos as u32) + 1 + sdbl_end_col + (end_correction as u32)
             } else {
@@ -179,14 +210,14 @@ impl<'a> SdblPositionMapper<'a> {
         };
 
         let bsl_start_offset = line_col_to_byte_offset_fast(
-            self.bsl_source,
-            &self.line_starts,
+            this.bsl_source,
+            &this.line_starts,
             bsl_start_line,
             bsl_start_col,
         );
         let bsl_end_offset = line_col_to_byte_offset_fast(
-            self.bsl_source,
-            &self.line_starts,
+            this.bsl_source,
+            &this.line_starts,
             bsl_end_line,
             bsl_end_col,
         );

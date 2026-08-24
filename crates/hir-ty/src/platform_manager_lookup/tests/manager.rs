@@ -8,6 +8,7 @@ fn platform_manager_typeid_round_trips_via_ty() {
             ret: db.number(None, None),
             max_args: Some(0),
             from_doc_comment: false,
+            doc_see: Default::default(),
         },
         return_ty: db.number(None, None),
         overloads: vec![vec![db.string(None, false)]],

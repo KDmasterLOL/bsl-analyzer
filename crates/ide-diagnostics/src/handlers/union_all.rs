@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -18,14 +18,14 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::UnionWithoutAll { range } = diag {
-        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::UnionAll, "Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ", *range, mapper, query_text, diagnostics);
+        crate::sdbl_utils::dispatch_simple(config, DiagnosticCode::UnionAll, "Использование ключевого слова ОБЪЕДИНИТЬ без ВСЕ приводит к излишней обработке для удаления дубликатов. Используйте ОБЪЕДИНИТЬ ВСЕ", *range, mapper, query_text, diagnostics);
     }
 }
 

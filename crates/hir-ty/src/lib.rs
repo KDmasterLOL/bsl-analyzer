@@ -3,6 +3,7 @@ pub mod builtin;
 mod call_binding;
 pub mod call_resolution;
 pub mod db;
+pub mod doc_see;
 pub mod field_enum;
 pub mod field_lookup;
 pub mod form_attr;

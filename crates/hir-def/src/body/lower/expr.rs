@@ -1,6 +1,5 @@
 use bsl_platform::capability::{Category as CapabilityCategory, EntryKind as CapabilityEntryKind};
 use intern::NormName;
-use parser_error::{ParseError, RecoveryKind};
 use stdx::case::CaseExt;
 use syntax::ast_utils::field_tail_name_token;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -17,24 +16,6 @@ use super::LoweringCtx;
 
 fn field_name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     field_tail_name_token(node)
-}
-
-fn trailing_dot_range(refs: &SyntaxNode) -> Option<syntax::TextRange> {
-    let children: Vec<_> = refs.children_with_tokens().collect();
-    for child in children.into_iter().rev() {
-        let kind = child.kind();
-        if kind.is_trivia() {
-            continue;
-        }
-
-        return if kind == SyntaxKind::DOT {
-            child.as_token().map(|token| token.text_range())
-        } else {
-            None
-        };
-    }
-
-    None
 }
 
 pub(crate) fn lower_expr_node(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
@@ -167,34 +148,17 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
                 let sdbl_ast = parser::parse_sdbl_with_shared_cache(&sdbl_text);
                 let literal_text = node.text().to_string();
-                let mut error_ranges_in_bsl = Vec::new();
-
-                for syntax_err in sdbl_ast.errors() {
-                    let bsl_range = syntax::sdbl_query::map_range_query_to_literal(
-                        &literal_text,
-                        syntax_err.range(),
-                    );
-                    error_ranges_in_bsl.push((bsl_range, syntax_err.structured().clone()));
-                }
-
-                let sdbl_root = sdbl_ast.syntax_node();
-                for refs in
-                    sdbl_root.descendants().filter(|node| node.kind() == SyntaxKind::SDBL_REFS_EXPR)
-                {
-                    if let Some(dot_range) = trailing_dot_range(&refs) {
-                        let bsl_range = syntax::sdbl_query::map_range_query_to_literal(
-                            &literal_text,
-                            dot_range,
-                        );
-                        error_ranges_in_bsl.push((
-                            bsl_range,
-                            ParseError::Custom {
-                                message: "незавершённый путь в ссылке",
-                                recovery: RecoveryKind::Custom,
-                            },
-                        ));
-                    }
-                }
+                let error_ranges_in_bsl: Vec<_> =
+                    syntax::sdbl_query::collect_query_parse_errors(&sdbl_ast)
+                        .into_iter()
+                        .map(|(query_range, err)| {
+                            let bsl_range = syntax::sdbl_query::map_range_query_to_literal(
+                                &literal_text,
+                                query_range,
+                            );
+                            (bsl_range, err)
+                        })
+                        .collect();
 
                 let query_info = syntax::SdblQueryInfo::new(
                     node.text_range(),

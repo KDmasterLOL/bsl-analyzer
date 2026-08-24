@@ -93,11 +93,12 @@ struct SymbolInfoCandidates<S> {
 
 #[derive(Deserialize, JsonSchema, Serialize)]
 #[serde(untagged)]
-#[schemars(transform = union_as_one_of)]
+#[schemars(transform = overlapping_union)]
 #[allow(dead_code, reason = "schema-only member union published by tools/list")]
 enum SymbolMemberOutput {
     Typed(TypedMemberOutput),
     Callable(CallableMemberOutput),
+    Plain(PlainMemberOutput),
 }
 
 #[derive(Deserialize, JsonSchema, Serialize)]
@@ -122,6 +123,19 @@ struct CallableMemberOutput {
     availability: MemberAvailabilityOutput,
     source_extension: Option<String>,
     signature: MemberSignatureOutput,
+}
+
+/// A member the analysis names by kind alone: a tabular section, or an attribute or form
+/// element whose type did not resolve. Neither `type` nor `signature` describes it, and a
+/// union without this branch calls a routine catalog card malformed.
+#[derive(Deserialize, JsonSchema, Serialize)]
+struct PlainMemberOutput {
+    name: String,
+    kind: String,
+    member_kind: MemberKind,
+    origin: MemberOrigin,
+    availability: MemberAvailabilityOutput,
+    source_extension: Option<String>,
 }
 
 #[derive(Deserialize, JsonSchema, Serialize)]
@@ -195,16 +209,32 @@ wire_enum!(TypeResolution {
     Unresolved => "unresolved",
 });
 
+/// Publish a union whose branches OVERLAP as `anyOf`.
+///
+/// A typed member satisfies the typed branch and the plain one alike — the plain branch names
+/// the fields every member carries and forbids nothing beyond them. Under `oneOf` a validator
+/// must find exactly one match and rejects the card; `anyOf` states what is true: the member
+/// has at least one of these shapes.
+fn overlapping_union(schema: &mut schemars::Schema) {
+    let object = schema.ensure_object();
+    if let Some(branches) = object.remove("oneOf") {
+        object.insert("anyOf".to_string(), branches);
+    }
+    crate::contract::ensure_object_root(object);
+}
+
 fn union_as_one_of(schema: &mut schemars::Schema) {
     let object = schema.ensure_object();
     if let Some(branches) = object.remove("anyOf") {
         object.insert("oneOf".to_string(), branches);
     }
+    crate::contract::ensure_object_root(object);
 }
 
 pub(crate) fn symbol_info_output_schema() -> Arc<serde_json::Map<String, Value>> {
     let mut schema = (*rmcp::handler::server::tool::schema_for_type::<SymbolInfoOutput>()).clone();
     single_value_enums_to_consts(&mut schema);
+    crate::contract::ensure_object_root(&mut schema);
     Arc::new(schema)
 }
 
@@ -895,6 +925,93 @@ mod tests {
         assert_eq!(card.members[0].member_kind, "method");
         assert_eq!(card.signature.as_deref(), Some("Функция Сложить(А, Б) Экспорт"));
         assert!(card.doc.is_some(), "member filters must not change legacy include sections");
+    }
+
+    /// Ветви члена пересекаются, поэтому объединение публикуется как `anyOf`.
+    ///
+    /// Положительный контроль встроен в саму проверку: типизированный член обязан
+    /// удовлетворять И типизированной ветви, И «простой» — именно поэтому `oneOf`, требующий
+    /// ровно одного совпадения, отверг бы карточку целиком.
+    #[test]
+    fn the_member_union_is_published_as_any_of_because_its_branches_overlap() {
+        let schema = symbol_info_output_schema();
+        let member = serde_json::to_value(&*schema)
+            .expect("schema serializes")
+            .to_string()
+            .contains("\"member_kind\"");
+        assert!(member, "в схеме нет членов — проверять нечего");
+
+        let defs = schema["$defs"].as_object().expect("$defs");
+        let union = defs
+            .values()
+            .find(|value| {
+                value
+                    .get("anyOf")
+                    .or_else(|| value.get("oneOf"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|branches| {
+                        branches.iter().any(|branch| {
+                            required_keys(branch, defs).iter().any(|key| key == "type_variants")
+                        })
+                    })
+            })
+            .expect("объединение членов опубликовано");
+
+        assert!(union.get("anyOf").is_some(), "ветви пересекаются, oneOf отверг бы ответ");
+
+        let branches = union["anyOf"].as_array().expect("ветви");
+        let typed = json!({
+            "name": "Реквизит1",
+            "kind": "Реквизит",
+            "member_kind": "attribute",
+            "origin": "metadata",
+            "availability": {"context_status": "not_evaluated"},
+            "type": "Строка",
+            "type_variants": [],
+        });
+        let matching = branches
+            .iter()
+            .filter(|branch| required_keys(branch, defs).iter().all(|key| typed.get(key).is_some()))
+            .count();
+        assert!(matching >= 2, "типизированный член обязан подходить и к простой ветви");
+    }
+
+    /// Имена обязательных полей ветви, с раскрытием `$ref`.
+    fn required_keys(branch: &Value, defs: &Map<String, Value>) -> Vec<String> {
+        let branch = branch
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|reference| reference.strip_prefix("#/$defs/"))
+            .and_then(|name| defs.get(name))
+            .unwrap_or(branch);
+        branch
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|keys| keys.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// Член, названный только видом, — законная ветвь опубликованной схемы.
+    ///
+    /// Табличную часть не описывает ни тип, ни сигнатура, и такой член приходит в
+    /// карточке обычного справочника. Схема, перечисляющая только типизированную и
+    /// вызываемую ветви, заставляет валидирующего клиента отвергнуть ВЕСЬ ответ.
+    #[test]
+    fn a_member_named_only_by_its_kind_is_a_published_branch() {
+        let mut card = method_card();
+        card.members =
+            vec![SymbolMember::metadata("Товары", "ТабличнаяЧасть", "tabular_section", None)];
+        let roots = stand_roots();
+        let body = render_card(&card, None, DEFAULT_TOP_MODULES, 6000, &stamp(&roots))
+            .structured_content
+            .expect("card structuredContent");
+
+        let member = &body["members"][0];
+        assert!(
+            member.get("type").is_none() && member.get("signature").is_none(),
+            "член без типа и без сигнатуры — тот самый вход, на котором ветвь нужна: {member}"
+        );
+        serde_json::from_value::<SymbolInfoOutput>(body.clone()).expect("card output schema shape");
     }
 
     #[test]

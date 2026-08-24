@@ -314,3 +314,49 @@ fn names_a_section(text: &str) -> bool {
         .windows(3)
         .any(|window| window[0] == b'4' && window[1] == b'.' && window[2].is_ascii_digit())
 }
+
+/// Аттестация перечисляет тот же вердикт, что и чек-лист.
+///
+/// Копия в прозе рядом с гейтованным оригиналом расходится с ним молча — если
+/// расхождение ничем не ловится. Здесь ловится: перечень в документе обязан
+/// содержать строку каждой функции с той же буквой вердикта, и лишних строк в
+/// нём быть не должно.
+#[test]
+fn the_document_lists_every_verdict() {
+    let legal = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/legal");
+    // The public mirror is published without `docs/legal/`, so the attestation is absent
+    // there by construction and there is nothing to compare the checklist against. A
+    // missing FILE inside an existing directory is a real breakage and still fails below.
+    if !legal.is_dir() {
+        eprintln!("пропуск: каталога docs/legal нет, аттестацию сверять не с чем");
+        return;
+    }
+    let attestation = legal.join("bsl-clean-room-slice-b3.md");
+    let text = std::fs::read_to_string(&attestation)
+        .unwrap_or_else(|err| panic!("{} не прочитан: {err}", attestation.display()));
+
+    let mut breaches = Vec::new();
+    let mut expected = Vec::new();
+
+    for entry in CHECKLIST {
+        let letter = match entry.verdict {
+            Verdict::R { .. } => 'R',
+            Verdict::A { .. } => 'A',
+            Verdict::D { .. } => 'D',
+        };
+        let row = format!("| `{}` | {letter} |", key(entry.file, entry.name));
+        if !text.contains(&row) {
+            breaches.push(format!("в аттестации нет строки: {row}"));
+        }
+        expected.push(row);
+    }
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("| `src/") && !expected.iter().any(|row| row == line) {
+            breaches.push(format!("в аттестации лишняя строка: {line}"));
+        }
+    }
+
+    assert!(breaches.is_empty(), "перечень разошёлся с чек-листом:\n  {}", breaches.join("\n  "));
+}

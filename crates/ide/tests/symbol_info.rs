@@ -669,6 +669,32 @@ fn managed_form_full_and_exact_queries_share_candidates_and_keep_private_fallbac
     assert!(helper.signature.as_deref().is_some_and(|value| value.contains("ЗакрытыйHelper")));
 }
 
+/// A local method keeps its card when the platform form type declares the same name.
+///
+/// `ФормаКлиентскогоПриложения` brings 41 methods — `Закрыть`, `Открыть`,
+/// `ПроверитьЗаполнение` — and a form module routinely declares a handler named after one of
+/// them. The fallback that answers by the module's own method must not be shadowed by the
+/// platform member that merely shares the name.
+#[test]
+fn managed_form_local_method_survives_a_platform_name_collision() {
+    let mut db = setup_forms();
+    db.set_file_text(FileId(0), "Процедура Закрыть()\nКонецПроцедуры\n");
+
+    let full = by_name(&db, "Документ.Документ1.Форма.ФормаДокумента").unwrap();
+    assert!(
+        full.members
+            .iter()
+            .any(|member| member.name == "Закрыть"
+                && member.origin == ide::SymbolMemberOrigin::Platform),
+        "стенд обязан содержать платформенное имя-двойник, иначе проверка холостая"
+    );
+
+    let exact = by_name(&db, "Документ.Документ1.Форма.ФормаДокумента.Закрыть")
+        .expect("локальный метод формы остаётся адресуемым");
+    assert_eq!(exact.kind, "procedure", "{exact:?}");
+    assert!(exact.signature.as_deref().is_some_and(|value| value.contains("Закрыть")));
+}
+
 #[test]
 fn managed_form_uses_effective_extension_exports_for_full_and_exact_cards() {
     let mut db = setup_forms_with_extension(Some(

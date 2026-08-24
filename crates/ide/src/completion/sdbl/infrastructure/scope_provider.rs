@@ -192,7 +192,9 @@ impl ScopeProvider for DbScopeProvider<'_> {
                     subquery: Vec::new(),
                     range: syntax::TextRange::default(),
                 };
-                scope.add_table(temp_table_ref);
+                // Completion has no channel to report a colliding alias through; the diagnostic
+                // path does that. Here the last source simply wins, as it does at run time.
+                let _ = scope.add_table(temp_table_ref);
             }
         }
 
@@ -211,7 +213,11 @@ impl ScopeProvider for DbScopeProvider<'_> {
                 "DIAGNOSTIC: adding table from FROM clause"
             );
 
-            scope.add_table(table.clone());
+            // Completion has no channel to report a colliding alias through; the diagnostic
+
+            // path does that. Here the last source simply wins, as it does at run time.
+
+            let _ = scope.add_table(table.clone());
 
             if !table.subquery.is_empty() {
                 tracing::info!(
@@ -235,7 +241,9 @@ impl ScopeProvider for DbScopeProvider<'_> {
                             sub_table_alias = ?sub_table.alias.as_ref().map(|a| a.as_str()),
                             "DIAGNOSTIC: adding table from subquery FROM"
                         );
-                        scope.add_table(sub_table.clone());
+                        // Completion has no channel to report a colliding alias through; the diagnostic
+                        // path does that. Here the last source simply wins, as it does at run time.
+                        let _ = scope.add_table(sub_table.clone());
                     }
 
                     for sub_join in &subquery_hir.joins {
@@ -244,7 +252,9 @@ impl ScopeProvider for DbScopeProvider<'_> {
                             sub_join_table_alias = ?sub_join.table.alias.as_ref().map(|a| a.as_str()),
                             "DIAGNOSTIC: adding table from subquery JOIN"
                         );
-                        scope.add_table(sub_join.table.clone());
+                        // Completion has no channel to report a colliding alias through; the diagnostic
+                        // path does that. Here the last source simply wins, as it does at run time.
+                        let _ = scope.add_table(sub_join.table.clone());
                     }
                 }
             }
@@ -257,7 +267,11 @@ impl ScopeProvider for DbScopeProvider<'_> {
                 "DIAGNOSTIC: adding table from JOIN clause"
             );
 
-            scope.add_table(join.table.clone());
+            // Completion has no channel to report a colliding alias through; the diagnostic
+
+            // path does that. Here the last source simply wins, as it does at run time.
+
+            let _ = scope.add_table(join.table.clone());
         }
 
         tracing::info!(

@@ -3,7 +3,7 @@ use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::resolver::{QualifiedMethodError, Resolver};
 use hir_def::symbol_tree::MethodSymbol;
-use hir_def::ty::FunctionSignature;
+use hir_def::ty::{DocSeeSlots, FunctionSignature};
 use hir_def::{MethodId, Name};
 
 use crate::db::HirDatabase;
@@ -227,13 +227,28 @@ pub fn resolve_aliased_manager_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
-fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) -> FunctionSignature {
+pub(crate) fn materialise_signature(
+    db: &dyn TypeKernelDb,
+    method_symbol: &MethodSymbol,
+) -> FunctionSignature {
     let ctx = TyLoweringContext::new();
+    // Absent documentation is the common case, and then nothing below changes a single type.
+    let docs = method_symbol.docs.as_deref();
 
+    let mut param_sees: Vec<bool> = Vec::with_capacity(method_symbol.params.len());
     let params: Box<[TypeId]> = method_symbol
         .params
         .iter()
-        .map(|p| p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown()))
+        .map(|p| {
+            let base =
+                p.type_ref.as_ref().map(|t| ctx.lower_type_ref_id(db, t)).unwrap_or(db.unknown());
+            let documented = docs
+                .and_then(|docs| find_param_doc(docs, &p.name))
+                .map(|param_doc| param_doc.types.as_slice());
+            let (ty, sees_target) = enrich_with_documented_structure(db, base, documented);
+            param_sees.push(sees_target);
+            ty
+        })
         .collect();
     let defaults: Box<[bool]> = method_symbol.params.iter().map(|p| p.has_default).collect();
 
@@ -242,9 +257,58 @@ fn materialise_signature(db: &dyn TypeKernelDb, method_symbol: &MethodSymbol) ->
         .as_ref()
         .map(|t| ctx.lower_type_ref_id(db, t))
         .unwrap_or_else(|| if method_symbol.is_function { db.unknown() } else { db.undefined() });
+    let (ret, ret_sees_target) =
+        enrich_with_documented_structure(db, ret, docs.map(|docs| docs.returned_value.as_slice()));
 
     let max_args = Some(params.len() as u32);
-    FunctionSignature { params, defaults, ret, max_args, from_doc_comment: true }
+    let doc_see = DocSeeSlots { ret: ret_sees_target, params: param_sees.into() };
+    FunctionSignature { params, defaults, ret, max_args, from_doc_comment: true, doc_see }
+}
+
+/// Puts the fields a doc-comment declares into the slot's already lowered type, and reports
+/// whether the documentation pointed at another method (`см. Модуль.Метод`).
+///
+/// Documentation is advisory here: it may only fill in the fields of a structure the declared type
+/// already carries. When the slot declares something else, or the documentation names no inline
+/// structure, the lowered type is returned untouched.
+///
+/// The reference is reported from this one parse rather than re-read from the text later. Two
+/// parsers already read these comments and have disagreed before; a third would disagree again,
+/// silently, in whichever form only one of them recognises.
+fn enrich_with_documented_structure(
+    db: &dyn TypeKernelDb,
+    base: TypeId,
+    documented: Option<&[hir_def::docs::TypeDoc]>,
+) -> (TypeId, bool) {
+    let Some(documented) = documented else {
+        return (base, false);
+    };
+    let mut enriched = base;
+    let mut sees_target = false;
+    for type_doc in documented {
+        let Some(expr) = hir_def::docs::parse_type_expr(type_doc) else {
+            continue;
+        };
+        sees_target |= expr.names_documentation_target();
+        if let Some(documented) = crate::lower::doc_structure::doc_structure_ty(
+            db,
+            &expr,
+            &crate::lower::doc_structure::SeePolicy::Permissive,
+        ) {
+            enriched = crate::lower::doc_structure::substitute(db, enriched, &documented);
+        }
+    }
+    (enriched, sees_target)
+}
+
+/// Matched by name without regard to case, the same way the syntactic parameter hints are.
+fn find_param_doc<'a>(
+    docs: &'a hir_def::docs::MethodDocs,
+    name: &hir_def::Name,
+) -> Option<&'a hir_def::docs::ParameterDoc> {
+    use stdx::case::CaseExt;
+    let needle = name.as_str().fold_lower();
+    docs.parameters.iter().find(|param| param.name.fold_lower() == needle)
 }
 
 pub(crate) fn materialise_signature_enriched(
@@ -253,11 +317,30 @@ pub(crate) fn materialise_signature_enriched(
     method_symbol: &MethodSymbol,
 ) -> FunctionSignature {
     let mut sig: FunctionSignature = materialise_signature(db, method_symbol);
-    if sig.ret == db.unknown() {
+    // A slot documented as a bare `Структура` says nothing the body does not already say, and the
+    // keys the body proves are the only thing anyone can use. Reading the body for it keeps the
+    // rule that documentation adds and never removes.
+    let unknown = sig.ret == db.unknown();
+    // The untyped structure may stand alone or in a union arm — `Неопределено, Структура` is how an
+    // optional result is written — and both must be filled, or documenting the obvious still costs
+    // the caller the keys.
+    if unknown || crate::lower::doc_structure::has_bare_untyped_structure(db, sig.ret) {
         let method_input = hir_def::MethodIdInput::new(db, method_id);
         let inferred = crate::method_graph::method_return_type_query(db, method_input);
-        if inferred != db.unknown() {
-            sig.ret = inferred;
+        if unknown {
+            if inferred != db.unknown() {
+                sig.ret = inferred;
+            }
+        } else {
+            // The body proves its keys on the path that returns a structure; the other paths of an
+            // optional result contribute nothing to the documented structure and are left out.
+            let proven = crate::lower::doc_structure::structures_with_fields(db, inferred);
+            if !proven.is_empty() {
+                let structure = if proven.len() == 1 { proven[0] } else { db.union(proven) };
+                // Only the untyped structure is replaced: an arm the documentation declares as
+                // something else, and a structure documented under a collection, stay as declared.
+                sig.ret = crate::lower::doc_structure::substitute_bare(db, sig.ret, structure);
+            }
         }
     }
 
@@ -279,6 +362,7 @@ mod tests {
             ret: db.number(None, None),
             max_args: Some(1),
             from_doc_comment: true,
+            doc_see: Default::default(),
         };
 
         let resolution = MethodResolution::new(method_id, true, signature.clone());
@@ -299,11 +383,153 @@ mod tests {
             ret: db.undefined(),
             max_args: Some(0),
             from_doc_comment: true,
+            doc_see: Default::default(),
         };
 
         let resolution = MethodResolution::new(method_id, false, signature);
 
         assert!(!resolution.is_export);
+    }
+
+    /// A method symbol shaped the way `symbol_tree` builds one: the parameter's `type_ref` is the
+    /// hint the second doc-parser produced, which is what `materialise_signature` lowers.
+    fn method_with_docs(
+        docs: hir_def::docs::MethodDocs,
+        params: &[(&str, Option<hir_def::TypeRef>)],
+    ) -> MethodSymbol {
+        use hir_def::symbol_tree::ParamSymbol;
+        use syntax::TextRange;
+        MethodSymbol {
+            id: MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 },
+            name: Name::new("Тест"),
+            is_function: true,
+            is_export: true,
+            params: params
+                .iter()
+                .map(|(name, type_ref)| ParamSymbol {
+                    name: Name::new(name),
+                    is_val: false,
+                    has_default: false,
+                    type_ref: type_ref.clone(),
+                })
+                .collect(),
+            annotations: Vec::new(),
+            source_range: TextRange::default(),
+            name_range: TextRange::default(),
+            docs: Some(std::sync::Arc::new(docs)),
+            return_type_ref: None,
+        }
+    }
+
+    fn slot(name: &str) -> hir_def::docs::TypeDoc {
+        hir_def::docs::TypeDoc::simple(name.to_string(), None)
+    }
+
+    #[test]
+    fn the_signature_records_which_slots_name_a_documentation_target() {
+        // The record is what tier 2 is allowed to ask about, so it must separate a reference from
+        // everything else that lowers to the same permissive type. `Произвольный` is the input
+        // that makes the difference visible: it and an unresolved reference are the same type
+        // afterwards, and only the parse can still tell them apart.
+        let db = InMemoryDb::new();
+        let mut docs = hir_def::docs::MethodDocs::empty();
+        docs.parameters = vec![
+            hir_def::docs::ParameterDoc::new("Ссылка".into(), vec![slot("см. База.Создать")]),
+            hir_def::docs::ParameterDoc::new("Любой".into(), vec![slot("Произвольный")]),
+            hir_def::docs::ParameterDoc::new("Проза".into(), vec![slot("см. в описании")]),
+        ];
+        docs.returned_value = vec![slot("см. База.Создать.Настройки")];
+        // All three lower to `Any` — a reference, `Произвольный` and prose reach the same hint.
+        let any = Some(hir_def::TypeRef::Any);
+        let symbol = method_with_docs(
+            docs,
+            &[("Ссылка", any.clone()), ("Любой", any.clone()), ("Проза", any)],
+        );
+
+        let signature = materialise_signature(&db, &symbol);
+
+        assert!(signature.doc_see.ret, "трёхсегментная ссылка на возврате");
+        assert!(signature.doc_see.param(0), "ссылка в параметре");
+        assert!(!signature.doc_see.param(1), "Произвольный целью не является");
+        assert!(!signature.doc_see.param(2), "проза целью не является");
+        // The positive control for the whole record: the three parameters lower to ONE type, so
+        // the record demonstrably cannot be read back off the lowered types.
+        assert_eq!(signature.params[0], db.any());
+        assert_eq!(signature.params[1], db.any());
+        assert_eq!(signature.params[2], db.any());
+    }
+
+    #[test]
+    fn a_signature_without_references_records_none() {
+        // Tier 1 behaviour must be unchanged where no reference occurs, and the record must not
+        // spread to slots that merely carry documentation.
+        let db = InMemoryDb::new();
+        let mut docs = hir_def::docs::MethodDocs::empty();
+        docs.parameters = vec![hir_def::docs::ParameterDoc::new(
+            "Данные".into(),
+            vec![hir_def::docs::TypeDoc::structured(
+                "Структура:".to_string(),
+                None,
+                vec![hir_def::docs::ParameterDoc::new("Имя".into(), vec![slot("Строка")])],
+            )],
+        )];
+        let symbol = method_with_docs(
+            docs,
+            &[(
+                "Данные",
+                Some(hir_def::TypeRef::Builtin(hir_def::type_ref::BuiltinTypeRef::Structure)),
+            )],
+        );
+
+        let signature = materialise_signature(&db, &symbol);
+
+        assert!(signature.doc_see.is_empty(), "ни один слот не называет цель");
+        // Positive control: the documented structure still carries its field, so the assertion
+        // above is not green merely because the documentation stopped being read.
+        let bsl_types::kind::TypeKind::Structure(facet) = db.lookup_type(signature.params[0])
+        else {
+            panic!("ожидалась структура, получено {:?}", db.lookup_type(signature.params[0]));
+        };
+        let fields = facet.fields.as_ref().expect("документированные поля должны сохраниться");
+        assert_eq!(fields.fields.len(), 1);
+        assert_eq!(fields.fields[0].name, "Имя");
+    }
+
+    #[test]
+    fn a_field_documented_as_arbitrary_is_the_top_type() {
+        // Teaching the structured doc-parser this word changed tier 1 too: the field used to lower
+        // to `Unknown` through an unrecognised name. The direction is a widening — `Any` dominates
+        // a union where `Unknown` was discarded — so no slot narrows, but the change is real and
+        // is pinned here rather than left to be discovered.
+        let db = InMemoryDb::new();
+        let mut docs = hir_def::docs::MethodDocs::empty();
+        docs.parameters = vec![hir_def::docs::ParameterDoc::new(
+            "Данные".into(),
+            vec![hir_def::docs::TypeDoc::structured(
+                "Структура:".to_string(),
+                None,
+                vec![hir_def::docs::ParameterDoc::new(
+                    "Значение".into(),
+                    vec![slot("Произвольный")],
+                )],
+            )],
+        )];
+        let symbol = method_with_docs(
+            docs,
+            &[(
+                "Данные",
+                Some(hir_def::TypeRef::Builtin(hir_def::type_ref::BuiltinTypeRef::Structure)),
+            )],
+        );
+
+        let signature = materialise_signature(&db, &symbol);
+
+        let bsl_types::kind::TypeKind::Structure(facet) = db.lookup_type(signature.params[0])
+        else {
+            panic!("ожидалась структура");
+        };
+        let fields = facet.fields.as_ref().expect("поле документировано");
+        assert_eq!(fields.fields[0].ty, db.any());
     }
 
     #[test]

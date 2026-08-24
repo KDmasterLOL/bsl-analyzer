@@ -118,7 +118,9 @@ enum SearchState {
 }
 
 pub(crate) fn search_output_schema() -> Arc<serde_json::Map<String, Value>> {
-    rmcp::handler::server::tool::schema_for_type::<SearchOutput>()
+    let mut schema = (*rmcp::handler::server::tool::schema_for_type::<SearchOutput>()).clone();
+    crate::contract::ensure_object_root(&mut schema);
+    Arc::new(schema)
 }
 
 /// The outcome of producing one modality's code hits, separated from presentation so the

@@ -147,11 +147,14 @@ directory = "baselines"
             br#"{"schema_version":1,"scope":{"source_root":"src/cf","extensions":[]},"diagnostics":["#,
         )
         .unwrap();
+    // Zero-padded so the paths sort in index order: streaming migration cannot sort, so
+    // it rejects a legacy set whose entries are out of canonical order, and unpadded
+    // names put `modules/10.bsl` before `modules/2.bsl`.
     for index in 0..RECORDS {
         if index > 0 {
             writer.write_all(b",").unwrap();
         }
-        let path = format!("src/cf/modules/{index}.bsl");
+        let path = format!("src/cf/modules/{index:07}.bsl");
         let snippet = format!("Message({index});");
         let entry = DiagnosticsBaselineEntry {
             fingerprint: diagnostic_fingerprint(&path, "LineLength", &snippet, 0),
@@ -197,7 +200,7 @@ directory = "baselines"
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    assert!(status.success());
+    assert!(status.success(), "migration child exited with {status}");
     assert!(peak_rss > 0, "migration process RSS was never observed");
     eprintln!("migration input={input_bytes} peak_rss={peak_rss}");
     assert!(

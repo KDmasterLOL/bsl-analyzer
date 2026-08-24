@@ -116,7 +116,9 @@ impl LoweringContext<'_> {
             }
         }
 
-        self.scope.add_table(table.clone());
+        if let Some(alias) = self.scope.add_table(table.clone()) {
+            self.diagnostics.push(SdblDiagnostic::DuplicateAlias { alias, range: table.range });
+        }
 
         let condition_node = join.syntax().children().find(|n| {
             matches!(

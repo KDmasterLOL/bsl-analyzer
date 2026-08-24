@@ -297,8 +297,16 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
         "message embeds the module/method name and environment qualifiers by design",
     ),
     (
+        DiagnosticCode::AmbiguousFieldInQuery,
+        "SDBL name-resolution diagnostic; requires configuration metadata fixture",
+    ),
+    (
         DiagnosticCode::AssignAliasFieldsInQuery,
         "SDBL alias policy; query-language parity needs dedicated metadata/query harness",
+    ),
+    (
+        DiagnosticCode::DuplicateAliasInQuery,
+        "SDBL source-alias policy; not BSL identifier parity",
     ),
     (
         DiagnosticCode::FieldsFromJoinsWithoutIsNull,
@@ -609,7 +617,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 192, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 194, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -17,7 +17,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
@@ -27,7 +27,7 @@ pub(crate) fn dispatch(
         diag
     {
         crate::sdbl_utils::dispatch_simple(
-            ctx,
+            config,
             DiagnosticCode::IncorrectUseLikeInQuery,
             "Нужно исправить выражение в соответствии со стандартом",
             *range,

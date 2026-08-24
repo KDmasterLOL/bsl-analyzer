@@ -47,6 +47,7 @@ pub(super) fn build_method_record_resolution(
         defaults: defaults.into_boxed_slice(),
         ret: return_ty,
         from_doc_comment: false,
+        doc_see: Default::default(),
     };
     PlatformMethodRecordResolution {
         method_id: method.id,
@@ -91,6 +92,7 @@ pub(super) fn build_any_metadata_ref_method_record(
         defaults: defaults.into_boxed_slice(),
         ret: return_ty,
         from_doc_comment: false,
+        doc_see: Default::default(),
     };
     PlatformMethodRecordResolution {
         method_id: method.id,

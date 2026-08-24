@@ -574,6 +574,69 @@ pub fn narrowed_type_at<DB: TypeKernelDb + ?Sized>(
     Some(db.union(arms.to_vec()))
 }
 
+/// Applies a guard from an enclosing `?(Усл, А, Б)` to an expression sitting in one of its arms.
+///
+/// Narrowing is a dataflow over the CFG, and the CFG does not branch inside an expression: both
+/// arms live in the vertex that holds the condition, so the dataflow state is identical on either
+/// side and a guard written in `Усл` never reaches them. The enclosing ternaries are therefore
+/// walked lexically here.
+///
+/// Runs per call argument on hot bodies, so a type no guard could change is returned before any
+/// subtree walk: only a union can lose an arm, and only a body that actually spells a ternary is
+/// scanned.
+pub fn refine_by_ternary_guard(
+    db: &dyn TypeKernelDb,
+    body: &Body,
+    expr_idx: ExprIdx,
+    name: &Name,
+    base: TypeId,
+) -> TypeId {
+    if !matches!(db.lookup_type(base), TypeKind::Union(_)) {
+        return base;
+    }
+
+    let mut refined = base;
+    for (_, expr) in body.exprs_iter() {
+        let Expr::Ternary { condition, then_expr, else_expr } = expr else {
+            continue;
+        };
+        let on_true = if expr_covers_expr(body, *then_expr, expr_idx) {
+            true
+        } else if expr_covers_expr(body, *else_expr, expr_idx) {
+            false
+        } else {
+            continue;
+        };
+        let Some(guard) = recognize_guard(*condition, body) else {
+            continue;
+        };
+        if !guard_var(&guard).eq_ignore_case(name) {
+            continue;
+        }
+
+        let mut base_types = FxHashMap::default();
+        base_types.insert(fold_name(name), refined);
+        let transfer = NarrowingTransfer::new(db, base_types);
+        let mut state = NarrowState::new();
+        transfer.apply_guard(&mut state, &guard, on_true);
+        if let Some(arms) = state.get(name) {
+            if !arms.is_empty() {
+                refined = db.union(arms.to_vec());
+            }
+        }
+    }
+    refined
+}
+
+fn guard_var(guard: &Guard) -> &Name {
+    match guard {
+        Guard::TypeCheck { var, .. }
+        | Guard::IsUndefined { var }
+        | Guard::IsNotUndefined { var }
+        | Guard::ValueFilled { var } => var,
+    }
+}
+
 pub fn narrow_or_base<DB: HirDatabase + ?Sized>(
     db: &DB,
     file_id: FileId,

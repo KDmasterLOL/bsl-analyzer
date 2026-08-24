@@ -6291,3 +6291,85 @@ fn a_case_variant_configuration_xml_names_the_configuration_root() {
         "корень опознан по CONFIGURATION.XML"
     );
 }
+
+/// A defined type composes differently from an object or a register, and the difference is
+/// the point: an extension does not overlay a defined type, it REPLACES its underlying type
+/// wholesale. Copying the neighbours' fold here would silently keep the base's type.
+///
+/// The no-collision input is the control: a resolver that simply returned the last root would
+/// pass the collision half and fail this one.
+#[test]
+fn resolve_defined_type_across_roots_lets_an_extension_replace_the_base() {
+    use crate::metadata::{DefinedTypeEntry, MetadataListingData};
+
+    fn defined_type_xml(name: &str, inner: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<DefinedType uuid=\"00000000-0000-0000-0000-000000000010\">",
+                "<Properties><Name>{}</Name><Type><Type>{}</Type></Type></Properties>",
+                "</DefinedType></MetaDataObject>"
+            ),
+            name, inner
+        )
+    }
+
+    let base_shared = FileId(0);
+    let ext_shared = FileId(1);
+    let base_only = FileId(2);
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_shared, VfsPath::new("/base/DefinedTypes/Цена.xml"));
+    file_set.insert(ext_shared, VfsPath::new("/ext/DefinedTypes/Цена.xml"));
+    file_set.insert(base_only, VfsPath::new("/base/DefinedTypes/ТолькоБаза.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for f in [base_shared, ext_shared, base_only] {
+        db.set_file_source_root(f, SourceRootId(1));
+    }
+    db.set_file_text(base_shared, &defined_type_xml("Цена", "xs:decimal"));
+    db.set_file_text(ext_shared, &defined_type_xml("Цена", "xs:string"));
+    db.set_file_text(base_only, &defined_type_xml("ТолькоБаза", "xs:boolean"));
+
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing(
+        "/base",
+        MetadataListingData {
+            defined_types: vec![
+                DefinedTypeEntry { name: "Цена".to_string(), main: base_shared },
+                DefinedTypeEntry { name: "ТолькоБаза".to_string(), main: base_only },
+            ],
+            ..empty_listing_data()
+        },
+    );
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData {
+            defined_types: vec![DefinedTypeEntry {
+                name: "Цена".to_string(), main: ext_shared
+            }],
+            ..empty_listing_data()
+        },
+    );
+
+    let collided = db.resolve_defined_type_across_roots("Цена").expect("the name resolves");
+    assert!(
+        format!("{collided:?}").contains("String"),
+        "the extension replaces the base wholesale, got {collided:?}",
+    );
+
+    let base_only_type =
+        db.resolve_defined_type_across_roots("ТолькоБаза").expect("the name resolves");
+    assert!(
+        format!("{base_only_type:?}").contains("Bool"),
+        "a name no extension defines still comes from the base, got {base_only_type:?}",
+    );
+
+    assert!(
+        db.resolve_defined_type_across_roots("НетТакого").is_none(),
+        "an absent defined type resolves to None",
+    );
+}

@@ -236,7 +236,12 @@ impl LoweringContext<'_> {
         let from = self.lower_from_clause(query.from_clause());
 
         for table in &from {
-            self.scope.add_table(table.clone());
+            if let Some(alias) = self.scope.add_table(table.clone()) {
+                self.diagnostics.push(crate::diagnostics::SdblDiagnostic::DuplicateAlias {
+                    alias,
+                    range: table.range,
+                });
+            }
         }
 
         let joins = self.lower_joins(query);

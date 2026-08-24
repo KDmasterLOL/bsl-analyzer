@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext, Fix, TextEdit};
 use ide_db::TextRange;
 use sdbl_hir;
 
@@ -50,7 +50,7 @@ pub(crate) fn build_alias_fix(
 }
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
@@ -68,9 +68,9 @@ pub(crate) fn dispatch(
         diagnostics.push(Diagnostic {
             code,
             message,
-            severity: ctx.severity(code),
+            severity: config.severity(code),
             range: bsl_range,
-            tags: ctx.tags(code),
+            tags: config.tags(code),
             fixes,
         });
     }
@@ -87,49 +87,15 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use crate::test_utils::{check_diagnostics_snapshot_for, format_diags};
-    use crate::{Diagnostic, DiagnosticCode, Severity};
+    use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
-    use parser::parse_sdbl;
-
-    fn check_standalone_query(query_text: &str) -> Vec<Diagnostic> {
-        use sdbl_hir::lower_sdbl_to_hir;
-
-        let parse = parse_sdbl(query_text);
-        let package = lower_sdbl_to_hir(&parse, None);
-
-        package
-            .all_diagnostics()
-            .filter_map(|d| {
-                if let sdbl_hir::SdblDiagnostic::AliasWithoutAsKeyword {
-                    field_name, range, ..
-                } = d
-                {
-                    let message = if let Some(name) = field_name {
-                        format!(
-                            "Поле '{}' должно иметь явный псевдоним с ключевым словом AS/КАК",
-                            name
-                        )
-                    } else {
-                        "Поле в подзапросе должно иметь псевдоним с ключевым словом AS/КАК"
-                            .to_string()
-                    };
-                    Some(Diagnostic {
-                        code: DiagnosticCode::AssignAliasFieldsInQuery,
-                        message,
-                        severity: Severity::Warning,
-                        range: *range,
-                        tags: vec![],
-                        fixes: vec![],
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
 
     fn check_standalone_query_snapshot(query_text: &str, expected: expect_test::Expect) {
-        let diagnostics = check_standalone_query(query_text);
+        let config = DiagnosticsConfig {
+            only_enabled: Some(vec![DiagnosticCode::AssignAliasFieldsInQuery]),
+            ..Default::default()
+        };
+        let diagnostics = crate::validate_query_text(&config, None, query_text);
         expected.assert_eq(&format_diags(query_text, &diagnostics));
     }
 

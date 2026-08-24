@@ -670,7 +670,9 @@ pub(crate) fn syntax_help_output_schema() -> Arc<serde_json::Map<String, Value>>
         schema.insert("oneOf".into(), Value::Array(one_of));
         Some(schema)
     })();
-    Arc::new(flattened.unwrap_or_else(|| generated.as_ref().clone()))
+    let mut schema = flattened.unwrap_or_else(|| generated.as_ref().clone());
+    crate::contract::ensure_object_root(&mut schema);
+    Arc::new(schema)
 }
 
 #[derive(JsonSchema, Serialize)]
@@ -868,14 +870,20 @@ fn syntax_help_result(
     item: SyntaxHelpItem,
     max_output_tokens: usize,
 ) -> Result<CallToolResult, McpError> {
-    let text_truncated = truncate_text_to_budget(&mut text, max_output_tokens, BUDGET_NOTE);
     let mut body = serde_json::to_value(SyntaxHelpResponse::Card {
         schema_version: SyntaxHelpSchemaVersion::V2,
         item,
-        text_truncated,
+        text_truncated: false,
         budget_exhausted: false,
     })
     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+    // The Markdown is served first, but not out of the card identity's pocket: charging it the
+    // whole ceiling leaves nothing for the kind and the names, and the pair then trips the
+    // over-ceiling check below — an answer with a truncated rendering and a naming card becomes
+    // an empty envelope. What the identity needs is reserved before the text is cut.
+    let text_budget = max_output_tokens.saturating_sub(identity_bytes(&body).div_ceil(4));
+    let text_truncated = truncate_text_to_budget(&mut text, text_budget, BUDGET_NOTE);
+    body["text_truncated"] = json!(text_truncated);
     let budget_exhausted = fit_card_to_budget(&mut body, max_output_tokens, text.len());
     body["budget_exhausted"] = json!(budget_exhausted);
     if text.len() + serialized_bytes(&body) > max_output_tokens.saturating_mul(4) {
@@ -907,6 +915,18 @@ fn syntax_help_not_found(
     })
     .map_err(|error| McpError::internal_error(error.to_string(), None))?;
     Ok(structured_with_text(format!("Сущность платформы не найдена: {target}"), body))
+}
+
+/// The card's own size with every listing emptied — the kind, the names, the flags, which no
+/// budget may drop.
+fn identity_bytes(body: &Value) -> usize {
+    let mut identity = body.clone();
+    for (key, _) in LISTINGS {
+        if let Some(array) = identity.get_mut(key).and_then(Value::as_array_mut) {
+            array.clear();
+        }
+    }
+    serialized_bytes(&identity)
 }
 
 /// Fit the card into what the Markdown left of `max_output_tokens`, reporting whether the pair
@@ -947,8 +967,8 @@ fn fit_card_to_budget(body: &mut Value, max_output_tokens: usize, text_bytes: us
 /// `matches` is the answer to the lookup itself, and an empty one would read as "nothing found";
 /// a type's constructors and methods are supplementary, and the Markdown note already points at
 /// the single-member lookup that returns them affordably.
-const LISTINGS: [(&str, bool); 3] =
-    [("matches", true), ("constructors", false), ("methods", false)];
+const LISTINGS: [(&str, bool); 4] =
+    [("matches", true), ("constructors", false), ("methods", false), ("properties", false)];
 
 /// Keep the leading entries of a listing that fit `budget_bytes`, reporting the bytes kept and
 /// whether anything was dropped.
@@ -2021,14 +2041,25 @@ mod tests {
 
     /// A budget smaller than the card identity returns the published minimal envelope instead of
     /// silently exceeding the ceiling with a partial entity.
+    ///
+    /// The control is the same lookup with room for the identity: it must still answer with the
+    /// card. Without it the assertions below pass on an implementation that lets the Markdown
+    /// spend the whole ceiling and then replaces every answer with the minimal envelope.
     #[test]
     fn a_budget_below_the_cards_identity_overshoots_by_that_much_and_says_so() {
+        let tiny = bsl_syntax_help("Массив", None, 1).unwrap();
+        let minimal = structured(&tiny);
+
+        assert_eq!(minimal["budget_exhausted"], true);
+        assert_eq!(minimal["status"], "budget_exhausted");
+        assert!(minimal["budget_hint"].is_string());
+
         let result = bsl_syntax_help("Массив", None, 600).unwrap();
         let card = structured(&result);
 
-        assert_eq!(card["budget_exhausted"], true);
-        assert_eq!(card["status"], "budget_exhausted");
-        assert!(card["budget_hint"].is_string());
+        assert_eq!(card["kind"], "type", "{card}");
+        assert_eq!(card["name"], "Массив", "{card}");
+        assert!(!extract_text(&result).is_empty(), "усечённый Markdown не пропадает");
         assert!(pair_bytes(&result) <= 600 * 4 + 1024, "{} bytes", pair_bytes(&result));
     }
 

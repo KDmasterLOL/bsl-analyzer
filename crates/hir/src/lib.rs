@@ -185,6 +185,7 @@ pub use hir_ty::call_resolution::{
     UserMethodId,
 };
 pub use hir_ty::db::HirDatabase;
+pub use hir_ty::doc_see::{doc_see_signature_query, DocSeeSignature};
 pub use hir_ty::form_self::{
     is_form_self_property_name, managed_form_platform_type_names, FORM_TYPE_NAME,
 };

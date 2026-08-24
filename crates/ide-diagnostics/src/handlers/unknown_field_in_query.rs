@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 use sdbl_hir;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
@@ -32,9 +32,9 @@ pub(crate) fn dispatch(
                 "Поле \"{}\" не найдено в таблице \"{}\" запроса",
                 field_name, table_name
             ),
-            severity: ctx.severity(code),
+            severity: config.severity(code),
             range: mapper.map_range(*range, query_text),
-            tags: ctx.tags(code),
+            tags: config.tags(code),
             fixes: vec![],
         });
     }

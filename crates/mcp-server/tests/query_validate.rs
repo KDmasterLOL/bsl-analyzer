@@ -1,0 +1,219 @@
+//! `query(validate)` over a real MCP session.
+//!
+//! The things worth pinning here cannot be seen from inside the tool: whether the answer
+//! actually reaches `workspace_semantics` once the resident is up, whether the degraded answer
+//! still honours the project's own configuration, and whether the tool leaves the resident in
+//! a state it can come back from. An in-process call skips the lifecycle that decides all
+//! three.
+
+use std::path::Path;
+use std::time::Duration;
+
+use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
+use rmcp::model::CallToolRequestParams;
+use rmcp::service::RunningService;
+use rmcp::{RoleClient, ServiceExt};
+use serde_json::{json, Map, Value};
+
+type Client = RunningService<RoleClient, ()>;
+
+/// The query names a field the catalog does not have. Without metadata nothing can say so;
+/// with metadata `UnknownFieldInQuery` must appear. That difference is the whole point of the
+/// task, so it is what the tests measure — a query both paths treat identically would make
+/// every assertion below pass on a tool that never loaded metadata at all.
+const UNKNOWN_FIELD: &str = "ВЫБРАТЬ Т.НетТакогоПоля КАК П ИЗ Справочник.Товары КАК Т";
+
+/// Structural, resolver-free. Present under both backends, so it proves the degraded answer is
+/// not simply empty.
+const JOIN_WITH_SUBQUERY: &str = "ВЫБРАТЬ Т.Наименование КАК П ИЗ Справочник.Товары КАК Т \
+     ВНУТРЕННЕЕ СОЕДИНЕНИЕ (ВЫБРАТЬ 1 КАК Ч) КАК В ПО ИСТИНА";
+
+fn write(root: &Path, relative: &str, contents: &str) {
+    let path = root.join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+fn stage(root: &Path) {
+    write(
+        root,
+        "Configuration.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+  <Configuration uuid="00000000-0000-0000-0000-0000000000aa">
+    <Properties><Name>ТестоваяКонфигурация</Name></Properties>
+  </Configuration>
+</MetaDataObject>"#,
+    );
+    write(
+        root,
+        "Catalogs/Товары.xml",
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+  <Catalog uuid="00000000-0000-0000-0000-0000000000bb">
+    <Properties><Name>Товары</Name></Properties>
+  </Catalog>
+</MetaDataObject>"#,
+    );
+}
+
+async fn client(root: &Path) -> Client {
+    let server = McpServer::new(
+        McpProfile::Workspace,
+        SharedState::workspace(root.to_path_buf()).expect("valid project"),
+    );
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    ().serve(client_io).await.expect("session initialized")
+}
+
+async fn validate(client: &Client, arguments: Map<String, Value>) -> Value {
+    client
+        .call_tool(CallToolRequestParams::new("query").with_arguments(arguments))
+        .await
+        .expect("query call")
+        .structured_content
+        .expect("validate answers with a structured envelope")
+}
+
+fn args(query: &str) -> Map<String, Value> {
+    json!({ "action": "validate", "query": query }).as_object().cloned().expect("object")
+}
+
+fn local(envelope: &Value) -> &Value {
+    &envelope["results"][0]
+}
+
+fn codes(envelope: &Value) -> Vec<String> {
+    local(envelope)["diagnostics"]
+        .as_array()
+        .expect("diagnostics array")
+        .iter()
+        .map(|d| d["code"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// Keeps asking until the answer stops being parse-only. Written as a poll rather than a
+/// single call because the tool deliberately never waits for the resident.
+async fn validate_until_semantic(client: &Client, query: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let envelope = validate(client, args(query)).await;
+        if local(&envelope)["backend"] == "workspace_semantics" {
+            return envelope;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never reached workspace_semantics: {envelope}",
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_ready_workspace_answers_with_metadata_semantics() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    stage(dir.path());
+    let client = client(dir.path()).await;
+
+    let envelope = validate_until_semantic(&client, UNKNOWN_FIELD).await;
+
+    assert!(
+        codes(&envelope).iter().any(|c| c == "UnknownFieldInQuery"),
+        "a ready workspace must catch the unknown field: {envelope}",
+    );
+    assert!(
+        local(&envelope)["degraded_reason"].is_null(),
+        "a complete answer states no reason to be incomplete: {envelope}",
+    );
+}
+
+/// The first call happens while the resident is still cold, so it is the degraded answer —
+/// and it must be honest about that AND still carry the rules that need no metadata. A test
+/// asserting only "no UnknownFieldInQuery" would pass on a tool that returned nothing at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_call_degrades_without_claiming_completeness() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    stage(dir.path());
+    let client = client(dir.path()).await;
+
+    let first = validate(&client, args(JOIN_WITH_SUBQUERY)).await;
+
+    if local(&first)["backend"] == "parser" {
+        assert!(
+            local(&first)["degraded_reason"].is_string(),
+            "a parser-backed answer must say why: {first}",
+        );
+        assert!(
+            !codes(&first).iter().any(|c| c == "UnknownFieldInQuery"),
+            "a metadata-dependent code cannot appear without metadata: {first}",
+        );
+        assert!(
+            codes(&first).iter().any(|c| c == "JoinWithSubQuery"),
+            "the structural rules still apply while metadata loads: {first}",
+        );
+    }
+
+    // Whatever the first call saw, the tool must have kicked the build — otherwise a workspace
+    // that went idle would never serve semantics again.
+    let ready = validate_until_semantic(&client, JOIN_WITH_SUBQUERY).await;
+    assert!(
+        codes(&ready).iter().any(|c| c == "JoinWithSubQuery"),
+        "the structural rule survives the move to full semantics: {ready}",
+    );
+}
+
+/// The project's configuration is the tool's configuration, in BOTH completeness states.
+/// Reading it from the resident would resurrect a disabled rule exactly on the degraded path,
+/// where no resident exists — so the disabled rule here is a structural one, reachable
+/// without metadata, and the assertion runs on the very first (cold) call as well as after.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_disabled_in_the_project_stays_disabled_in_both_states() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    stage(dir.path());
+    write(dir.path(), "bsl-analyzer.toml", "[diagnostics.parameters]\nJoinWithSubQuery = false\n");
+    let client = client(dir.path()).await;
+
+    let cold = validate(&client, args(JOIN_WITH_SUBQUERY)).await;
+    assert!(
+        !codes(&cold).iter().any(|c| c == "JoinWithSubQuery"),
+        "[{}] a rule the project turned off must stay off: {cold}",
+        local(&cold)["backend"],
+    );
+
+    let warm = validate_until_semantic(&client, JOIN_WITH_SUBQUERY).await;
+    assert!(
+        !codes(&warm).iter().any(|c| c == "JoinWithSubQuery"),
+        "the same rule must stay off once metadata is ready: {warm}",
+    );
+}
+
+/// The control for the test above: without it, a tool that reported nothing at all would look
+/// like a tool that honours the configuration.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_rule_fires_when_the_project_leaves_it_on() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    stage(dir.path());
+    let client = client(dir.path()).await;
+
+    let envelope = validate(&client, args(JOIN_WITH_SUBQUERY)).await;
+    assert!(
+        codes(&envelope).iter().any(|c| c == "JoinWithSubQuery"),
+        "with no override the rule must fire — otherwise the disable test is vacuous: {envelope}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unregistered_root_id_fails_the_call_instead_of_degrading() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    stage(dir.path());
+    let client = client(dir.path()).await;
+
+    let mut arguments = args(UNKNOWN_FIELD);
+    arguments.insert("root_id".into(), json!("нет-такого-корня"));
+
+    let result =
+        client.call_tool(CallToolRequestParams::new("query").with_arguments(arguments)).await;
+
+    assert!(result.is_err(), "an unknown root_id is a bad request, not a reason to degrade");
+}

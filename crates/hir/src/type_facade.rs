@@ -445,9 +445,13 @@ fn method_dto_from_platform(db: &dyn TypeKernelDb, method: &PlatformMethod) -> M
             optional: param.is_optional,
         })
         .collect();
+    // Имена берутся у каталога, а не у сырых полей: у шаблонных записей менеджера `name`
+    // усечено до `&lt;Имя`, и карточка показала бы двадцать два одинаковых члена с этим
+    // именем вместо `СоздатьЭлемент`, `СоздатьГруппу` и остальных.
+    let (russian, english) = bsl_platform::method_display_names(method);
     Method {
-        name: Name::new(method.name.as_str()),
-        english_name: fallback_name(method.english_name.as_str(), method.name.as_str()),
+        name: Name::new(russian.as_str()),
+        english_name: fallback_name(english.as_str(), russian.as_str()),
         return_ty: method.return_type.as_ref().map(|ret| lower_return_type_string_typeid(db, ret)),
         params,
         env: Some(hir_def::execution_env::EnvFlags::from_platform_context(method.context.as_ref())),

@@ -10,6 +10,7 @@ pub mod features;
 pub mod metadata;
 pub mod provider;
 pub mod queries;
+pub mod query_resolver;
 pub mod root_db;
 pub mod salsa_events;
 pub mod salsa_provider;

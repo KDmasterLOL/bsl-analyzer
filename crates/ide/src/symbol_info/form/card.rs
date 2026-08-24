@@ -165,6 +165,20 @@ pub(super) fn form_member_card(
         if members.is_empty() {
             return form_handler_card(db, symbol, resolved, member, req);
         }
+        // A name the module declares itself stays answerable even when the managed surface
+        // carries the same one: the platform form type alone brings dozens of names a handler
+        // routinely reuses (`Закрыть`, `Открыть`, `ПроверитьЗаполнение`), and answering with
+        // candidates alone drops the method's signature and its usages id. Module-origin
+        // candidates are left to the branches above — those are the effective exports whose
+        // composition the extension answers for.
+        if resolved.form.find_attribute(member).is_none()
+            && resolved.form.find_element(member).is_none()
+            && members.iter().all(|candidate| candidate.origin != SymbolMemberOrigin::Module)
+        {
+            if let Some(card) = form_handler_card(db, symbol, resolved, member, req) {
+                return Some(card);
+            }
+        }
         let mut card = SymbolInfoCard::empty(symbol.to_string(), "member candidates");
         card.container = Some(form_container(resolved));
         card.signature = Some(format!("{} candidate(s)", members.len()));

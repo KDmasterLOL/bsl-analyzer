@@ -244,16 +244,26 @@ mod tests {
         let diagnostics: Vec<_> =
             (0..2_000).map(|_| diagnostic(DiagnosticCode::EmptyCodeBlock)).collect();
 
-        let started = std::time::Instant::now();
-        let out = active_for_file(
-            &DiagnosticsBaselineSnapshot::Disabled,
-            root,
-            &path,
-            &text,
-            diagnostics.clone(),
-        );
-        let disabled = started.elapsed();
-        assert_eq!(out.len(), diagnostics.len(), "a disabled baseline changes nothing");
+        // What the timer must contain is the call and nothing else. Handing the input over
+        // costs a clone of two thousand diagnostics — on its own more than the disabled
+        // call, and allocation-bound, so on a loaded machine it grows far faster than the
+        // work being measured. The fastest of several runs is taken for the same reason: a
+        // call of a few microseconds otherwise reports whatever pause the scheduler put in
+        // the middle of it, and a single such pause is enough to close the gap.
+        let fastest = |snapshot: &DiagnosticsBaselineSnapshot| {
+            (0..5)
+                .map(|_| {
+                    let input = diagnostics.clone();
+                    let started = std::time::Instant::now();
+                    let out = active_for_file(snapshot, root, &path, &text, input);
+                    (started.elapsed(), out.len())
+                })
+                .min_by_key(|(elapsed, _)| *elapsed)
+                .expect("five runs")
+        };
+
+        let (disabled, kept) = fastest(&DiagnosticsBaselineSnapshot::Disabled);
+        assert_eq!(kept, diagnostics.len(), "a disabled baseline changes nothing");
 
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
@@ -266,9 +276,7 @@ mod tests {
             path: root.join("baseline.json"),
             epoch: "e".to_owned(),
         };
-        let started = std::time::Instant::now();
-        let _ = active_for_file(&ready, root, &path, &text, diagnostics);
-        let enabled = started.elapsed();
+        let (enabled, _) = fastest(&ready);
 
         assert!(
             disabled * 8 < enabled,

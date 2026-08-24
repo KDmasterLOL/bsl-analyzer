@@ -174,6 +174,8 @@ enum ReferenceSearchParams {
 }
 
 fn document_search_action(schema: &mut schemars::Schema) {
+    contract::ensure_object_root(schema.ensure_object());
+
     fn visit(object: &mut serde_json::Map<String, serde_json::Value>) {
         if let Some(properties) =
             object.get_mut("properties").and_then(serde_json::Value::as_object_mut)
@@ -331,7 +333,11 @@ impl JsonSchema for SyntaxHelpParams {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        generator.subschema_for::<SyntaxHelpParamsSchema>()
+        // Inlined, not referenced: this schema IS the published inputSchema, and a root
+        // consisting of a `$ref` says nothing about itself — the specification types the
+        // root as an object, and a client is not required to follow the reference to
+        // learn that.
+        <SyntaxHelpParamsSchema as JsonSchema>::json_schema(generator)
     }
 }
 
@@ -348,6 +354,7 @@ fn syntax_help_xor_schema(schema: &mut schemars::Schema) {
         legacy_branch.insert("not".to_owned(), serde_json::json!({"required": ["reference_id"]}));
     }
     object.insert("oneOf".to_owned(), serde_json::Value::Array(branches));
+    contract::ensure_object_root(object);
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -362,6 +369,10 @@ struct QueryParams {
     parameters: Option<std::collections::HashMap<String, serde_json::Value>>,
     /// Named live 1C connection (optional when only one/default connection exists).
     connection: Option<String>,
+    /// `validate`: the configuration root the query is meant for — `""` for the configuration,
+    /// an extension's id otherwise. An assertion about context, not a narrowing knob: an id
+    /// that is not registered fails the call, a registered one is echoed back in `context`.
+    root_id: Option<String>,
     /// `execute`: output budget in tokens (~4 chars each) on top of the `limit` row cap —
     /// `limit` bounds how many rows come back, nothing bounds how wide they are. An
     /// over-budget table is truncated at a row boundary with a note (default 6000); when the
@@ -1291,7 +1302,11 @@ impl McpServer {
     /// `schema` — the SDBL schema reference. `execute` output is bounded by `max_output_tokens`
     /// on top of `limit` and appends a truncation note.
     #[tool(name = "query", annotations(read_only_hint = true))]
-    async fn query(&self, params: Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
+    async fn query(
+        &self,
+        params: Parameters<QueryParams>,
+        ct: tokio_util::sync::CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
         let p = params.0;
         let max_output_tokens =
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
@@ -1302,7 +1317,9 @@ impl McpServer {
                 tools::query::validate_query(
                     &self.state,
                     &query,
+                    p.root_id.as_deref(),
                     p.connection.as_deref(),
+                    ct,
                     max_output_tokens,
                 )
                 .await
@@ -1941,7 +1958,7 @@ impl McpServer {
         })
         .await;
         cancellable_answer(outcome, "symbol_info", started, || {
-            tools::metadata::loading(&diag.status_report())
+            tools::symbol_info::loading(&diag.status_report())
         })
     }
 
@@ -3148,6 +3165,9 @@ mod tool_descriptions {
             row cap fired too, the note says raising the budget alone will not help.
               - parameters: `execute`: named SDBL query parameters (`&Param` → value) (optional).
               - query: SDBL text — required for `validate`/`execute`, omitted for `schema`.
+              - root_id: `validate`: the configuration root the query is meant for — `""` for the configuration,
+            an extension's id otherwise. An assertion about context, not a narrowing knob: an id
+            that is not registered fails the call, a registered one is echoed back in `context`.
 
             ## search
             Search project code or the built-in platform reference from the workspace profile.

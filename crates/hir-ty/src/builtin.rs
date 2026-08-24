@@ -67,6 +67,7 @@ impl BuiltinSignature {
             ret,
             max_args: self.max_args,
             from_doc_comment: false,
+            doc_see: Default::default(),
         }
     }
 

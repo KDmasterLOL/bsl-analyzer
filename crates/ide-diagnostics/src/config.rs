@@ -141,6 +141,32 @@ impl DiagnosticsConfig {
         }
     }
 
+    /// The severity a finding of `code` carries under this configuration.
+    ///
+    /// Lives on the config, not only on `DiagnosticsContext`, because a diagnostic can be
+    /// produced without a file to anchor it — validating a bare query text has a
+    /// configuration but no `FileId`.
+    pub fn severity(&self, code: DiagnosticCode) -> Severity {
+        self.get_effective_metadata(code).map(|m| m.severity_value()).unwrap_or(Severity::Warning)
+    }
+
+    /// The LSP tags a finding of `code` carries under this configuration. File-free for the
+    /// same reason as [`Self::severity`].
+    pub fn tags(&self, code: DiagnosticCode) -> Vec<crate::DiagnosticTag> {
+        self.get_effective_metadata(code)
+            .map(|m| {
+                m.tags()
+                    .iter()
+                    .filter_map(|tag| match tag {
+                        MetadataTag::Unused => Some(crate::DiagnosticTag::Unnecessary),
+                        MetadataTag::Deprecated => Some(crate::DiagnosticTag::Deprecated),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn get_effective_metadata(&self, code: DiagnosticCode) -> Option<EffectiveMetadata> {
         let base = handlers::get_metadata(code)?;
         let override_data = self.metadata_overrides.get(&code);

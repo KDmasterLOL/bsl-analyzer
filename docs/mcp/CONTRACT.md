@@ -30,8 +30,8 @@ uri: bsl-analyzer://contract
 
 ```jsonc
 {
-  "contract_version": "1.13",
-  "build_version": "0.2.70",
+  "contract_version": "1.14",
+  "build_version": "0.2.71",
   "mcp": {
     "profiles": {
       "workspace": {
@@ -103,7 +103,7 @@ uri: bsl-analyzer://contract
 
 Пояснения к полям:
 
-- В контракте `1.13` `search` публикует `output_schema_version="4"`,
+- В контракте `1.14` `search` публикует `output_schema_version="4"`,
   `syntax_help` — `"2"`, `symbol_info` — `"1"`. `syntax_help` и справочные
   действия `search(action=find_docs|search_docs|list_platform|status)` доступны
   не только в `reference`, но и в `workspace`; отдельный профиль `reference`

@@ -1,4 +1,4 @@
-use parser_error::ParseError;
+use parser_error::{ParseError, RecoveryKind};
 
 use crate::{Parse, SyntaxKind, SyntaxNode, TextRange};
 
@@ -33,6 +33,52 @@ impl SdblQueryInfo {
     pub fn syntax_node(&self) -> Option<SyntaxNode> {
         self.query_ast.as_ref().map(|p| p.syntax_node())
     }
+}
+
+/// Every parse error of an SDBL query, in the coordinates of the query text itself.
+///
+/// Two sources, and the second is not derivable from the tree: the parser's own
+/// [`ParseError`]s, plus a synthetic one for a reference path that ends on a dot. `ERROR`
+/// nodes carry no `ParseError`, so a consumer that walks the tree instead of calling this
+/// cannot render the same messages.
+///
+/// Callers embedding the query in a BSL literal map each range through
+/// [`map_range_query_to_literal`]; a caller validating a bare query text uses them as they are.
+pub fn collect_query_parse_errors(query_ast: &Parse<SyntaxNode>) -> Vec<(TextRange, ParseError)> {
+    let mut errors: Vec<(TextRange, ParseError)> =
+        query_ast.errors().iter().map(|err| (err.range(), err.structured().clone())).collect();
+
+    let root = query_ast.syntax_node();
+    for refs in root.descendants().filter(|node| node.kind() == SyntaxKind::SDBL_REFS_EXPR) {
+        if let Some(dot_range) = trailing_dot_range(&refs) {
+            errors.push((
+                dot_range,
+                ParseError::Custom {
+                    message: "незавершённый путь в ссылке",
+                    recovery: RecoveryKind::Custom,
+                },
+            ));
+        }
+    }
+
+    errors
+}
+
+fn trailing_dot_range(refs: &SyntaxNode) -> Option<TextRange> {
+    for child in refs.children_with_tokens().collect::<Vec<_>>().into_iter().rev() {
+        let kind = child.kind();
+        if kind.is_trivia() {
+            continue;
+        }
+
+        return if kind == SyntaxKind::DOT {
+            child.as_token().map(|token| token.text_range())
+        } else {
+            None
+        };
+    }
+
+    None
 }
 
 pub fn extract_sdbl_with_corrections(node: &SyntaxNode) -> Option<(String, Vec<(usize, usize)>)> {

@@ -265,8 +265,12 @@ impl SharedState {
     }
 
     pub fn shutdown(&self) {
-        self.baseline.shutdown();
+        // The reference worker stops FIRST: in the reference profile its baseline and this one
+        // are the same `Arc`, and closing the baseline before the worker is told to stop leaves
+        // it working against a shut-down service — its own `shutdown` closes the baseline in the
+        // right order (stop, then close, then join).
         self.reference_search.shutdown();
+        self.baseline.shutdown();
         self.diagnostics.shutdown();
         // The retry driver stops BEFORE the lease is released: its Arc-held worker would
         // otherwise outlive the handover and publish over the next owner's caches.

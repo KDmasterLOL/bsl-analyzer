@@ -3319,3 +3319,92 @@ fn having_clause_runs_nested_fields_check() {
         "разыменование через точку в ИМЕЮЩИЕ должно детектироваться так же, как в ГДЕ"
     );
 }
+
+/// Which fields of a register may not exist is decided once, on the main table, and every
+/// virtual table derived from it inherits that verdict.
+///
+/// The same false positive returned three review rounds in a row because each virtual-table
+/// branch rebuilds its field list from literals: silencing the main table left the slice
+/// firing, and fixing `Активность` there left `Период` to repeat it.
+///
+/// The conditional names are seeded ONLY into the main table's `fields`. Anything a shape hands
+/// back under those names it therefore built itself, from a literal — which is exactly the path
+/// that loses the mark and the only path inheritance has to repair. Seeding them everywhere
+/// instead made the check pass on marks that had simply been copied through, proving nothing:
+/// disabling inheritance for `Остатки` alone left the test green.
+///
+/// Which shapes rebuild which names is pinned below rather than merely counted, so the gate
+/// fails in BOTH directions: a shape that starts producing a conditional name joins the checked
+/// set instead of slipping past it, and a shape that stops producing one is noticed too.
+#[test]
+fn every_virtual_table_shape_inherits_the_provisional_marks_of_its_register() {
+    use crate::hir::{FieldDef, ResolvedTable};
+    use crate::standard_fields::VirtualTableType;
+    use crate::SdblType;
+    use bsl_metadata::MdoType;
+
+    // The names a register lists although the platform may not create them.
+    const CONDITIONAL: &[&str] = &["Период", "Активность", "Регистратор", "НомерСтроки"];
+
+    // Shape → the conditional names it rebuilds for itself. An empty list is a claim too: that
+    // shape derives its fields from the register's own dimensions and resources, so there is no
+    // literal to lose a mark and nothing for inheritance to repair.
+    const REBUILT: &[(VirtualTableType, &[&str])] = &[
+        (VirtualTableType::SliceLast, &["Период"]),
+        (VirtualTableType::SliceFirst, &["Период"]),
+        (VirtualTableType::Balance, &[]),
+        (VirtualTableType::Turnovers, &["Период", "Регистратор", "НомерСтроки"]),
+        (VirtualTableType::BalanceAndTurnovers, &["Период", "Регистратор"]),
+        (VirtualTableType::RecordsWithExtDimensions, &[]),
+        (VirtualTableType::ExtDimensionDr, &[]),
+        (VirtualTableType::ExtDimensions, &[]),
+        (VirtualTableType::Changes, &[]),
+    ];
+
+    let mut checked_any = 0;
+
+    for (shape, expected) in REBUILT {
+        let main = ResolvedTable::Register {
+            mdo_type: MdoType::InformationRegister,
+            name: "Курсы".to_string(),
+            fields: CONDITIONAL
+                .iter()
+                .map(|name| FieldDef::provisional_standard(*name, *name, SdblType::Date))
+                .collect(),
+            dimensions: vec![FieldDef::new("Измерение", SdblType::string())],
+            resources: vec![FieldDef::new("Ресурс", SdblType::number())],
+            attributes: vec![FieldDef::new("Реквизит", SdblType::string())],
+            field_model_complete: true,
+        };
+
+        let transformed = super::LoweringContext::transform_for_virtual_table(main, *shape);
+
+        let mut observed: Vec<&str> = CONDITIONAL
+            .iter()
+            .copied()
+            .filter(|name| transformed.fields().iter().any(|f| f.matches_name(name)))
+            .collect();
+        observed.sort_unstable();
+        let mut expected_sorted = expected.to_vec();
+        expected_sorted.sort_unstable();
+
+        assert_eq!(
+            observed, expected_sorted,
+            "[{shape:?}] rebuilds a different set of conditional names than this gate pins; \
+             update the table together with the branch, or the new name goes unchecked",
+        );
+
+        for name in &observed {
+            checked_any += 1;
+            for field in transformed.fields().iter().filter(|f| f.matches_name(name)) {
+                assert!(
+                    field.provisional,
+                    "[{shape:?}] `{name}` came back unmarked — the shape rebuilt it from a \
+                     literal instead of inheriting the register's verdict",
+                );
+            }
+        }
+    }
+
+    assert!(checked_any > 0, "no shape produced a conditional name — the gate asserted nothing");
+}

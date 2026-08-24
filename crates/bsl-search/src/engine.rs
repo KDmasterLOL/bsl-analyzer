@@ -1415,6 +1415,7 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
+        self.invalidate_reference_stamp(collection)?;
         if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
@@ -1442,6 +1443,35 @@ impl SearchEngine {
         Ok(count)
     }
 
+    /// Метка записанного справочного корпуса: сам корпус плюс эмбеддер, которым он
+    /// записан.
+    ///
+    /// Тождество эмбеддера входит в метку, потому что корпус без векторов и корпус,
+    /// векторизованный другой моделью или размерностью, для семантического поиска
+    /// разные вещи, а текст документов у них один и тот же.
+    pub(crate) fn reference_stamp(
+        fingerprint: &str,
+        model: Option<&str>,
+        dim: Option<usize>,
+    ) -> String {
+        match (model, dim) {
+            (Some(model), Some(dim)) => format!("{fingerprint}:{model}:{dim}"),
+            (Some(model), None) => format!("{fingerprint}:{model}:default"),
+            _ => format!("{fingerprint}:fts"),
+        }
+    }
+
+    /// Запись в коллекцию мимо [`Self::replace_reference_collection_if_stale`] снимает
+    /// метку корпуса: она описывает содержимое, которого после такой записи в коллекции
+    /// уже нет, и уцелевшая метка заставила бы следующую публикацию молча не состояться.
+    fn invalidate_reference_stamp(&mut self, collection: &str) -> Result<(), SearchError> {
+        self.store.clear_reference_collection_fingerprint(collection)?;
+        if collection == "platform" {
+            self.loaded_reference_fingerprint = None;
+        }
+        Ok(())
+    }
+
     pub fn replace_reference_collection_if_stale(
         &mut self,
         collection: &str,
@@ -1450,23 +1480,41 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<ReferenceCollectionReplaceOutcome, SearchError> {
+        let stamp =
+            Self::reference_stamp(fingerprint, self.embedding_model(), self.embedding_dimension());
         let committed = self.store.reference_collection_fingerprint(collection)?;
-        if committed.as_deref() == Some(fingerprint) {
+        if committed.as_deref() == Some(stamp.as_str()) {
             if self.loaded_reference_fingerprint != committed && self.embedder.is_some() {
                 self.index =
                     Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
             }
             self.loaded_reference_fingerprint = committed;
             return Ok(ReferenceCollectionReplaceOutcome {
-                committed_fingerprint: fingerprint.to_owned(),
+                committed_fingerprint: stamp,
                 written: false,
             });
         }
-        let embeddings = self.embed_documents(documents, progress)?;
+        // A corpus that could not be vectorised is still worth publishing lexically: refusing
+        // to publish it costs the caller find_docs entirely, and the stamp above records that
+        // the published corpus has no vectors — so a later boot with a reachable embedder sees
+        // a stale stamp and embeds it then. Without that stamp this degradation would be
+        // permanent, which is why it is safe only now.
+        let embeddings = match self.embed_documents(documents, progress) {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                warn!(%error, collection, "reference corpus embedding failed, publishing lexical-only");
+                None
+            }
+        };
+        let stamp = if embeddings.is_some() {
+            stamp
+        } else {
+            Self::reference_stamp(fingerprint, None, None)
+        };
         let outcome = self.store.replace_reference_collection_if_stale(
             collection,
             virtual_path,
-            fingerprint,
+            &stamp,
             documents,
             embeddings.as_deref(),
         )?;
@@ -1547,10 +1595,22 @@ impl SearchEngine {
             }
         });
 
+        // Отказ батча не выходит из функции прямо здесь: незакрытый прогресс переживёт
+        // вызов и навсегда оставит статус поиска в «идёт индексация», а воркеры останутся
+        // неприсоединёнными. Ошибка запоминается, приём результатов прекращается, и
+        // уборка ниже — общая для успеха и отказа.
         let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
+        let mut failure: Option<SearchError> = None;
         while let Ok((idx, result)) = result_rx.recv() {
-            results.push((idx, result?));
+            match result {
+                Ok(embeddings) => results.push((idx, embeddings)),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    break;
+                }
+            }
         }
+        drop(result_rx);
 
         let _ = producer.join();
         for w in workers {
@@ -1559,6 +1619,10 @@ impl SearchEngine {
 
         if let Some(p) = progress {
             p.active.store(false, Ordering::Relaxed);
+        }
+
+        if let Some(error) = failure {
+            return Err(error);
         }
 
         results.sort_by_key(|(i, _)| *i);
@@ -3085,6 +3149,8 @@ impl SearchEngine {
     ) -> Result<usize, SearchError> {
         use std::collections::{BTreeMap, HashSet};
 
+        self.invalidate_reference_stamp(collection)?;
+
         let mut grouped = BTreeMap::<FileKey, Vec<crate::IndexedDocument>>::new();
         for document in documents {
             grouped
@@ -3183,6 +3249,11 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
+        // Метка снимается и ПОСЛЕ записи, не только до неё: запись идёт файл за файлом,
+        // отдельными транзакциями, и другой процесс успевает опубликовать локальный корпус
+        // в середине — его метка описывала бы содержимое, которого здесь уже нет.
+        self.invalidate_reference_stamp(collection)?;
+
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(indexed)
     }
@@ -3223,6 +3294,7 @@ impl SearchEngine {
 
     pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
         self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
+        self.invalidate_reference_stamp(collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
@@ -6525,6 +6597,178 @@ mod tests {
         assert_eq!(integrity, "ok");
     }
 
+    /// Метка корпуса называет эмбеддер, которым он записан.
+    ///
+    /// Иначе корпус, записанный демоном без эмбеддера, совпадает по метке с тем,
+    /// что нужен демону с эмбеддером: ранний выход считает его свежим, векторов у
+    /// коллекции не появляется никогда, а семантический поиск по справке молча пуст.
+    #[test]
+    fn a_corpus_written_without_an_embedder_is_stamped_as_such() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp",
+                    &documents,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            !engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp",
+                    &documents,
+                    None
+                )
+                .unwrap()
+                .written,
+            "тот же движок и тот же корпус второй раз не переписываются"
+        );
+
+        assert_eq!(
+            engine.store.reference_collection_fingerprint("platform").unwrap().as_deref(),
+            Some(SearchEngine::reference_stamp("fp", None, None).as_str()),
+            "записанная метка обязана называть отсутствие эмбеддера"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", None, None),
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            "корпус без векторов не годится движку, который умеет векторы"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            SearchEngine::reference_stamp("fp", Some("e5-large"), Some(1024)),
+            "векторы чужой модели не годятся"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(512)),
+            "векторы другой размерности не годятся"
+        );
+    }
+
+    /// Недоступный эмбеддер отнимает у справки семантику, но не лексику.
+    ///
+    /// Отмечен `ignore`: живого места для внедрения отказа нет, а настоящий недоступный
+    /// эмбеддер отрабатывает десять попыток с нарастающей паузой — около трёх минут.
+    /// Запускать точечно: `cargo test -p bsl-search --lib -- --ignored lexical`.
+    #[test]
+    #[ignore = "недоступный эмбеддер ретраится ~160 с; запускать точечно"]
+    fn an_unreachable_embedder_still_publishes_the_corpus_lexically() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        let config = crate::SearchConfig {
+            embedder: crate::EmbedderConfig {
+                // Порт 1 закрыт: соединение отвергается сразу, отказ настоящий.
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "unreachable-model".to_owned(),
+                dim: Some(8),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
+
+        let outcome = engine
+            .replace_reference_collection_if_stale(
+                "platform",
+                "platform://docs",
+                "fp",
+                &documents,
+                None,
+            )
+            .expect("отказ эмбеддера не отменяет публикацию корпуса");
+
+        assert!(outcome.written);
+        assert_eq!(engine.text_search("uniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        assert_eq!(
+            engine.store.reference_collection_fingerprint("platform").unwrap().as_deref(),
+            Some(SearchEngine::reference_stamp("fp", None, None).as_str()),
+            "корпус без векторов обязан быть помечен как таковой — иначе рабочий эмбеддер \
+             никогда его не переберёт"
+        );
+    }
+
+    /// Запись в коллекцию мимо штампующего пути метку снимает.
+    ///
+    /// В коллекцию `platform` пишет не только публикация локального корпуса: ветка
+    /// внешнего справочного базиса синхронизирует туда чужой снимок и удаляет
+    /// локальный документ. Уцелевшая метка после такой записи говорит о корпусе,
+    /// которого в коллекции уже нет, и следующая публикация молча не состоится.
+    #[test]
+    fn a_write_past_the_stamping_path_drops_the_stamp() {
+        let dir = tempdir().unwrap();
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        for foreign in ["sync", "remove"] {
+            let db_path = dir.path().join(format!("reference-{foreign}.db"));
+            let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+            assert!(
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp",
+                        &documents,
+                        None
+                    )
+                    .unwrap()
+                    .written
+            );
+
+            match foreign {
+                "sync" => {
+                    engine.sync_indexed_documents_in_collection("platform", &[], None).unwrap();
+                }
+                _ => engine.remove_file("platform://docs", "platform").unwrap(),
+            }
+
+            assert_eq!(
+                engine.store.reference_collection_fingerprint("platform").unwrap(),
+                None,
+                "после записи мимо штампующего пути ({foreign}) метка обязана исчезнуть"
+            );
+            assert!(
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp",
+                        &documents,
+                        None
+                    )
+                    .unwrap()
+                    .written,
+                "тот же корпус обязан быть записан заново ({foreign})"
+            );
+            assert_eq!(engine.text_search("uniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        }
+    }
+
     #[test]
     fn concurrent_reference_writers_commit_one_generation() {
         let dir = tempdir().unwrap();
@@ -6557,11 +6801,12 @@ mod tests {
             }));
         }
         let outcomes: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let stamp = SearchEngine::reference_stamp("fp-shared", None, None);
         assert_eq!(outcomes.iter().filter(|(outcome, _, _)| outcome.written).count(), 1);
         assert!(outcomes.iter().all(|(outcome, hits, loaded)| {
-            outcome.committed_fingerprint == "fp-shared"
+            outcome.committed_fingerprint == stamp
                 && *hits == 1
-                && loaded.as_deref() == Some("fp-shared")
+                && loaded.as_deref() == Some(stamp.as_str())
         }));
     }
 
@@ -6652,7 +6897,9 @@ mod tests {
                 .into_iter()
                 .collect();
             assert_eq!(results.iter().filter(|result| result.starts_with("true:")).count(), 1);
-            assert!(results.iter().all(|result| result.ends_with(":1:fp-process-safe")));
+            let expected =
+                format!(":1:{}", SearchEngine::reference_stamp("fp-process-safe", None, None));
+            assert!(results.iter().all(|result| result.ends_with(&expected)));
 
             let connection = rusqlite::Connection::open(root.join("reference-search.db")).unwrap();
             assert_eq!(

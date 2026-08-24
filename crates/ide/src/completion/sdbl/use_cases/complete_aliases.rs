@@ -101,9 +101,10 @@ mod tests {
             subquery: Vec::new(),
         };
 
-        scope.add_table(table1);
-        scope.add_table(table2);
-        scope.add_table(table3);
+        // Distinct aliases by construction, so there is no collision to report.
+        let _ = scope.add_table(table1);
+        let _ = scope.add_table(table2);
+        let _ = scope.add_table(table3);
 
         scope
     }

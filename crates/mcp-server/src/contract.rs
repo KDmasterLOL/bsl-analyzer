@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.13";
+pub const CONTRACT_VERSION: &str = "1.14";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -417,6 +417,18 @@ pub(crate) fn schema_properties(schema: &Map<String, Value>) -> Map<String, Valu
     schema_shape(schema).properties
 }
 
+/// Give a published schema the root `type: "object"` the MCP specification requires.
+///
+/// A union of object branches is generated as a bare `oneOf`/`anyOf`, and a schema whose
+/// root says nothing about its type is rejected by a spec-compliant client — and by
+/// `rmcp`'s own `schema_for_output`. The branches stay as they are: the keyword only
+/// states what every branch already is.
+pub(crate) fn ensure_object_root(schema: &mut Map<String, Value>) {
+    if !schema.contains_key("type") {
+        schema.insert("type".to_owned(), Value::String("object".to_owned()));
+    }
+}
+
 fn schema_shape(schema: &Map<String, Value>) -> SchemaShape {
     shape_from_value(schema, &Value::Object(schema.clone()), 0)
 }
@@ -426,17 +438,21 @@ fn shape_from_value(root: &Map<String, Value>, schema: &Value, depth: usize) -> 
         return SchemaShape::default();
     }
     let Some(object) = schema.as_object() else { return SchemaShape::default() };
+    let mut shape = SchemaShape::default();
+    // A `$ref` keeps its neighbours: schemars writes an internally tagged variant as the
+    // tag's `properties`/`required` NEXT TO a `$ref` at the variant's payload. Returning
+    // the target alone drops the discriminator, and the published surface then calls a
+    // required parameter optional.
     if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
         if let Some(name) = reference.strip_prefix("#/$defs/") {
             if let Some(target) =
                 root.get("$defs").and_then(Value::as_object).and_then(|defs| defs.get(name))
             {
-                return shape_from_value(root, target, depth + 1);
+                shape = shape_from_value(root, target, depth + 1);
             }
         }
     }
 
-    let mut shape = SchemaShape::default();
     if let Some(properties) = object.get("properties").and_then(Value::as_object) {
         shape.properties.extend(properties.clone());
     }
@@ -681,6 +697,13 @@ mod tests {
                     let schema = output_schema(profile, decl.name).unwrap_or_else(|| {
                         panic!("{}/{} has no outputSchema", profile.as_str(), decl.name)
                     });
+                    assert_eq!(
+                        schema["type"],
+                        "object",
+                        "{}/{} outputSchema must describe object responses",
+                        profile.as_str(),
+                        decl.name
+                    );
                     assert!(
                         schema
                             .as_object()
@@ -696,6 +719,27 @@ mod tests {
                         decl.name
                     );
                 }
+            }
+        }
+    }
+
+    /// Every served tool's inputSchema says its root is an object.
+    ///
+    /// The output side is gated above; the input side is the half a client reads FIRST, and a
+    /// tool whose parameters are a union is generated as a bare `oneOf` — a shape a
+    /// spec-compliant client rejects along with the whole listing.
+    #[test]
+    fn every_published_input_schema_is_object_rooted() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let router = McpServer::profile_router(profile);
+            for tool in router.list_all() {
+                assert_eq!(
+                    tool.input_schema.get("type").and_then(Value::as_str),
+                    Some("object"),
+                    "{}/{} inputSchema must describe object parameters",
+                    profile.as_str(),
+                    tool.name
+                );
             }
         }
     }
@@ -795,7 +839,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.13",
+              "contract_version": "1.14",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -825,12 +869,12 @@ mod tests {
                           }
                         ],
                         "name": "search",
-                        "output_schema_fingerprint": "blake3:dcd30e696ea1070a8dbe44f7a2da4bc069f4ff83d49f3ab7a580a9cc963bba3a",
+                        "output_schema_fingerprint": "blake3:4829b5149282d60e71524da2b7b4a1b684b1f8db79d255f962f9063e0aec3adf",
                         "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
-                            "required": false,
+                            "required": true,
                             "type": "string"
                           },
                           {
@@ -867,7 +911,7 @@ mod tests {
                         "actions": [],
                         "name": "syntax_help",
                         "note": "exactly one of `name` or `reference_id` is required",
-                        "output_schema_fingerprint": "blake3:8a212815b8e90e95f79b13325d18b264233cbe387eeb7efe229a3dda1e1da250",
+                        "output_schema_fingerprint": "blake3:219fdb853fb5b1c5a40de0010463c820ba26d85b01d9ee1ad8766ff45b848465",
                         "output_schema_version": "2",
                         "params": [
                           {
@@ -1143,12 +1187,12 @@ mod tests {
                           }
                         ],
                         "name": "search",
-                        "output_schema_fingerprint": "blake3:dcd30e696ea1070a8dbe44f7a2da4bc069f4ff83d49f3ab7a580a9cc963bba3a",
+                        "output_schema_fingerprint": "blake3:4829b5149282d60e71524da2b7b4a1b684b1f8db79d255f962f9063e0aec3adf",
                         "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
-                            "required": false,
+                            "required": true,
                             "type": "string"
                           },
                           {
@@ -1233,6 +1277,12 @@ mod tests {
                           },
                           {
                             "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "root_id",
                             "nullable": true,
                             "required": false,
                             "type": "string"
@@ -1620,7 +1670,7 @@ mod tests {
                         "actions": [],
                         "name": "symbol_info",
                         "note": "one of `symbol` or `path`+`line` is required",
-                        "output_schema_fingerprint": "blake3:4b5f3122c310343fd4d47e1342fbf761d7a38048c67aa6a48b16de9069bee1e1",
+                        "output_schema_fingerprint": "blake3:117d545855a5f8370e8835fb9ec1903166654396c7fd3e74282439f3c1dff9cf",
                         "output_schema_version": "1",
                         "params": [
                           {
@@ -1817,7 +1867,7 @@ mod tests {
                         "actions": [],
                         "name": "syntax_help",
                         "note": "exactly one of `name` or `reference_id` is required",
-                        "output_schema_fingerprint": "blake3:8a212815b8e90e95f79b13325d18b264233cbe387eeb7efe229a3dda1e1da250",
+                        "output_schema_fingerprint": "blake3:219fdb853fb5b1c5a40de0010463c820ba26d85b01d9ee1ad8766ff45b848465",
                         "output_schema_version": "2",
                         "params": [
                           {

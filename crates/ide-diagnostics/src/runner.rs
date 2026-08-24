@@ -89,7 +89,9 @@ const CONFIGURATION_DIAGNOSTICS: &[DiagnosticCode] = &[
 
 const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::QueryParseError,
+    DiagnosticCode::AmbiguousFieldInQuery,
     DiagnosticCode::AssignAliasFieldsInQuery,
+    DiagnosticCode::DuplicateAliasInQuery,
     DiagnosticCode::FieldsFromJoinsWithoutIsNull,
     DiagnosticCode::FullOuterJoinQuery,
     DiagnosticCode::IncorrectUseLikeInQuery,
@@ -475,7 +477,9 @@ pub fn collect_sdbl_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
     diagnostics
 }
 
-const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
+pub(crate) const SDBL_DISPATCH: &[(DiagnosticCode, crate::sdbl_utils::SdblDispatchFn)] = &[
+    (DiagnosticCode::AmbiguousFieldInQuery, handlers::ambiguous_field_in_query::dispatch),
+    (DiagnosticCode::DuplicateAliasInQuery, handlers::duplicate_alias_in_query::dispatch),
     (DiagnosticCode::AssignAliasFieldsInQuery, handlers::assign_alias_fields_in_query::dispatch),
     (
         DiagnosticCode::FieldsFromJoinsWithoutIsNull,
@@ -533,7 +537,13 @@ fn collect_sdbl_hir_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
         for hir_diag in sdbl_package.all_diagnostics() {
             for (_, dispatch_fn) in &enabled {
-                dispatch_fn(ctx, hir_diag, &mapper, &query_info.query_text, &mut diagnostics);
+                dispatch_fn(
+                    ctx.config,
+                    hir_diag,
+                    &mapper,
+                    &query_info.query_text,
+                    &mut diagnostics,
+                );
             }
         }
     }

@@ -11,6 +11,7 @@ mod query;
 mod runner;
 mod scope_gate;
 mod single_pass;
+mod standalone_query;
 mod suppression;
 mod types;
 
@@ -31,6 +32,7 @@ pub use metadata::{
     DiagnosticSeverityLevel, DiagnosticType, Impact, ImpactSeverity, MetadataTag, SoftwareQuality,
 };
 pub use query::file_diagnostics_query;
+pub use standalone_query::{sdbl_query_codes, validate_query_text, METADATA_DEPENDENT_CODES};
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
 
 pub fn all_diagnostic_codes() -> impl Iterator<Item = DiagnosticCode> {

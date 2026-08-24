@@ -1522,6 +1522,15 @@ impl Store {
         })
     }
 
+    pub(crate) fn clear_reference_collection_fingerprint(
+        &self,
+        collection: &str,
+    ) -> Result<(), SearchError> {
+        let key = format!("reference_collection_fingerprint:{collection}");
+        self.conn.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     pub(crate) fn reference_collection_fingerprint(
         &self,
         collection: &str,

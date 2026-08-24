@@ -1,4 +1,5 @@
 pub(crate) mod builtin_names;
+pub(crate) mod doc_structure;
 pub mod type_string;
 
 use std::collections::HashSet;
