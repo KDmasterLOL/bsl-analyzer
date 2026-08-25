@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn every_publication_path_propagates_final_install_refusal() {
+    fn fresh_and_cached_publication_paths_propagate_final_install_refusal() {
         let refuse_install = super::super::snapshot::refuse_snapshot_install_for_test;
 
         let fresh_dir = tempfile::tempdir().unwrap();
@@ -1430,31 +1430,6 @@ mod tests {
         );
         assert_eq!(fresh_install, LeaseOutcome::Applied(Err(SnapshotInstallError::Changed)));
         assert!(fresh.snapshot().is_none(), "fresh publish never becomes ready");
-
-        let incremental_dir = tempfile::tempdir().unwrap();
-        let incremental_root = incremental_dir.path();
-        sample_workspace(incremental_root);
-        let incremental = GraphState::for_workspace(incremental_root.to_path_buf());
-        incremental.ensure_loading();
-        wait_ready(&incremental);
-        write(
-            incremental_root,
-            "CommonModules/Сервер/Ext/Module.bsl",
-            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 1;\nВозврат Значение;\nКонецФункции",
-        );
-        refuse_install();
-        assert!(matches!(
-            incremental.try_incremental_reload(incremental_root, 2, 0),
-            PublishAttemptOutcome::Refused(LoadFailure {
-                reason: LoadFailureReason::TransientRefusal,
-                ..
-            })
-        ));
-        assert_eq!(
-            incremental.snapshot().map(|snapshot| snapshot.generation),
-            Some(1),
-            "failed reload keeps serving its old pool"
-        );
 
         let clean_dir = tempfile::tempdir().unwrap();
         let clean_root = clean_dir.path();
@@ -1486,6 +1461,36 @@ mod tests {
         stale.record_load_failure(false, failure);
         assert!(stale.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
         assert!(stale.snapshot().is_none(), "stale adoption never becomes ready");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn incremental_publication_propagates_final_install_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 1;\nВозврат Значение;\nКонецФункции",
+        );
+        super::super::snapshot::refuse_snapshot_install_for_test();
+
+        assert!(matches!(
+            graph.try_incremental_reload(root, 2, 0),
+            PublishAttemptOutcome::Refused(LoadFailure {
+                reason: LoadFailureReason::TransientRefusal,
+                ..
+            })
+        ));
+        assert_eq!(
+            graph.snapshot().map(|snapshot| snapshot.generation),
+            Some(1),
+            "failed reload keeps serving its old pool"
+        );
     }
 
     #[test]
