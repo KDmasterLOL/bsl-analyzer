@@ -78,11 +78,18 @@ impl<'a> Scope<'a> {
         }
     }
 
-    pub fn add_table(&mut self, table: TableRef) {
-        if let Some(frame) = self.frames.last_mut() {
-            let key = table.effective_name().fold_lower();
-            frame.tables.insert(key, table);
-        }
+    /// Registers a source under its effective name, reporting whether that name was already
+    /// taken.
+    ///
+    /// The answer matters beyond the diagnostic: a second source under the same name evicts
+    /// the first from the scope, so every later reference to it silently resolves against the
+    /// wrong table. Callers that drop this result are choosing to let that happen quietly.
+    #[must_use = "a colliding alias silently evicts the source already registered under it"]
+    pub fn add_table(&mut self, table: TableRef) -> Option<String> {
+        let frame = self.frames.last_mut()?;
+        let name = table.effective_name().to_string();
+        let key = name.fold_lower();
+        frame.tables.insert(key, table).map(|_| name)
     }
 
     pub fn add_temp_table(&mut self, name: String, fields: Vec<FieldDef>) {
@@ -140,19 +147,45 @@ impl<'a> Scope<'a> {
             return SdblType::Unknown;
         }
 
-        let mut found_type: Option<SdblType> = None;
+        // Resolution walks frames from the innermost outward and STOPS at the first frame that
+        // offers the name. A subquery is its own scope: a name it resolves on its own sources
+        // shadows the same name outside, exactly as it does in SQL, and only the sources of one
+        // level can compete for it. Searching every live frame at once made a self-contained
+        // subquery collide with its enclosing query over names like `Код` or `Ссылка` — the
+        // commonest names there are.
+        //
+        // Provisional fields are skipped while COUNTING sources, not while typing: a field the
+        // platform may not expose cannot be one of the two occurrences that make a bare name
+        // ambiguous.
+        for frame in self.frames.iter().rev() {
+            let mut found_type: Option<SdblType> = None;
+            let mut provisional_type: Option<SdblType> = None;
 
-        for table in self.all_tables() {
-            let ty = self.find_column_type_in_table(table, column_name);
-            if !ty.is_unknown_or_error() {
+            for table in frame.tables.values() {
+                let ty = self.find_column_type_in_table(table, column_name);
+                if ty.is_unknown_or_error() {
+                    continue;
+                }
+                if self.column_is_provisional_in_table(table, column_name) {
+                    provisional_type.get_or_insert(ty);
+                    continue;
+                }
                 if found_type.is_some() {
                     return SdblType::Error;
                 }
                 found_type = Some(ty);
             }
+
+            if let Some(ty) = found_type.or(provisional_type) {
+                return ty;
+            }
         }
 
-        found_type.unwrap_or(SdblType::Unknown)
+        SdblType::Unknown
+    }
+
+    fn column_is_provisional_in_table(&self, table: &TableRef, column_name: &str) -> bool {
+        table.metadata.as_ref().is_some_and(|resolved| resolved.column_is_provisional(column_name))
     }
 
     fn find_column_type_in_table(&self, table: &TableRef, column_name: &str) -> SdblType {
@@ -164,22 +197,61 @@ impl<'a> Scope<'a> {
         SdblType::Unknown
     }
 
+    /// The sources that make `column_name` ambiguous, from the frame that owns the name.
+    ///
+    /// Mirrors [`Self::resolve_column_type`]: naming a table from an enclosing query would
+    /// point the reader at a source the reference could not have meant.
     pub fn find_tables_with_column(&self, column_name: &str) -> Vec<String> {
-        let mut result = Vec::new();
-
-        for table in self.all_tables() {
-            if let Some(ref resolved) = table.metadata {
-                if resolved
-                    .fields()
-                    .iter()
-                    .any(|f| stdx::case::eq_ignore_case(&f.name, column_name))
-                {
+        for frame in self.frames.iter().rev() {
+            let mut result = Vec::new();
+            for table in frame.tables.values() {
+                let Some(resolved) = table.metadata.as_ref() else { continue };
+                // Same rule as the ambiguity decision itself: a provisional field is not an
+                // occurrence, so naming its table as a candidate would mislead the reader.
+                let offered = resolved.fields().iter().any(|f| f.matches_name(column_name));
+                if offered && !resolved.column_is_provisional(column_name) {
                     result.push(table.effective_name().to_string());
                 }
             }
+            if !result.is_empty() {
+                result.sort();
+                return result;
+            }
         }
 
-        result
+        Vec::new()
+    }
+
+    /// The sources that also offer `head` as a field, when `head` is an alias at their level.
+    ///
+    /// The platform rejects `Имя.Поле` outright when `Имя` reads both ways, and it decides that
+    /// per query level: the same collision inside a subquery is accepted (verified against
+    /// 8.3.27). The field's type is irrelevant — a String attribute collides just as a tabular
+    /// section does — so this is a name question, settled before any type is known.
+    ///
+    /// Provisional fields are not occurrences here for the same reason as everywhere else: a
+    /// field the platform may not create cannot be the half of a collision it never sees.
+    pub fn qualified_head_collision(&self, head: &str) -> Vec<String> {
+        let head_lower = head.fold_lower();
+        for frame in self.frames.iter().rev() {
+            if !frame.tables.contains_key(&head_lower) {
+                continue;
+            }
+            let mut offered: Vec<String> = frame
+                .tables
+                .values()
+                .filter(|table| {
+                    table.metadata.as_ref().is_some_and(|resolved| {
+                        resolved.fields().iter().any(|f| f.matches_name(head))
+                            && !resolved.column_is_provisional(head)
+                    })
+                })
+                .map(|table| table.effective_name().to_string())
+                .collect();
+            offered.sort();
+            return offered;
+        }
+        Vec::new()
     }
 
     pub fn find_field_def(
@@ -600,7 +672,7 @@ mod tests {
             ],
         );
 
-        scope.add_table(table);
+        let _ = scope.add_table(table);
 
         assert!(scope.find_table("в").is_some());
         assert!(scope.find_table("В").is_some());
@@ -615,13 +687,13 @@ mod tests {
 
         let outer_table =
             make_table("Outer", None, vec![FieldDef::new("Field1", SdblType::string())]);
-        scope.add_table(outer_table);
+        let _ = scope.add_table(outer_table);
 
         scope.push_frame();
 
         let inner_table =
             make_table("Inner", None, vec![FieldDef::new("Field2", SdblType::number())]);
-        scope.add_table(inner_table);
+        let _ = scope.add_table(inner_table);
 
         assert!(scope.find_table("Inner").is_some());
         assert!(scope.find_table("Outer").is_some());
@@ -650,8 +722,8 @@ mod tests {
             vec![FieldDef::new("SharedField", SdblType::number())],
         );
 
-        scope.add_table(table1);
-        scope.add_table(table2);
+        let _ = scope.add_table(table1);
+        let _ = scope.add_table(table2);
 
         let ty = scope.resolve_column_type(None, "UniqueField");
         assert_eq!(ty, SdblType::string());

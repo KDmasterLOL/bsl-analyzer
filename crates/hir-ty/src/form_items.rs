@@ -329,6 +329,50 @@ mod tests {
     }
 
     #[test]
+    fn lower_form_element_resolves_object_attribute_data_path_type() {
+        let mut form = empty_form("ФормаКонтрагента");
+        form.attributes.push(FormAttribute {
+            name: "Объект".to_string(),
+            attr_type: AttributeType::Ref {
+                mdo_type: MdoType::Catalog,
+                name: "Контрагенты".to_string(),
+            },
+            is_main: true,
+            columns: vec![],
+        });
+        let element = FormElement::with_kind(
+            "ИНН",
+            1,
+            Some("Объект.ИНН".to_string()),
+            FormElementKind::Field,
+            None,
+        );
+        let mut config = Configuration::new("Test");
+        let mut catalog = MetadataObject::new(MdoType::Catalog, "Контрагенты");
+        catalog.add_attribute(bsl_metadata::Attribute {
+            name: "ИНН".to_string(),
+            name_en: None,
+            attr_type: AttributeType::String { length: Some(12) },
+        });
+        config.add_metadata_object(catalog);
+        let configs = wrap_config(config);
+        let db = InMemoryDb::new();
+
+        let id = lower_form_element(&db, &form, &element, &configs);
+
+        match db.lookup_type(id) {
+            TypeKind::FormControl { binding: Some(binding), .. } => {
+                assert_eq!(binding.path.as_ref(), ["Объект", "ИНН"]);
+                assert_eq!(
+                    binding.target,
+                    FormBindingTargetFacet::Attribute { ty: db.string(None, false) }
+                );
+            }
+            other => panic!("expected typed form-control binding, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn lower_form_element_with_tabular_section_path_yields_tabular_section_target() {
         let mut form = empty_form("ФормаПКО");
         form.attributes.push(FormAttribute {

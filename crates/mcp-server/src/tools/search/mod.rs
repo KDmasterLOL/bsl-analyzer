@@ -11,6 +11,7 @@ mod status;
 #[cfg(test)]
 mod test_support;
 mod types;
+pub(crate) use types::search_output_schema;
 
 pub use docs::{find_docs, search_docs};
 pub use hybrid::hybrid_code;

@@ -1,0 +1,16 @@
+{
+  "_fixture": {
+    "version": "1",
+    "producer_contract": "legacy-type-only",
+    "legacy_consumer_release": "v0.2.70",
+    "legacy_consumer_commit": "d7e50c494995ee8dee742a6236b16134d2a42e87",
+    "legacy_onec_client_source_sha256": "2d3afd71024f10162c97666a895852784121d8270a117e0212a717efee9905b2"
+  },
+  "name": "УдалённыйОбъект",
+  "full_name": "Справочник.УдалённыйОбъект",
+  "synonym": "Удалённый объект",
+  "Реквизиты": [
+    {"name":"SameAsWorkspace","synonym":"Same as workspace","type":"СправочникСсылка.Контрагенты"},
+    {"name":"OnlyInOtherInfobase","synonym":"Only in other infobase","type":"СправочникСсылка.Контрагенты"}
+  ]
+}

@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -19,7 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 const DEFAULT_MIN_PATH_DEPTH: i64 = 3;
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
@@ -27,8 +27,7 @@ pub(crate) fn dispatch(
 ) {
     if let sdbl_hir::SdblDiagnostic::QueryNestedFieldsByDot { range, parts_count } = diag {
         if let Some(n) = parts_count {
-            let min = ctx
-                .config
+            let min = config
                 .get_int(DiagnosticCode::QueryNestedFieldsByDot, "minPathDepth")
                 .unwrap_or(DEFAULT_MIN_PATH_DEPTH);
             if (*n as i64) < min {
@@ -36,7 +35,7 @@ pub(crate) fn dispatch(
             }
         }
         crate::sdbl_utils::dispatch_simple(
-            ctx,
+            config,
             DiagnosticCode::QueryNestedFieldsByDot,
             "Обнаружено разыменование ссылочного поля",
             *range,

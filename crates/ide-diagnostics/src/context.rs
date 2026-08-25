@@ -360,32 +360,11 @@ impl<'a> DiagnosticsContext<'a> {
     }
 
     pub fn severity(&self, code: crate::DiagnosticCode) -> crate::Severity {
-        self.config
-            .get_effective_metadata(code)
-            .map(|m| m.severity_value())
-            .unwrap_or(crate::Severity::Warning)
+        self.config.severity(code)
     }
 
     pub fn tags(&self, code: crate::DiagnosticCode) -> Vec<crate::DiagnosticTag> {
-        self.config
-            .get_effective_metadata(code)
-            .map(|m| {
-                let tags = m.tags();
-                let mut result = Vec::new();
-                for tag in tags {
-                    match tag {
-                        crate::metadata::MetadataTag::Unused => {
-                            result.push(crate::DiagnosticTag::Unnecessary);
-                        }
-                        crate::metadata::MetadataTag::Deprecated => {
-                            result.push(crate::DiagnosticTag::Deprecated);
-                        }
-                        _ => {}
-                    }
-                }
-                result
-            })
-            .unwrap_or_default()
+        self.config.tags(code)
     }
 
     pub fn is_disabled_with_metadata(&self, code: crate::DiagnosticCode) -> bool {

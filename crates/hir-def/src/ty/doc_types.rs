@@ -1,5 +1,7 @@
+use std::borrow::Cow;
+
 use crate::path::QualifiedName;
-use crate::type_ref::TypeRef;
+use crate::type_ref::{BuiltinTypeRef, TypeRef};
 use crate::Name;
 use stdx::case::CaseExt;
 
@@ -23,11 +25,11 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
     let mut in_params_section = false;
     let mut in_return_section = false;
     let mut last_param_idx: Option<usize> = None;
+    let mut seen_return_bullet = false;
 
     for line in doc_comment.lines() {
         let line = line.trim();
         let line = line.strip_prefix("//").unwrap_or(line).trim();
-
         let line_lower = line.fold_lower();
 
         if is_params_header(&line_lower) {
@@ -41,8 +43,21 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
             in_params_section = false;
             in_return_section = true;
             last_param_idx = None;
+            seen_return_bullet = false;
             continue;
         }
+
+        // Tabs commonly align the `-` separator (`Имя\t\t- Тип`). Every reader below recognises
+        // only a space-flanked dash, and the structured doc parser normalises the same way, so a
+        // tab here otherwise makes one parser see a type where the other sees prose. Section
+        // headers stay deliberately outside this: the structured parser matches them on the raw
+        // line, and normalising here would make a tabbed header visible to one parser only.
+        let normalized: Cow<'_, str> = if line.contains('\t') {
+            Cow::Owned(line.replace('\t', " "))
+        } else {
+            Cow::Borrowed(line)
+        };
+        let line = normalized.trim();
 
         if in_params_section {
             if is_continuation_line(line) {
@@ -62,8 +77,36 @@ pub fn parse_method_doc_types(doc_comment: &str) -> Option<MethodTypeHints> {
         }
 
         if in_return_section {
-            if let Some(type_ref) = parse_return_line(line) {
-                hints.ret = type_ref;
+            // A documented return is often a list of bullet alternatives, with the structure
+            // body attached to one of them. Closing the section on the first recognised line
+            // would keep only that alternative and type every caller by it alone, so bullets
+            // accumulate into a union exactly as they do for a parameter.
+            if is_continuation_line(line) {
+                // A bullet this parser cannot name is still a documented alternative. Folding it
+                // in as `Unknown` would let the kernel drop it (`T | Unknown == T`) and narrow the
+                // return to the alternatives that happened to parse, flagging every value of the
+                // unnamed one; `Any` keeps the union permissive, exactly as `См.` does.
+                let addition = match parse_continuation_line(line) {
+                    Some(TypeRef::Unknown) | None => TypeRef::Any,
+                    Some(parsed) => parsed,
+                };
+                if seen_return_bullet {
+                    fold_into_union(&mut hints.ret, addition);
+                } else {
+                    hints.ret = addition;
+                    seen_return_bullet = true;
+                }
+                continue;
+            }
+
+            if !seen_return_bullet {
+                if let Some(type_ref) = parse_return_line(line) {
+                    hints.ret = type_ref;
+                    in_return_section = false;
+                }
+            } else {
+                // The bullet list ended: field lines (`* Поле - Тип`) and prose below it
+                // describe the alternatives, they do not add further ones.
                 in_return_section = false;
             }
         }
@@ -151,6 +194,12 @@ fn parse_return_line(line: &str) -> Option<TypeRef> {
     if line.is_empty() {
         return None;
     }
+
+    // A return type is often written as a bullet (`- Структура`). The structured doc parser
+    // strips that dash, so this one must too, or the same slot is a typed structure for one
+    // reader and prose for the other. Unlike parameters, the return section takes the first
+    // recognised line and stops, so there are no union continuations to confuse with a bullet.
+    let line = line.strip_prefix('-').map_or(line, str::trim);
 
     let type_name = if let Some(dash_pos) = line.find(" - ") { &line[..dash_pos] } else { line };
 
@@ -248,37 +297,28 @@ fn is_identifier_like(s: &str) -> bool {
     (first.is_alphabetic() || first == '_') && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    let s_lower = s.fold_lower();
-    let prefix_lower = prefix.fold_lower();
-
-    if !s_lower.starts_with(&prefix_lower) {
-        return None;
-    }
-
-    let prefix_chars = prefix.chars().count();
-    let tail_start = s.char_indices().nth(prefix_chars).map(|(idx, _)| idx).unwrap_or(s.len());
-
-    Some(&s[tail_start..])
+/// Splits `<коллекция> из <Тип>` into its head and tail. The two words are matched independently:
+/// documentation mixes the languages freely (`Structure из …`, `Массив of …`), and a form one
+/// parser recognises while the other does not silently costs the slot its documented fields.
+fn split_collection(name: &str) -> Option<(&str, &str)> {
+    [" из ", " of "].iter().find_map(|marker| {
+        stdx::case::find_ignore_case(name, marker)
+            .map(|at| (name[..at.start].trim(), name[at.end..].trim()))
+    })
 }
 
 fn parse_collection_of(name: &str) -> Option<TypeRef> {
-    for prefix in ["Массив из ", "Array of "] {
-        if let Some(tail) = strip_prefix_ci(name, prefix) {
-            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
+    let (head, element) = split_collection(name)?;
+    match head.fold_lower().as_str() {
+        "массив" | "array" | "фиксированныймассив" | "fixedarray" => {
+            Some(TypeRef::Array(Some(Box::new(parse_type_name(element)))))
         }
+        "соответствие" | "map" => Some(TypeRef::Map(None)),
+        // The value type of `Структура из КлючИЗначение` has nowhere to go, but the structure
+        // itself must still be recognised.
+        "структура" | "structure" => Some(TypeRef::Builtin(BuiltinTypeRef::Structure)),
+        _ => None,
     }
-    for prefix in ["ФиксированныйМассив из ", "FixedArray of "] {
-        if let Some(tail) = strip_prefix_ci(name, prefix) {
-            return Some(TypeRef::Array(Some(Box::new(parse_type_name(tail)))));
-        }
-    }
-    for prefix in ["Соответствие из ", "Map of "] {
-        if strip_prefix_ci(name, prefix).is_some() {
-            return Some(TypeRef::Map(None));
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -501,6 +541,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_name_recognises_structure_of_t() {
+        // The value type has nowhere to go in the kernel, but the structure must survive: the
+        // structured doc parser reads this same slot as a structure, and a slot the two parsers
+        // type differently loses its documented fields.
+        assert_eq!(
+            parse_type_name("Структура из КлючИЗначение"),
+            builtin(BuiltinTypeRef::Structure)
+        );
+        assert_eq!(parse_type_name("Structure of KeyAndValue"), builtin(BuiltinTypeRef::Structure));
+        assert_eq!(parse_type_name("Структура"), builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
     fn parse_type_name_recognises_array_of_t_russian() {
         let parsed = parse_type_name("Массив из Строка");
         assert_eq!(
@@ -613,6 +666,105 @@ mod tests {
             }
             other => panic!("Реквизиты: expected TypeRef::Union, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_method_doc_types_unnamed_return_bullet_stays_permissive() {
+        // The second alternative is prose: it carries no ` - ` separator and names no type.
+        // Folding it in as `Unknown` would let the kernel canonicalise the union down to
+        // `Неопределено`, and every guarded use of the real value would be flagged.
+        let doc = "\n// Возвращаемое значение:\n                   //   - Неопределено - если не пройдены проверки.\n                   //   - Значение любого типа.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        match hints.ret {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::Undefined));
+                assert_eq!(parts[1], TypeRef::Any, "the unnamed alternative must dominate");
+            }
+            other => panic!("expected a permissive union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_names_a_structure_of_a_value_type() {
+        // `Структура Из КлючИЗначение.` names a type, unlike the prose above: it must come out as
+        // the structure it is, so the documented fields have an untyped structure to fill.
+        let doc = "\n// Возвращаемое значение:\n                   //   - Неопределено - если не пройдены проверки.\n                   //   - Структура Из КлючИЗначение.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        match hints.ret {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], TypeRef::Builtin(BuiltinTypeRef::Undefined));
+                assert_eq!(parts[1], TypeRef::Builtin(BuiltinTypeRef::Structure));
+            }
+            other => panic!("expected a union, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_return_bullets_fold_into_union() {
+        // Both alternatives are written as bullets, and the structure body belongs to the
+        // second one. Taking the first bullet and closing the section types the call as an
+        // array of catalog refs, so every column read on the real value-table row becomes an
+        // unresolved field.
+        let doc = "\n// Возвращаемое значение:\n                   //   - Массив Из СправочникСсылка.Склады - список ссылок.\n                   //   - ТаблицаЗначений - таблица с данными по складам:\n                   //       * Склад - СправочникСсылка.Склады - склад.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        match hints.ret {
+            TypeRef::Union(parts) => {
+                assert_eq!(parts.len(), 2, "both documented alternatives must survive");
+                assert!(matches!(parts[0], TypeRef::Array(Some(_))));
+                assert_eq!(parts[1], TypeRef::Builtin(BuiltinTypeRef::ValueTable));
+            }
+            other => panic!("expected a union of both alternatives, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_method_doc_types_single_return_bullet_is_not_wrapped_in_union() {
+        let doc = "\n// Возвращаемое значение:\n//   - Структура - параметры соединения.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.ret, TypeRef::Builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
+    fn parse_method_doc_types_tab_inside_section_header_is_not_a_header() {
+        // Section headers are matched on the raw line by the structured doc parser
+        // (`docs::returns_section_header`). Normalising tabs here too would make a tabbed
+        // header visible to this parser alone, which is the very divergence the tab handling
+        // below exists to remove.
+        let doc = "\n// Возвращаемое\tзначение:\n//   Структура - данные.\n";
+
+        assert_eq!(parse_method_doc_types(doc), None);
+    }
+
+    #[test]
+    fn parse_method_doc_types_return_line_keeps_leading_dash_type() {
+        let doc = "\n// Возвращаемое значение:\n//   - Структура - параметры соединения.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.ret, TypeRef::Builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
+    fn parse_method_doc_types_return_line_separated_by_tab() {
+        let doc = "\n// Возвращаемое значение:\n//   Структура\t- параметры соединения.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.ret, TypeRef::Builtin(BuiltinTypeRef::Structure));
+    }
+
+    #[test]
+    fn parse_method_doc_types_param_line_separated_by_tab() {
+        let doc = "\n// Параметры:\n//  Данные\t\t- Строка - выгружаемые данные.\n";
+
+        let hints = parse_method_doc_types(doc).unwrap();
+        assert_eq!(hints.params.len(), 1, "tab-aligned separator must still yield a param hint");
+        assert_eq!(hints.params[0].0.as_str(), "Данные");
+        assert_eq!(hints.params[0].1, TypeRef::Builtin(BuiltinTypeRef::String));
     }
 
     #[test]
@@ -751,6 +903,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_name_comma_after_a_collection_splits_before_the_collection() {
+        // `Массив из A, B` is written for BOTH readings in real configurations: sometimes one
+        // array whose element is either type, sometimes an array OR an unrelated alternative.
+        // The split-first reading is kept deliberately, because the alternative one buries a
+        // dominating `Произвольный`/`Any` inside the element, where it stops keeping the slot
+        // permissive: `Массив из Строка, Произвольный` would become a plain array and flag every
+        // map-style use of the value. Measured on a real configuration: claiming the whole list
+        // for the collection added 14 mismatches and fixed none.
+        let parsed = parse_type_name("Массив из Строка, Произвольный");
+        match parsed {
+            TypeRef::Union(members) => {
+                assert_eq!(members.len(), 2);
+                assert!(matches!(members[0], TypeRef::Array(Some(_))));
+                assert_eq!(members[1], TypeRef::Any, "the dominating arm must stay at top level");
+            }
+            other => panic!("expected a union, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_type_name_keeps_valid_members_of_mixed_comma_list() {
         let parsed = parse_type_name("СправочникСсылка.Номенклатура, совсем не тип");
         match parsed {
@@ -811,13 +983,44 @@ mod tests {
     }
 
     #[test]
-    fn strip_prefix_ci_handles_cyrillic_round_trip() {
-        let tail = strip_prefix_ci("Массив из Строка", "Массив из ").unwrap();
-        assert_eq!(tail, "Строка");
+    fn split_collection_reads_cyrillic_and_mixed_case() {
+        // Byte offsets and case folding both have to survive Cyrillic: the marker is found in the
+        // folded text and then cut out of the original.
+        assert_eq!(split_collection("Массив из Строка"), Some(("Массив", "Строка")));
+        assert_eq!(split_collection("маССив ИЗ Число"), Some(("маССив", "Число")));
+        assert_eq!(
+            split_collection("Structure из КлючИЗначение"),
+            Some(("Structure", "КлючИЗначение"))
+        );
+        assert_eq!(split_collection("Массив"), None);
+    }
 
-        let tail_mixed = strip_prefix_ci("маССив ИЗ Число", "Массив из ").unwrap();
-        assert_eq!(tail_mixed, "Число");
+    #[test]
+    fn a_head_whose_case_folding_changes_its_length_does_not_break_the_split() {
+        // `İ`, `K` and `Å` change their byte length when lowercased. Reading the marker's offset
+        // out of a folded copy cuts the original at the wrong byte — inside a char, which panics
+        // right in the middle of parsing a doc-comment.
+        assert_eq!(parse_type_name("İ из Строка"), TypeRef::Unknown);
+        assert_eq!(parse_type_name("Å из Строка"), TypeRef::Unknown);
+        assert_eq!(
+            parse_type_name("Массив из Å"),
+            TypeRef::Array(Some(Box::new(TypeRef::Name(QualifiedName::from_segments([
+                Name::new("Å")
+            ])))))
+        );
+    }
 
-        assert!(strip_prefix_ci("Соответствие из X", "Массив из ").is_none());
+    #[test]
+    fn parse_type_name_reads_the_marker_in_either_language() {
+        assert_eq!(
+            parse_type_name("Structure из КлючИЗначение"),
+            builtin(BuiltinTypeRef::Structure)
+        );
+        assert_eq!(
+            parse_type_name("Массив of Строка"),
+            TypeRef::Array(Some(Box::new(builtin(BuiltinTypeRef::String))))
+        );
+        // A head that names no collection stays what it was: prose in the type position.
+        assert_eq!(parse_type_name("Данные из справочника"), TypeRef::Unknown);
     }
 }

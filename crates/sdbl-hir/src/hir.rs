@@ -494,6 +494,17 @@ impl ResolvedTable {
         self.fields().iter().find(|f| f.matches_name(name))
     }
 
+    /// Whether this table's offer of `name` is provisional — the field may not exist at all.
+    ///
+    /// Asks about every entry under the name, not the first one, because a conditional
+    /// register field is listed twice: once by the metadata XML reader, which injects
+    /// `Активность`/`НомерСтроки`/`Регистратор` into every information register, and once by
+    /// the query layer's standard-field set. Only one of the two carries the mark, and which
+    /// one [`Self::find_field`] returns is an accident of ordering.
+    pub fn column_is_provisional(&self, name: &str) -> bool {
+        self.fields().iter().any(|f| f.matches_name(name) && f.provisional)
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Self::Metadata { name, .. } => name,
@@ -534,15 +545,42 @@ pub struct FieldDef {
     pub ty: SdblType,
 
     pub is_standard: bool,
+
+    /// The field is listed although it may not exist: whether the platform actually exposes it
+    /// depends on object settings the metadata model does not read (a register's subordination
+    /// to a recorder, its action-/base-period properties).
+    ///
+    /// Listing it is deliberate, but only one direction of error is safe. A rule that reports
+    /// a MISSING field stays silent on a field that is listed, so over-listing costs it a
+    /// false negative — acceptable. A rule that reports a field offered by SEVERAL sources
+    /// gets the opposite: an over-listed field invents a collision that the platform does not
+    /// see. Such rules must not count a provisional field as an occurrence.
+    pub provisional: bool,
 }
 
 impl FieldDef {
     pub fn new(name: impl Into<String>, ty: SdblType) -> Self {
-        Self { name: name.into(), name_en: None, ty, is_standard: false }
+        Self { name: name.into(), name_en: None, ty, is_standard: false, provisional: false }
     }
 
     pub fn standard(name: impl Into<String>, name_en: impl Into<String>, ty: SdblType) -> Self {
-        Self { name: name.into(), name_en: Some(name_en.into()), ty, is_standard: true }
+        Self {
+            name: name.into(),
+            name_en: Some(name_en.into()),
+            ty,
+            is_standard: true,
+            provisional: false,
+        }
+    }
+
+    /// A standard field whose presence depends on settings the metadata model cannot see.
+    /// See [`FieldDef::provisional`].
+    pub fn provisional_standard(
+        name: impl Into<String>,
+        name_en: impl Into<String>,
+        ty: SdblType,
+    ) -> Self {
+        Self { provisional: true, ..Self::standard(name, name_en, ty) }
     }
 
     pub fn new_with_names(
@@ -551,7 +589,7 @@ impl FieldDef {
         ty: SdblType,
         is_standard: bool,
     ) -> Self {
-        Self { name, name_en, ty, is_standard }
+        Self { name, name_en, ty, is_standard, provisional: false }
     }
 
     pub fn matches_name(&self, name: &str) -> bool {

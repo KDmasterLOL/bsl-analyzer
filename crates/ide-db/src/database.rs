@@ -35,6 +35,30 @@ pub struct VisibleRoots {
     pub chain: Vec<(String, PathBuf)>,
 }
 
+/// One effective top-level member of a metadata object together with the root
+/// whose overlay supplied the winning value. `None` denotes the base
+/// configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveMetadataMember {
+    pub member: EffectiveMetadataMemberValue,
+    pub source_extension: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectiveMetadataMemberValue {
+    Attribute(bsl_metadata::Attribute),
+    TabularSection(bsl_metadata::TabularSection),
+}
+
+impl EffectiveMetadataMemberValue {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Attribute(attribute) => &attribute.name,
+            Self::TabularSection(section) => section.name(),
+        }
+    }
+}
+
 #[salsa::db]
 pub struct RootDatabaseImpl {
     storage: salsa::Storage<Self>,
@@ -619,9 +643,26 @@ impl RootDatabaseImpl {
             snapshot.closures.len(),
             "workspace-configs snapshot: closures must parallel paths"
         );
+        assert_eq!(
+            snapshot.paths.len(),
+            snapshot.topological_order.len(),
+            "workspace-configs snapshot: topological_order must cover every path"
+        );
         assert!(
             snapshot.closures.iter().flatten().all(|&dep| dep < snapshot.paths.len()),
             "workspace-configs snapshot: closure indices must point into paths"
+        );
+        assert!(
+            snapshot.topological_order.iter().all(|&idx| idx < snapshot.paths.len()),
+            "workspace-configs snapshot: topological_order indices must point into paths"
+        );
+        let mut unique_order = snapshot.topological_order.clone();
+        unique_order.sort_unstable();
+        unique_order.dedup();
+        assert_eq!(
+            unique_order.len(),
+            snapshot.paths.len(),
+            "workspace-configs snapshot: topological_order must not repeat paths"
         );
         for (_, path) in &snapshot.paths {
             self.ensure_config_revision_input(&path.to_string_lossy());
@@ -636,6 +677,44 @@ impl RootDatabaseImpl {
 
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         self.workspace_configs().snapshot(self).paths.clone()
+    }
+
+    pub fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)> {
+        let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        let snapshot = self.workspace_configs_snapshot();
+        snapshot
+            .topological_order
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, &idx)| {
+                let configured = &snapshot.paths[idx].1;
+                let canonical = &snapshot.canonical_paths[idx];
+                let matched_len = [configured, canonical]
+                    .into_iter()
+                    .filter(|root| file_path.starts_with(root))
+                    .map(|root| root.components().count())
+                    .max()?;
+                Some((matched_len, rank, snapshot.paths[idx].0.clone()))
+            })
+            .max_by_key(|(matched_len, _, _)| *matched_len)
+            .map(|(_, rank, label)| (rank, label))
+    }
+
+    pub fn visible_config_root_ranks(&self, file_id: FileId) -> Option<Vec<usize>> {
+        let roots = self.visible_roots_for_file(file_id)?;
+        let snapshot = self.workspace_configs_snapshot();
+        let visible_paths = roots.main.iter().chain(roots.chain.iter().map(|(_, path)| path));
+        let visible_paths: HashSet<&PathBuf> = visible_paths.collect();
+        Some(
+            snapshot
+                .topological_order
+                .iter()
+                .enumerate()
+                .filter_map(|(rank, &idx)| {
+                    visible_paths.contains(&snapshot.paths[idx].1).then_some(rank)
+                })
+                .collect(),
+        )
     }
 
     /// Set (or update) one config root's metadata structure listing. Must run
@@ -1519,25 +1598,91 @@ impl RootDatabaseImpl {
     /// then each extension. Order is load-bearing for the `*_across_roots` resolvers —
     /// the base is an object's authoritative definition and extensions overlay it.
     fn ordered_config_roots(&self) -> Vec<String> {
-        let paths = RootDatabaseImpl::all_config_paths(self);
+        let snapshot = self.workspace_configs_snapshot();
+        let paths = &snapshot.paths;
         debug_assert!(
             paths.iter().filter(|(label, _)| label.is_none()).count() <= 1,
             "all_config_paths must carry at most one None-labelled base root",
         );
-        let mut roots = Vec::with_capacity(paths.len());
-        roots.extend(
-            paths
+        snapshot
+            .topological_order
+            .iter()
+            .map(|&idx| paths[idx].1.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn effective_metadata_members_from_roots(
+        &self,
+        roots: impl IntoIterator<Item = (Option<String>, std::path::PathBuf)>,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<Vec<EffectiveMetadataMember>>> {
+        let mut found_object = false;
+        let mut members: Vec<EffectiveMetadataMember> = Vec::new();
+
+        for (source_extension, root) in roots {
+            let Some(listing) = self.metadata_listing(&root.to_string_lossy()) else { continue };
+            let Some(object) =
+                metadata::resolve_metadata_object(self, listing, mdo_type, name.to_string())
+            else {
+                continue;
+            };
+            found_object = true;
+
+            let overlay = object
+                .attributes
                 .iter()
-                .filter(|(label, _)| label.is_none())
-                .map(|(_, p)| p.to_string_lossy().into_owned()),
-        );
-        roots.extend(
-            paths
-                .iter()
-                .filter(|(label, _)| label.is_some())
-                .map(|(_, p)| p.to_string_lossy().into_owned()),
-        );
-        roots
+                .cloned()
+                .map(EffectiveMetadataMemberValue::Attribute)
+                .chain(
+                    object
+                        .tabular_sections
+                        .iter()
+                        .cloned()
+                        .map(EffectiveMetadataMemberValue::TabularSection),
+                );
+            for member in overlay {
+                members.retain(|existing| {
+                    existing.member.name().fold_lower() != member.name().fold_lower()
+                });
+                members.push(EffectiveMetadataMember {
+                    member,
+                    source_extension: source_extension.clone(),
+                });
+            }
+        }
+
+        found_object.then(|| Arc::new(members))
+    }
+
+    /// Effective top-level object members in the designer-wide view. The base
+    /// is composed first, followed by every loaded extension in the workspace's
+    /// stable topological order. An unread or absent root contributes nothing.
+    pub fn effective_metadata_members_across_roots(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<Vec<EffectiveMetadataMember>>> {
+        let snapshot = self.workspace_configs_snapshot();
+        let roots = snapshot.topological_order.iter().map(|&idx| snapshot.paths[idx].clone());
+        self.effective_metadata_members_from_roots(roots, mdo_type, name)
+    }
+
+    /// Effective top-level object members visible from one file: base,
+    /// transitive dependencies, then the file's own extension.
+    pub fn effective_metadata_members_for_file(
+        &self,
+        file_id: FileId,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<Vec<EffectiveMetadataMember>>> {
+        let roots = self.visible_roots_for_file(file_id)?;
+        let ordered = roots
+            .main
+            .into_iter()
+            .map(|path| (None, path))
+            .chain(roots.chain.into_iter().map(|(label, path)| (Some(label), path)));
+        self.effective_metadata_members_from_roots(ordered, mdo_type, name)
     }
 
     /// Resolve a metadata object visible anywhere in the configuration — base plus every
@@ -1588,6 +1733,32 @@ impl RootDatabaseImpl {
             }
         }
         acc.map(Arc::new)
+    }
+
+    /// The defined-type counterpart of [`Self::resolve_metadata_object_across_roots`], for a
+    /// consumer with no file anchor.
+    ///
+    /// The composition differs from its two neighbours and cannot be copied from them: a
+    /// metadata object folds each extension's overlay into the base, whereas an extension
+    /// **replaces** a defined type's underlying type wholesale (see
+    /// [`metadata::resolve_defined_type`]). So the last root that defines the name wins
+    /// outright, and the base is consulted only when no extension defines it — the same
+    /// replacement semantics [`Self::resolve_defined_type_for_file`] applies along a file's
+    /// visibility chain, widened here to the whole configuration.
+    pub fn resolve_defined_type_across_roots(
+        &self,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
+        let mut found = None;
+        for root in self.ordered_config_roots() {
+            let Some(listing) = self.metadata_listing(&root) else { continue };
+            if let Some(underlying) =
+                metadata::resolve_defined_type(self, listing, name.to_string())
+            {
+                found = Some((*underlying).clone());
+            }
+        }
+        found
     }
 
     /// Resolve an event subscription by name across base + every extension. Event
@@ -2332,6 +2503,34 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         RootDatabaseImpl::resolve_register_by_name_for_file(self, file_id, name)
     }
 
+    fn has_effective_module_variable(
+        &self,
+        file_id: FileId,
+        module_type: bsl_metadata::ModuleType,
+        mdo_type: bsl_metadata::MdoType,
+        object_name: &str,
+        variable_name: &str,
+    ) -> bool {
+        let role = match module_type {
+            bsl_metadata::ModuleType::ObjectModule => crate::EffectiveModuleRole::Object,
+            bsl_metadata::ModuleType::ManagerModule => crate::EffectiveModuleRole::Manager,
+            _ => return false,
+        };
+        let source_root_id = self.file_source_root_input(file_id).source_root_id(self);
+        crate::effective_module_exports_query(
+            self,
+            source_root_id,
+            Some(file_id),
+            role,
+            mdo_type,
+            object_name.to_string(),
+            None,
+        )
+        .variables
+        .iter()
+        .any(|item| stdx::case::eq_ignore_case(item.variable.name.as_str(), variable_name))
+    }
+
     fn resolve_defined_type(
         &self,
         file_id: FileId,
@@ -2685,6 +2884,14 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         RootDatabaseImpl::all_config_paths(self)
+    }
+
+    fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)> {
+        RootDatabaseImpl::config_root_rank_and_label(self, file_id)
+    }
+
+    fn visible_config_root_ranks(&self, file_id: FileId) -> Option<Vec<usize>> {
+        RootDatabaseImpl::visible_config_root_ranks(self, file_id)
     }
 
     fn common_module_for_file_id(

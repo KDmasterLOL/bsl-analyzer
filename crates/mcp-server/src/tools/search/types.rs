@@ -1,4 +1,8 @@
 use bsl_search::{SearchError, SearchHit, Snapshot};
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde_json::Value;
+use std::sync::Arc;
 
 pub(super) const DIRECT_SEARCH_INITIAL_WINDOW_MULTIPLIER: usize = 3;
 pub(super) const DIRECT_SEARCH_MAX_WINDOW_MULTIPLIER: usize = 10;
@@ -20,7 +24,104 @@ pub(super) const HYBRID_FETCH_MULTIPLIER: usize = 2;
 /// per code hit and, for `search_code`, a `freshness` envelope. The legacy 1-based
 /// `line_start`/`line_end` are untouched. The number is shared with the `reference` profile's
 /// documentation actions, whose own shape did not change.
-pub(super) const SEARCH_SCHEMA_VERSION: &str = "3";
+pub(super) const SEARCH_SCHEMA_VERSION: &str = "4";
+
+#[derive(JsonSchema, Serialize)]
+#[serde(untagged)]
+#[allow(dead_code, reason = "schema-only union published by tools/list")]
+enum SearchOutput {
+    SearchCode(SearchHits<SearchCodeAction>),
+    FindDocs(SearchHits<FindDocsAction>),
+    SearchDocs(SearchHits<SearchDocsAction>),
+    SearchCodeNotReady(SearchNotReady<SearchCodeAction>),
+    FindDocsNotReady(SearchNotReady<FindDocsAction>),
+    SearchDocsNotReady(SearchNotReady<SearchDocsAction>),
+    ListPlatform {
+        action: ListPlatformAction,
+        schema_version: ListPlatformSchemaVersion,
+        items: Vec<crate::tools::platform::PlatformReference>,
+        shown: usize,
+        total: usize,
+        budget_exhausted: bool,
+        budget_hint: Option<String>,
+    },
+    Status {
+        action: StatusAction,
+        schema_version: StatusSchemaVersion,
+        profile: SearchProfile,
+        state: SearchState,
+    },
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SearchHits<A> {
+    action: A,
+    schema_version: SearchSchemaVersion,
+    hits: Vec<Value>,
+    shown: usize,
+    total: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_exhausted: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_hint: Option<String>,
+}
+
+#[derive(JsonSchema, Serialize)]
+struct SearchNotReady<A> {
+    action: A,
+    schema_version: SearchSchemaVersion,
+    status: NotReadyStatus,
+    retry_after_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<Value>,
+}
+
+macro_rules! const_enum {
+    ($name:ident, $variant:ident, $wire:literal) => {
+        #[derive(JsonSchema, Serialize)]
+        #[allow(dead_code, reason = "schema-only const discriminator")]
+        enum $name {
+            #[serde(rename = $wire)]
+            $variant,
+        }
+    };
+}
+
+const_enum!(SearchCodeAction, SearchCode, "search_code");
+const_enum!(FindDocsAction, FindDocs, "find_docs");
+const_enum!(SearchDocsAction, SearchDocs, "search_docs");
+const_enum!(ListPlatformAction, ListPlatform, "list_platform");
+const_enum!(StatusAction, Status, "status");
+const_enum!(SearchSchemaVersion, V4, "4");
+const_enum!(ListPlatformSchemaVersion, V1, "1");
+const_enum!(StatusSchemaVersion, V1, "1");
+const_enum!(NotReadyStatus, NotReady, "not_ready");
+
+#[derive(JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code, reason = "schema-only enum")]
+enum SearchProfile {
+    Workspace,
+    Reference,
+}
+
+#[derive(JsonSchema, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code, reason = "schema-only enum")]
+enum SearchState {
+    Ready,
+    Loading,
+    Busy,
+    Failed,
+}
+
+pub(crate) fn search_output_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*rmcp::handler::server::tool::schema_for_type::<SearchOutput>()).clone();
+    crate::contract::ensure_object_root(&mut schema);
+    Arc::new(schema)
+}
 
 /// The outcome of producing one modality's code hits, separated from presentation so the
 /// hybrid path can fuse two modalities. Hard policy/terminal failures stay `Err(McpError)`;

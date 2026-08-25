@@ -106,6 +106,29 @@ pub fn form_element_kind_sort_band(kind: FormElementKind) -> u8 {
 
 pub use bsl_types::kind::MetadataKind;
 
+/// Which slots of a signature documented their type by pointing at another method's
+/// documentation (`см. Модуль.Метод`).
+///
+/// Recorded while the doc-comment is parsed, so it states what the parse saw rather than guessing
+/// afterwards from the lowered type: an unresolved reference lowers to the top type, and so does
+/// `Произвольный`, which makes the two indistinguishable once lowering is done.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct DocSeeSlots {
+    pub ret: bool,
+
+    pub params: Box<[bool]>,
+}
+
+impl DocSeeSlots {
+    pub fn param(&self, index: usize) -> bool {
+        self.params.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        !self.ret && !self.params.iter().any(|slot| *slot)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionSignature {
     pub params: Box<[bsl_types::kind::TypeId]>,
@@ -117,6 +140,8 @@ pub struct FunctionSignature {
     pub max_args: Option<u32>,
 
     pub from_doc_comment: bool,
+
+    pub doc_see: DocSeeSlots,
 }
 
 impl FunctionSignature {

@@ -3,7 +3,7 @@ mod embed;
 mod overlay_retry;
 mod sync;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod types;
 
 use crate::baseline::DeferredBaselineRuntime;
@@ -19,6 +19,25 @@ use std::sync::{Arc, Mutex};
 pub(crate) use types::{
     OverlayWarmupState, SemanticRuntimeStatus, SharedSearchEngine, WorkspaceSearchMode,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReferenceSearchLifecycle {
+    Uninitialized,
+    Loading,
+    Ready,
+    Failed { message: String, reason_code: String },
+}
+
+#[derive(Clone)]
+pub(crate) struct ReferenceSearchState {
+    engine: SharedSearchEngine,
+    progress: Arc<IndexProgress>,
+    semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+    baseline: DeferredBaselineRuntime,
+    lifecycle: Arc<Mutex<ReferenceSearchLifecycle>>,
+    stopped: Arc<std::sync::atomic::AtomicBool>,
+    worker: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
 
 /// Per-query cap on how many dirty overlay paths [`SharedState::prefetch_resident_overlay`]
 /// resolves from the shared resident parse. A branch switch can dirty thousands of paths;
@@ -49,6 +68,7 @@ pub struct SharedState {
     /// background thread, so construction (and thus the MCP `initialize` handshake)
     /// never waits on the network. Readers see an explicit pending state meanwhile.
     baseline: DeferredBaselineRuntime,
+    reference_search: ReferenceSearchState,
     graph: GraphState,
     diagnostics: DiagnosticsState,
     /// Daemon-owned filesystem change hub. Created before any consumer subscribes
@@ -228,7 +248,28 @@ impl SharedState {
         self.baseline.view()
     }
 
+    pub(crate) fn ensure_reference_loading(&self) {
+        self.reference_search.ensure_loading();
+    }
+
+    pub(crate) fn reference_search_engine(&self) -> SharedSearchEngine {
+        Arc::clone(&self.reference_search.engine)
+    }
+
+    pub(crate) fn reference_baseline_view(&self) -> crate::baseline::BaselineView {
+        self.reference_search.baseline.view()
+    }
+
+    pub(crate) fn reference_lifecycle(&self) -> ReferenceSearchLifecycle {
+        self.reference_search.lifecycle()
+    }
+
     pub fn shutdown(&self) {
+        // The reference worker stops FIRST: in the reference profile its baseline and this one
+        // are the same `Arc`, and closing the baseline before the worker is told to stop leaves
+        // it working against a shut-down service — its own `shutdown` closes the baseline in the
+        // right order (stop, then close, then join).
+        self.reference_search.shutdown();
         self.baseline.shutdown();
         self.diagnostics.shutdown();
         // The retry driver stops BEFORE the lease is released: its Arc-held worker would

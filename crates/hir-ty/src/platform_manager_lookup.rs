@@ -67,6 +67,31 @@ pub fn resolve_platform_metadata_ref_method(
     )
 }
 
+pub fn platform_methods_for_metadata_kind(kind: MetadataKind) -> Vec<PlatformMethod> {
+    metadata_kind_to_prefix_and_mdo(kind)
+        .map(|(prefix, _)| {
+            bsl_platform::PlatformData::instance()
+                .get_manager_methods(prefix)
+                .into_iter()
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn platform_methods_for_manager(mdo_type: MdoType) -> Vec<PlatformMethod> {
+    mdo_type
+        .manager_type_prefix()
+        .map(|prefix| {
+            bsl_platform::PlatformData::instance()
+                .get_manager_methods(prefix)
+                .into_iter()
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn build_resolution(
     db: &dyn TypeKernelDb,
     method: &PlatformMethod,

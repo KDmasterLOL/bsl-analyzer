@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -17,14 +17,14 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     if let sdbl_hir::SdblDiagnostic::JoinWithSubQuery { range } = diag {
-        crate::sdbl_utils::dispatch_simple(ctx, DiagnosticCode::JoinWithSubQuery, "Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью", *range, mapper, query_text, diagnostics);
+        crate::sdbl_utils::dispatch_simple(config, DiagnosticCode::JoinWithSubQuery, "Не используйте соединение с подзапросами. Соединения с подзапросами вызывают серьезные проблемы с производительностью", *range, mapper, query_text, diagnostics);
     }
 }
 

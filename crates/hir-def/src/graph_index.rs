@@ -1836,15 +1836,13 @@ fn rls_condition_objects(
 /// condition so it can be spliced after the wrapper's own `ГДЕ`.
 fn strip_leading_where(condition: &str) -> &str {
     let trimmed = condition.trim();
-    // Lowercase to fold case for both ASCII (`WHERE`) and Cyrillic (`ГДЕ`); lowercasing keeps the
-    // byte length stable for these alphabets, so the offset is valid back in `trimmed`.
-    let lower = trimmed.fold_lower();
     for kw in ["где", "where"] {
-        if let Some(rest) = lower.strip_prefix(kw) {
-            // Only strip a standalone keyword (followed by whitespace), not an identifier prefix.
-            if rest.starts_with(char::is_whitespace) {
-                return trimmed[kw.len()..].trim_start();
-            }
+        let Some(at) = stdx::case::find_ignore_case(trimmed, kw).filter(|at| at.start == 0) else {
+            continue;
+        };
+        // Only strip a standalone keyword (followed by whitespace), not an identifier prefix.
+        if trimmed[at.end..].starts_with(char::is_whitespace) {
+            return trimmed[at.end..].trim_start();
         }
     }
     trimmed

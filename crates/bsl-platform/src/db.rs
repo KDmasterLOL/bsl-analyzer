@@ -863,6 +863,30 @@ pub fn find_prefixed_method(prefix: &str, method_name: &str) -> Option<PlatformM
     find_prefixed_methods(prefix, method_name).into_iter().next()
 }
 
+/// Отображаемые имена метода: русское и английское.
+///
+/// У шаблонных записей менеджера (`СправочникМенеджер.<Имя>`) поле `name` в каталоге
+/// платформы усечено до `&lt;Имя`, а настоящее имя лежит в синтаксисе документации;
+/// английское при этом написано целиком, вместе с владельцем. Правило нужно и поиску
+/// метода по имени, и любому показу члена, поэтому живёт рядом с самим каталогом.
+pub fn method_display_names(method: &PlatformMethod) -> (String, String) {
+    let english = method
+        .english_name
+        .rsplit_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(method.english_name.as_str())
+        .to_owned();
+    if !method.name.starts_with("&lt;") && !method.name.starts_with('<') {
+        return (method.name.to_string(), english);
+    }
+    let russian = PlatformDataInner::instance()
+        .get_method_docs(method.id)
+        .and_then(|docs| docs.syntax.split('(').next().map(str::trim).map(str::to_owned))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| english.clone());
+    (russian, english)
+}
+
 pub fn find_prefixed_methods(prefix: &str, method_name: &str) -> Vec<PlatformMethod> {
     let method_lower = method_name.fold_lower();
     let data = PlatformDataInner::instance();
@@ -888,6 +912,39 @@ pub fn find_prefixed_methods(prefix: &str, method_name: &str) -> Vec<PlatformMet
         .cloned()
         .collect();
     sort_and_deduplicate_methods(methods)
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::*;
+
+    /// Метод не показывается усечённым шаблонным именем.
+    ///
+    /// Вход, на котором нарушение видно, в каталоге есть и он массовый: у 890 методов
+    /// прикладных типов (`CatalogManager.&lt;Catalog name&gt;` и родня) поле `name` усечено
+    /// до `&lt;Имя`, а настоящее имя лежит в синтаксисе документации. Проверка требует,
+    /// чтобы такие записи в каталоге БЫЛИ, иначе она зелена вхолостую.
+    #[test]
+    fn template_manager_methods_display_their_real_name() {
+        let data = PlatformDataInner::instance();
+        let templated: Vec<_> =
+            data.all_methods().iter().filter(|method| method.name.starts_with("&lt;")).collect();
+
+        assert!(!templated.is_empty(), "в каталоге нет усечённых имён — проверять нечего");
+        for method in &templated {
+            let (russian, english) = method_display_names(method);
+            assert!(
+                !russian.starts_with("&lt;") && !russian.is_empty(),
+                "{russian:?} у метода {} остаётся усечённым",
+                method.english_name
+            );
+            assert!(!english.contains('.'), "{english:?} несёт владельца вместо имени");
+        }
+        assert!(
+            templated.iter().any(|method| method_display_names(method).0 == "СоздатьЭлемент"),
+            "СоздатьЭлемент обязан находиться среди шаблонных методов менеджера справочника"
+        );
+    }
 }
 
 fn sort_and_deduplicate_methods(mut methods: Vec<PlatformMethod>) -> Vec<PlatformMethod> {

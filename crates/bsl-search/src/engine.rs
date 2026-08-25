@@ -82,6 +82,12 @@ pub struct SearchHit {
     pub score: f32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceCollectionReplaceOutcome {
+    pub committed_fingerprint: String,
+    pub written: bool,
+}
+
 impl SearchHit {
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
         Self {
@@ -395,6 +401,7 @@ pub struct SearchEngine {
     embedder: Option<Embedder>,
     index: VectorIndex,
     dim: usize,
+    loaded_reference_fingerprint: Option<String>,
     batch_size: usize,
     concurrency: usize,
     workspace_roots: Option<WorkspaceRoots>,
@@ -465,6 +472,7 @@ impl SearchEngine {
         let embedder = Embedder::new(embedder_config);
 
         let index = Self::load_or_build_index(&store, dim, Some(&embedder))?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
         info!(vectors = index.len(), dim, "search index loaded");
 
         Self::ensure_fts(&store)?;
@@ -474,6 +482,7 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
@@ -559,6 +568,7 @@ impl SearchEngine {
         let store = Store::open(db_path)?;
         let dim = 1024;
         let index = VectorIndex::new(dim)?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
         Self::ensure_fts(&store)?;
 
@@ -567,6 +577,7 @@ impl SearchEngine {
             embedder: None,
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: EmbeddingExecutionPolicy::default().batch_size(),
             concurrency: EmbeddingExecutionPolicy::default().concurrency(),
             workspace_roots: None,
@@ -588,6 +599,7 @@ impl SearchEngine {
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
         let index = VectorIndex::new(dim)?;
+        let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
         Self::ensure_fts(&store)?;
 
@@ -596,6 +608,7 @@ impl SearchEngine {
             embedder: Some(embedder),
             index,
             dim,
+            loaded_reference_fingerprint,
             batch_size: execution.batch_size(),
             concurrency: execution.concurrency(),
             workspace_roots: None,
@@ -1402,6 +1415,7 @@ impl SearchEngine {
         documents: &[Document],
         progress: Option<&Arc<IndexProgress>>,
     ) -> Result<usize, SearchError> {
+        self.invalidate_reference_stamp(collection)?;
         if let Some(stored_hash) = self.store.file_hash(CONFIGURATION_ROOT_ID, virtual_path)? {
             if stored_hash == version_hash {
                 info!(collection, documents = documents.len(), "documents unchanged, skipping");
@@ -1411,105 +1425,210 @@ impl SearchEngine {
 
         info!(collection, documents = documents.len(), "indexing documents");
 
-        if let Some(embedder) = &self.embedder {
-            let texts: Vec<String> = documents.iter().map(|d| d.body.clone()).collect();
-            let batch_size = self.batch_size;
-            let total_batches = texts.len().div_ceil(batch_size);
-
-            if let Some(p) = progress {
-                p.active.store(true, Ordering::Relaxed);
-                p.total_files.store(1, Ordering::Relaxed);
-                p.total_chunks.store(texts.len(), Ordering::Relaxed);
-                p.total_batches.store(total_batches, Ordering::Relaxed);
-                p.done_batches.store(0, Ordering::Relaxed);
-                p.done_chunks.store(0, Ordering::Relaxed);
-            }
-
-            let concurrency = self.concurrency.min(total_batches.max(1));
-
-            let indexed_batches: Vec<(usize, Vec<String>)> =
-                texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
-
-            let (task_tx, task_rx) =
-                crossbeam_channel::bounded::<(usize, Vec<String>)>(concurrency * 2);
-            let (result_tx, result_rx) = crossbeam_channel::bounded::<(
-                usize,
-                Result<Vec<Vec<f32>>, SearchError>,
-            )>(concurrency * 2);
-
-            let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
-                .map(|_| {
-                    let rx = task_rx.clone();
-                    let tx = result_tx.clone();
-                    let emb = embedder.clone();
-                    let prog = progress.cloned();
-
-                    std::thread::spawn(move || {
-                        while let Ok((idx, batch)) = rx.recv() {
-                            let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
-                            let result = emb.embed_batch(&refs);
-                            if let (Ok(_), Some(p)) = (&result, &prog) {
-                                p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
-                                p.done_batches.fetch_add(1, Ordering::Relaxed);
-                            }
-                            let _ = tx.send((idx, result));
-                        }
-                    })
-                })
-                .collect();
-
-            drop(task_rx);
-            drop(result_tx);
-
-            let producer = std::thread::spawn(move || {
-                for (idx, batch) in indexed_batches {
-                    if task_tx.send((idx, batch)).is_err() {
-                        break;
-                    }
-                }
-            });
-
-            let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
-            while let Ok((idx, result)) = result_rx.recv() {
-                results.push((idx, result?));
-            }
-
-            let _ = producer.join();
-            for w in workers {
-                let _ = w.join();
-            }
-
-            if let Some(p) = progress {
-                p.active.store(false, Ordering::Relaxed);
-            }
-
-            results.sort_by_key(|(i, _)| *i);
-            let all_embeddings: Vec<Vec<f32>> =
-                results.into_iter().flat_map(|(_, embs)| embs).collect();
-
-            self.store.reindex_documents(
-                collection,
-                virtual_path,
-                version_hash,
-                documents,
-                Some(&all_embeddings),
-            )?;
-
+        let embeddings = self.embed_documents(documents, progress)?;
+        self.store.reindex_documents(
+            collection,
+            virtual_path,
+            version_hash,
+            documents,
+            embeddings.as_deref(),
+        )?;
+        if embeddings.is_some() {
             self.index =
                 Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
-        } else {
-            self.store.reindex_documents(
-                collection,
-                virtual_path,
-                version_hash,
-                documents,
-                None,
-            )?;
         }
 
         let count = documents.len();
         info!(collection, count, "document indexing complete");
         Ok(count)
+    }
+
+    /// Метка записанного справочного корпуса: сам корпус плюс эмбеддер, которым он
+    /// записан.
+    ///
+    /// Тождество эмбеддера входит в метку, потому что корпус без векторов и корпус,
+    /// векторизованный другой моделью или размерностью, для семантического поиска
+    /// разные вещи, а текст документов у них один и тот же.
+    pub(crate) fn reference_stamp(
+        fingerprint: &str,
+        model: Option<&str>,
+        dim: Option<usize>,
+    ) -> String {
+        match (model, dim) {
+            (Some(model), Some(dim)) => format!("{fingerprint}:{model}:{dim}"),
+            (Some(model), None) => format!("{fingerprint}:{model}:default"),
+            _ => format!("{fingerprint}:fts"),
+        }
+    }
+
+    /// Запись в коллекцию мимо [`Self::replace_reference_collection_if_stale`] снимает
+    /// метку корпуса: она описывает содержимое, которого после такой записи в коллекции
+    /// уже нет, и уцелевшая метка заставила бы следующую публикацию молча не состояться.
+    fn invalidate_reference_stamp(&mut self, collection: &str) -> Result<(), SearchError> {
+        self.store.clear_reference_collection_fingerprint(collection)?;
+        if collection == "platform" {
+            self.loaded_reference_fingerprint = None;
+        }
+        Ok(())
+    }
+
+    pub fn replace_reference_collection_if_stale(
+        &mut self,
+        collection: &str,
+        virtual_path: &str,
+        fingerprint: &str,
+        documents: &[Document],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<ReferenceCollectionReplaceOutcome, SearchError> {
+        let stamp =
+            Self::reference_stamp(fingerprint, self.embedding_model(), self.embedding_dimension());
+        let committed = self.store.reference_collection_fingerprint(collection)?;
+        if committed.as_deref() == Some(stamp.as_str()) {
+            if self.loaded_reference_fingerprint != committed && self.embedder.is_some() {
+                self.index =
+                    Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
+            }
+            self.loaded_reference_fingerprint = committed;
+            return Ok(ReferenceCollectionReplaceOutcome {
+                committed_fingerprint: stamp,
+                written: false,
+            });
+        }
+        // A corpus that could not be vectorised is still worth publishing lexically: refusing
+        // to publish it costs the caller find_docs entirely, and the stamp above records that
+        // the published corpus has no vectors — so a later boot with a reachable embedder sees
+        // a stale stamp and embeds it then. Without that stamp this degradation would be
+        // permanent, which is why it is safe only now.
+        let embeddings = match self.embed_documents(documents, progress) {
+            Ok(embeddings) => embeddings,
+            Err(error) => {
+                warn!(%error, collection, "reference corpus embedding failed, publishing lexical-only");
+                None
+            }
+        };
+        let stamp = if embeddings.is_some() {
+            stamp
+        } else {
+            Self::reference_stamp(fingerprint, None, None)
+        };
+        let outcome = self.store.replace_reference_collection_if_stale(
+            collection,
+            virtual_path,
+            &stamp,
+            documents,
+            embeddings.as_deref(),
+        )?;
+        if self.loaded_reference_fingerprint.as_deref()
+            != Some(outcome.committed_fingerprint.as_str())
+            && self.embedder.is_some()
+        {
+            self.index =
+                Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
+        }
+        self.loaded_reference_fingerprint = Some(outcome.committed_fingerprint.clone());
+        Ok(ReferenceCollectionReplaceOutcome {
+            committed_fingerprint: outcome.committed_fingerprint,
+            written: outcome.written,
+        })
+    }
+
+    fn embed_documents(
+        &self,
+        documents: &[Document],
+        progress: Option<&Arc<IndexProgress>>,
+    ) -> Result<Option<Vec<Vec<f32>>>, SearchError> {
+        let Some(embedder) = &self.embedder else { return Ok(None) };
+        let texts: Vec<String> = documents.iter().map(|d| d.body.clone()).collect();
+        let batch_size = self.batch_size;
+        let total_batches = texts.len().div_ceil(batch_size);
+
+        if let Some(p) = progress {
+            p.active.store(true, Ordering::Relaxed);
+            p.total_files.store(1, Ordering::Relaxed);
+            p.total_chunks.store(texts.len(), Ordering::Relaxed);
+            p.total_batches.store(total_batches, Ordering::Relaxed);
+            p.done_batches.store(0, Ordering::Relaxed);
+            p.done_chunks.store(0, Ordering::Relaxed);
+        }
+
+        let concurrency = self.concurrency.min(total_batches.max(1));
+
+        let indexed_batches: Vec<(usize, Vec<String>)> =
+            texts.chunks(batch_size).enumerate().map(|(i, b)| (i, b.to_vec())).collect();
+
+        let (task_tx, task_rx) =
+            crossbeam_channel::bounded::<(usize, Vec<String>)>(concurrency * 2);
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<(
+            usize,
+            Result<Vec<Vec<f32>>, SearchError>,
+        )>(concurrency * 2);
+
+        let workers: Vec<std::thread::JoinHandle<()>> = (0..concurrency)
+            .map(|_| {
+                let rx = task_rx.clone();
+                let tx = result_tx.clone();
+                let emb = embedder.clone();
+                let prog = progress.cloned();
+
+                std::thread::spawn(move || {
+                    while let Ok((idx, batch)) = rx.recv() {
+                        let refs: Vec<&str> = batch.iter().map(|s| s.as_str()).collect();
+                        let result = emb.embed_batch(&refs);
+                        if let (Ok(_), Some(p)) = (&result, &prog) {
+                            p.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                            p.done_batches.fetch_add(1, Ordering::Relaxed);
+                        }
+                        let _ = tx.send((idx, result));
+                    }
+                })
+            })
+            .collect();
+
+        drop(task_rx);
+        drop(result_tx);
+
+        let producer = std::thread::spawn(move || {
+            for (idx, batch) in indexed_batches {
+                if task_tx.send((idx, batch)).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Отказ батча не выходит из функции прямо здесь: незакрытый прогресс переживёт
+        // вызов и навсегда оставит статус поиска в «идёт индексация», а воркеры останутся
+        // неприсоединёнными. Ошибка запоминается, приём результатов прекращается, и
+        // уборка ниже — общая для успеха и отказа.
+        let mut results: Vec<(usize, Vec<Vec<f32>>)> = Vec::with_capacity(total_batches);
+        let mut failure: Option<SearchError> = None;
+        while let Ok((idx, result)) = result_rx.recv() {
+            match result {
+                Ok(embeddings) => results.push((idx, embeddings)),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    break;
+                }
+            }
+        }
+        drop(result_rx);
+
+        let _ = producer.join();
+        for w in workers {
+            let _ = w.join();
+        }
+
+        if let Some(p) = progress {
+            p.active.store(false, Ordering::Relaxed);
+        }
+
+        if let Some(error) = failure {
+            return Err(error);
+        }
+
+        results.sort_by_key(|(i, _)| *i);
+        let all_embeddings: Vec<Vec<f32>> =
+            results.into_iter().flat_map(|(_, embs)| embs).collect();
+        Ok(Some(all_embeddings))
     }
 
     pub fn has_semantic(&self) -> bool {
@@ -3030,6 +3149,8 @@ impl SearchEngine {
     ) -> Result<usize, SearchError> {
         use std::collections::{BTreeMap, HashSet};
 
+        self.invalidate_reference_stamp(collection)?;
+
         let mut grouped = BTreeMap::<FileKey, Vec<crate::IndexedDocument>>::new();
         for document in documents {
             grouped
@@ -3128,6 +3249,11 @@ impl SearchEngine {
             p.active.store(false, Ordering::Relaxed);
         }
 
+        // Метка снимается и ПОСЛЕ записи, не только до неё: запись идёт файл за файлом,
+        // отдельными транзакциями, и другой процесс успевает опубликовать локальный корпус
+        // в середине — его метка описывала бы содержимое, которого здесь уже нет.
+        self.invalidate_reference_stamp(collection)?;
+
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(indexed)
     }
@@ -3168,6 +3294,7 @@ impl SearchEngine {
 
     pub fn remove_file(&mut self, rel_path: &str, collection: &str) -> Result<(), SearchError> {
         self.store.remove_file(CONFIGURATION_ROOT_ID, rel_path, collection)?;
+        self.invalidate_reference_stamp(collection)?;
         self.index = Self::build_persisted_index(&self.store, self.dim, self.embedder.as_ref())?;
         Ok(())
     }
@@ -3265,7 +3392,7 @@ mod tests {
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
     use crate::workspace_overlay::RefreshMode;
     use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
-    use crate::{BaselineRef, CorpusId, IndexedDocument, SearchError, Snapshot};
+    use crate::{BaselineRef, CorpusId, Document, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
@@ -6400,5 +6527,393 @@ mod tests {
             super::WorkspaceRootsTransitionOutcome::Superseded
         );
         assert_eq!(engine.workspace_roots(), Some(&initial));
+    }
+
+    #[test]
+    fn reference_collection_replace_is_atomic_stamped_and_idempotent() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let old = [Document {
+            title: "Old".to_owned(),
+            body: "olduniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+        let new = [
+            Document {
+                title: "New".to_owned(),
+                body: "newuniquemarker".to_owned(),
+                kind: "type".to_owned(),
+            },
+            Document {
+                title: "Property".to_owned(),
+                body: "property marker".to_owned(),
+                kind: "property".to_owned(),
+            },
+        ];
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-old",
+                    &old,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-new",
+                    &new,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            !engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-new",
+                    &new,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(engine.text_search("olduniquemarker", 10, Some("platform")).unwrap().is_empty());
+        assert_eq!(engine.text_search("newuniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        assert_eq!(engine.load_indexed_documents(Some("platform")).unwrap().len(), 2);
+        let integrity: String = rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
+
+    /// Метка корпуса называет эмбеддер, которым он записан.
+    ///
+    /// Иначе корпус, записанный демоном без эмбеддера, совпадает по метке с тем,
+    /// что нужен демону с эмбеддером: ранний выход считает его свежим, векторов у
+    /// коллекции не появляется никогда, а семантический поиск по справке молча пуст.
+    #[test]
+    fn a_corpus_written_without_an_embedder_is_stamped_as_such() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        assert!(
+            engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp",
+                    &documents,
+                    None
+                )
+                .unwrap()
+                .written
+        );
+        assert!(
+            !engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp",
+                    &documents,
+                    None
+                )
+                .unwrap()
+                .written,
+            "тот же движок и тот же корпус второй раз не переписываются"
+        );
+
+        assert_eq!(
+            engine.store.reference_collection_fingerprint("platform").unwrap().as_deref(),
+            Some(SearchEngine::reference_stamp("fp", None, None).as_str()),
+            "записанная метка обязана называть отсутствие эмбеддера"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", None, None),
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            "корпус без векторов не годится движку, который умеет векторы"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            SearchEngine::reference_stamp("fp", Some("e5-large"), Some(1024)),
+            "векторы чужой модели не годятся"
+        );
+        assert_ne!(
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(1024)),
+            SearchEngine::reference_stamp("fp", Some("bge-m3"), Some(512)),
+            "векторы другой размерности не годятся"
+        );
+    }
+
+    /// Недоступный эмбеддер отнимает у справки семантику, но не лексику.
+    ///
+    /// Отмечен `ignore`: живого места для внедрения отказа нет, а настоящий недоступный
+    /// эмбеддер отрабатывает десять попыток с нарастающей паузой — около трёх минут.
+    /// Запускать точечно: `cargo test -p bsl-search --lib -- --ignored lexical`.
+    #[test]
+    #[ignore = "недоступный эмбеддер ретраится ~160 с; запускать точечно"]
+    fn an_unreachable_embedder_still_publishes_the_corpus_lexically() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        let config = crate::SearchConfig {
+            embedder: crate::EmbedderConfig {
+                // Порт 1 закрыт: соединение отвергается сразу, отказ настоящий.
+                base_url: "http://127.0.0.1:1".to_owned(),
+                model: "unreachable-model".to_owned(),
+                dim: Some(8),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut engine = SearchEngine::new(&db_path, config).unwrap();
+
+        let outcome = engine
+            .replace_reference_collection_if_stale(
+                "platform",
+                "platform://docs",
+                "fp",
+                &documents,
+                None,
+            )
+            .expect("отказ эмбеддера не отменяет публикацию корпуса");
+
+        assert!(outcome.written);
+        assert_eq!(engine.text_search("uniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        assert_eq!(
+            engine.store.reference_collection_fingerprint("platform").unwrap().as_deref(),
+            Some(SearchEngine::reference_stamp("fp", None, None).as_str()),
+            "корпус без векторов обязан быть помечен как таковой — иначе рабочий эмбеддер \
+             никогда его не переберёт"
+        );
+    }
+
+    /// Запись в коллекцию мимо штампующего пути метку снимает.
+    ///
+    /// В коллекцию `platform` пишет не только публикация локального корпуса: ветка
+    /// внешнего справочного базиса синхронизирует туда чужой снимок и удаляет
+    /// локальный документ. Уцелевшая метка после такой записи говорит о корпусе,
+    /// которого в коллекции уже нет, и следующая публикация молча не состоится.
+    #[test]
+    fn a_write_past_the_stamping_path_drops_the_stamp() {
+        let dir = tempdir().unwrap();
+        let documents = [Document {
+            title: "Массив".to_owned(),
+            body: "uniquemarker".to_owned(),
+            kind: "type".to_owned(),
+        }];
+
+        for foreign in ["sync", "remove"] {
+            let db_path = dir.path().join(format!("reference-{foreign}.db"));
+            let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+            assert!(
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp",
+                        &documents,
+                        None
+                    )
+                    .unwrap()
+                    .written
+            );
+
+            match foreign {
+                "sync" => {
+                    engine.sync_indexed_documents_in_collection("platform", &[], None).unwrap();
+                }
+                _ => engine.remove_file("platform://docs", "platform").unwrap(),
+            }
+
+            assert_eq!(
+                engine.store.reference_collection_fingerprint("platform").unwrap(),
+                None,
+                "после записи мимо штампующего пути ({foreign}) метка обязана исчезнуть"
+            );
+            assert!(
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp",
+                        &documents,
+                        None
+                    )
+                    .unwrap()
+                    .written,
+                "тот же корпус обязан быть записан заново ({foreign})"
+            );
+            assert_eq!(engine.text_search("uniquemarker", 10, Some("platform")).unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_reference_writers_commit_one_generation() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("reference-search.db");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        let engines =
+            [SearchEngine::fts_only(&db_path).unwrap(), SearchEngine::fts_only(&db_path).unwrap()];
+        for mut engine in engines {
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                let documents = [Document {
+                    title: "Shared".to_owned(),
+                    body: "shared generation marker".to_owned(),
+                    kind: "type".to_owned(),
+                }];
+                barrier.wait();
+                let outcome = engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp-shared",
+                        &documents,
+                        None,
+                    )
+                    .unwrap();
+                let hits =
+                    engine.text_search("shared generation marker", 10, Some("platform")).unwrap();
+                (outcome, hits.len(), engine.loaded_reference_fingerprint.clone())
+            }));
+        }
+        let outcomes: Vec<_> = handles.into_iter().map(|handle| handle.join().unwrap()).collect();
+        let stamp = SearchEngine::reference_stamp("fp-shared", None, None);
+        assert_eq!(outcomes.iter().filter(|(outcome, _, _)| outcome.written).count(), 1);
+        assert!(outcomes.iter().all(|(outcome, hits, loaded)| {
+            outcome.committed_fingerprint == stamp
+                && *hits == 1
+                && loaded.as_deref() == Some(stamp.as_str())
+        }));
+    }
+
+    #[test]
+    fn reference_collection_publish_is_process_safe_for_absent_and_stale_db() {
+        const CHILD: &str = "BSL_SEARCH_REFERENCE_WRITER_CHILD";
+        if let Ok(worker) = std::env::var(CHILD) {
+            let root = std::path::PathBuf::from(
+                std::env::var("BSL_SEARCH_REFERENCE_WRITER_ROOT").unwrap(),
+            );
+            let ready = root.join(format!("ready-{worker}"));
+            fs::write(&ready, b"ready").unwrap();
+            let start = root.join("start");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !start.exists() {
+                assert!(std::time::Instant::now() < deadline, "parent never released barrier");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let documents = [Document {
+                title: "ProcessSafe".to_owned(),
+                body: "processsafemarker".to_owned(),
+                kind: "type".to_owned(),
+            }];
+            let mut engine = SearchEngine::fts_only(&root.join("reference-search.db")).unwrap();
+            let outcome = engine
+                .replace_reference_collection_if_stale(
+                    "platform",
+                    "platform://docs",
+                    "fp-process-safe",
+                    &documents,
+                    None,
+                )
+                .unwrap();
+            let count = engine.load_indexed_documents(Some("platform")).unwrap().len();
+            fs::write(
+                root.join(format!("result-{worker}")),
+                format!("{}:{count}:{}", outcome.written, outcome.committed_fingerprint),
+            )
+            .unwrap();
+            return;
+        }
+
+        for stale in [false, true] {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            if stale {
+                let mut engine = SearchEngine::fts_only(&root.join("reference-search.db")).unwrap();
+                engine
+                    .replace_reference_collection_if_stale(
+                        "platform",
+                        "platform://docs",
+                        "fp-stale",
+                        &[Document {
+                            title: "Stale".to_owned(),
+                            body: "stalemarker".to_owned(),
+                            kind: "type".to_owned(),
+                        }],
+                        None,
+                    )
+                    .unwrap();
+            }
+            let exe = std::env::current_exe().unwrap();
+            let mut children = Vec::new();
+            for worker in ["a", "b"] {
+                children.push(
+                    std::process::Command::new(&exe)
+                        .args([
+                            "--exact",
+                            "engine::tests::reference_collection_publish_is_process_safe_for_absent_and_stale_db",
+                        ])
+                        .env(CHILD, worker)
+                        .env("BSL_SEARCH_REFERENCE_WRITER_ROOT", root)
+                        .spawn()
+                        .unwrap(),
+                );
+            }
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !(root.join("ready-a").exists() && root.join("ready-b").exists()) {
+                assert!(std::time::Instant::now() < deadline, "writers never reached barrier");
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            fs::write(root.join("start"), b"start").unwrap();
+            for child in &mut children {
+                assert!(child.wait().unwrap().success());
+            }
+            let results: Vec<_> = ["a", "b"]
+                .map(|worker| fs::read_to_string(root.join(format!("result-{worker}"))).unwrap())
+                .into_iter()
+                .collect();
+            assert_eq!(results.iter().filter(|result| result.starts_with("true:")).count(), 1);
+            let expected =
+                format!(":1:{}", SearchEngine::reference_stamp("fp-process-safe", None, None));
+            assert!(results.iter().all(|result| result.ends_with(&expected)));
+
+            let connection = rusqlite::Connection::open(root.join("reference-search.db")).unwrap();
+            assert_eq!(
+                connection
+                    .query_row::<String, _, _>("PRAGMA integrity_check", [], |row| row.get(0))
+                    .unwrap(),
+                "ok"
+            );
+            let chunks: i64 =
+                connection.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0)).unwrap();
+            let fts: i64 = connection
+                .query_row("SELECT COUNT(*) FROM chunks_fts", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!((chunks, fts), (1, 1));
+        }
     }
 }

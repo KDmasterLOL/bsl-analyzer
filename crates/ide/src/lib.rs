@@ -59,15 +59,16 @@ pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
 pub use ide_db::metadata::WorkspaceConfigsSnapshot;
+pub use ide_db::query_resolver::AcrossRootsQueryResolver;
 pub use ide_db::{
     CommonModuleBodies, GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange,
 };
 pub use ide_diagnostics::{
     all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
-    file_diagnostics, file_diagnostics_query, get_metadata, CleanCodeAttribute, Diagnostic,
-    DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType,
-    DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity,
-    SoftwareQuality, TextEdit,
+    file_diagnostics, file_diagnostics_query, get_metadata, validate_query_text,
+    CleanCodeAttribute, Diagnostic, DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel,
+    DiagnosticTag, DiagnosticType, DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity,
+    MetadataTag, Severity, SoftwareQuality, TextEdit, METADATA_DEPENDENT_CODES,
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use name_lookup::{
@@ -84,8 +85,10 @@ pub use references::{
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
-    symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard, SymbolInfoRequest,
-    SymbolInfoSections, SymbolMember, SymbolPosition,
+    is_well_formed_symbol, symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard,
+    SymbolInfoRequest, SymbolInfoSections, SymbolMember, SymbolMemberAvailability,
+    SymbolMemberContextStatus, SymbolMemberOrigin, SymbolMemberSignature, SymbolPosition,
+    SymbolTypeVariant,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 

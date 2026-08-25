@@ -32,10 +32,8 @@ impl Drop for EnvVarGuard {
     }
 }
 
-pub(super) use fixtures::{
-    mock_embedding_env, mock_semantic_config, spawn_mock_embedding_server, write_common_module,
-    write_common_module_tree,
-};
+pub(super) use fixtures::{mock_embedding_env, write_common_module, write_common_module_tree};
+pub(crate) use fixtures::{mock_semantic_config, spawn_mock_embedding_server};
 
 #[cfg(test)]
 mod fixtures {
@@ -49,7 +47,7 @@ mod fixtures {
     /// A minimal in-process HTTP embedding endpoint: answers `POST /v1/embeddings` with one
     /// fixed vector per input, so the real `Embedder` produces deterministic vectors without
     /// a live service. Returns the base URL; the detached server thread stops on process exit.
-    pub(in crate::state) fn spawn_mock_embedding_server(vector: Vec<f32>) -> String {
+    pub(crate) fn spawn_mock_embedding_server(vector: Vec<f32>) -> String {
         use std::io::{Read, Write};
         use std::net::TcpListener;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -105,7 +103,7 @@ mod fixtures {
     }
 
     /// A semantic `SearchConfig` pointed at `base_url`, dim 3.
-    pub(in crate::state) fn mock_semantic_config(base_url: &str) -> bsl_search::SearchConfig {
+    pub(crate) fn mock_semantic_config(base_url: &str) -> bsl_search::SearchConfig {
         bsl_search::SearchConfig {
             embedder: bsl_search::EmbedderConfig {
                 base_url: base_url.to_owned(),

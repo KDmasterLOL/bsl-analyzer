@@ -4,6 +4,20 @@ use tempfile::TempDir;
 
 const BROKEN: &str = "Процедура Тест(\n";
 
+/// Drop the ambient git environment. When the suite runs inside a `git commit` pre-commit
+/// hook, GIT_DIR / GIT_INDEX_FILE point at the real repository and win over the fixture
+/// directory: the temporary project would be staged into the developer's own index, and
+/// its blobs would die with the temporary directory, leaving that index unable to build a
+/// tree.
+fn hermetic(command: &mut Command) -> &mut Command {
+    for (key, _) in std::env::vars_os() {
+        if key.to_string_lossy().starts_with("GIT_") {
+            command.env_remove(&key);
+        }
+    }
+    command
+}
+
 fn run(root: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
         .current_dir(root)
@@ -170,12 +184,9 @@ fn selective_v1_migration_runs_under_analysis_filters() {
         vec!["-c", "user.name=T", "-c", "user.email=t@e", "add", "."],
         vec!["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "-m", "fixture"],
     ] {
-        let status = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(&args)
-            .status()
-            .expect("run git");
+        let mut command = Command::new("git");
+        let status =
+            hermetic(&mut command).arg("-C").arg(root).args(&args).status().expect("run git");
         assert!(status.success(), "git {args:?} failed");
     }
 

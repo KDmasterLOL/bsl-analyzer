@@ -202,7 +202,7 @@ mod tests {
             subquery: Vec::new(),
         };
 
-        scope.add_table(table);
+        let _ = scope.add_table(table);
         scope
     }
 

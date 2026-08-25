@@ -3,6 +3,7 @@ pub mod builtin;
 mod call_binding;
 pub mod call_resolution;
 pub mod db;
+pub mod doc_see;
 pub mod field_enum;
 pub mod field_lookup;
 pub mod form_attr;
@@ -50,6 +51,7 @@ pub use form_items::{
     is_form_items_collection_ty, lower_form_element_for_file, FORM_ITEMS_TYPE_EN,
     FORM_ITEMS_TYPE_RU,
 };
+pub use form_self::managed_form_platform_type_names;
 pub use hir_def::ty::{
     form_control_platform_type_chain, form_control_platform_type_name, form_element_kind_label,
     form_element_kind_sort_band, FormDataKind, FormElementKind, FunctionSignature, MetadataKind,
@@ -75,7 +77,9 @@ pub use platform_global_lookup::{
     BareGlobalClaim, BodyShadowScope,
 };
 pub use platform_manager_lookup::{
-    resolve_platform_manager_method, resolve_platform_metadata_ref_method, PlatformMethodResolution,
+    platform_methods_for_manager, platform_methods_for_metadata_kind,
+    resolve_platform_manager_method, resolve_platform_metadata_ref_method,
+    PlatformMethodResolution,
 };
 pub use platform_property_lookup::{lookup_platform_property, PlatformPropertyResolution};
 pub use platform_resolution::{

@@ -101,6 +101,20 @@ impl LoweringContext<'_> {
 
         let ref_range = name_span(&ident_ranges, node.text_range());
 
+        // Decided before the column is typed, and independently of whether it resolves: the
+        // platform rejects the reference on the NAME alone, so a valid field behind a colliding
+        // qualifier is still an error.
+        if let Some(head) = table_alias_str {
+            let offered_by = self.scope.qualified_head_collision(head);
+            if !offered_by.is_empty() {
+                self.diagnostics.push(SdblDiagnostic::AmbiguousQualifiedHead {
+                    head: head.to_string(),
+                    offered_by,
+                    range: ref_range,
+                });
+            }
+        }
+
         if ty == SdblType::Unknown {
             if let Some(alias) = table_alias_str {
                 if self.scope.find_field_def(Some(alias), column_name_str).is_none() {

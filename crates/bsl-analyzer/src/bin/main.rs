@@ -443,31 +443,30 @@ mod contract_surface {
         );
     }
 
-    /// `--allowed-host` gates a `Host` header, not network reach, and an explicit list
-    /// drops the built-in loopback entries. Both facts are load-bearing and neither is
-    /// guessable from the flag's name: an operator who missed them reads the resulting
-    /// 403 as the server refusing the network (#30). The long help is the only place a
-    /// `--help` reader meets them, so it is asserted rather than left to drift.
     #[test]
-    fn allowed_host_help_states_what_it_matches_and_what_it_replaces() {
+    fn allowed_hosts_help_states_what_it_matches_and_what_it_replaces() {
         let mut serve = Cli::command();
         let serve = serve
             .find_subcommand_mut("mcp")
             .expect("mcp command")
             .find_subcommand_mut("serve")
             .expect("mcp serve command");
-        let allowed_host = serve
+        let allowed_hosts = serve
             .get_arguments()
-            .find(|arg| arg.get_long() == Some("allowed-host"))
-            .expect("mcp serve declares --allowed-host");
+            .find(|arg| arg.get_long() == Some("allowed_hosts"))
+            .expect("mcp serve declares --allowed_hosts");
         let help =
-            allowed_host.get_long_help().expect("--allowed-host carries long help").to_string();
+            allowed_hosts.get_long_help().expect("--allowed_hosts carries long help").to_string();
 
         assert!(help.contains("Host header"), "{help}");
         assert!(help.contains("replaces"), "{help}");
         for default in ["localhost", "127.0.0.1", "::1"] {
             assert!(help.contains(default), "the replaced default {default} is unnamed: {help}");
         }
+        assert!(
+            serve.get_arguments().any(|arg| arg.get_long() == Some("config")),
+            "mcp serve declares --config as an alternative"
+        );
     }
 
     #[test]
@@ -577,20 +576,21 @@ mod contract_surface {
               lsp
               mcp
                 serve
-                  allowed-host
+                  allowed_hosts !config
                   backend-pid
                   cache-dir
+                  config !allowed_hosts !host !port
                   configuration-root
                   enable-tool
                   extension !no-extensions
                   extension-depends-on
-                  host
+                  host !config
                   mode = stdio | broker | broker-required | daemon | http
                   no-extensions !extension
                   onec-password
                   onec-url
                   onec-user
-                  port
+                  port !config
                   profile = workspace | reference
                   source-dir (-s)
                 install

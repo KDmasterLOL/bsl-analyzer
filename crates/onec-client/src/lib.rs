@@ -244,7 +244,139 @@ pub struct MetadataStructureRequest {
     pub name: String,
 }
 
-pub type MetadataStructureResult = serde_json::Value;
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MetadataStructureResult {
+    pub name: String,
+    pub full_name: String,
+    pub synonym: String,
+    #[serde(rename = "СтандартныеРеквизиты", default)]
+    pub standard_attributes: Vec<MetadataStructureItem>,
+    #[serde(rename = "Реквизиты", default)]
+    pub attributes: Vec<MetadataStructureItem>,
+    #[serde(rename = "Измерения", default)]
+    pub dimensions: Vec<MetadataStructureItem>,
+    #[serde(rename = "Ресурсы", default)]
+    pub resources: Vec<MetadataStructureItem>,
+    #[serde(rename = "ТабличныеЧасти", default)]
+    pub tabular_sections: Vec<MetadataStructureItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataStructureItem {
+    pub name: String,
+    pub synonym: String,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub type_name: Option<String>,
+    #[serde(rename = "type_variants", skip_serializing_if = "Vec::is_empty")]
+    pub type_variants: Vec<MetadataTypeVariant>,
+}
+
+impl<'de> Deserialize<'de> for MetadataStructureItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawItem {
+            name: String,
+            synonym: String,
+            #[serde(rename = "type")]
+            type_name: Option<String>,
+            #[serde(rename = "typeVariants")]
+            type_variants: Option<Vec<MetadataTypeVariant>>,
+        }
+
+        let raw = RawItem::deserialize(deserializer)?;
+        let type_variants = raw.type_variants.unwrap_or_else(|| {
+            raw.type_name
+                .as_ref()
+                .map(|presentation| {
+                    vec![MetadataTypeVariant {
+                        technical_name: None,
+                        presentation: presentation.clone(),
+                        resolution: "unresolved",
+                        reason: Some("legacy_type_only"),
+                    }]
+                })
+                .unwrap_or_default()
+        });
+        Ok(Self { name: raw.name, synonym: raw.synonym, type_name: raw.type_name, type_variants })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataTypeVariant {
+    pub technical_name: Option<String>,
+    pub presentation: String,
+    pub resolution: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+impl<'de> Deserialize<'de> for MetadataTypeVariant {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawVariant {
+            #[serde(rename = "technicalName")]
+            technical_name: Option<String>,
+            presentation: String,
+        }
+
+        let raw = RawVariant::deserialize(deserializer)?;
+        let (technical_name, resolution, reason) = match raw.technical_name {
+            Some(name) if known_producer_type_id(&name) => (Some(name), "source", None),
+            Some(_) => (None, "unresolved", Some("unknown_technical_name")),
+            None => (None, "unresolved", Some("technical_name_unavailable")),
+        };
+        Ok(Self { technical_name, presentation: raw.presentation, resolution, reason })
+    }
+}
+
+fn known_producer_type_id(name: &str) -> bool {
+    const PLATFORM: &[&str] = &[
+        "Строка",
+        "Число",
+        "Булево",
+        "Дата",
+        "Неопределено",
+        "Null",
+        "Массив",
+        "Структура",
+        "Соответствие",
+        "ТаблицаЗначений",
+        "ДеревоЗначений",
+        "СписокЗначений",
+        "ОписаниеТипов",
+        "УникальныйИдентификатор",
+    ];
+    const APPLIED: &[&str] = &[
+        "СправочникСсылка",
+        "ДокументСсылка",
+        "ПеречислениеСсылка",
+        "ЗадачаСсылка",
+        "БизнесПроцессСсылка",
+        "ОбработкаОбъект",
+        "ОтчетОбъект",
+        "ПланОбменаСсылка",
+        "ПланСчетовСсылка",
+        "ПланВидовХарактеристикСсылка",
+        "ПланВидовРасчетаСсылка",
+        "РегистрСведенийКлючЗаписи",
+        "РегистрНакопленияКлючЗаписи",
+        "РегистрБухгалтерииКлючЗаписи",
+        "РегистрРасчетаКлючЗаписи",
+    ];
+
+    PLATFORM.contains(&name)
+        || name.split_once('.').is_some_and(|(prefix, object)| {
+            APPLIED.contains(&prefix)
+                && !object.is_empty()
+                && object.chars().all(|character| character == '_' || character.is_alphanumeric())
+        })
+}
 
 #[cfg(test)]
 mod tests {
@@ -269,6 +401,100 @@ mod tests {
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(value["meta_type"], "Catalogs");
         assert_eq!(value["name"], "Организации");
+    }
+
+    #[test]
+    fn metadata_structure_types_known_variants_and_tolerates_future_fields() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../bsl-analyzer/tests/fixtures/live_metadata_type_variants.json"
+        ))
+        .unwrap();
+
+        for locale in ["ru", "en"] {
+            let result: MetadataStructureResult =
+                serde_json::from_value(fixture[locale].clone()).unwrap();
+            let find = |name| result.attributes.iter().find(|item| item.name == name).unwrap();
+
+            for name in ["Primitive", "Platform", "Applied", "ReportApplied"] {
+                let variant = &find(name).type_variants[0];
+                assert_eq!(variant.resolution, "source");
+                assert!(variant.technical_name.is_some());
+                assert!(variant.reason.is_none());
+            }
+            assert_eq!(find("Composite").type_variants.len(), 2);
+            let same = &find("SamePresentation").type_variants;
+            assert_eq!(same.len(), 2);
+            assert_eq!(same[0].presentation, same[1].presentation);
+            assert_ne!(same[0].technical_name, same[1].technical_name);
+            assert!(same.iter().all(|variant| variant.resolution == "source"));
+
+            let unsupported = &find("Unsupported").type_variants[0];
+            assert_eq!(unsupported.resolution, "unresolved");
+            assert_eq!(unsupported.reason, Some("technical_name_unavailable"));
+
+            let future = &find("FutureUnknown").type_variants[0];
+            assert!(future.technical_name.is_none());
+            assert_eq!(future.resolution, "unresolved");
+            assert_eq!(future.reason, Some("unknown_technical_name"));
+        }
+    }
+
+    #[test]
+    fn legacy_metadata_type_stays_unresolved_across_infobases() {
+        let result: MetadataStructureResult = serde_json::from_str(include_str!(
+            "../../bsl-analyzer/tests/fixtures/live_metadata_legacy.json"
+        ))
+        .unwrap();
+
+        assert_eq!(result.attributes.len(), 2);
+        assert_eq!(
+            result.attributes[0].type_variants[0].presentation,
+            result.attributes[1].type_variants[0].presentation
+        );
+        for attribute in result.attributes {
+            let variant = &attribute.type_variants[0];
+            assert!(variant.technical_name.is_none(), "must not resolve from workspace names");
+            assert_eq!(variant.resolution, "unresolved");
+            assert_eq!(variant.reason, Some("legacy_type_only"));
+        }
+    }
+
+    #[test]
+    fn metadata_structure_compatibility_matrix_keeps_legacy_type() {
+        const RELEASE: &str = "v0.2.70";
+        const COMMIT: &str = "d7e50c494995ee8dee742a6236b16134d2a42e87";
+        const SOURCE_SHA256: &str =
+            "2d3afd71024f10162c97666a895852784121d8270a117e0212a717efee9905b2";
+        let old: serde_json::Value = serde_json::from_str(include_str!(
+            "../../bsl-analyzer/tests/fixtures/live_metadata_legacy.json"
+        ))
+        .unwrap();
+        let new_fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../bsl-analyzer/tests/fixtures/live_metadata_type_variants.json"
+        ))
+        .unwrap();
+        let new = new_fixture["ru"].clone();
+
+        for fixture in [&old, &new_fixture] {
+            assert_eq!(fixture["_fixture"]["version"], "1");
+            assert_eq!(fixture["_fixture"]["legacy_consumer_release"], RELEASE);
+            assert_eq!(fixture["_fixture"]["legacy_consumer_commit"], COMMIT);
+            assert_eq!(fixture["_fixture"]["legacy_onec_client_source_sha256"], SOURCE_SHA256);
+        }
+
+        // New consumer × old/new producer responses.
+        for response in [old.clone(), new.clone()] {
+            let parsed: MetadataStructureResult = serde_json::from_value(response).unwrap();
+            assert!(parsed.attributes.iter().all(|item| item.type_name.is_some()));
+        }
+
+        // Frozen v0.2.70 used `serde_json::Value` as MetadataStructureResult. It reads the
+        // preserved `type` field and ignores every added field in both response versions.
+        for response in [old, new] {
+            let legacy: serde_json::Value = serde_json::from_value(response).unwrap();
+            let attributes = legacy["Реквизиты"].as_array().unwrap();
+            assert!(attributes.iter().all(|item| item["type"].is_string()));
+        }
     }
 
     #[test]

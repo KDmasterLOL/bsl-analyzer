@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+  <Catalog uuid="00000000-0000-0000-0000-0000000000bb">
+    <Properties><Name>Валюты</Name></Properties>
+    <ChildObjects>
+      <Attribute uuid="00000000-0000-0000-0000-0000000000cc">
+        <Properties><Name>Активность</Name><Type><v8:Type xmlns:v8="http://v8.1c.ru/8.1/data/core">xs:boolean</v8:Type></Type></Properties>
+      </Attribute>
+    </ChildObjects>
+  </Catalog>
+</MetaDataObject>

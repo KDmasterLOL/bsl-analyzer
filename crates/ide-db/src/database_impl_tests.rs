@@ -5447,6 +5447,414 @@ fn resolve_metadata_object_across_roots_merges_base_and_extension() {
     );
 }
 
+#[test]
+fn effective_metadata_members_keep_topological_winner_and_source() {
+    use crate::metadata::{MdoEntry, WorkspaceConfigsSnapshot};
+    use crate::EffectiveMetadataMemberValue;
+    use bsl_metadata::{AttributeType, MdoType};
+
+    fn catalog_xml(attribute: &str, ty: &str) -> String {
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../bsl-metadata/fixtures/cfe_dependencies/base/Catalogs/Товары.xml"
+        ))
+        .replace("<Name>Цвет</Name>", &format!("<Name>{attribute}</Name>"))
+        .replace("<v8:Type>xs:string</v8:Type>", &format!("<v8:Type>{ty}</v8:Type>"))
+    }
+
+    let base = FileId(0);
+    let winner = FileId(1);
+    let dependency = FileId(2);
+    let unique = FileId(3);
+    let unread = FileId(4);
+    let roots = ["/base", "/winner", "/dependency", "/unique", "/unread"];
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (file, root) in [base, winner, dependency, unique, unread].into_iter().zip(roots) {
+        file_set.insert(file, VfsPath::new(format!("{root}/Catalogs/Товары.xml")));
+    }
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for file in [base, winner, dependency, unique, unread] {
+        db.set_file_source_root(file, SourceRootId(1));
+    }
+    db.set_file_text(base, &catalog_xml("Цвет", "xs:string"));
+    db.set_file_text(dependency, &catalog_xml("Цвет", "xs:boolean"));
+    db.set_file_text(winner, &catalog_xml("цВет", "xs:decimal"));
+    db.set_file_text(unique, &catalog_xml("Вес", "xs:string"));
+    db.set_file_text(unread, &catalog_xml("Цвет", "xs:dateTime"));
+    db.set_file_unreadable(unread);
+
+    // Declaration order intentionally puts the dependent before its dependency.
+    // The explicit topology must still compose dependency first, dependent last.
+    let paths: Vec<(Option<String>, std::path::PathBuf)> = vec![
+        (None, roots[0].into()),
+        (Some("Победитель".to_string()), roots[1].into()),
+        (Some("Зависимость".to_string()), roots[2].into()),
+        (Some("Уникальное".to_string()), roots[3].into()),
+        (Some("Нечитаемое".to_string()), roots[4].into()),
+    ];
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        paths,
+        closures: vec![vec![], vec![2], vec![], vec![], vec![]],
+        topological_order: vec![0, 2, 1, 3, 4],
+        fingerprint: Some("test-topology".to_string()),
+    });
+    let listing = |main| MetadataListingData {
+        entries: vec![MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Товары".to_string(),
+            main,
+            predefined: None,
+        }],
+        ..empty_listing_data()
+    };
+    for (root, file) in roots.into_iter().zip([base, winner, dependency, unique, unread]) {
+        db.set_metadata_listing(root, listing(file));
+    }
+
+    let base_listing = db.metadata_listing("/base").unwrap();
+    let base_object_before = crate::metadata::resolve_metadata_object(
+        &db,
+        base_listing,
+        MdoType::Catalog,
+        "Товары".to_string(),
+    )
+    .unwrap();
+
+    let members = db
+        .effective_metadata_members_across_roots(MdoType::Catalog, "Товары")
+        .expect("object exists in readable roots");
+    let colors: Vec<_> = members
+        .iter()
+        .filter(|member| stdx::case::eq_ignore_case(member.member.name(), "Цвет"))
+        .collect();
+    assert_eq!(colors.len(), 1, "Unicode-case-equivalent overlays replace instead of duplicating");
+    let color = colors[0];
+    assert_eq!(color.source_extension.as_deref(), Some("Победитель"));
+    assert!(matches!(
+        &color.member,
+        EffectiveMetadataMemberValue::Attribute(attribute)
+            if matches!(attribute.attr_type, AttributeType::Number { .. })
+    ));
+    let weights: Vec<_> = members.iter().filter(|member| member.member.name() == "Вес").collect();
+    assert_eq!(weights.len(), 1, "a unique extension member is present once");
+    let weight = weights[0];
+    assert_eq!(weight.source_extension.as_deref(), Some("Уникальное"));
+
+    let base_visible = db
+        .effective_metadata_members_for_file(base, MdoType::Catalog, "Товары")
+        .expect("base object is visible from its own root");
+    let base_color = base_visible.iter().find(|member| member.member.name() == "Цвет").unwrap();
+    assert_eq!(base_color.source_extension, None);
+    assert!(matches!(
+        &base_color.member,
+        EffectiveMetadataMemberValue::Attribute(attribute)
+            if matches!(attribute.attr_type, AttributeType::String { .. })
+    ));
+
+    let visible = db
+        .effective_metadata_members_for_file(winner, MdoType::Catalog, "Товары")
+        .expect("dependent root sees base, dependency and itself");
+    assert!(visible.iter().all(|member| member.member.name() != "Вес"));
+    let visible_color = visible
+        .iter()
+        .find(|member| stdx::case::eq_ignore_case(member.member.name(), "Цвет"))
+        .unwrap();
+    assert_eq!(visible_color.source_extension.as_deref(), Some("Победитель"));
+
+    let base_object_after = crate::metadata::resolve_metadata_object(
+        &db,
+        base_listing,
+        MdoType::Catalog,
+        "Товары".to_string(),
+    )
+    .unwrap();
+    assert!(
+        Arc::ptr_eq(&base_object_before, &base_object_after),
+        "effective enumeration must reuse the per-MDO parsed query"
+    );
+}
+
+#[test]
+fn effective_module_exports_cover_composition_matrix_for_all_module_roles() {
+    use crate::effective_exports::{
+        effective_module_exports_query, EffectiveModuleRole, ExportComposition,
+    };
+    use crate::metadata::WorkspaceConfigsSnapshot;
+    use bsl_metadata::MdoType;
+    use stdx::case::CaseExt;
+
+    const BASE: &str = r#"
+Перем БазоваяПеременная Экспорт;
+Процедура Базовая() Экспорт
+КонецПроцедуры
+Процедура Изменяемый() Экспорт
+КонецПроцедуры
+Процедура Замещаемый() Экспорт
+КонецПроцедуры
+Процедура До() Экспорт
+КонецПроцедуры
+Процедура После() Экспорт
+КонецПроцедуры
+"#;
+    const EARLY: &str = r#"
+Перем РанняяПеременная Экспорт;
+Процедура ТолькоРаннее() Экспорт
+КонецПроцедуры
+&ИзменениеИКонтроль("Изменяемый")
+Процедура РаннееИзменение()
+#Вставка
+    А = 1;
+#КонецВставки
+КонецПроцедуры
+&Вместо("Замещаемый")
+Процедура РаннееВместо()
+КонецПроцедуры
+&Перед("До")
+Процедура РаннееПеред()
+КонецПроцедуры
+&После("После")
+Процедура РаннееПосле()
+КонецПроцедуры
+"#;
+    const LATE: &str = r#"
+Перем ПоздняяПеременная Экспорт;
+Процедура ТолькоПозднее() Экспорт
+КонецПроцедуры
+&ИзменениеИКонтроль("Изменяемый")
+Процедура ПозднееИзменение()
+#Вставка
+    А = 2;
+#КонецВставки
+КонецПроцедуры
+&Вместо("Замещаемый")
+Процедура ПозднееВместо()
+КонецПроцедуры
+"#;
+    const UNREAD: &str = "Процедура НеДолженПоявиться() Экспорт\nКонецПроцедуры";
+
+    let roots = ["/base", "/late", "/early", "/unread"];
+    let paths: Vec<(Option<String>, std::path::PathBuf)> = vec![
+        (None, roots[0].into()),
+        (Some("Позднее".to_string()), roots[1].into()),
+        (Some("Раннее".to_string()), roots[2].into()),
+        (Some("Нечитаемое".to_string()), roots[3].into()),
+    ];
+    let mut db = RootDatabaseImpl::new();
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        paths,
+        // `Позднее` depends on `Раннее`, despite being declared first.
+        closures: vec![vec![], vec![2], vec![], vec![]],
+        topological_order: vec![0, 2, 1, 3],
+        fingerprint: Some("exports-topology".to_string()),
+    });
+
+    let relative_paths = [
+        "Catalogs/Товары/Ext/ObjectModule.bsl",
+        "Catalogs/Товары/Ext/ManagerModule.bsl",
+        "Catalogs/Товары/Forms/Форма/Ext/Form/Module.bsl",
+    ];
+    let mut file_set = FileSet::new();
+    let mut enrolled = Vec::new();
+    let mut next = 0u32;
+    for relative in relative_paths {
+        for (root_idx, root) in roots.iter().enumerate() {
+            let file = FileId(next);
+            next += 1;
+            file_set.insert(file, VfsPath::new(format!("{root}/{relative}")));
+            enrolled.push((file, root_idx));
+        }
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for &(file, root_idx) in &enrolled {
+        db.set_file_source_root(file, SourceRootId(0));
+        db.set_file_text(file, [BASE, LATE, EARLY, UNREAD][root_idx]);
+        if root_idx == 3 {
+            db.set_file_unreadable(file);
+        }
+    }
+
+    for role in [
+        EffectiveModuleRole::Object,
+        EffectiveModuleRole::Manager,
+        EffectiveModuleRole::ManagedForm,
+    ] {
+        let exports = effective_module_exports_query(
+            &db,
+            SourceRootId(0),
+            None,
+            role,
+            MdoType::Catalog,
+            "Товары".to_string(),
+            (role == EffectiveModuleRole::ManagedForm).then(|| "Форма".to_string()),
+        );
+        let named = |name: &str| {
+            exports
+                .methods
+                .iter()
+                .filter(|method| method.name.as_str().fold_lower() == name.fold_lower())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(named("Базовая").len(), 1, "{role:?}: base export");
+        assert_eq!(named("ТолькоРаннее")[0].source_extension.as_deref(), Some("Раннее"));
+        assert_eq!(named("ТолькоПозднее")[0].source_extension.as_deref(), Some("Позднее"));
+
+        let changed = named("Изменяемый");
+        assert_eq!(changed.len(), 1, "{role:?}: replaced base is not effective");
+        assert_eq!(changed[0].source_extension.as_deref(), Some("Позднее"));
+        assert_eq!(changed[0].composition, ExportComposition::ChangeAndValidate);
+        assert_eq!(changed[0].method.name.as_str(), "ПозднееИзменение");
+
+        let instead = named("Замещаемый");
+        assert_eq!(instead.len(), 1, "{role:?}: later &Вместо wins");
+        assert_eq!(instead[0].source_extension.as_deref(), Some("Позднее"));
+        assert_eq!(instead[0].composition, ExportComposition::Instead);
+        assert_eq!(instead[0].method.name.as_str(), "ПозднееВместо");
+
+        let before = named("До");
+        assert_eq!(before.len(), 2, "{role:?}: base and &Перед stay separate");
+        assert!(before.iter().any(|method| method.composition == ExportComposition::Base));
+        assert!(before.iter().any(|method| {
+            method.composition == ExportComposition::Before
+                && method.source_extension.as_deref() == Some("Раннее")
+        }));
+        let after = named("После");
+        assert_eq!(after.len(), 2, "{role:?}: base and &После stay separate");
+        assert!(after.iter().any(|method| method.composition == ExportComposition::After));
+
+        for internal in [
+            "РаннееИзменение",
+            "ПозднееИзменение",
+            "РаннееВместо",
+            "ПозднееВместо",
+            "РаннееПеред",
+            "РаннееПосле",
+            "НеДолженПоявиться",
+        ] {
+            assert!(named(internal).is_empty(), "{role:?}: internal name {internal} leaked");
+        }
+        let variables: Vec<_> =
+            exports.variables.iter().map(|variable| variable.variable.name.as_str()).collect();
+        assert!(variables.contains(&"БазоваяПеременная"));
+        assert!(variables.contains(&"РанняяПеременная"));
+        assert!(variables.contains(&"ПоздняяПеременная"));
+    }
+}
+
+#[test]
+fn ba010_effective_module_variables_resolve_for_object_and_manager_facets() {
+    use crate::metadata::WorkspaceConfigsSnapshot;
+    use bsl_metadata::MdoType;
+    use bsl_types::testing::RootConfigCtx;
+    use hir::{Builders, HirDatabase, InferenceDiagnostic, MetadataKind, Name};
+    use hir_ty::{lookup_field, lookup_manager_field, DbObjectResolver};
+
+    const BASE_OBJECT: &str = "Перем БазоваяОбъекта Экспорт;";
+    const EARLY_OBJECT: &str = "Перем РанняяОбъекта Экспорт;";
+    const LATE_OBJECT: &str = r#"
+Перем ПоздняяОбъекта Экспорт;
+Процедура Проверка()
+    А = ЭтотОбъект.БазоваяОбъекта;
+    Б = ЭтотОбъект.РанняяОбъекта;
+    В = ЭтотОбъект.ПоздняяОбъекта;
+КонецПроцедуры
+"#;
+    const BASE_MANAGER: &str = "Перем БазоваяМенеджера Экспорт;";
+    const EARLY_MANAGER: &str = "Перем РанняяМенеджера Экспорт;";
+    const LATE_MANAGER: &str = "Перем ПоздняяМенеджера Экспорт;";
+
+    let paths: Vec<(Option<String>, std::path::PathBuf)> = vec![
+        (None, "/base".into()),
+        (Some("Раннее".to_string()), "/early".into()),
+        (Some("Позднее".to_string()), "/late".into()),
+    ];
+    let mut db = RootDatabaseImpl::new();
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        paths,
+        closures: vec![vec![], vec![], vec![1]],
+        topological_order: vec![0, 1, 2],
+        fingerprint: Some("ba010".to_string()),
+    });
+
+    let files = [
+        (FileId(0), "/base/Catalogs/Товары/Ext/ObjectModule.bsl", BASE_OBJECT),
+        (FileId(1), "/early/Catalogs/Товары/Ext/ObjectModule.bsl", EARLY_OBJECT),
+        (FileId(2), "/late/Catalogs/Товары/Ext/ObjectModule.bsl", LATE_OBJECT),
+        (FileId(3), "/base/Catalogs/Товары/Ext/ManagerModule.bsl", BASE_MANAGER),
+        (FileId(4), "/early/Catalogs/Товары/Ext/ManagerModule.bsl", EARLY_MANAGER),
+        (FileId(5), "/late/Catalogs/Товары/Ext/ManagerModule.bsl", LATE_MANAGER),
+    ];
+    let mut file_set = FileSet::new();
+    for (file, path, _) in files {
+        file_set.insert(file, VfsPath::new(path));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (file, _, text) in files {
+        db.set_file_source_root(file, SourceRootId(0));
+        db.set_file_text(file, text);
+    }
+
+    let object_ty =
+        db.metadata_ref(MetadataKind::CatalogObject, "Товары".to_string(), &RootConfigCtx);
+    let late_object_resolver = DbObjectResolver::new(&db, FileId(2));
+    for name in ["БазоваяОбъекта", "РанняяОбъекта", "ПоздняяОбъекта"]
+    {
+        assert!(
+            lookup_field(&db, &late_object_resolver, object_ty, &Name::new(name)).is_some(),
+            "late object facet must see {name}"
+        );
+    }
+    assert!(
+        lookup_field(
+            &db,
+            &DbObjectResolver::new(&db, FileId(0)),
+            object_ty,
+            &Name::new("РанняяОбъекта"),
+        )
+        .is_none(),
+        "base object facet must not see an extension variable"
+    );
+
+    let manager_ty = db.object_manager(MdoType::Catalog, "Товары".to_string(), &RootConfigCtx);
+    let late_manager_resolver = DbObjectResolver::new(&db, FileId(5));
+    for name in ["БазоваяМенеджера", "РанняяМенеджера", "ПоздняяМенеджера"]
+    {
+        assert!(
+            lookup_manager_field(&db, &late_manager_resolver, manager_ty, &Name::new(name))
+                .is_some(),
+            "late manager facet must see {name}"
+        );
+    }
+    assert!(
+        lookup_manager_field(
+            &db,
+            &DbObjectResolver::new(&db, FileId(3)),
+            manager_ty,
+            &Name::new("РанняяМенеджера"),
+        )
+        .is_none(),
+        "base manager facet must not see an extension variable"
+    );
+
+    let unresolved: Vec<_> = db
+        .infer(FileId(2))
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            InferenceDiagnostic::UnresolvedField { field_name, .. } => {
+                Some(field_name.as_str().to_string())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(unresolved.is_empty(), "BA-010 false UnresolvedField: {unresolved:?}");
+}
+
 /// A register kind reached through the root-scoped resolver: an extension-only register is
 /// found (base listing empty), confirming registers participate in the base + extension
 /// scan just like objects.
@@ -5881,5 +6289,87 @@ fn a_case_variant_configuration_xml_names_the_configuration_root() {
         db.find_configuration_root(&module),
         Some(root.clone()),
         "корень опознан по CONFIGURATION.XML"
+    );
+}
+
+/// A defined type composes differently from an object or a register, and the difference is
+/// the point: an extension does not overlay a defined type, it REPLACES its underlying type
+/// wholesale. Copying the neighbours' fold here would silently keep the base's type.
+///
+/// The no-collision input is the control: a resolver that simply returned the last root would
+/// pass the collision half and fail this one.
+#[test]
+fn resolve_defined_type_across_roots_lets_an_extension_replace_the_base() {
+    use crate::metadata::{DefinedTypeEntry, MetadataListingData};
+
+    fn defined_type_xml(name: &str, inner: &str) -> String {
+        format!(
+            concat!(
+                "<MetaDataObject>",
+                "<DefinedType uuid=\"00000000-0000-0000-0000-000000000010\">",
+                "<Properties><Name>{}</Name><Type><Type>{}</Type></Type></Properties>",
+                "</DefinedType></MetaDataObject>"
+            ),
+            name, inner
+        )
+    }
+
+    let base_shared = FileId(0);
+    let ext_shared = FileId(1);
+    let base_only = FileId(2);
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(base_shared, VfsPath::new("/base/DefinedTypes/Цена.xml"));
+    file_set.insert(ext_shared, VfsPath::new("/ext/DefinedTypes/Цена.xml"));
+    file_set.insert(base_only, VfsPath::new("/base/DefinedTypes/ТолькоБаза.xml"));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for f in [base_shared, ext_shared, base_only] {
+        db.set_file_source_root(f, SourceRootId(1));
+    }
+    db.set_file_text(base_shared, &defined_type_xml("Цена", "xs:decimal"));
+    db.set_file_text(ext_shared, &defined_type_xml("Цена", "xs:string"));
+    db.set_file_text(base_only, &defined_type_xml("ТолькоБаза", "xs:boolean"));
+
+    db.set_all_config_paths(vec![
+        (None, std::path::PathBuf::from("/base")),
+        (Some("Расш".to_string()), std::path::PathBuf::from("/ext")),
+    ]);
+    db.set_metadata_listing(
+        "/base",
+        MetadataListingData {
+            defined_types: vec![
+                DefinedTypeEntry { name: "Цена".to_string(), main: base_shared },
+                DefinedTypeEntry { name: "ТолькоБаза".to_string(), main: base_only },
+            ],
+            ..empty_listing_data()
+        },
+    );
+    db.set_metadata_listing(
+        "/ext",
+        MetadataListingData {
+            defined_types: vec![DefinedTypeEntry {
+                name: "Цена".to_string(), main: ext_shared
+            }],
+            ..empty_listing_data()
+        },
+    );
+
+    let collided = db.resolve_defined_type_across_roots("Цена").expect("the name resolves");
+    assert!(
+        format!("{collided:?}").contains("String"),
+        "the extension replaces the base wholesale, got {collided:?}",
+    );
+
+    let base_only_type =
+        db.resolve_defined_type_across_roots("ТолькоБаза").expect("the name resolves");
+    assert!(
+        format!("{base_only_type:?}").contains("Bool"),
+        "a name no extension defines still comes from the base, got {base_only_type:?}",
+    );
+
+    assert!(
+        db.resolve_defined_type_across_roots("НетТакого").is_none(),
+        "an absent defined type resolves to None",
     );
 }

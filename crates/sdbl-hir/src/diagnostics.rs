@@ -33,6 +33,17 @@ pub enum SdblDiagnostic {
         range: TextRange,
     },
 
+    /// `Имя.Поле`, where `Имя` names both a source and a field at the same query level.
+    ///
+    /// A separate variant from [`Self::AmbiguousColumnRef`] because the reader's fix differs:
+    /// there a qualifier must be added, here the SOURCE has to be renamed — the qualifier is
+    /// already present and is itself the problem.
+    AmbiguousQualifiedHead {
+        head: String,
+        offered_by: Vec<String>,
+        range: TextRange,
+    },
+
     TypeMismatch {
         expected: SdblType,
         actual: SdblType,
@@ -203,6 +214,9 @@ impl SdblDiagnostic {
             Self::UnknownField { table_name, field_name, .. } => {
                 format!("Поле '{}' не найдено в таблице '{}'", field_name, table_name)
             }
+            Self::AmbiguousQualifiedHead { head, offered_by, .. } => {
+                ambiguous_qualified_head_message(head, offered_by)
+            }
             Self::AmbiguousColumnRef { column_name, possible_tables, .. } => {
                 format!(
                     "Неоднозначная ссылка на колонку '{}'. Возможные таблицы: {}",
@@ -229,7 +243,11 @@ impl SdblDiagnostic {
                 format!("Для поля '{}' требуется псевдоним (используйте AS)", name)
             }
             Self::DuplicateAlias { alias, .. } => {
-                format!("Дублирующийся псевдоним '{}' в SELECT", alias)
+                format!(
+                    "Псевдоним '{}' уже занят другим источником запроса: ссылки по этому имени \
+                     разрешаются в последний источник",
+                    alias
+                )
             }
             Self::FullOuterJoin { .. } => {
                 "Использование FULL OUTER JOIN значительно снижает производительность запроса. \
@@ -311,6 +329,7 @@ impl SdblDiagnostic {
             Self::VirtualTableCallWithoutParameters { range, .. } => *range,
             Self::UnknownField { range, .. } => *range,
             Self::AmbiguousColumnRef { range, .. } => *range,
+            Self::AmbiguousQualifiedHead { range, .. } => *range,
             Self::TypeMismatch { range, .. } => *range,
             Self::UnknownFunction { range, .. } => *range,
             Self::InvalidArgumentCount { range, .. } => *range,
@@ -337,6 +356,7 @@ impl SdblDiagnostic {
             Self::QueryToMissingMetadata { .. } => true,
             Self::UnknownField { .. } => true,
             Self::AmbiguousColumnRef { .. } => true,
+            Self::AmbiguousQualifiedHead { .. } => true,
             Self::TypeMismatch { .. } => true,
             Self::UnknownFunction { .. } => true,
             Self::InvalidArgumentCount { .. } => true,
@@ -344,7 +364,7 @@ impl SdblDiagnostic {
             Self::JoinWithVirtualTable { .. } => false,
             Self::VirtualTableCallWithoutParameters { .. } => false,
             Self::AliasRequired { .. } => false,
-            Self::DuplicateAlias { .. } => false,
+            Self::DuplicateAlias { .. } => true,
             Self::FullOuterJoin { .. } => false,
             Self::JoinWithSubQuery { .. } => false,
             Self::AliasWithoutAsKeyword { .. } => false,
@@ -361,6 +381,40 @@ impl SdblDiagnostic {
             Self::UnlimitedStringUsage { .. } => true,
         }
     }
+}
+
+/// The one wording for a colliding qualifier head, shared by the enum rendering and by the
+/// `ide-diagnostics` handler: two copies of it had already drifted apart.
+///
+/// Names every source that offers the name, including the alias itself. A message that
+/// mentioned only the self-collision hid the fact that a second, independent source carries
+/// the same field.
+pub fn ambiguous_qualified_head_message(head: &str, offered_by: &[String]) -> String {
+    // The query language is case-insensitive, so the spelling at the reference site and the
+    // spelling in `КАК ...` may differ; ASCII folding would call the same source a foreign one.
+    let mut own = false;
+    let mut others: Vec<&str> = Vec::new();
+    for source in offered_by {
+        if stdx::case::eq_ignore_case(source, head) {
+            own = true;
+        } else {
+            others.push(source);
+        }
+    }
+    let others = others.join(", ");
+
+    let where_ = if own && others.is_empty() {
+        "того же источника".to_string()
+    } else if own {
+        format!("того же источника, а также источника {others}")
+    } else {
+        format!("источника {others}")
+    };
+
+    format!(
+        "Имя \"{head}\" — и псевдоним источника, и поле {where_}. Платформа отклонит такой \
+         запрос: переименуйте источник"
+    )
 }
 
 #[cfg(test)]

@@ -1211,7 +1211,6 @@ fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCa
 /// whole collections and nothing narrower — so this is a linear scan, the same
 /// one `syntax_help` already performs.
 fn from_platform(db: &RootDatabaseImpl, merge: &mut Merge<'_>) -> Vec<NameCandidate> {
-    let platform = hir::platform_data();
     let mut out = Vec::new();
 
     let mut push = |canonical: &str,
@@ -1225,84 +1224,25 @@ fn from_platform(db: &RootDatabaseImpl, merge: &mut Merge<'_>) -> Vec<NameCandid
         out.push(candidate);
     };
 
-    for function in platform.all_global_functions() {
+    for entry in hir::platform_name_entries() {
         db.unwind_if_revision_cancelled();
-        let Some(tier) = merge.best_tier(&[&function.name, &function.english_name]) else {
+        let Some(tier) = merge.best_tier(&[entry.name, entry.english_name]) else {
             continue;
         };
-        let canonical = function.name.as_str();
-        push(
-            canonical,
-            Some(canonical.to_string()),
-            PlatformRef { name: canonical.to_string(), type_name: None },
-            tier,
-        );
-    }
-
-    for ty in platform.all_types() {
-        db.unwind_if_revision_cancelled();
-        let Some(tier) = merge.best_tier(&[&ty.name, &ty.english_name]) else { continue };
-        let canonical = ty.name.as_str();
-        // A type has no `symbol_info` spelling of its own: `resolve_single`
-        // knows common modules and global functions, nothing else.
-        push(canonical, None, PlatformRef { name: canonical.to_string(), type_name: None }, tier);
-    }
-
-    for method in platform.all_methods() {
-        db.unwind_if_revision_cancelled();
-        let Some(tier) = merge.best_tier(&[&method.name, &method.english_name]) else { continue };
-        let canonical = method.name.as_str();
-        let owner = platform_owner_display(method.type_name.as_str());
-        // A manager type is spelled with a dot (`Documents.…`); prefixing a
-        // method with it yields a three-part name that `symbol_info` reads as
-        // `<MdoType>.<Object>.<Member>` and resolves to something else
-        // entirely. Those keep the `syntax_help` reference only.
-        let symbol = owner
-            .as_deref()
-            .filter(|owner| !owner.contains('.'))
-            .map(|owner| format!("{owner}.{canonical}"));
-        push(
-            canonical,
-            symbol,
-            PlatformRef { name: canonical.to_string(), type_name: owner },
-            tier,
-        );
-    }
-
-    for property in platform.all_properties() {
-        db.unwind_if_revision_cancelled();
-        let Some(tier) = merge.best_tier(&[&property.name, &property.english_name]) else {
-            continue;
+        let canonical = entry.name;
+        let owner = entry.owner.map(str::to_owned);
+        let symbol = match entry.kind {
+            hir::PlatformNameKind::GlobalFunction => Some(canonical.to_owned()),
+            hir::PlatformNameKind::Method => owner
+                .as_deref()
+                .filter(|owner| !owner.contains('.'))
+                .map(|owner| format!("{owner}.{canonical}")),
+            hir::PlatformNameKind::Type | hir::PlatformNameKind::Property => None,
         };
-        let canonical = property.name.as_str();
-        push(
-            canonical,
-            None,
-            PlatformRef {
-                name: canonical.to_string(),
-                type_name: platform_owner_display(property.type_name.as_str()),
-            },
-            tier,
-        );
+        push(canonical, symbol, PlatformRef { name: canonical.to_owned(), type_name: owner }, tier);
     }
 
     out
-}
-
-/// The owning type as a user would spell it: the platform stores English type
-/// names on members, while `syntax_help` and `symbol_info` are happier with the
-/// Russian one when there is one.
-fn platform_owner_display(type_name: &str) -> Option<String> {
-    if type_name.is_empty() {
-        return None;
-    }
-    let platform = hir::platform_data();
-    Some(
-        platform
-            .get_type(type_name)
-            .map(|ty| ty.name.to_string())
-            .unwrap_or_else(|| type_name.to_string()),
-    )
 }
 
 /// Exported methods and module variables of every module in the root.

@@ -177,7 +177,9 @@ pub enum DiagnosticCode {
     UnavailableInEnvironment,
     ModuleAccessibility,
 
+    AmbiguousFieldInQuery,
     AssignAliasFieldsInQuery,
+    DuplicateAliasInQuery,
     FieldsFromJoinsWithoutIsNull,
     FullOuterJoinQuery,
     IncorrectUseLikeInQuery,

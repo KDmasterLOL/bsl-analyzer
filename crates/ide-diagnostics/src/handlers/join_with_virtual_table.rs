@@ -1,6 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{Diagnostic, DiagnosticCode, DiagnosticsConfig, DiagnosticsContext};
 use sdbl_hir;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) fn dispatch(
-    ctx: &DiagnosticsContext,
+    config: &DiagnosticsConfig,
     diag: &sdbl_hir::SdblDiagnostic,
     mapper: &crate::sdbl_utils::SdblPositionMapper,
     query_text: &str,
@@ -26,7 +26,7 @@ pub(crate) fn dispatch(
 ) {
     if let sdbl_hir::SdblDiagnostic::JoinWithVirtualTable { range, .. } = diag {
         crate::sdbl_utils::dispatch_simple(
-            ctx,
+            config,
             DiagnosticCode::JoinWithVirtualTable,
             "Не следует использовать соединения с виртуальными таблицами",
             *range,

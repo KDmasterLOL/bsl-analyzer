@@ -220,7 +220,11 @@ impl LoweringContext<'_> {
                         subquery: Vec::new(),
                         range: table_ref.syntax().text_range(),
                     };
-                    self.scope.add_table(dim_table);
+                    let dim_range = dim_table.range;
+                    if let Some(alias) = self.scope.add_table(dim_table) {
+                        self.diagnostics
+                            .push(SdblDiagnostic::DuplicateAlias { alias, range: dim_range });
+                    }
                     true
                 } else {
                     false
@@ -514,12 +518,18 @@ impl LoweringContext<'_> {
                 .attr_type()
                 .map(|at| self.resolve_attribute_type(at))
                 .unwrap_or(SdblType::Unknown);
-            attributes.push(FieldDef::new_with_names(
+            let mut field = FieldDef::new_with_names(
                 attr.name().to_string(),
                 attr.name_en().map(|s| s.to_string()),
                 ty,
                 false,
-            ));
+            );
+            // The metadata reader injects the recorder-mode fields into every register's
+            // attribute list, so the mark has to be applied HERE and not only to the standard
+            // set: `attributes` is what the virtual-table transform rebuilds its field list
+            // from, and a mark placed only on the standard set does not survive that rebuild.
+            field.provisional = Self::is_conditional_standard_field(mdo_type, attr.name());
+            attributes.push(field);
         }
 
         let mut fields = Vec::new();
@@ -532,7 +542,21 @@ impl LoweringContext<'_> {
         // its own fixed set; conditional fields (e.g. calc-register action/base
         // periods) are over-added — that is an acceptable false-negative, while
         // the diagnostic contract forbids only false-positives.
-        let (standard_fields, field_model_complete) = Self::register_standard_fields(mdo_type);
+        let (mut standard_fields, field_model_complete) = Self::register_standard_fields(mdo_type);
+        if mdo_type == MdoType::InformationRegister {
+            // `Период` exists only on a periodic register — the metadata reader adds it under
+            // exactly that condition. The set above adds it to every register, so mark it
+            // unless this one is known to be periodic.
+            let periodic = matches!(
+                register.periodicity(),
+                Some(p) if p != bsl_metadata::RegisterPeriodicity::Nonperiodical
+            );
+            if !periodic {
+                for field in standard_fields.iter_mut().filter(|f| f.matches_name("Период")) {
+                    field.provisional = true;
+                }
+            }
+        }
         fields.extend(standard_fields);
 
         tracing::debug!(
@@ -558,6 +582,21 @@ impl LoweringContext<'_> {
         })
     }
 
+    /// Whether a register field of this kind exists only under object settings the metadata
+    /// model does not read.
+    ///
+    /// Only the information register qualifies: its recorder-mode fields are absent from an
+    /// independent register. An accumulation register is always subordinate to a recorder, so
+    /// the same names are unconditional there.
+    fn is_conditional_standard_field(mdo_type: MdoType, name: &str) -> bool {
+        if mdo_type != MdoType::InformationRegister {
+            return false;
+        }
+        const RECORDER_MODE_ONLY: &[&str] =
+            &["Регистратор", "Активность", "НомерСтроки", "МоментВремени"];
+        RECORDER_MODE_ONLY.iter().any(|known| stdx::case::eq_ignore_case(known, name))
+    }
+
     /// Standard (platform) fields of a register MAIN table, paired with whether
     /// the resulting field model is exhaustive enough to drive the unknown-field
     /// diagnostic. Sets follow the ITS query-language reference (pubqlang
@@ -576,20 +615,26 @@ impl LoweringContext<'_> {
                 true,
             ),
             // Регистратор/НомерСтроки/Активность/МоментВремени exist only in
-            // "Подчинение регистратору" mode; over-adding them is FN-safe.
+            // "Подчинение регистратору" mode, which the metadata model does not read, so they
+            // are listed provisionally: silent for the unknown-field rule, invisible to the
+            // ambiguity rule.
             MdoType::InformationRegister => (
                 vec![
                     FieldDef::standard("Период", "Period", SdblType::Date),
-                    FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
-                    FieldDef::standard("Активность", "Active", SdblType::Boolean),
-                    FieldDef::standard("НомерСтроки", "LineNumber", SdblType::number()),
-                    FieldDef::standard("МоментВремени", "PointInTime", SdblType::DateTime),
+                    FieldDef::provisional_standard("Регистратор", "Recorder", SdblType::AnyRef),
+                    FieldDef::provisional_standard("Активность", "Active", SdblType::Boolean),
+                    FieldDef::provisional_standard("НомерСтроки", "LineNumber", SdblType::number()),
+                    FieldDef::provisional_standard(
+                        "МоментВремени",
+                        "PointInTime",
+                        SdblType::DateTime,
+                    ),
                 ],
                 true,
             ),
             // No plain `Период` here — `ПериодРегистрации` is the anchor. The
-            // action-/base-period fields are conditional on register properties;
-            // over-adding them is FN-safe.
+            // action-/base-period fields are conditional on register properties the metadata
+            // model does not read, so they are listed provisionally.
             MdoType::CalculationRegister => (
                 vec![
                     FieldDef::standard("Регистратор", "Recorder", SdblType::AnyRef),
@@ -598,11 +643,31 @@ impl LoweringContext<'_> {
                     FieldDef::standard("ВидРасчета", "CalculationType", SdblType::AnyRef),
                     FieldDef::standard("Сторно", "Reversal", SdblType::Boolean),
                     FieldDef::standard("ПериодРегистрации", "RegistrationPeriod", SdblType::Date),
-                    FieldDef::standard("ПериодДействия", "ActionPeriod", SdblType::Date),
-                    FieldDef::standard("ПериодДействияНачало", "ActionPeriodBegin", SdblType::Date),
-                    FieldDef::standard("ПериодДействияКонец", "ActionPeriodEnd", SdblType::Date),
-                    FieldDef::standard("БазовыйПериодНачало", "BasePeriodBegin", SdblType::Date),
-                    FieldDef::standard("БазовыйПериодКонец", "BasePeriodEnd", SdblType::Date),
+                    FieldDef::provisional_standard(
+                        "ПериодДействия",
+                        "ActionPeriod",
+                        SdblType::Date,
+                    ),
+                    FieldDef::provisional_standard(
+                        "ПериодДействияНачало",
+                        "ActionPeriodBegin",
+                        SdblType::Date,
+                    ),
+                    FieldDef::provisional_standard(
+                        "ПериодДействияКонец",
+                        "ActionPeriodEnd",
+                        SdblType::Date,
+                    ),
+                    FieldDef::provisional_standard(
+                        "БазовыйПериодНачало",
+                        "BasePeriodBegin",
+                        SdblType::Date,
+                    ),
+                    FieldDef::provisional_standard(
+                        "БазовыйПериодКонец",
+                        "BasePeriodEnd",
+                        SdblType::Date,
+                    ),
                 ],
                 true,
             ),
@@ -626,7 +691,44 @@ impl LoweringContext<'_> {
         }
     }
 
-    fn transform_for_virtual_table(
+    /// Which of a register's fields may not exist is a property of the REGISTER, not of the
+    /// table shape it is read through, so it is decided once — when the main table is built —
+    /// and inherited by every virtual table derived from it.
+    ///
+    /// This is the single point where a `ResolvedTable::Register` leaving this module gets its
+    /// marks. Each virtual-table branch rebuilds its own field list from literals, and marking
+    /// them branch by branch is what made the same false positive come back three times: the
+    /// main table fell silent while the slice kept firing, then `Активность` was fixed and
+    /// `Период` repeated it. A branch added later inherits the marks without knowing they exist.
+    pub(crate) fn transform_for_virtual_table(
+        resolved: ResolvedTable,
+        vt_type: crate::standard_fields::VirtualTableType,
+    ) -> ResolvedTable {
+        let provisional: Vec<String> = resolved
+            .fields()
+            .iter()
+            .filter(|field| field.provisional)
+            .map(|field| field.name.clone())
+            .collect();
+
+        let mut transformed = Self::rebuild_for_virtual_table(resolved, vt_type);
+
+        if let ResolvedTable::Register { fields, dimensions, resources, attributes, .. } =
+            &mut transformed
+        {
+            for list in [fields, dimensions, resources, attributes] {
+                for field in list.iter_mut() {
+                    if provisional.iter().any(|name| field.matches_name(name)) {
+                        field.provisional = true;
+                    }
+                }
+            }
+        }
+
+        transformed
+    }
+
+    fn rebuild_for_virtual_table(
         resolved: ResolvedTable,
         vt_type: crate::standard_fields::VirtualTableType,
     ) -> ResolvedTable {

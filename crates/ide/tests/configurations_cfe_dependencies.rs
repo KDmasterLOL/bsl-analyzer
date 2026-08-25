@@ -60,6 +60,7 @@ fn setup() -> (RootDatabaseImpl, Files) {
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
+        topological_order: vec![0, 1, 2, 3],
         fingerprint: None,
     };
     db.set_workspace_configs_snapshot(snapshot);

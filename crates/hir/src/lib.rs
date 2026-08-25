@@ -23,8 +23,10 @@ pub use semantic_symbol::{
     FileSymbolCtx, SemanticSymbol, SemanticSymbolKey, SemanticSymbolKind, SymbolDeclaration,
 };
 pub use type_facade::{
-    form_element_type, kernel_type_label, module_implicit_field_names, module_implicit_fields,
-    platform_data, Field, HirFieldOrigin, Type,
+    execution_environment_at, form_element_type, kernel_type_label, module_implicit_field_names,
+    module_implicit_fields, platform_data, platform_name_entries, root_metadata_object_type,
+    root_metadata_ref_type, root_object_manager_type, Field, HirFieldOrigin, PlatformNameEntry,
+    PlatformNameKind, Type,
 };
 
 pub use hir_def::execution_env;
@@ -53,7 +55,7 @@ pub use hir_def::item_tree::{Annotation, AnnotationKind, Function, ModItem, Para
 pub use hir_def::is_bsl_source;
 pub use hir_def::module_structure;
 pub use hir_def::region_tree::{RegionIdx, RegionTree};
-pub use hir_def::symbol_tree::MethodSymbol;
+pub use hir_def::symbol_tree::{MethodSymbol, VariableSymbol};
 pub use hir_def::{
     module_key_for_path, module_path_segment_modes, parse_form_module_path, ConditionalTree,
     FormKey, ItemTree, ModuleIndex, ModuleKey, SymbolTree, WorkspaceMembers,
@@ -183,7 +185,10 @@ pub use hir_ty::call_resolution::{
     UserMethodId,
 };
 pub use hir_ty::db::HirDatabase;
-pub use hir_ty::form_self::{is_form_self_property_name, FORM_TYPE_NAME};
+pub use hir_ty::doc_see::{doc_see_signature_query, DocSeeSignature};
+pub use hir_ty::form_self::{
+    is_form_self_property_name, managed_form_platform_type_names, FORM_TYPE_NAME,
+};
 pub use hir_ty::infer::{
     infer_effective, infer_module_code_query, infer_owner, infer_query, infer_weaving,
     type_of_expr_query,

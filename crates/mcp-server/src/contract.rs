@@ -36,7 +36,7 @@ use crate::{McpProfile, McpServer};
 /// Consumers should require an exact major and a minimum minor. Bump this by hand in the
 /// same commit that changes the surface; the snapshot test over [`document`] puts the
 /// version field next to the change in the diff.
-pub const CONTRACT_VERSION: &str = "1.13";
+pub const CONTRACT_VERSION: &str = "1.14";
 
 /// URI of the MCP resource carrying [`document`].
 pub const CONTRACT_URI: &str = "bsl-analyzer://contract";
@@ -88,8 +88,13 @@ const METADATA_ACTIONS: &[ActionDecl] = &[
     action("status", &[]),
 ];
 
-const WORKSPACE_SEARCH_ACTIONS: &[ActionDecl] =
-    &[action("search_code", &["query"]), action("status", &[])];
+const WORKSPACE_SEARCH_ACTIONS: &[ActionDecl] = &[
+    action("search_code", &["query"]),
+    action("status", &[]),
+    action("list_platform", &[]),
+    action("find_docs", &["query"]),
+    action("search_docs", &["query"]),
+];
 
 const QUERY_ACTIONS: &[ActionDecl] =
     &[action("validate", &["query"]), action("execute", &["query"]), action("schema", &[])];
@@ -130,12 +135,30 @@ const DIAGNOSTICS_ACTIONS: &[ActionDecl] = &[
     action("workspace", &[]),
 ];
 
-const REFERENCE_SEARCH_ACTIONS: &[ActionDecl] =
-    &[action("find_docs", &["query"]), action("search_docs", &["query"]), action("status", &[])];
+const REFERENCE_SEARCH_ACTIONS: &[ActionDecl] = &[
+    action("find_docs", &["query"]),
+    action("search_docs", &["query"]),
+    action("status", &[]),
+    action("list_platform", &[]),
+];
+
+const SYNTAX_HELP: ToolDecl = ToolDecl {
+    name: "syntax_help",
+    actions: &[],
+    note: Some("exactly one of `name` or `reference_id` is required"),
+    output_schema_version: Some("2"),
+    default_enabled: true,
+};
 
 const WORKSPACE_TOOLS: &[ToolDecl] = &[
     tool("metadata", METADATA_ACTIONS),
-    tool("search", WORKSPACE_SEARCH_ACTIONS),
+    ToolDecl {
+        name: "search",
+        actions: WORKSPACE_SEARCH_ACTIONS,
+        note: None,
+        output_schema_version: Some("4"),
+        default_enabled: true,
+    },
     tool("query", QUERY_ACTIONS),
     tool("execute", EXECUTE_ACTIONS),
     tool("event_log", &[]),
@@ -145,7 +168,7 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         name: "symbol_info",
         actions: &[],
         note: Some("one of `symbol` or `path`+`line` is required"),
-        output_schema_version: None,
+        output_schema_version: Some("1"),
         default_enabled: true,
     },
     ToolDecl {
@@ -169,17 +192,18 @@ const WORKSPACE_TOOLS: &[ToolDecl] = &[
         default_enabled: true,
     },
     tool("outline", &[]),
+    SYNTAX_HELP,
 ];
 
 const REFERENCE_TOOLS: &[ToolDecl] = &[
-    tool("search", REFERENCE_SEARCH_ACTIONS),
     ToolDecl {
-        name: "syntax_help",
-        actions: &[],
+        name: "search",
+        actions: REFERENCE_SEARCH_ACTIONS,
         note: None,
-        output_schema_version: Some("1"),
+        output_schema_version: Some("4"),
         default_enabled: true,
     },
+    SYNTAX_HELP,
     tool("its_help", &[]),
 ];
 
@@ -300,10 +324,7 @@ pub fn mcp_surface() -> Value {
 /// additive on purpose — folding opt-in tools into `tools` with a flag would change the
 /// meaning of a field consumers already read as "what I will get", which is a major bump.
 fn profile_surface(profile: McpProfile) -> Value {
-    let router = match profile {
-        McpProfile::Workspace => McpServer::workspace_tool_router(),
-        McpProfile::Reference => McpServer::reference_tool_router(),
-    };
+    let router = McpServer::profile_router(profile);
     let listed = router.list_all();
     let entries = |default_enabled: bool| -> Vec<Value> {
         tools_of(profile)
@@ -360,14 +381,9 @@ fn action_surface(decl: &ActionDecl) -> Value {
 /// `tools/list`, and carrying them here would make every reworded sentence read as a
 /// contract change — exactly the failure mode this declaration exists to end.
 fn params_surface(schema: &Map<String, Value>) -> Value {
-    let required: BTreeSet<&str> = schema
-        .get("required")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
-        return Value::Array(Vec::new());
-    };
+    let shape = schema_shape(schema);
+    let props = &shape.properties;
+    let required = &shape.required;
     let mut names: Vec<&String> = props.keys().collect();
     names.sort();
     Value::Array(
@@ -388,6 +404,85 @@ fn params_surface(schema: &Map<String, Value>) -> Value {
             })
             .collect(),
     )
+}
+
+#[derive(Default)]
+struct SchemaShape {
+    properties: Map<String, Value>,
+    required: BTreeSet<String>,
+}
+
+#[cfg(test)]
+pub(crate) fn schema_properties(schema: &Map<String, Value>) -> Map<String, Value> {
+    schema_shape(schema).properties
+}
+
+/// Give a published schema the root `type: "object"` the MCP specification requires.
+///
+/// A union of object branches is generated as a bare `oneOf`/`anyOf`, and a schema whose
+/// root says nothing about its type is rejected by a spec-compliant client — and by
+/// `rmcp`'s own `schema_for_output`. The branches stay as they are: the keyword only
+/// states what every branch already is.
+pub(crate) fn ensure_object_root(schema: &mut Map<String, Value>) {
+    if !schema.contains_key("type") {
+        schema.insert("type".to_owned(), Value::String("object".to_owned()));
+    }
+}
+
+fn schema_shape(schema: &Map<String, Value>) -> SchemaShape {
+    shape_from_value(schema, &Value::Object(schema.clone()), 0)
+}
+
+fn shape_from_value(root: &Map<String, Value>, schema: &Value, depth: usize) -> SchemaShape {
+    if depth > 16 {
+        return SchemaShape::default();
+    }
+    let Some(object) = schema.as_object() else { return SchemaShape::default() };
+    let mut shape = SchemaShape::default();
+    // A `$ref` keeps its neighbours: schemars writes an internally tagged variant as the
+    // tag's `properties`/`required` NEXT TO a `$ref` at the variant's payload. Returning
+    // the target alone drops the discriminator, and the published surface then calls a
+    // required parameter optional.
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        if let Some(name) = reference.strip_prefix("#/$defs/") {
+            if let Some(target) =
+                root.get("$defs").and_then(Value::as_object).and_then(|defs| defs.get(name))
+            {
+                shape = shape_from_value(root, target, depth + 1);
+            }
+        }
+    }
+
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        shape.properties.extend(properties.clone());
+    }
+    if let Some(required) = object.get("required").and_then(Value::as_array) {
+        shape.required.extend(required.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    if let Some(all_of) = object.get("allOf").and_then(Value::as_array) {
+        for branch in all_of {
+            let branch = shape_from_value(root, branch, depth + 1);
+            shape.properties.extend(branch.properties);
+            shape.required.extend(branch.required);
+        }
+    }
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(union) = object.get(keyword).and_then(Value::as_array) {
+            let branches: Vec<_> =
+                union.iter().map(|branch| shape_from_value(root, branch, depth + 1)).collect();
+            for branch in &branches {
+                shape.properties.extend(branch.properties.clone());
+            }
+            if let Some(first) = branches.first() {
+                let mut common = first.required.clone();
+                for branch in &branches[1..] {
+                    common.retain(|name| branch.required.contains(name));
+                }
+                shape.required.extend(common);
+            }
+        }
+    }
+    shape
 }
 
 fn accepts_null(schema: &Value) -> bool {
@@ -438,22 +533,16 @@ mod tests {
     use expect_test::expect;
 
     fn schema_props(profile: McpProfile, tool: &str) -> Map<String, Value> {
-        let router = match profile {
-            McpProfile::Workspace => McpServer::workspace_tool_router(),
-            McpProfile::Reference => McpServer::reference_tool_router(),
-        };
+        let router = McpServer::profile_router(profile);
         let listed = router.list_all();
         let found = listed.iter().find(|t| t.name == tool).unwrap_or_else(|| {
             panic!("tool '{tool}' is declared but the router does not serve it")
         });
-        found.input_schema.get("properties").and_then(Value::as_object).cloned().unwrap_or_default()
+        schema_properties(&found.input_schema)
     }
 
     fn output_schema(profile: McpProfile, tool: &str) -> Option<Value> {
-        let router = match profile {
-            McpProfile::Workspace => McpServer::workspace_tool_router(),
-            McpProfile::Reference => McpServer::reference_tool_router(),
-        };
+        let router = McpServer::profile_router(profile);
         router
             .list_all()
             .iter()
@@ -589,10 +678,7 @@ mod tests {
     #[test]
     fn declaration_covers_every_served_tool() {
         for profile in [McpProfile::Workspace, McpProfile::Reference] {
-            let router = match profile {
-                McpProfile::Workspace => McpServer::workspace_tool_router(),
-                McpProfile::Reference => McpServer::reference_tool_router(),
-            };
+            let router = McpServer::profile_router(profile);
             let mut served: Vec<String> =
                 router.list_all().iter().map(|t| t.name.to_string()).collect();
             served.sort();
@@ -619,12 +705,41 @@ mod tests {
                         decl.name
                     );
                     assert!(
+                        schema
+                            .as_object()
+                            .is_some_and(|schema| !schema_properties(schema).is_empty()),
+                        "{}/{} outputSchema has no object-shaped branch",
+                        profile.as_str(),
+                        decl.name
+                    );
+                    assert!(
                         schema.to_string().contains("schema_version"),
                         "{}/{} outputSchema has no schema_version",
                         profile.as_str(),
                         decl.name
                     );
                 }
+            }
+        }
+    }
+
+    /// Every served tool's inputSchema says its root is an object.
+    ///
+    /// The output side is gated above; the input side is the half a client reads FIRST, and a
+    /// tool whose parameters are a union is generated as a bare `oneOf` — a shape a
+    /// spec-compliant client rejects along with the whole listing.
+    #[test]
+    fn every_published_input_schema_is_object_rooted() {
+        for profile in [McpProfile::Workspace, McpProfile::Reference] {
+            let router = McpServer::profile_router(profile);
+            for tool in router.list_all() {
+                assert_eq!(
+                    tool.input_schema.get("type").and_then(Value::as_str),
+                    Some("object"),
+                    "{}/{} inputSchema must describe object parameters",
+                    profile.as_str(),
+                    tool.name
+                );
             }
         }
     }
@@ -724,7 +839,7 @@ mod tests {
         doc.insert("mcp".into(), mcp_surface());
         expect![[r#"
             {
-              "contract_version": "1.13",
+              "contract_version": "1.14",
               "mcp": {
                 "profiles": {
                   "reference": {
@@ -747,14 +862,25 @@ mod tests {
                           {
                             "name": "status",
                             "required": []
+                          },
+                          {
+                            "name": "list_platform",
+                            "required": []
                           }
                         ],
                         "name": "search",
+                        "output_schema_fingerprint": "blake3:4829b5149282d60e71524da2b7b4a1b684b1f8db79d255f962f9063e0aec3adf",
+                        "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
                             "required": true,
                             "type": "string"
+                          },
+                          {
+                            "name": "kind",
+                            "required": false,
+                            "type": "any"
                           },
                           {
                             "name": "limit",
@@ -769,8 +895,13 @@ mod tests {
                             "type": "integer"
                           },
                           {
-                            "name": "query",
+                            "name": "name",
                             "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "query",
                             "required": false,
                             "type": "string"
                           }
@@ -779,8 +910,9 @@ mod tests {
                       {
                         "actions": [],
                         "name": "syntax_help",
-                        "output_schema_fingerprint": "blake3:6cab7da33f83233f74680c7f276749f8625af0a67f00758449f3032c873af0ba",
-                        "output_schema_version": "1",
+                        "note": "exactly one of `name` or `reference_id` is required",
+                        "output_schema_fingerprint": "blake3:219fdb853fb5b1c5a40de0010463c820ba26d85b01d9ee1ad8766ff45b848465",
+                        "output_schema_version": "2",
                         "params": [
                           {
                             "name": "max_output_tokens",
@@ -790,7 +922,12 @@ mod tests {
                           },
                           {
                             "name": "name",
-                            "required": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "reference_id",
+                            "required": false,
                             "type": "string"
                           },
                           {
@@ -1031,14 +1168,37 @@ mod tests {
                           {
                             "name": "status",
                             "required": []
+                          },
+                          {
+                            "name": "list_platform",
+                            "required": []
+                          },
+                          {
+                            "name": "find_docs",
+                            "required": [
+                              "query"
+                            ]
+                          },
+                          {
+                            "name": "search_docs",
+                            "required": [
+                              "query"
+                            ]
                           }
                         ],
                         "name": "search",
+                        "output_schema_fingerprint": "blake3:4829b5149282d60e71524da2b7b4a1b684b1f8db79d255f962f9063e0aec3adf",
+                        "output_schema_version": "4",
                         "params": [
                           {
                             "name": "action",
                             "required": true,
                             "type": "string"
+                          },
+                          {
+                            "name": "kind",
+                            "required": false,
+                            "type": "any"
                           },
                           {
                             "name": "limit",
@@ -1053,8 +1213,13 @@ mod tests {
                             "type": "integer"
                           },
                           {
-                            "name": "query",
+                            "name": "name",
                             "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "query",
                             "required": false,
                             "type": "string"
                           }
@@ -1112,6 +1277,12 @@ mod tests {
                           },
                           {
                             "name": "query",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "root_id",
                             "nullable": true,
                             "required": false,
                             "type": "string"
@@ -1499,6 +1670,8 @@ mod tests {
                         "actions": [],
                         "name": "symbol_info",
                         "note": "one of `symbol` or `path`+`line` is required",
+                        "output_schema_fingerprint": "blake3:117d545855a5f8370e8835fb9ec1903166654396c7fd3e74282439f3c1dff9cf",
+                        "output_schema_version": "1",
                         "params": [
                           {
                             "name": "column",
@@ -1528,6 +1701,17 @@ mod tests {
                             "nullable": true,
                             "required": false,
                             "type": "integer"
+                          },
+                          {
+                            "name": "member_kind",
+                            "required": false,
+                            "type": "any"
+                          },
+                          {
+                            "name": "member_name",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
                           },
                           {
                             "name": "path",
@@ -1673,6 +1857,37 @@ mod tests {
                           },
                           {
                             "name": "root_id",
+                            "nullable": true,
+                            "required": false,
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "actions": [],
+                        "name": "syntax_help",
+                        "note": "exactly one of `name` or `reference_id` is required",
+                        "output_schema_fingerprint": "blake3:219fdb853fb5b1c5a40de0010463c820ba26d85b01d9ee1ad8766ff45b848465",
+                        "output_schema_version": "2",
+                        "params": [
+                          {
+                            "name": "max_output_tokens",
+                            "nullable": true,
+                            "required": false,
+                            "type": "integer"
+                          },
+                          {
+                            "name": "name",
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "reference_id",
+                            "required": false,
+                            "type": "string"
+                          },
+                          {
+                            "name": "type_name",
                             "nullable": true,
                             "required": false,
                             "type": "string"

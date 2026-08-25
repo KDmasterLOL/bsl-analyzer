@@ -1,4 +1,5 @@
 pub mod all_function_path_must_have_return;
+pub mod ambiguous_field_in_query;
 pub mod assign_alias_fields_in_query;
 pub mod bad_words;
 pub mod begin_transaction_before_try_catch;
@@ -41,6 +42,7 @@ mod deprecated_platform_facts;
 pub mod deprecated_type_managed_form;
 pub mod disable_safe_mode;
 pub mod double_negatives;
+pub mod duplicate_alias_in_query;
 pub mod duplicate_region;
 pub mod duplicate_string_literal;
 pub mod duplicated_insertion_into_collection;
@@ -402,6 +404,8 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         DiagnosticCode::QueryNestedFieldsByDot => Some(&query_nested_fields_by_dot::METADATA),
         DiagnosticCode::QueryParseError => Some(&query_parse_error::METADATA),
         DiagnosticCode::QueryToMissingMetadata => Some(&query_to_missing_metadata::METADATA),
+        DiagnosticCode::AmbiguousFieldInQuery => Some(&ambiguous_field_in_query::METADATA),
+        DiagnosticCode::DuplicateAliasInQuery => Some(&duplicate_alias_in_query::METADATA),
         DiagnosticCode::UnknownFieldInQuery => Some(&unknown_field_in_query::METADATA),
         DiagnosticCode::UnlimitedLengthStringUsageInQuery => {
             Some(&unlimited_length_string_usage_in_query::METADATA)

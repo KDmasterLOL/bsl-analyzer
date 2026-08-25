@@ -79,7 +79,7 @@ mod tests {
             subquery: Vec::new(),
         };
 
-        scope.add_table(table);
+        let _ = scope.add_table(table);
         scope
     }
 
@@ -178,7 +178,7 @@ mod tests {
             range: TextRange::default(),
             subquery: Vec::new(),
         };
-        scope.add_table(table);
+        let _ = scope.add_table(table);
 
         let items = CompleteFieldsUseCase::execute(&scope, "Т", "");
 
@@ -224,7 +224,7 @@ mod tests {
             subquery: Vec::new(),
         };
 
-        scope.add_table(tabular_table);
+        let _ = scope.add_table(tabular_table);
 
         let document_fields = vec![
             FieldDef::standard("Ссылка", "Ref", SdblType::reference(MdoType::Document, "ЧекККМ")),
@@ -251,7 +251,7 @@ mod tests {
             subquery: Vec::new(),
         };
 
-        scope.add_table(document_table);
+        let _ = scope.add_table(document_table);
 
         let tabular_items = CompleteFieldsUseCase::execute(&scope, "ЧекККМТовары", "");
         assert!(tabular_items.len() >= 4, "Tabular section should have at least 4 fields");
@@ -342,7 +342,7 @@ mod tests {
             range: TextRange::default(),
             subquery: Vec::new(),
         };
-        scope.add_table(temp_table);
+        let _ = scope.add_table(temp_table);
 
         let items = CompleteFieldsUseCase::execute(&scope, "ВТ", "");
 
@@ -419,7 +419,7 @@ mod tests {
             range: TextRange::default(),
             subquery: Vec::new(),
         };
-        scope.add_table(temp_table);
+        let _ = scope.add_table(temp_table);
 
         let items = CompleteFieldsUseCase::execute(&scope, "ВТ", "Наим");
 

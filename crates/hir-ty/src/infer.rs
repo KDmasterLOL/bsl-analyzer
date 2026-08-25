@@ -869,6 +869,35 @@ impl<'db> InferenceContext<'db> {
         self.proceed_arity = Some((required_count, total_count));
     }
 
+    /// The return type a call site sees once a documented cross-reference has been followed.
+    ///
+    /// Whether the slot names a target at all is NOT asked here — that was recorded when the
+    /// documentation was parsed. Asking it again in terms of types would reintroduce the guesswork
+    /// the recorded bit exists to avoid, and would get it wrong: a slot documented
+    /// `Массив из см. X.Y` lowers to an array of the permissive type, not to it. The one test on
+    /// `resolved` below is a different question — whether replacing it would take something away.
+    ///
+    /// Applied UNDER [`Self::effective_local_return`], so an extension that supplies its own
+    /// return still wins: effective and weaving inference are out of scope here.
+    fn documented_return(&self, method_id: hir_def::MethodId, resolved: TypeId) -> TypeId {
+        // Never over keys a BODY proved. Where the two doc-parsers disagree — a one-line
+        // `Возвращаемое значение: см. Цель.Метод` is such a place — the signature falls back to
+        // what the body proves, and replacing that would take keys away from the caller.
+        //
+        // The test is on the origin of those keys, not on their presence: a slot documented
+        // `Структура:` with a field `* Поле - см. X.Y` also arrives here carrying fields, and it is
+        // exactly the slot the resolved answer improves.
+        if crate::lower::doc_structure::has_body_proven_structure(self.db, resolved) {
+            return resolved;
+        }
+        crate::doc_see::doc_see_signature_query(
+            self.db,
+            hir_def::MethodIdInput::new(self.db, method_id),
+        )
+        .ret
+        .unwrap_or(resolved)
+    }
+
     /// In effective inference, prefer a LOCAL method's CHANGED-body return over the value
     /// materialised by the base-keyed `resolve_*` paths (which re-derive the base body).
     /// A no-op for cross-module resolutions (the file guard fails) and for ordinary modules
@@ -1041,15 +1070,24 @@ impl<'db> InferenceContext<'db> {
         let (method_id, signature) = signatures.first()?;
         self.expr_types.insert(callee, self.db.unknown());
 
+        // Two branches, and both must be served. The multi-variant one returns before any call
+        // candidate is built, so a substitution made only where `primary_return` is passed would
+        // leave every bare name with more than one global export on tier 1.
         if signatures.len() > 1 {
             let returns = signatures
                 .iter()
-                .map(|(method, signature)| self.effective_local_return(*method, signature.ret))
+                .map(|(method, signature)| {
+                    self.effective_local_return(
+                        *method,
+                        self.documented_return(*method, signature.ret),
+                    )
+                })
                 .collect();
             return Some(self.db.union(returns));
         }
 
-        let return_ty = self.effective_local_return(*method_id, signature.ret);
+        let return_ty = self
+            .effective_local_return(*method_id, self.documented_return(*method_id, signature.ret));
         let candidates =
             crate::user_call_candidates::for_resolved_method(self.db, name, *method_id, return_ty)
                 .ok()?;
@@ -1579,6 +1617,53 @@ impl<'db> InferenceContext<'db> {
         )
     }
 
+    /// Gives a parameter the fields its doc-comment declares, for use inside the method's own body.
+    ///
+    /// The materialised signature serves calls from the outside; within the body a parameter is a
+    /// binding with no reaching write, and bare-name resolution answers `Unknown` for it. Without
+    /// this seed a documented structure is offered at every call site and nowhere in the method
+    /// that receives it.
+    ///
+    /// Ordinary modules only: effective (`&ИзменениеИКонтроль`) and weaving inference build their
+    /// symbols differently, and are left exactly as they were.
+    fn seed_documented_structure_parameters(&mut self) {
+        let DefWithBodyId::Method(local_id) = self.owner else {
+            return;
+        };
+        if self.local_symbols.is_some() || self.weaving_base.is_some() {
+            return;
+        }
+
+        let module = hir_def::ModuleId::new(self.context_file_id);
+        let symbol_tree = self.db.symbol_tree(module);
+        let method_id = hir_def::MethodId { module, local_id };
+        let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
+            return;
+        };
+        if method_symbol.docs.is_none() {
+            return;
+        }
+
+        let signature = crate::method_resolution::materialise_signature(self.db, method_symbol);
+        // A parameter documented by pointing at another method is seeded from that method's
+        // documentation; one documented inline keeps the type the signature already lowered.
+        let referenced = crate::doc_see::doc_see_signature_query(
+            self.db,
+            hir_def::MethodIdInput::new(self.db, method_id),
+        );
+        for (index, (binding, ty)) in
+            self.body.params().zip(signature.params.iter().copied()).enumerate()
+        {
+            let ty = referenced.param(index).unwrap_or(ty);
+            if !crate::lower::doc_structure::is_doc_structure(self.db, ty) {
+                continue;
+            }
+            self.binding_types.insert(binding, ty);
+            let name = NormName::intern(self.body.binding(binding).name.as_str());
+            self.var_types.insert(name, ty);
+        }
+    }
+
     pub fn infer_all(&mut self) {
         let _p = tracing::debug_span!("infer_all").entered();
 
@@ -1612,6 +1697,8 @@ impl<'db> InferenceContext<'db> {
                 collect_structure_shapes(&self.body, SeedRoots::NewLiterals, None)
             }
         };
+
+        self.seed_documented_structure_parameters();
 
         let stmts: Vec<StmtIdx> = self.body.body_stmts_typed().to_vec();
         self.infer_stmts(&stmts);
@@ -2798,8 +2885,10 @@ impl<'db> InferenceContext<'db> {
                             );
                         }
                         self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self
-                            .effective_local_return(resolution.method_id, resolution.return_type);
+                        let return_ty = self.effective_local_return(
+                            resolution.method_id,
+                            self.documented_return(resolution.method_id, resolution.return_type),
+                        );
                         let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
                             self.db,
                             &method_name,
@@ -2855,8 +2944,10 @@ impl<'db> InferenceContext<'db> {
                             );
                         }
                         self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self
-                            .effective_local_return(resolution.method_id, resolution.return_type);
+                        let return_ty = self.effective_local_return(
+                            resolution.method_id,
+                            self.documented_return(resolution.method_id, resolution.return_type),
+                        );
                         let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
                             self.db,
                             &method_name,
@@ -2923,8 +3014,10 @@ impl<'db> InferenceContext<'db> {
                             );
                         }
                         self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self
-                            .effective_local_return(resolution.method_id, resolution.return_type);
+                        let return_ty = self.effective_local_return(
+                            resolution.method_id,
+                            self.documented_return(resolution.method_id, resolution.return_type),
+                        );
                         let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
                             self.db,
                             &method_name,
@@ -3291,7 +3384,7 @@ impl<'db> InferenceContext<'db> {
             .filter(|ret| !self.is_unknown(*ret));
         let sig =
             crate::method_resolution::materialise_signature_enriched(self.db, method.id, method);
-        let return_ty = effective_ret.unwrap_or(sig.ret);
+        let return_ty = effective_ret.unwrap_or_else(|| self.documented_return(method.id, sig.ret));
         let Ok(candidates) =
             crate::user_call_candidates::for_resolved_method(self.db, name, method.id, return_ty)
         else {
@@ -3387,7 +3480,8 @@ impl<'db> InferenceContext<'db> {
                 // arm that wins under flow-insensitive typing. Narrowing on either gives the
                 // receiver a `CommonModule` type for member resolution / hover / completion,
                 // without overriding a method that declares a genuinely useful return type.
-                let mut return_ty = resolution.return_type;
+                let mut return_ty =
+                    self.documented_return(resolution.method_id, resolution.return_type);
                 if (self.is_unknown(return_ty) || self.is_undefined(resolution.return_type))
                     && method_name.as_str().fold_lower() == "общиймодуль"
                 {

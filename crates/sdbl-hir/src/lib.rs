@@ -10,7 +10,7 @@ mod standard_fields;
 mod types;
 
 pub use context_detector::{detect_context, is_mdo_type, parse_nested_column_ref};
-pub use diagnostics::{LikeUsageKind, SdblDiagnostic};
+pub use diagnostics::{ambiguous_qualified_head_message, LikeUsageKind, SdblDiagnostic};
 pub use hir::{
     ExprHir, FieldDef, FieldHir, FunctionKind, GroupByHir, InValues, JoinHir, JoinType, Name,
     OrderByHir, OrderByItem, ResolvedTable, SdblHir, SdblPackage, SdblQuery, SelectHir, TableRef,

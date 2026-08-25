@@ -66,8 +66,8 @@ pub struct McpServeArgs {
     /// used it for the idle TTL (`BSL_MCP_IDLE_TTL_SECS`, default 300s); a backend that
     /// never served any traffic gives up after a short orphan grace
     /// (`BSL_MCP_ORPHAN_GRACE_SECS`, default 30s). `http` serves multiple clients over
-    /// Streamable HTTP on the required `--port`. `daemon` *is* the broker backend and is
-    /// launched internally by a broker proxy. `broker-required` connects only to the
+    /// Streamable HTTP using individual options or `--config`. `daemon` *is* the broker backend
+    /// and is launched internally by a broker proxy. `broker-required` connects only to the
     /// already-running daemon named by `--backend-pid`, whose value the supervisor knows
     /// because it started that daemon: it never launches or falls back to direct stdio, and
     /// it serves the 1C connection the daemon was started with.
@@ -88,7 +88,7 @@ pub struct McpServeArgs {
     #[arg(long)]
     host: Option<IpAddr>,
 
-    /// TCP port for HTTP mode. Required and must be in 1..=65535.
+    /// TCP port for HTTP mode. Required without `--config` and must be in 1..=65535.
     #[arg(long)]
     port: Option<u16>,
 
@@ -99,8 +99,17 @@ pub struct McpServeArgs {
     /// localhost, 127.0.0.1 and ::1 entirely, so name them again if the server must keep
     /// answering its own machine. A wildcard bind address such as 0.0.0.0 is not a Host
     /// value and allows nothing that a client normally sends.
-    #[arg(long = "allowed-host")]
+    #[arg(long = "allowed_hosts", num_args = 1.., value_name = "HOST")]
     allowed_hosts: Vec<String>,
+
+    /// Path to a TOML file with HTTP binding settings.
+    ///
+    /// Alternative to `--host`, `--port` and `--allowed_hosts`. The file contains top-level
+    /// `host`, `port` and `allowed_hosts` fields; `allowed_hosts` is an array of strings. Only
+    /// `port` is required: an omitted `host` binds loopback and an omitted `allowed_hosts`
+    /// keeps the built-in local names, exactly as the flags do.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["host", "port", "allowed_hosts"])]
+    config: Option<PathBuf>,
 
     #[arg(long)]
     onec_url: Option<String>,
@@ -207,11 +216,22 @@ pub enum McpServeMode {
     Http,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HttpServeOptions {
+    // The file is an alternative to the flags, so it inherits their defaults: a host left out
+    // binds loopback and an omitted allowlist keeps the built-in local names. Without these a
+    // working `--mode http --port 8021` would stop working the moment it was moved into a file,
+    // which is the one migration the file exists for.
+    #[serde(default = "loopback_host")]
     host: IpAddr,
     port: u16,
+    #[serde(default)]
     allowed_hosts: Vec<String>,
+}
+
+fn loopback_host() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
 }
 
 #[derive(Args)]
@@ -455,10 +475,46 @@ fn warn_on_wildcard_allowlist(allowed_hosts: &[String]) {
     if !wildcard.is_empty() {
         tracing::warn!(
             entries = %wildcard.join(", "),
-            "--allowed-host names a bind address rather than a Host header; a client sends \
-             the address it dialed, which is never a wildcard"
+            "allowed_hosts names a bind address rather than a Host header; \
+             a client sends the address it dialed, which is never a wildcard"
         );
     }
+}
+
+fn load_http_options(path: &Path) -> Result<HttpServeOptions, io::Error> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        io::Error::new(error.kind(), format!("failed to read --config {}: {error}", path.display()))
+    })?;
+    toml::from_str(&contents).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to parse --config {} as TOML: {error}", path.display()),
+        )
+    })
+}
+
+fn validate_http_options(options: HttpServeOptions) -> Result<HttpServeOptions, io::Error> {
+    if options.port == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "port must be in 1..=65535"));
+    }
+
+    // A blank entry satisfies no `Host` at all, so counting it towards the allowlist
+    // would start a server that rejects every request it receives.
+    if options.allowed_hosts.iter().any(|host| host.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "allowed_hosts must not contain empty entries",
+        ));
+    }
+
+    if !options.host.is_loopback() && options.allowed_hosts.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a non-loopback host requires at least one allowed_hosts entry",
+        ));
+    }
+
+    Ok(options)
 }
 
 fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, io::Error> {
@@ -534,37 +590,41 @@ fn validate_serve_args(args: &McpServeArgs) -> Result<Option<HttpServeOptions>, 
         if !args.allowed_hosts.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "--allowed-host is only valid with --mode http",
+                "--allowed_hosts is only valid with --mode http",
+            ));
+        }
+        if args.config.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--config is only valid with --mode http",
             ));
         }
         return Ok(None);
     }
 
+    if let Some(config_path) = args.config.as_deref() {
+        if args.host.is_some() || args.port.is_some() || !args.allowed_hosts.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "--config cannot be combined with --host, --port or --allowed_hosts",
+            ));
+        }
+        return Ok(Some(validate_http_options(load_http_options(config_path)?)?));
+    }
+
     let port = args.port.ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "--port is required with --mode http")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "--port or --config is required with --mode http",
+        )
     })?;
-    if port == 0 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "--port must be in 1..=65535"));
-    }
-
-    // A blank entry satisfies no `Host` at all, so counting it towards the allowlist
-    // would start a server that rejects every request it receives.
-    if args.allowed_hosts.iter().any(|host| host.trim().is_empty()) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "--allowed-host must not be empty",
-        ));
-    }
-
-    let host = args.host.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
-    if !host.is_loopback() && args.allowed_hosts.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "non-loopback --host requires at least one --allowed-host",
-        ));
-    }
-
-    Ok(Some(HttpServeOptions { host, port, allowed_hosts: args.allowed_hosts.clone() }))
+    // Both ways in are validated by the same function: a rule enforced on one of them alone
+    // would let the other start a server the first would have refused.
+    Ok(Some(validate_http_options(HttpServeOptions {
+        host: args.host.unwrap_or_else(loopback_host),
+        port,
+        allowed_hosts: args.allowed_hosts.clone(),
+    })?))
 }
 
 fn resolve_workspace_cache(
@@ -1410,8 +1470,8 @@ mod tests {
     use super::{
         daemon_command, resolve_onec_password, resolve_serve_mode_with_override,
         resolve_workspace_cache, validate_backend_pid, validate_onec_settings, validate_serve_args,
-        warn_on_wildcard_allowlist, McpCommand, McpProfileCli, McpServeArgs, McpServeMode,
-        ServeModeContext,
+        warn_on_wildcard_allowlist, HttpServeOptions, McpCommand, McpProfileCli, McpServeArgs,
+        McpServeMode, ServeModeContext,
     };
     use clap::Parser;
     use std::io;
@@ -1542,7 +1602,25 @@ mod tests {
     }
 
     #[test]
-    fn http_cli_parses_ip_and_repeated_allowed_hosts() {
+    fn http_cli_parses_config_path() {
+        let cli = ServeCli::try_parse_from([
+            "serve",
+            "--profile",
+            "workspace",
+            "--source-dir",
+            ".",
+            "--mode",
+            "http",
+            "--config",
+            "mcp-http.toml",
+        ])
+        .expect("valid HTTP command line");
+
+        assert_eq!(cli.args.config, Some(PathBuf::from("mcp-http.toml")));
+    }
+
+    #[test]
+    fn http_cli_parses_allowed_hosts_array() {
         let cli = ServeCli::try_parse_from([
             "serve",
             "--profile",
@@ -1555,9 +1633,8 @@ mod tests {
             "0.0.0.0",
             "--port",
             "8021",
-            "--allowed-host",
+            "--allowed_hosts",
             "first.example.test",
-            "--allowed-host",
             "second.example.test",
         ])
         .expect("valid HTTP command line");
@@ -1601,6 +1678,140 @@ mod tests {
     }
 
     #[test]
+    fn http_config_loads_allowed_hosts_array() {
+        let mut args = serve_args(McpServeMode::Http, None);
+        args.config =
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-http.toml"));
+        let options = validate_serve_args(&args)
+            .expect("valid HTTP TOML")
+            .expect("HTTP mode returns options");
+
+        assert_eq!(options.host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(options.port, 8021);
+        assert_eq!(
+            options.allowed_hosts,
+            ["localhost", "127.0.0.1", "::1", "10.9.9.10", "mcp-server", "mcp-server.local",]
+        );
+    }
+
+    #[test]
+    fn http_config_conflicts_with_individual_options() {
+        let conflict = ServeCli::try_parse_from([
+            "serve",
+            "--profile",
+            "workspace",
+            "--source-dir",
+            ".",
+            "--mode",
+            "http",
+            "--config",
+            "mcp-http.toml",
+            "--port",
+            "8021",
+        ])
+        .expect_err("--config and individual HTTP options are alternatives");
+
+        assert_eq!(conflict.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    fn http_options_from_toml(contents: &str) -> (tempfile::TempDir, McpServeArgs) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("mcp-http.toml");
+        std::fs::write(&path, contents).expect("write config");
+        let mut args = serve_args(McpServeMode::Http, None);
+        args.config = Some(path);
+        (dir, args)
+    }
+
+    /// `--config` is advertised as an alternative to the three flags, so a file has to accept
+    /// everything the flags accept. A required `host` would break the one migration the file
+    /// exists for: moving a working loopback run into a scheduler task.
+    #[test]
+    fn http_config_omitting_host_and_allowlist_matches_the_flags() {
+        let (_dir, args) = http_options_from_toml("port = 8021\n");
+        let from_file = validate_serve_args(&args).expect("port alone is a valid file");
+
+        let mut flags = serve_args(McpServeMode::Http, Some(8021));
+        flags.allowed_hosts.clear();
+        let from_flags = validate_serve_args(&flags).expect("port alone is a valid command line");
+
+        assert_eq!(from_file, from_flags);
+        assert_eq!(
+            from_file,
+            Some(HttpServeOptions {
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 8021,
+                allowed_hosts: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn http_config_omitting_host_keeps_the_named_allowlist() {
+        let (_dir, args) =
+            http_options_from_toml("port = 8021\nallowed_hosts = [\"mcp.example.test\"]\n");
+        let options = validate_serve_args(&args)
+            .expect("a named allowlist without a host is valid")
+            .expect("HTTP mode returns options");
+
+        assert_eq!(options.host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(options.allowed_hosts, ["mcp.example.test"]);
+    }
+
+    #[test]
+    fn http_config_rejects_port_zero() {
+        let (_dir, args) = http_options_from_toml("port = 0\n");
+        let err = validate_serve_args(&args).expect_err("port 0 binds nothing");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("1..=65535"), "{err}");
+    }
+
+    #[test]
+    fn http_config_rejects_a_blank_allowlist_entry() {
+        let (_dir, args) =
+            http_options_from_toml("port = 8021\nallowed_hosts = [\"mcp.example.test\", \" \"]\n");
+        let err = validate_serve_args(&args)
+            .expect_err("a blank entry matches no Host and must be rejected");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("allowed_hosts"), "{err}");
+    }
+
+    #[test]
+    fn http_config_rejects_a_non_loopback_host_without_an_allowlist() {
+        let (_dir, args) = http_options_from_toml("host = \"0.0.0.0\"\nport = 8021\n");
+        let err = validate_serve_args(&args)
+            .expect_err("a non-loopback bind without an allowlist is unsafe");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("allowed_hosts"), "{err}");
+    }
+
+    /// A misspelled key is a typo in an operator's file, and accepting it silently would start
+    /// a server bound somewhere other than the one place the file names.
+    #[test]
+    fn http_config_rejects_an_unknown_field() {
+        let (_dir, args) = http_options_from_toml("port = 8021\nhosts = [\"mcp.example.test\"]\n");
+        let err = validate_serve_args(&args).expect_err("an unknown key is a typo");
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("hosts"), "{err}");
+    }
+
+    #[test]
+    fn http_config_names_the_path_it_could_not_read() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("absent.toml");
+        let mut args = serve_args(McpServeMode::Http, None);
+        args.config = Some(missing.clone());
+
+        let err = validate_serve_args(&args).expect_err("an unreadable file cannot be served");
+
+        assert!(err.to_string().contains(&missing.display().to_string()), "{err}");
+    }
+
+    #[test]
     fn existing_stdio_cli_keeps_parsing_without_http_options() {
         let cli = ServeCli::try_parse_from([
             "serve",
@@ -1617,6 +1828,7 @@ mod tests {
         assert!(cli.args.host.is_none());
         assert!(cli.args.port.is_none());
         assert!(cli.args.allowed_hosts.is_empty());
+        assert!(cli.args.config.is_none());
     }
 
     #[test]
@@ -1657,8 +1869,7 @@ mod tests {
         for mode in
             [McpServeMode::Stdio, McpServeMode::Broker, McpServeMode::Daemon, McpServeMode::Http]
         {
-            let port = matches!(mode, McpServeMode::Http).then_some(8021);
-            let mut args = serve_args(mode, port);
+            let mut args = serve_args(mode, None);
             args.backend_pid = Some(42);
 
             let error = validate_serve_args(&args)
@@ -1741,8 +1952,15 @@ mod tests {
             args.port = None;
             args.allowed_hosts = vec!["mcp.example.test".to_owned()];
             assert!(
-                validate_serve_args(&args).unwrap_err().to_string().contains("--allowed-host"),
-                "{mode:?} must reject --allowed-host"
+                validate_serve_args(&args).unwrap_err().to_string().contains("--allowed_hosts"),
+                "{mode:?} must reject --allowed_hosts"
+            );
+
+            args.allowed_hosts.clear();
+            args.config = Some(PathBuf::from("mcp-http.toml"));
+            assert!(
+                validate_serve_args(&args).unwrap_err().to_string().contains("--config"),
+                "{mode:?} must reject --config"
             );
         }
     }
@@ -1787,7 +2005,7 @@ mod tests {
         let wildcard = vec!["0.0.0.0".to_owned(), "mcp.example.test".to_owned()];
         let (_, warned) = warnings_during(|| warn_on_wildcard_allowlist(&wildcard));
         assert!(warned.contains("0.0.0.0"), "{warned}");
-        assert!(warned.contains("--allowed-host"), "{warned}");
+        assert!(warned.contains("allowed_hosts"), "{warned}");
         assert!(!warned.contains("mcp.example.test"), "only the wildcard is named: {warned}");
 
         let real = vec!["mcp.example.test".to_owned(), "127.0.0.1".to_owned()];
@@ -1804,7 +2022,7 @@ mod tests {
             validate_serve_args(&args).expect_err("non-loopback bind without allowlist is unsafe");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("--allowed-host"));
+        assert!(err.to_string().contains("allowed_hosts"));
     }
 
     #[test]
@@ -1817,7 +2035,7 @@ mod tests {
             .expect_err("a blank allowlist entry matches no Host and must be rejected");
 
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(err.to_string().contains("--allowed-host"));
+        assert!(err.to_string().contains("allowed_hosts"));
     }
 
     #[test]
@@ -1917,11 +2135,11 @@ mod tests {
     #[test]
     fn enable_tool_rejects_a_name_from_the_other_profile() {
         let mut args = serve_args(McpServeMode::Stdio, None);
-        args.enable_tools = vec!["syntax_help".to_owned()];
+        args.enable_tools = vec!["its_help".to_owned()];
 
-        let err = validate_serve_args(&args).expect_err("syntax_help is not a workspace tool");
+        let err = validate_serve_args(&args).expect_err("its_help is not a workspace tool");
 
-        assert!(err.to_string().contains("syntax_help"), "{err}");
+        assert!(err.to_string().contains("its_help"), "{err}");
     }
 
     #[test]
@@ -2078,6 +2296,7 @@ mod tests {
             host: None,
             port,
             allowed_hosts: Vec::new(),
+            config: None,
             onec_url: None,
             onec_user: String::new(),
             onec_password: String::new(),
@@ -2176,13 +2395,13 @@ mod tests {
         {
             let McpCommand::Serve(args) = &mut command else { unreachable!() };
             args.cache_dir = Some(cache.clone());
-            args.host = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+            args.config = Some(PathBuf::from("mcp-http.toml"));
         }
 
         assert!(command.daemon_log_file_for(Some("1")).is_none());
         assert!(!cache.exists(), "a rejected command created {}", cache.display());
         let McpCommand::Serve(args) = &command else { unreachable!() };
-        assert!(validate_serve_args(args).is_err(), "--host outside http mode is rejected");
+        assert!(validate_serve_args(args).is_err(), "--config outside http mode is rejected");
     }
 
     #[test]

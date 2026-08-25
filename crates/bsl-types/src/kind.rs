@@ -400,6 +400,7 @@ pub enum ProjectionOrigin {
     FormAttribute,
     ValueTableLiteral,
     StructureLiteral,
+    DocComment,
     Unknown,
 }
 
@@ -411,6 +412,7 @@ pub enum ProjectionFieldSource {
     Aggregate,
     Derived,
     StructureLiteral,
+    DocComment,
     Unknown,
 }
 

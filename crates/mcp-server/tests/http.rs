@@ -169,6 +169,10 @@ async fn workspace_http_preserves_the_metadata_meta_type_contract() {
             .is_some_and(|properties| properties.contains_key("meta_type")),
         "HTTP tools/list must preserve the metadata.meta_type input contract"
     );
+    assert!(
+        metadata.output_schema.is_none(),
+        "metadata has action-specific shapes and must not publish a tool-wide outputSchema"
+    );
 
     client.cancel().await.expect("client session should close");
     server.stop().await;

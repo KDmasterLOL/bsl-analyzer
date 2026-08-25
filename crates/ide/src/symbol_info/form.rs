@@ -50,7 +50,7 @@ pub(super) fn resolve_form(
     req: &SymbolInfoRequest,
 ) -> Option<SymbolInfoCard> {
     let lookup = parse_form_lookup(segments)?;
-    let resolved = resolve_form_lookup(db, lookup)?;
+    let resolved = resolve_form_lookup(db, lookup, req.position.map(|position| position.file_id))?;
     match lookup.member {
         Some(member) => card::form_member_card(db, symbol, &resolved, member, req),
         None => Some(card::form_card(db, symbol, &resolved, req)),
@@ -79,16 +79,34 @@ fn parse_form_lookup<'a>(segments: &[&'a str]) -> Option<FormLookup<'a>> {
     }
 }
 
-fn resolve_form_lookup(db: &RootDatabaseImpl, lookup: FormLookup<'_>) -> Option<ResolvedForm> {
+fn resolve_form_lookup(
+    db: &RootDatabaseImpl,
+    lookup: FormLookup<'_>,
+    visibility_file: Option<FileId>,
+) -> Option<ResolvedForm> {
     let module_index = db.module_index(CONFIG_SOURCE_ROOT);
     let form_name = Name::new(lookup.form_name);
-    let form_file = match lookup.owner {
-        Some((mdo_type, object)) => {
-            let object_name = Name::new(object);
-            module_index.resolve_form_module(Some((mdo_type, &object_name)), &form_name)
-        }
-        None => module_index.resolve_form_module(None, &form_name),
-    }?;
+    let object_name = lookup.owner.map(|(_, object)| Name::new(object));
+    let owner =
+        lookup.owner.zip(object_name.as_ref()).map(|((mdo_type, _), object)| (mdo_type, object));
+    let visible_ranks = visibility_file.and_then(|file| db.visible_config_root_ranks(file));
+    let form_file = module_index
+        .form_module_candidates(owner, &form_name)
+        .iter()
+        .filter(|&&file| {
+            visible_ranks.as_ref().is_none_or(|ranks| {
+                db.config_root_rank_and_label(file).is_some_and(|(rank, _)| ranks.contains(&rank))
+            })
+        })
+        .copied()
+        .min_by_key(|&file| {
+            db.config_root_rank_and_label(file).map_or(usize::MAX, |(rank, _)| rank)
+        })
+        .or_else(|| {
+            visibility_file
+                .is_none()
+                .then(|| module_index.resolve_form_module(owner, &form_name))?
+        })?;
     let sema = Semantics::new(db);
     let form = sema.form(form_file)?;
     let path_key = file_path(db, form_file).and_then(|path| hir::parse_form_module_path(&path));
