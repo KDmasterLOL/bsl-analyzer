@@ -19,10 +19,60 @@ struct SearchDriftPlan {
     dirty_keys: Vec<bsl_search::FileKey>,
     removed_keys: Vec<bsl_search::FileKey>,
     context_keys: Vec<bsl_search::FileKey>,
+    full_rescan: bool,
     roots_epoch: u64,
     preparation_error: Option<String>,
     nudge_rebuild: bool,
     nudge_project_reload: bool,
+    dirty_cursor: usize,
+    removed_cursor: usize,
+    context_cursor: usize,
+}
+
+#[derive(Default)]
+struct RescanDebt {
+    streak: u32,
+    next_allowed: Option<std::time::Instant>,
+}
+
+impl RescanDebt {
+    fn required(&self) -> bool {
+        self.next_allowed.is_some()
+    }
+
+    fn record_failure(&mut self, now: std::time::Instant) {
+        let delay = super::overlay_retry::retry_delay(self.streak);
+        self.streak = self.streak.saturating_add(1);
+        self.next_allowed = Some(now + delay);
+    }
+
+    fn waiting(&self, now: std::time::Instant) -> bool {
+        #[cfg(test)]
+        if FORCE_RESCAN_DEBT_DUE.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.next_allowed.is_some_and(|next| now < next)
+    }
+
+    fn wait_for(&self, now: std::time::Instant, idle: Duration) -> Duration {
+        #[cfg(test)]
+        if FORCE_RESCAN_DEBT_DUE.load(Ordering::SeqCst) && self.required() {
+            return Duration::ZERO;
+        }
+        self.next_allowed.map_or(idle, |next| next.saturating_duration_since(now).min(idle))
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+impl SearchDriftPlan {
+    fn complete(&self) -> bool {
+        self.dirty_cursor == self.dirty_keys.len()
+            && self.removed_cursor == self.removed_keys.len()
+            && self.context_cursor == self.context_keys.len()
+    }
 }
 
 /// Test seam: force a reconcile walk (the overflow rescan and the boot store reconcile) to count as
@@ -34,6 +84,10 @@ pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
 
 #[cfg(test)]
 static FORCE_DRIFT_APPLY_ERROR: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+static FORCE_RESCAN_DEBT_DUE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 /// One slice of waiting for the watch to arm, and the whole budget for it.
@@ -132,13 +186,19 @@ impl SharedState {
                 // consumer that feeds it: a running thread is a feeder that exists.
                 loop {
                     match Self::apply_workspace_search(&engine, &lease, |engine| {
-                        engine.enable_workspace_watcher_mode()
+                        engine.enable_workspace_watcher_mode();
+                        Ok(())
                     }) {
                         super::WorkspaceSearchApply::Applied(()) => break,
-                        super::WorkspaceSearchApply::Retry => {
+                        super::WorkspaceSearchApply::TransientRefusal => {
                             std::thread::sleep(crate::workspace_lease::VERDICT_TTL)
                         }
                         super::WorkspaceSearchApply::Terminal => {
+                            hub.unsubscribe(cursor);
+                            return;
+                        }
+                        super::WorkspaceSearchApply::OperationError(error) => {
+                            tracing::warn!("could not enable workspace watcher mode: {error}");
                             hub.unsubscribe(cursor);
                             return;
                         }
@@ -149,20 +209,46 @@ impl SharedState {
                 let mut cursor = cursor;
                 let mut generation = 0u64;
                 let mut pending = None;
+                let mut rescan_debt = RescanDebt::default();
                 loop {
                     if pending.is_none() {
-                        generation = hub.wait_for_change(generation, Duration::from_secs(30));
+                        generation = hub.wait_for_change(
+                            generation,
+                            rescan_debt
+                                .wait_for(std::time::Instant::now(), Duration::from_secs(30)),
+                        );
                         let batch = hub.materialize(cursor);
+                        if rescan_debt.waiting(std::time::Instant::now()) {
+                            let fresh = !batch.entries.is_empty() || batch.rescan_required;
+                            if fresh {
+                                if Self::root_transition_relevant_drift(
+                                    &batch.entries,
+                                    true,
+                                    &graph,
+                                ) {
+                                    root_drift_epoch.fetch_add(1, Ordering::SeqCst);
+                                }
+                                graph.nudge_rebuild();
+                                graph.nudge_project_reload();
+                                hub.acknowledge(&batch);
+                                cursor = batch.cursor;
+                                if let Some(retry) = &overlay_retry {
+                                    retry.kick_fresh();
+                                }
+                            }
+                            continue;
+                        }
                         let fresh = !batch.entries.is_empty() || batch.rescan_required;
+                        let rescan_required = batch.rescan_required || rescan_debt.required();
                         let root_relevant = Self::root_transition_relevant_drift(
                             &batch.entries,
-                            batch.rescan_required,
+                            rescan_required,
                             &graph,
                         );
                         let plan = Self::prepare_search_drift(
                             &engine,
                             &batch.entries,
-                            batch.rescan_required,
+                            rescan_required,
                             &graph,
                         );
                         pending = Some((batch, plan, fresh, root_relevant));
@@ -172,22 +258,40 @@ impl SharedState {
                         root_drift_epoch.fetch_add(1, Ordering::SeqCst);
                         *root_relevant = false;
                     }
-                    match Self::apply_prepared_search_drift(&engine, &lease, plan, &graph) {
-                        super::WorkspaceSearchApply::Applied(()) => {}
-                        super::WorkspaceSearchApply::Retry => {
-                            *plan = Self::prepare_search_drift(
-                                &engine,
-                                &batch.entries,
-                                batch.rescan_required,
-                                &graph,
-                            );
+                    let applied = Self::apply_prepared_search_drift(&engine, &lease, plan, &graph);
+                    if matches!(&applied, super::WorkspaceSearchApply::Applied(false)) {
+                        continue;
+                    }
+                    // Nudge after the mark attempt so a successful build captures its seq bound.
+                    // This remains independent of the apply outcome: an error still gets a graph
+                    // catch-up, while a transient retry nudges again and records a follow-up build.
+                    if plan.nudge_rebuild {
+                        graph.nudge_rebuild();
+                    }
+                    if plan.nudge_project_reload {
+                        graph.nudge_project_reload();
+                    }
+                    match applied {
+                        super::WorkspaceSearchApply::Applied(true) => {
+                            if plan.full_rescan {
+                                rescan_debt.clear();
+                            }
+                        }
+                        super::WorkspaceSearchApply::TransientRefusal => {
                             std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
                             continue;
+                        }
+                        super::WorkspaceSearchApply::OperationError(error) => {
+                            tracing::warn!(
+                                "search drift apply failed; advancing the hub cursor: {error}"
+                            );
+                            rescan_debt.record_failure(std::time::Instant::now());
                         }
                         super::WorkspaceSearchApply::Terminal => {
                             hub.unsubscribe(cursor);
                             return;
                         }
+                        super::WorkspaceSearchApply::Applied(false) => unreachable!(),
                     }
                     hub.acknowledge(batch);
                     cursor = batch.cursor;
@@ -241,14 +345,25 @@ impl SharedState {
         rescan_required: bool,
         graph: &GraphState,
     ) {
-        let plan = Self::prepare_search_drift(engine, entries, rescan_required, graph);
-        let result = Self::apply_prepared_search_drift(
-            engine,
-            &crate::workspace_lease::WorkspaceLease::unmanaged(),
-            &plan,
-            graph,
-        );
-        debug_assert!(matches!(result, super::WorkspaceSearchApply::Applied(())));
+        let mut plan = Self::prepare_search_drift(engine, entries, rescan_required, graph);
+        let result = loop {
+            let result = Self::apply_prepared_search_drift(
+                engine,
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+                &mut plan,
+                graph,
+            );
+            if !matches!(&result, super::WorkspaceSearchApply::Applied(false)) {
+                break result;
+            }
+        };
+        if plan.nudge_rebuild {
+            graph.nudge_rebuild();
+        }
+        if plan.nudge_project_reload {
+            graph.nudge_project_reload();
+        }
+        debug_assert!(matches!(result, super::WorkspaceSearchApply::Applied(true)));
     }
 
     fn prepare_search_drift(
@@ -279,6 +394,7 @@ impl SharedState {
                 "workspace change hub overflowed; re-marking all workspace .bsl paths dirty for the search overlay"
             );
             plan.mark_all_context = true;
+            plan.full_rescan = true;
             plan.nudge_project_reload = true;
             Self::prepare_search_rewalk(engine, &mut plan);
             Self::materialize_search_drift(engine, &mut plan);
@@ -299,8 +415,13 @@ impl SharedState {
                     plan.context_paths.extend(walk_bsl_files(&subtree));
                 }
             }
-            plan.context_paths
-                .extend(Self::resolve_referencing_module_files(graph, &class.xml_paths));
+            match Self::resolve_referencing_module_files(graph, &class.xml_paths) {
+                Ok(paths) => plan.context_paths.extend(paths),
+                Err(error) => {
+                    plan.preparation_error = Some(error);
+                    plan.full_rescan = true;
+                }
+            }
             plan.mark_all_context |= mark_whole;
             plan.nudge_rebuild = mark_whole || !plan.context_paths.is_empty();
         }
@@ -338,6 +459,10 @@ impl SharedState {
             .extend(plan.context_paths.iter().filter_map(|path| engine.workspace_file_key(path)));
 
         let prepared = (|| -> Result<(), bsl_search::SearchError> {
+            if plan.mark_all_context {
+                plan.context_keys.extend(engine.known_workspace_keys()?);
+                plan.mark_all_context = false;
+            }
             plan.removed_keys.extend(engine.vanished_workspace_keys(&plan.removed_subtrees)?);
             if let Some(present) = &plan.reconcile_present {
                 let present: std::collections::HashSet<_> =
@@ -352,6 +477,10 @@ impl SharedState {
         }
         plan.removed_keys.sort_unstable();
         plan.removed_keys.dedup();
+        plan.dirty_keys.sort_unstable();
+        plan.dirty_keys.dedup();
+        plan.context_keys.sort_unstable();
+        plan.context_keys.dedup();
     }
 
     fn prepare_search_rewalk(engine: &SharedSearchEngine, plan: &mut SearchDriftPlan) {
@@ -382,57 +511,58 @@ impl SharedState {
     fn apply_prepared_search_drift(
         shared: &SharedSearchEngine,
         lease: &crate::workspace_lease::WorkspaceLease,
-        plan: &SearchDriftPlan,
-        graph: &GraphState,
-    ) -> super::WorkspaceSearchApply<()> {
-        let applied = Self::apply_workspace_search(shared, lease, |engine| {
-            let mut context_marked = false;
+        plan: &mut SearchDriftPlan,
+        _graph: &GraphState,
+    ) -> super::WorkspaceSearchApply<bool, bsl_search::SearchError> {
+        Self::apply_workspace_search_checkpointed(shared, lease, |engine, checkpoint| {
             if engine.workspace_roots_epoch() != plan.roots_epoch {
-                return Err(bsl_search::SearchError::Index(
+                return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
                     "workspace roots changed after search drift preparation".to_owned(),
-                ));
+                )));
             }
             if let Some(error) = &plan.preparation_error {
-                return Err(bsl_search::SearchError::Index(error.clone()));
+                return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
+                    error.clone(),
+                )));
             }
             #[cfg(test)]
             if FORCE_DRIFT_APPLY_ERROR.load(Ordering::SeqCst) {
-                return Err(bsl_search::SearchError::Index(
+                return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
                     "forced drift apply failure".to_owned(),
-                ));
+                )));
             }
-            for key in &plan.dirty_keys {
-                engine.mark_workspace_key_dirty(key.clone())?;
-            }
-            if !plan.removed_keys.is_empty() {
-                engine.remove_workspace_keys(plan.removed_keys.clone())?;
-            }
-            if plan.mark_all_context {
-                context_marked |= engine.mark_workspace_context_dirty()? > 0;
-            }
-            for key in &plan.context_keys {
-                engine.mark_workspace_key_context_dirty(key)?;
-                context_marked = true;
-            }
-            Ok::<_, bsl_search::SearchError>(context_marked)
-        });
-        match applied {
-            super::WorkspaceSearchApply::Applied(Ok(context_marked)) => {
-                if plan.nudge_rebuild && context_marked {
-                    graph.nudge_rebuild();
+            let result = (|| -> Result<(), bsl_search::SearchError> {
+                let mut remaining = bsl_search::WORKSPACE_APPLY_BATCH_ROWS;
+                while remaining > 0 && plan.dirty_cursor < plan.dirty_keys.len() {
+                    engine.mark_workspace_key_dirty(plan.dirty_keys[plan.dirty_cursor].clone())?;
+                    plan.dirty_cursor += 1;
+                    remaining -= 1;
                 }
-                if plan.nudge_project_reload {
-                    graph.nudge_project_reload();
+                if remaining > 0 && plan.removed_cursor < plan.removed_keys.len() {
+                    let end = (plan.removed_cursor + remaining).min(plan.removed_keys.len());
+                    engine.remove_workspace_keys(
+                        plan.removed_keys[plan.removed_cursor..end].to_vec(),
+                    )?;
+                    remaining -= end - plan.removed_cursor;
+                    plan.removed_cursor = end;
                 }
-                super::WorkspaceSearchApply::Applied(())
+                while remaining > 0 && plan.context_cursor < plan.context_keys.len() {
+                    engine.mark_workspace_key_context_dirty(
+                        &plan.context_keys[plan.context_cursor],
+                    )?;
+                    plan.context_cursor += 1;
+                    remaining -= 1;
+                }
+                Ok(())
+            })();
+            if let Err(error) = result {
+                return std::ops::ControlFlow::Continue(Err(error));
             }
-            super::WorkspaceSearchApply::Applied(Err(error)) => {
-                tracing::warn!("search drift apply failed; retaining batch for retry: {error}");
-                super::WorkspaceSearchApply::Retry
+            if checkpoint().is_break() {
+                return std::ops::ControlFlow::Break(());
             }
-            super::WorkspaceSearchApply::Retry => super::WorkspaceSearchApply::Retry,
-            super::WorkspaceSearchApply::Terminal => super::WorkspaceSearchApply::Terminal,
-        }
+            std::ops::ControlFlow::Continue(Ok(plan.complete()))
+        })
     }
 
     /// Reverse-look-up the workspace modules that READ any changed MDO, returning the graph's
@@ -467,21 +597,37 @@ impl SharedState {
     fn resolve_referencing_module_files(
         graph: &GraphState,
         xml_paths: &[crate::drift_classify::DriftPath],
-    ) -> std::collections::HashSet<PathBuf> {
+    ) -> Result<std::collections::HashSet<PathBuf>, String> {
+        use crate::workspace_lease::LeaseOutcome;
+
         let mut files = std::collections::HashSet::new();
         let mdo_ids: Vec<String> =
             xml_paths.iter().filter_map(|dp| xml_to_mdo_id(&dp.raw)).collect();
         if mdo_ids.is_empty() {
-            return files;
+            return Ok(files);
         }
-        let Some(snapshot) = graph.snapshot() else { return files };
+        let snapshot = match graph.snapshot_blocking() {
+            LeaseOutcome::Applied(Ok(Some(snapshot))) => snapshot,
+            LeaseOutcome::Applied(Ok(None)) => return Ok(files),
+            LeaseOutcome::Applied(Err(error)) => {
+                return Err(format!("background graph snapshot failed: {error}"))
+            }
+            LeaseOutcome::TransientRefusal => {
+                return Err("background graph snapshot lease was temporarily unavailable".to_owned())
+            }
+            LeaseOutcome::Terminal => {
+                return Err("background graph snapshot lease ended".to_owned())
+            }
+        };
         for mdo_id in mdo_ids {
             match snapshot.graph.referencing_files(&mdo_id) {
                 Ok(found) => files.extend(found.into_iter().map(PathBuf::from)),
-                Err(e) => tracing::warn!(mdo = %mdo_id, "referencing-files lookup failed: {e}"),
+                Err(error) => {
+                    return Err(format!("referencing-files lookup failed for {mdo_id}: {error}"))
+                }
             }
         }
-        files
+        Ok(files)
     }
 
     /// Re-mark every workspace `.bsl` dirty for the search overlay, then reconcile the
@@ -594,7 +740,7 @@ impl SharedState {
         match engine
             .reconcile_workspace_files_fenced(&present, |apply| Self::startup_apply(lease, apply))
         {
-            Ok(Some(removed)) => {
+            Ok(bsl_search::FenceOutcome::Applied(removed)) => {
                 if removed > 0 {
                     tracing::info!(
                         removed,
@@ -603,7 +749,10 @@ impl SharedState {
                 }
                 Some(true)
             }
-            Ok(None) => None,
+            Ok(bsl_search::FenceOutcome::Terminal) => None,
+            Ok(bsl_search::FenceOutcome::TransientRefusal) => {
+                unreachable!("startup_apply retries transient refusals")
+            }
             Err(e) => {
                 tracing::warn!("search boot reconcile failed; priming the overlay instead: {e}");
                 Some(false)
@@ -705,7 +854,7 @@ pub(super) fn prefetch_resident_overlay(
         return;
     }
 
-    if let super::WorkspaceSearchApply::Applied(Err(error)) =
+    if let super::WorkspaceSearchApply::OperationError(error) =
         SharedState::apply_workspace_search(engine, lease, |engine| {
             engine.reindex_dirty_from_snapshots(&snapshots)
         })
@@ -806,6 +955,25 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn continuous_events_do_not_reset_rescan_debt_backoff() {
+        let start = std::time::Instant::now();
+        let mut debt = super::RescanDebt::default();
+        debt.record_failure(start);
+        assert!(!debt.waiting(start), "the first retry is immediate");
+
+        debt.record_failure(start);
+        let next = debt.next_allowed;
+        for offset in 1..30 {
+            assert!(debt.waiting(start + std::time::Duration::from_secs(offset)));
+            assert_eq!(debt.next_allowed, next, "fresh wakeups do not move the deadline");
+        }
+        assert!(!debt.waiting(start + std::time::Duration::from_secs(30)));
+
+        debt.clear();
+        assert!(!debt.required(), "a converged full rescan retires the one debt slot");
+    }
+
+    #[test]
     fn superseded_daemon_cannot_mutate_shared_search() {
         struct Provider;
         impl bsl_search::GraphContextProvider for Provider {
@@ -892,6 +1060,7 @@ mod tests {
                         engine.refresh_dirty_contexts(&Provider, i64::MAX).unwrap();
                     }
                 }
+                Ok::<_, bsl_search::SearchError>(())
             });
             assert!(matches!(outcome, crate::state::WorkspaceSearchApply::Terminal), "{family:?}");
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "{family:?}");
@@ -912,14 +1081,16 @@ mod tests {
         assert!(matches!(
             SharedState::apply_workspace_search(&shared, &lease, |_| {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
             }),
-            crate::state::WorkspaceSearchApply::Retry
+            crate::state::WorkspaceSearchApply::TransientRefusal
         ));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         drop(held);
         assert!(matches!(
             SharedState::apply_workspace_search(&shared, &lease, |_| {
                 calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
             }),
             crate::state::WorkspaceSearchApply::Applied(())
         ));
@@ -927,12 +1098,12 @@ mod tests {
 
         let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
         let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
-        let plan = SearchDriftPlan { mark_all_context: true, ..Default::default() };
+        let mut plan = SearchDriftPlan { mark_all_context: true, ..Default::default() };
         assert!(matches!(
             SharedState::apply_prepared_search_drift(
                 &shared,
                 &old,
-                &plan,
+                &mut plan,
                 &crate::graph::GraphState::disabled(),
             ),
             crate::state::WorkspaceSearchApply::Terminal
@@ -940,14 +1111,215 @@ mod tests {
 
         let retry_lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
         super::FORCE_DRIFT_APPLY_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut failing_plan = SearchDriftPlan::default();
         let failed = SharedState::apply_prepared_search_drift(
             &shared,
             &retry_lease,
-            &SearchDriftPlan::default(),
+            &mut failing_plan,
             &crate::graph::GraphState::disabled(),
         );
         super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
-        assert!(matches!(failed, crate::state::WorkspaceSearchApply::Retry));
+        assert!(matches!(failed, crate::state::WorkspaceSearchApply::OperationError(_)));
+    }
+
+    #[test]
+    fn drift_apply_keeps_its_cursor_on_refusal_and_advances_in_bounded_slices() {
+        let dir = tempdir().unwrap();
+        let shared: super::super::SharedSearchEngine = Arc::new(Mutex::new(Some(
+            SearchEngine::fts_only(&dir.path().join("search.db")).unwrap(),
+        )));
+        let lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let mut plan = SearchDriftPlan {
+            dirty_keys: (0..=bsl_search::WORKSPACE_APPLY_BATCH_ROWS)
+                .map(|index| bsl_search::FileKey::configuration(format!("P{index}.bsl")))
+                .collect(),
+            ..Default::default()
+        };
+
+        let held = lease.hold_file_lock_for_test();
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &lease,
+                &mut plan,
+                &crate::graph::GraphState::disabled(),
+            ),
+            crate::state::WorkspaceSearchApply::TransientRefusal
+        ));
+        assert_eq!(plan.dirty_cursor, 0, "a refused fence consumes none of the plan");
+        drop(held);
+
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &lease,
+                &mut plan,
+                &crate::graph::GraphState::disabled(),
+            ),
+            crate::state::WorkspaceSearchApply::Applied(false)
+        ));
+        assert_eq!(plan.dirty_cursor, bsl_search::WORKSPACE_APPLY_BATCH_ROWS);
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &lease,
+                &mut plan,
+                &crate::graph::GraphState::disabled(),
+            ),
+            crate::state::WorkspaceSearchApply::Applied(true)
+        ));
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_dirty_paths_snapshot()
+                .unwrap()
+                .len(),
+            bsl_search::WORKSPACE_APPLY_BATCH_ROWS + 1
+        );
+    }
+
+    #[test]
+    fn durable_drift_errors_advance_changes_and_coalesce_one_rescan_debt() {
+        use crate::change_hub::{test_support::eventually, WorkspaceChangeHub};
+        use std::time::Duration;
+
+        struct ResetForcedError;
+        impl Drop for ResetForcedError {
+            fn drop(&mut self) {
+                super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+                super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _reset = ResetForcedError;
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        let a = workspace.join("A.bsl");
+        fs::write(&a, "Procedure Old()\nEndProcedure").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&workspace.join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine.index_directory_fts(&workspace).unwrap();
+        let shared: super::super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let lease = crate::workspace_lease::WorkspaceLease::claim(&workspace);
+        assert!(SharedState::spawn_search_sink(
+            hub.clone(),
+            cursor,
+            Arc::clone(&shared),
+            graph.clone(),
+            None,
+            Arc::new(AtomicU64::new(0)),
+            lease.clone(),
+        ));
+
+        let write_and_wait = |path: &std::path::Path, text: &str| {
+            let before = hub.events_seen();
+            fs::write(path, text).unwrap();
+            assert!(eventually(Duration::from_secs(5), || hub.events_seen() > before));
+            assert!(eventually(Duration::from_secs(15), || {
+                hub.materialize(cursor).entries.is_empty()
+            }));
+        };
+
+        super::FORCE_DRIFT_APPLY_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        write_and_wait(&workspace.join("Configuration.xml"), "<Configuration/>");
+        assert_ne!(
+            graph.status(),
+            crate::graph::GraphStatus::Idle,
+            "the graph nudge survives a search OperationError"
+        );
+        write_and_wait(&workspace.join("B.bsl"), "Procedure B()\nEndProcedure");
+        fs::remove_file(&a).unwrap();
+        write_and_wait(&a, "Procedure New()\nEndProcedure");
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_dirty_paths_snapshot()
+                .unwrap()
+                .is_empty(),
+            "durable errors advance without pretending their writes applied"
+        );
+
+        super::FORCE_RESCAN_DEBT_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
+        write_and_wait(&workspace.join("C.bsl"), "Procedure C()\nEndProcedure");
+        assert!(
+            shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .workspace_overlay_dirty_paths_snapshot()
+                .unwrap()
+                .is_empty(),
+            "an OperationError during the due full rescan keeps one debt slot without partial apply"
+        );
+        super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+        write_and_wait(&workspace.join("C.bsl"), "Procedure C2()\nEndProcedure");
+        assert!(
+            eventually(Duration::from_secs(15), || {
+                let recovered = shared
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .workspace_overlay_dirty_paths_snapshot()
+                    .unwrap();
+                ["A.bsl", "B.bsl", "C.bsl"]
+                    .into_iter()
+                    .all(|path| recovered.contains_key(&bsl_search::FileKey::configuration(path)))
+            }),
+            "the one recovery rescan converges to the final disk state"
+        );
+
+        lease.release();
+        hub.shutdown();
+        shared.lock().unwrap().as_ref().unwrap().initialize_workspace_overlay_clean().unwrap();
+        let next_hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+        assert!(next_hub.wait_until_watching(Duration::from_secs(5)));
+        let next_cursor = next_hub.subscribe();
+        let next_lease = crate::workspace_lease::WorkspaceLease::claim(&workspace);
+        assert!(SharedState::spawn_search_sink(
+            next_hub.clone(),
+            next_cursor,
+            Arc::clone(&shared),
+            graph,
+            None,
+            Arc::new(AtomicU64::new(0)),
+            next_lease.clone(),
+        ));
+        let before = next_hub.events_seen();
+        fs::write(workspace.join("D.bsl"), "Procedure D()\nEndProcedure").unwrap();
+        assert!(eventually(Duration::from_secs(5), || next_hub.events_seen() > before));
+        assert!(
+            eventually(Duration::from_secs(15), || {
+                shared
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .workspace_overlay_dirty_paths_snapshot()
+                    .unwrap()
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    == vec![bsl_search::FileKey::configuration("D.bsl")]
+            }),
+            "multiple failures coalesce into one rescan slot; the next change stays incremental"
+        );
+
+        next_lease.release();
+        next_hub.shutdown();
     }
 
     #[test]
@@ -1024,7 +1396,7 @@ mod tests {
             seq: 1,
         };
         let graph = crate::graph::GraphState::disabled();
-        let plan =
+        let mut plan =
             SharedState::prepare_search_drift(&shared, std::slice::from_ref(&entry), false, &graph);
 
         let expected_key = {
@@ -1045,21 +1417,21 @@ mod tests {
             SharedState::apply_prepared_search_drift(
                 &shared,
                 &crate::workspace_lease::WorkspaceLease::unmanaged(),
-                &plan,
+                &mut plan,
                 &graph,
             ),
-            crate::state::WorkspaceSearchApply::Retry
+            crate::state::WorkspaceSearchApply::OperationError(_)
         ));
-        let replanned =
+        let mut replanned =
             SharedState::prepare_search_drift(&shared, std::slice::from_ref(&entry), false, &graph);
         assert!(matches!(
             SharedState::apply_prepared_search_drift(
                 &shared,
                 &crate::workspace_lease::WorkspaceLease::unmanaged(),
-                &replanned,
+                &mut replanned,
                 &graph,
             ),
-            crate::state::WorkspaceSearchApply::Applied(())
+            crate::state::WorkspaceSearchApply::Applied(true)
         ));
         assert!(shared
             .lock()
@@ -1940,6 +2312,155 @@ mod tests {
             !dirty.contains(&bsl_search::FileKey::configuration("CommonModules/В/Ext/Module.bsl")),
             "a module that references nothing about the catalog is left untouched: {dirty:?}",
         );
+    }
+
+    #[test]
+    fn background_snapshot_failures_become_rescan_debt_instead_of_empty_xml_success() {
+        use crate::change_hub::{test_support::eventually, WorkspaceChangeHub};
+        use std::time::Duration;
+
+        struct ResetDebtDue;
+        impl Drop for ResetDebtDue {
+            fn drop(&mut self) {
+                super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _reset = ResetDebtDue;
+
+        for failure in [
+            None,
+            Some(crate::graph::BackgroundSnapshotFailure::Changed),
+            Some(crate::graph::BackgroundSnapshotFailure::Open),
+        ] {
+            let dir = tempdir().unwrap();
+            let workspace = dir.path().to_path_buf();
+            fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
+            let xml = workspace.join("Catalogs/Х.xml");
+            fs::create_dir_all(xml.parent().unwrap()).unwrap();
+            fs::write(
+                &xml,
+                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Catalog><Properties><Name>Х</Name></Properties></Catalog></MetaDataObject>"#,
+            )
+            .unwrap();
+            write_common_module(
+                &workspace,
+                "Б",
+                "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+            );
+
+            let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&workspace);
+            cache.ensure().unwrap();
+            let project = crate::graph::ProjectSnapshot::load(&workspace);
+            let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+            let summary = crate::graph_db::build_graph_database(
+                &project,
+                &universe,
+                &cache.graph_db_path(),
+                100,
+                &crate::graph_db::GraphMeta {
+                    revision: 1,
+                    fingerprint: crate::graph_db::GraphFp::default(),
+                    files: 0,
+                    built_at: "t".to_owned(),
+                },
+            )
+            .unwrap();
+            let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+            let graph =
+                crate::graph::GraphState::for_workspace_with_cache(workspace.clone(), cache)
+                    .with_lease(lease.clone());
+            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
+
+            let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+            engine.set_workspace_root(workspace.clone());
+            engine
+                .sync_indexed_documents_in_collection(
+                    "code",
+                    &[IndexedDocument {
+                        collection: "code".to_owned(),
+                        root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
+                        path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
+                        symbol_name: "ЧитаетХ".to_owned(),
+                        kind: "procedure".to_owned(),
+                        line_start: 0,
+                        line_end: 2,
+                        text: "Процедура ЧитаетХ()\nКонецПроцедуры".to_owned(),
+                        content_hash: "h".to_owned(),
+                        graph_context: None,
+                    }],
+                    None,
+                )
+                .unwrap();
+            engine.initialize_workspace_overlay_clean().unwrap();
+            let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+            let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
+            assert!(hub.wait_until_watching(Duration::from_secs(15)));
+            let cursor = hub.subscribe();
+            assert!(SharedState::spawn_search_sink(
+                hub.clone(),
+                cursor,
+                Arc::clone(&engine),
+                graph.clone(),
+                None,
+                Arc::new(AtomicU64::new(0)),
+                lease.clone(),
+            ));
+            assert!(eventually(Duration::from_secs(15), || {
+                engine
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .workspace_overlay_stats()
+                    .unwrap()
+                    .unwrap()
+                    .watcher_mode
+            }));
+
+            let occupied: Vec<_> = (0..crate::graph::SNAPSHOT_POOL_CAP)
+                .map(|_| graph.snapshot().expect("published descriptor"))
+                .collect();
+            graph.set_background_snapshot_failure_for_test(failure);
+            let held_lock = failure.is_none().then(|| lease.hold_file_lock_for_test());
+            let before = hub.events_seen();
+            fs::write(
+                &xml,
+                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Catalog><Properties><Name>Х</Name><Synonym>changed</Synonym></Properties></Catalog></MetaDataObject>"#,
+            )
+            .unwrap();
+            assert!(eventually(Duration::from_secs(15), || hub.events_seen() > before));
+            if held_lock.is_some() {
+                assert!(
+                    !hub.materialize(cursor).entries.is_empty(),
+                    "lease contention keeps the exact XML batch pending"
+                );
+            }
+            drop(held_lock);
+            assert!(eventually(Duration::from_secs(15), || {
+                hub.materialize(cursor).entries.is_empty()
+            }));
+            graph.set_background_snapshot_failure_for_test(None);
+            drop(occupied);
+            super::FORCE_RESCAN_DEBT_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
+            let wake = workspace.join("wake.bsl");
+            let before = hub.events_seen();
+            fs::write(&wake, "Процедура Разбудить()\nКонецПроцедуры").unwrap();
+            assert!(eventually(Duration::from_secs(15), || hub.events_seen() > before));
+            assert!(eventually(Duration::from_secs(15), || {
+                engine
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .context_dirty_paths("code")
+                    .unwrap()
+                    .contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl"))
+            }));
+            super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
+            lease.release();
+            hub.shutdown();
+        }
     }
 
     /// An `.xml` edit BEFORE any graph is published degrades: owned modules are still marked

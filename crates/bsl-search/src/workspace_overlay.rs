@@ -258,13 +258,11 @@ enum PointAction {
 /// as of Phase A (key -> sequence) and the freshness fence. Opaque to the caller — captured
 /// under the cache lock by [`WorkspaceOverlayCache::publication_baseline`] and handed back to
 /// [`WorkspaceOverlayCache::publish_plan`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicationBaseline {
     dirty: HashMap<FileKey, u64>,
     fence: u64,
-    /// The unread debts as of the capture: Phase A must not trust a fingerprint row for
-    /// these keys — the shared table may hold a row another daemon published, and a
-    /// stat-matching row is exactly what the debt says cannot be believed.
+    /// Keys whose live dirty or unread debt makes a persisted fingerprint untrustworthy.
     unread: HashSet<FileKey>,
 }
 
@@ -272,6 +270,12 @@ impl PublicationBaseline {
     /// The keys whose fingerprint rows Phase A must not trust (see the field doc).
     pub fn distrusted(&self) -> &HashSet<FileKey> {
         &self.unread
+    }
+
+    /// Planning input for a retry-capable host: live marks also distrust persisted rows, which
+    /// may be the unchanged table left by an atomic Phase-C rollback.
+    pub fn retry_distrusted(&self) -> HashSet<FileKey> {
+        self.unread.iter().chain(self.dirty.keys()).cloned().collect()
     }
 }
 
@@ -295,6 +299,16 @@ pub enum PublishOutcome {
         unread_keys: usize,
     },
     Superseded,
+}
+
+type OverlayFingerprintPublication = (String, HashMap<FileKey, crate::store::PersistedFingerprint>);
+
+/// Fully prepared Phase-C state. It is value-only until the host admits the matching Store
+/// transaction; a refusal can therefore retry this exact bundle without rebuilding or embedding.
+pub(crate) struct OverlayPublicationStaging {
+    pub(crate) next_cache: WorkspaceOverlayCache,
+    pub(crate) outcome: PublishOutcome,
+    pub(crate) fingerprints: Option<OverlayFingerprintPublication>,
 }
 
 /// What one FULL publication proved, for the shared tail ([`WorkspaceOverlayCache::finish_publication`]):
@@ -1785,6 +1799,20 @@ impl WorkspaceOverlayCache {
     /// Returns how many marked keys the plan's gate skipped UNREAD: their marks survive this
     /// publish, and the caller's outcome must count them as unread files — a plan that is
     /// empty only because its gate trusted a stale row proves nothing about the tree.
+    pub(crate) fn stage_plan(
+        &self,
+        plan: RefreshPlan,
+        new_embeddings: HashMap<String, Vec<f32>>,
+        baseline: &PublicationBaseline,
+    ) -> Result<OverlayPublicationStaging, SearchError> {
+        let mut next_cache = self.clone();
+        let (outcome, fingerprints) =
+            next_cache.apply_plan_in_memory(plan, new_embeddings, baseline)?;
+        Ok(OverlayPublicationStaging { next_cache, outcome, fingerprints })
+    }
+
+    /// Compatibility path for callers without a workspace lease. Production stages first and
+    /// supplies the lease checkpoint to the Store transaction through `SearchEngine`.
     pub fn publish_plan(
         &mut self,
         plan: RefreshPlan,
@@ -1793,6 +1821,31 @@ impl WorkspaceOverlayCache {
         embedder: Option<&Embedder>,
         store: &Store,
     ) -> Result<PublishOutcome, SearchError> {
+        let staging = self.stage_plan(plan, new_embeddings, baseline)?;
+        let embedding = embedder.map(|embedder| {
+            (embedder.model(), embedder.dim(), staging.next_cache.embedding_cache_snapshot())
+        });
+        let mut checkpoint = || std::ops::ControlFlow::Continue(());
+        if store
+            .apply_overlay_publication(
+                staging.fingerprints.as_ref().map(|(id, rows)| (id.as_str(), rows)),
+                embedding.as_ref().map(|(model, dim, rows)| (*model, *dim, rows)),
+                &mut checkpoint,
+            )?
+            .is_break()
+        {
+            unreachable!("permit-all checkpoint cannot cancel");
+        }
+        *self = staging.next_cache;
+        Ok(staging.outcome)
+    }
+
+    fn apply_plan_in_memory(
+        &mut self,
+        plan: RefreshPlan,
+        new_embeddings: HashMap<String, Vec<f32>>,
+        baseline: &PublicationBaseline,
+    ) -> Result<(PublishOutcome, Option<OverlayFingerprintPublication>), SearchError> {
         let scan_is_clean = plan.scan_is_clean();
         for (embedding_key, embedding) in new_embeddings {
             self.embedding_cache.insert(embedding_key, embedding);
@@ -1802,8 +1855,7 @@ impl WorkspaceOverlayCache {
         // value-stable (identical input, identical vector), so merging them is the one thing
         // an outdated plan is still good for.
         if baseline.fence < self.wholesale_seq {
-            self.persist_embedding_cache(embedder, store);
-            return Ok(PublishOutcome::Superseded);
+            return Ok((PublishOutcome::Superseded, None));
         }
         // Keys with a POINT settlement fresher than the plan's fence: the plan may not touch
         // them on any carrier, whatever it read — the point outcome saw a later disk.
@@ -1920,14 +1972,7 @@ impl WorkspaceOverlayCache {
         // the row is dropped — the unconditional replace-save then removes its old copy from
         // the table as well.
         let rows = self.split_rows_by_live_marks(plan.updated_persisted, &to_consume, &fenced);
-        let persist_ok = Self::persist_fingerprint_rows(
-            store,
-            &plan.snapshot_id,
-            &rows,
-            &plan.read_failures,
-            &to_consume,
-        );
-        self.finish_publication(&verdict, &to_consume, persist_ok);
+        self.finish_publication(&verdict, &to_consume, true);
         // Settlements whose key still CARRIES state (an entry, a hiding, a mark, an unread
         // debt) are kept even below the fence: another plan with an older fence may still be
         // in flight (the library does not enforce the driver's single-flight), and pruning
@@ -1953,35 +1998,20 @@ impl WorkspaceOverlayCache {
         // unread set does not already cover, or one unverified file would show up twice.
         let gate_deferred = deferred.iter().filter(|key| !self.unread_keys.contains(*key)).count();
 
-        self.persist_embedding_cache(embedder, store);
-
-        Ok(PublishOutcome::Applied {
-            gate_deferred,
-            persist_ok,
-            overlay_files: self.entries.len(),
-            deleted_files: self
-                .hidden_paths
-                .iter()
-                .filter(|key| !self.entries.contains_key(*key))
-                .count(),
-            unread_keys: self.unread_keys.len(),
-        })
-    }
-
-    /// Best-effort save of the merged embedding cache: vectors are value-stable and
-    /// replaceable, so a failed save costs a re-embed, never a lie.
-    fn persist_embedding_cache(&self, embedder: Option<&Embedder>, store: &Store) {
-        if let Some(embedder) = embedder {
-            if !self.embedding_cache.is_empty() {
-                if let Err(error) = store.save_overlay_embedding_cache(
-                    embedder.model(),
-                    embedder.dim(),
-                    &self.embedding_cache,
-                ) {
-                    tracing::warn!("failed to persist overlay embedding cache: {error}");
-                }
-            }
-        }
+        Ok((
+            PublishOutcome::Applied {
+                gate_deferred,
+                persist_ok: true,
+                overlay_files: self.entries.len(),
+                deleted_files: self
+                    .hidden_paths
+                    .iter()
+                    .filter(|key| !self.entries.contains_key(*key))
+                    .count(),
+                unread_keys: self.unread_keys.len(),
+            },
+            Some((plan.snapshot_id, rows)),
+        ))
     }
 
     /// A read-only clone of the embedding cache for the warmup's lock-free Phase B start.
@@ -6712,9 +6742,8 @@ mod tests {
         );
     }
 
-    /// Consuming a mark promises the knowledge reached every carrier INCLUDING the disk: a
-    /// failed replace-save on the planned path must leave the processed keys' marks alive
-    /// (today only the in-place path honours this).
+    /// Phase C surfaces Store failure and leaves the entire staged map unpublished, including
+    /// the processed mark that tells the next externally-triggered pass not to trust the row.
     #[test]
     fn a_failed_planned_save_keeps_the_marks_alive() {
         let dir = tempdir().unwrap();
@@ -6752,12 +6781,12 @@ mod tests {
                  BEGIN SELECT RAISE(FAIL, 'deny'); END;",
             )
             .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).is_err());
         assert!(
             cache.dirty_paths_snapshot().contains_key(&key("A.bsl")),
             "a failed persist must not consume the processed mark"
         );
-        assert!(cache.needs_full_rescan(), "stale rows on disk demand a catch-up pass");
+        assert!(!cache.needs_full_rescan(), "the failed staged map was never published");
     }
 
     /// A failed persist never charges the read budget: with prior failures at MAX-1 and both
@@ -6975,12 +7004,10 @@ mod tests {
         );
     }
 
-    /// When the transactional replace-save fails, the OLD table survives intact — including
-    /// the row of a same-stat edit this pass consumed. The tail must retract that row
-    /// point-wise: the surviving mark dies with the process, the row would live to suppress
-    /// the re-read after a restart.
+    /// When the transactional replace-save fails, both the OLD table and live map survive
+    /// intact. The retained mark distrusts that old row on the retry.
     #[test]
-    fn a_failed_replace_save_still_retracts_the_consumed_rows() {
+    fn a_failed_replace_save_rolls_back_and_retains_the_retry_mark() {
         let dir = tempdir().unwrap();
         let workspace = dir.path();
         let file = workspace.join("A.bsl");
@@ -7011,8 +7038,7 @@ mod tests {
         .unwrap();
         assert_eq!(plan.overlay_file_count(), 1, "the marked edit is re-read by the plan");
 
-        // The INSERT of A's fresh row is denied: the replace-save rolls back and the OLD row
-        // (same stat, first content) survives — but the point-wise retraction still works.
+        // The INSERT of A's fresh row is denied: the entire replace-save rolls back.
         let saboteur = rusqlite::Connection::open(&db_path).unwrap();
         saboteur
             .execute_batch(
@@ -7020,12 +7046,17 @@ mod tests {
                  WHEN NEW.path = 'A.bsl' BEGIN SELECT RAISE(FAIL, 'deny'); END;",
             )
             .unwrap();
-        cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).unwrap();
+        assert!(cache.publish_plan(plan, HashMap::new(), &dirty_before, None, &store).is_err());
         assert!(
-            store.load_overlay_fingerprint_cache("").unwrap_or(None).unwrap_or_default().is_empty(),
-            "the superseded old row must not survive the failed replace-save"
+            !store
+                .load_overlay_fingerprint_cache("")
+                .unwrap_or(None)
+                .unwrap_or_default()
+                .is_empty(),
+            "atomic rollback keeps the prior table"
         );
-        // Restart control: a fresh plan over the same store re-reads the same-stat file.
+        assert!(cache.dirty_paths_snapshot().contains_key(&key("A.bsl")));
+        // Retry control: the retained debt makes a fresh plan re-read the same-stat file.
         saboteur.execute_batch("DROP TRIGGER deny_a_insert;").unwrap();
         let replan = WorkspaceOverlayCache::plan_full_refresh_from_manifest(
             &manifest,
@@ -7033,7 +7064,7 @@ mod tests {
             &store,
             &HashMap::new(),
             None,
-            &HashSet::new(),
+            &cache.publication_baseline().retry_distrusted(),
         )
         .unwrap();
         assert_eq!(replan.overlay_file_count(), 1, "nothing on disk suppresses the re-read");

@@ -80,6 +80,21 @@ jobs:
           cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession &&
           cargo test -p mcp-server state::tests::terminal_supersession_is_not_transient_nonownership &&
           cargo test -p mcp-server --test broker superseded_backend_lifecycle
+      - name: Workspace lease operation semantics portable regressions
+        run: >-
+          cargo test -p mcp-server workspace_lease::tests::release_during_checkpointed_callback_rolls_back_as_terminal -- --exact &&
+          cargo test -p mcp-server workspace_lease::tests::release_waits_for_only_the_admitted_batch_and_refuses_the_next -- --exact &&
+          cargo test -p mcp-server workspace_lease::tests::takeover_between_batches_preserves_the_first_and_terminates_the_next -- --exact &&
+          cargo test -p mcp-server state::bootstrap::tests::startup_constructor_fence_distinguishes_retry_terminal_and_error -- --exact &&
+          cargo test -p mcp-server state::sync::tests::background_snapshot_failures_become_rescan_debt_instead_of_empty_xml_success -- --exact &&
+          cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession -- --exact &&
+          cargo test -p mcp-server state::overlay_retry::tests::transient_budget_fails_once_ignores_active_kicks_and_rearms_on_new_drift -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::path_identity_detects_equal_size_and_time_replacement -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::publication_without_a_complete_descriptor_pool_cannot_be_ready -- --exact &&
+          cargo test -p mcp-server graph::build::tests::every_publication_path_rejects_replacement_before_final_install -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::graph_handler_misses_immediately_when_preopened_handles_are_busy -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::resolve_names_misses_immediately_when_preopened_handles_are_busy -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::symbol_info_misses_immediately_when_preopened_handles_are_busy -- --exact
 
   partitioned-baseline-scale:
     name: Partitioned baseline 1.6M release gate

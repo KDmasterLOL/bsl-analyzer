@@ -184,7 +184,7 @@ codex mcp list
 - **Нет** → `search_code` работает в лексическом режиме (с пометкой
   `-- semantic skipped: … --`), плюс `find_docs`, `metadata`, `graph`,
   `diagnostics`, SDBL — **всё работает без эмбеддингов**. Переходите к шагу 5.
-- **Да** → нужен доступ к OpenAI-совместимому embedder'у и четыре переменные:
+- **Да** → нужен доступ к OpenAI-совместимому embedder'у и переменные:
 
   | Переменная | Назначение | Дефолт |
   |-----------|-----------|--------|
@@ -192,6 +192,7 @@ codex mcp list
   | `EMBEDDING_MODEL` | имя модели | `Qwen/Qwen3-Embedding-0.6B` |
   | `EMBEDDING_DIM` | размерность вектора (должна совпасть с моделью) | `1024` |
   | `EMBEDDING_API_KEY` | ключ (для сервисов с Bearer-авторизацией) | — (опц.) |
+  | `EMBEDDING_PUBLISH_RETRY_BUDGET_SECS` | общий лимит повторных попыток публикации, секунды | `600` |
 
   Установка с прописыванием env прямо в MCP-конфиг:
 
@@ -200,6 +201,7 @@ codex mcp list
     --env EMBEDDING_URL=https://your-embedder/v1 \
     --env EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B \
     --env EMBEDDING_DIM=1024 \
+    --env EMBEDDING_PUBLISH_RETRY_BUDGET_SECS=600 \
     --env EMBEDDING_API_KEY=sk-...
   ```
 

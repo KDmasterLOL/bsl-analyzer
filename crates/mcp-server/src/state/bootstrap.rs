@@ -24,6 +24,12 @@ use std::{
 /// only unusually slow networks ever reach it; the connect itself typically lands in
 /// seconds and wakes the waiter through the slot's condvar immediately.
 const BASELINE_CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+pub(super) const DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET: std::time::Duration =
+    std::time::Duration::from_secs(600);
+const EMBEDDING_PUBLISH_RETRY_BUDGET_ENV: &str = "EMBEDDING_PUBLISH_RETRY_BUDGET_SECS";
+#[cfg(test)]
+static EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 fn search_failure(error: SearchError) -> (String, String) {
     let reason = error.reason_code().unwrap_or("search_error").to_owned();
@@ -235,6 +241,7 @@ impl SharedState {
         // back to (re)building a local index of the whole configuration.
         let bootstrap = BaselineRuntime::workspace_bootstrap(Some(&project.root), &project.config);
         let workspace_search_mode = Self::workspace_mode_for(&bootstrap);
+        let embedding_publish_retry_budget = Self::embedding_publish_retry_budget();
         let baseline = match bootstrap {
             BaselineBootstrap::Immediate(runtime) => DeferredBaselineRuntime::ready(runtime),
             BaselineBootstrap::Connect(plan) => DeferredBaselineRuntime::spawn(*plan),
@@ -287,6 +294,7 @@ impl SharedState {
                         Arc::clone(&overlay_warmup),
                         Arc::clone(&semantic_runtime),
                         workspace_lease.clone(),
+                        embedding_publish_retry_budget,
                     ))
                 } else {
                     Self::set_overlay_warmup_state(
@@ -314,6 +322,7 @@ impl SharedState {
             overlay_retry.clone(),
             Arc::clone(&root_drift_epoch),
             workspace_lease.clone(),
+            embedding_publish_retry_budget,
         );
         let graph = GraphState::for_workspace_with_cache(source_dir.clone(), cache.clone())
             .with_change_hub(change_hub.clone())
@@ -350,6 +359,7 @@ impl SharedState {
             workspace_lease.clone(),
             overlay_retry.clone(),
             Arc::clone(&root_drift_epoch),
+            embedding_publish_retry_budget,
         );
 
         let reference_search = ReferenceSearchState::new(Some(&source_dir));
@@ -394,6 +404,7 @@ impl SharedState {
         lease: crate::workspace_lease::WorkspaceLease,
         overlay_retry: Option<Arc<super::overlay_retry::OverlayRetry>>,
         root_drift_epoch: Arc<AtomicU64>,
+        embedding_publish_retry_budget: std::time::Duration,
     ) {
         std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
@@ -513,9 +524,17 @@ impl SharedState {
                     OverlayInit::Clean => Self::startup_apply_once(&lease, || {
                         init.engine.initialize_workspace_overlay_clean()
                     }),
-                    OverlayInit::Prime => init
+                    OverlayInit::Prime => match init
                         .engine
-                        .prime_workspace_overlay_fenced(|apply| Self::startup_apply(&lease, apply)),
+                        .prime_workspace_overlay_fenced(|apply| Self::startup_apply(&lease, apply))
+                    {
+                        Ok(bsl_search::FenceOutcome::Applied(())) => Ok(Some(())),
+                        Ok(bsl_search::FenceOutcome::TransientRefusal) => {
+                            unreachable!("startup_apply retries transient refusals")
+                        }
+                        Ok(bsl_search::FenceOutcome::Terminal) => Ok(None),
+                        Err(error) => Err(error),
+                    },
                     OverlayInit::RemoteWarmup => Ok(Some(())),
                 };
                 match overlay_result {
@@ -625,6 +644,7 @@ impl SharedState {
                         lease.clone(),
                         pending.db_path,
                         pending.config,
+                        embedding_publish_retry_budget,
                     );
                 }
 
@@ -736,6 +756,30 @@ impl SharedState {
         })
     }
 
+    fn embedding_publish_retry_budget() -> std::time::Duration {
+        let Ok(raw) = std::env::var(EMBEDDING_PUBLISH_RETRY_BUDGET_ENV) else {
+            return DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET;
+        };
+        let budget = raw
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds > 0)
+            .map(std::time::Duration::from_secs);
+        if let Some(budget) =
+            budget.filter(|budget| std::time::Instant::now().checked_add(*budget).is_some())
+        {
+            return budget;
+        }
+        #[cfg(test)]
+        EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        tracing::warn!(
+            variable = EMBEDDING_PUBLISH_RETRY_BUDGET_ENV,
+            default_secs = DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET.as_secs(),
+            "invalid embedding publish retry budget; using default"
+        );
+        DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET
+    }
+
     fn open_semantic_search_engine(
         db_path: &Path,
         config: bsl_search::SearchConfig,
@@ -786,15 +830,40 @@ impl SharedState {
     pub(super) fn startup_apply<T>(
         lease: &crate::workspace_lease::WorkspaceLease,
         mut apply: impl FnMut() -> Result<T, bsl_search::SearchError>,
-    ) -> Option<Result<T, bsl_search::SearchError>> {
+    ) -> bsl_search::FenceOutcome<Result<T, bsl_search::SearchError>> {
         loop {
-            if let Some(result) = lease.with_ownership(&mut apply) {
-                return Some(result);
+            match lease.with_ownership_outcome(&mut apply) {
+                crate::workspace_lease::LeaseOutcome::Applied(result) => {
+                    return bsl_search::FenceOutcome::Applied(result)
+                }
+                crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                    std::thread::sleep(crate::workspace_lease::VERDICT_TTL)
+                }
+                crate::workspace_lease::LeaseOutcome::Terminal => {
+                    return bsl_search::FenceOutcome::Terminal
+                }
             }
-            if lease.is_superseded() || lease.is_released() {
-                return None;
+        }
+    }
+
+    pub(super) fn startup_apply_checkpointed(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        mut apply: impl FnMut(
+            &mut dyn FnMut() -> std::ops::ControlFlow<()>,
+        ) -> std::ops::ControlFlow<(), Result<(), bsl_search::SearchError>>,
+    ) -> bsl_search::FenceOutcome<Result<(), bsl_search::SearchError>> {
+        loop {
+            match lease.with_ownership_checkpointed(|checkpoint| apply(checkpoint)) {
+                crate::workspace_lease::LeaseOutcome::Applied(result) => {
+                    return bsl_search::FenceOutcome::Applied(result)
+                }
+                crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                    std::thread::sleep(crate::workspace_lease::VERDICT_TTL)
+                }
+                crate::workspace_lease::LeaseOutcome::Terminal => {
+                    return bsl_search::FenceOutcome::Terminal
+                }
             }
-            std::thread::sleep(crate::workspace_lease::VERDICT_TTL);
         }
     }
 
@@ -809,9 +878,50 @@ impl SharedState {
             Ok(())
         });
         match outcome {
-            Some(Ok(())) => Ok(value),
-            Some(Err(error)) => Err(error),
-            None => Ok(None),
+            bsl_search::FenceOutcome::Applied(Ok(())) => Ok(value),
+            bsl_search::FenceOutcome::Applied(Err(error)) => Err(error),
+            bsl_search::FenceOutcome::Terminal => Ok(None),
+            bsl_search::FenceOutcome::TransientRefusal => {
+                unreachable!("startup_apply retries transient refusals")
+            }
+        }
+    }
+
+    fn startup_apply_checkpointed_once<T>(
+        lease: &crate::workspace_lease::WorkspaceLease,
+        operation: impl FnOnce(
+            &mut dyn FnMut() -> std::ops::ControlFlow<()>,
+        ) -> std::ops::ControlFlow<(), Result<T, bsl_search::SearchError>>,
+    ) -> Result<Option<T>, bsl_search::SearchError> {
+        let mut operation = Some(operation);
+        let mut value = None;
+        let outcome = Self::startup_apply_checkpointed(lease, |checkpoint| {
+            let operation = match operation.take() {
+                Some(operation) => operation,
+                None => {
+                    return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
+                        "checkpointed startup operation invoked more than once".to_owned(),
+                    )));
+                }
+            };
+            match operation(checkpoint) {
+                std::ops::ControlFlow::Break(()) => std::ops::ControlFlow::Break(()),
+                std::ops::ControlFlow::Continue(Err(error)) => {
+                    std::ops::ControlFlow::Continue(Err(error))
+                }
+                std::ops::ControlFlow::Continue(Ok(result)) => {
+                    value = Some(result);
+                    std::ops::ControlFlow::Continue(Ok(()))
+                }
+            }
+        });
+        match outcome {
+            bsl_search::FenceOutcome::Applied(Ok(())) => Ok(value),
+            bsl_search::FenceOutcome::Applied(Err(error)) => Err(error),
+            bsl_search::FenceOutcome::Terminal => Ok(None),
+            bsl_search::FenceOutcome::TransientRefusal => {
+                unreachable!("startup apply retries transient refusals")
+            }
         }
     }
 
@@ -819,28 +929,42 @@ impl SharedState {
         db_path: &Path,
         lease: &crate::workspace_lease::WorkspaceLease,
     ) -> Result<Option<SearchEngine>, bsl_search::SearchError> {
-        match Self::embedding_config() {
-            Some(config) => {
-                SearchEngine::new_fenced(db_path, config, |apply| Self::startup_apply(lease, apply))
+        let opened = match Self::embedding_config() {
+            Some(config) => SearchEngine::new_fenced(db_path, config, |apply| {
+                Self::startup_apply_checkpointed(lease, apply)
+            }),
+            None => SearchEngine::fts_only_fenced(db_path, |apply| {
+                Self::startup_apply_checkpointed(lease, apply)
+            }),
+        }?;
+        Ok(match opened {
+            bsl_search::FenceOutcome::Applied(engine) => Some(engine),
+            bsl_search::FenceOutcome::TransientRefusal => {
+                unreachable!("startup_apply retries transient refusals")
             }
-            None => {
-                SearchEngine::fts_only_fenced(db_path, |apply| Self::startup_apply(lease, apply))
-            }
-        }
+            bsl_search::FenceOutcome::Terminal => None,
+        })
     }
 
     fn open_workspace_overlay_search_engine_fenced(
         db_path: &Path,
         lease: &crate::workspace_lease::WorkspaceLease,
     ) -> Result<Option<SearchEngine>, bsl_search::SearchError> {
-        match Self::embedding_config() {
+        let opened = match Self::embedding_config() {
             Some(config) => SearchEngine::semantic_overlay_only_fenced(db_path, config, |apply| {
-                Self::startup_apply(lease, apply)
+                Self::startup_apply_checkpointed(lease, apply)
             }),
-            None => {
-                SearchEngine::fts_only_fenced(db_path, |apply| Self::startup_apply(lease, apply))
+            None => SearchEngine::fts_only_fenced(db_path, |apply| {
+                Self::startup_apply_checkpointed(lease, apply)
+            }),
+        }?;
+        Ok(match opened {
+            bsl_search::FenceOutcome::Applied(engine) => Some(engine),
+            bsl_search::FenceOutcome::TransientRefusal => {
+                unreachable!("startup_apply retries transient refusals")
             }
-        }
+            bsl_search::FenceOutcome::Terminal => None,
+        })
     }
 
     fn configure_workspace_engine(
@@ -969,9 +1093,12 @@ impl SharedState {
             };
 
             let store = engine.store();
-            let Some(()) = Self::startup_apply_once(lease, || {
-                store.clear_collection("code")?;
-                store.clear_overlay_state("code")
+            let Some(()) = Self::startup_apply_checkpointed_once(lease, |checkpoint| match store
+                .clear_workspace_overlay_checkpointed("code", checkpoint)
+            {
+                Ok(std::ops::ControlFlow::Continue(())) => std::ops::ControlFlow::Continue(Ok(())),
+                Ok(std::ops::ControlFlow::Break(())) => std::ops::ControlFlow::Break(()),
+                Err(error) => std::ops::ControlFlow::Continue(Err(error)),
             })?
             else {
                 return Ok(None);
@@ -1166,14 +1293,17 @@ impl SharedState {
             // the chunks, so the deferred vectors are graph-enriched just as
             // `index_directory` would have produced.
             match engine.index_directory_deferred_fenced(&source_path, |apply| {
-                Self::startup_apply(lease, apply)
+                Self::startup_apply_checkpointed(lease, apply)
             }) {
-                Ok(Some(indexed)) => {
+                Ok(bsl_search::FenceOutcome::Applied(indexed)) => {
                     if indexed > 0 {
                         tracing::info!(indexed, "FTS + graph context written; embedding deferred");
                     }
                 }
-                Ok(None) => return Ok(None),
+                Ok(bsl_search::FenceOutcome::Terminal) => return Ok(None),
+                Ok(bsl_search::FenceOutcome::TransientRefusal) => {
+                    unreachable!("startup_apply retries transient refusals")
+                }
                 Err(error) => return Err(error),
             }
 
@@ -1212,11 +1342,16 @@ impl SharedState {
         // rows); only the cold, freshly-ingested-and-reconciled sub-branch may then assert Clean.
         let overlay_init = if engine.chunk_count().unwrap_or(0) == 0 {
             tracing::info!(?source_path, "building FTS index from source files");
-            match engine
-                .index_directory_fts_fenced(&source_path, |apply| Self::startup_apply(lease, apply))
-            {
-                Ok(Some(indexed)) => tracing::info!(indexed, "FTS index built"),
-                Ok(None) => return Ok(None),
+            match engine.index_directory_fts_fenced(&source_path, |apply| {
+                Self::startup_apply_checkpointed(lease, apply)
+            }) {
+                Ok(bsl_search::FenceOutcome::Applied(indexed)) => {
+                    tracing::info!(indexed, "FTS index built")
+                }
+                Ok(bsl_search::FenceOutcome::Terminal) => return Ok(None),
+                Ok(bsl_search::FenceOutcome::TransientRefusal) => {
+                    unreachable!("startup_apply retries transient refusals")
+                }
                 Err(error) => return Err(error),
             }
             let Some(reconciled) = Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease)
@@ -1233,16 +1368,20 @@ impl SharedState {
             // files DELETED while down (a prime only hides them lazily and never from the store).
             // A root DECLARED while down is neither: it has no rows to refresh and no rows to
             // remove, so the skip is taken per root and only the unindexed ones are ingested.
-            match engine.index_unindexed_roots_fts_fenced(|apply| Self::startup_apply(lease, apply))
-            {
-                Ok(Some(indexed)) if indexed > 0 => {
+            match engine.index_unindexed_roots_fts_fenced(|apply| {
+                Self::startup_apply_checkpointed(lease, apply)
+            }) {
+                Ok(bsl_search::FenceOutcome::Applied(indexed)) if indexed > 0 => {
                     tracing::info!(
                         indexed,
                         "indexed a source root declared while the daemon was down"
                     )
                 }
-                Ok(Some(_)) => {}
-                Ok(None) => return Ok(None),
+                Ok(bsl_search::FenceOutcome::Applied(_)) => {}
+                Ok(bsl_search::FenceOutcome::Terminal) => return Ok(None),
+                Ok(bsl_search::FenceOutcome::TransientRefusal) => {
+                    unreachable!("startup_apply retries transient refusals")
+                }
                 Err(error) => return Err(error),
             }
             if Self::reconcile_boot_store_with_disk_fenced(&mut engine, lease).is_none() {
@@ -1456,7 +1595,8 @@ mod tests {
     use super::super::test_support::{write_common_module_tree, EnvVarGuard, ENV_LOCK};
     use super::{
         DiagnosticsState, EmbedFlight, GraphState, OverlayInit, SemanticRuntimeStatus, SharedState,
-        WorkspaceSearchMode,
+        WorkspaceSearchMode, DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET,
+        EMBEDDING_PUBLISH_RETRY_BUDGET_ENV, EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS,
     };
     use crate::baseline::{
         BaselineBootstrap, BaselineRuntime, ConfiguredBaselineStatus, DeferredBaselineRuntime,
@@ -1472,6 +1612,41 @@ mod tests {
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+
+    #[test]
+    fn embedding_publish_retry_budget_requires_positive_representable_seconds() {
+        let _lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.store(0, Ordering::SeqCst);
+
+        let _env = EnvVarGuard::unset(EMBEDDING_PUBLISH_RETRY_BUDGET_ENV);
+        assert_eq!(
+            SharedState::embedding_publish_retry_budget(),
+            DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET
+        );
+        assert_eq!(EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.load(Ordering::SeqCst), 0);
+        drop(_env);
+
+        for invalid in ["0".to_owned(), "not-a-number".to_owned(), u64::MAX.to_string()] {
+            let warnings_before = EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.load(Ordering::SeqCst);
+            let _env = EnvVarGuard::set(EMBEDDING_PUBLISH_RETRY_BUDGET_ENV, &invalid);
+            assert_eq!(
+                SharedState::embedding_publish_retry_budget(),
+                DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET
+            );
+            assert_eq!(
+                EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.load(Ordering::SeqCst),
+                warnings_before + 1,
+                "one invalid host parse emits exactly one warning"
+            );
+        }
+
+        let _env = EnvVarGuard::set(EMBEDDING_PUBLISH_RETRY_BUDGET_ENV, "42");
+        assert_eq!(
+            SharedState::embedding_publish_retry_budget(),
+            std::time::Duration::from_secs(42)
+        );
+        assert_eq!(EMBEDDING_PUBLISH_RETRY_BUDGET_WARNINGS.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn startup_constructor_fence_distinguishes_retry_terminal_and_error() {
@@ -1493,7 +1668,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(2100));
         assert_eq!(calls.load(Ordering::SeqCst), 0, "a refused fence does not invoke apply");
         drop(held);
-        assert!(matches!(worker.join().unwrap(), Some(Ok(()))));
+        assert!(matches!(worker.join().unwrap(), bsl_search::FenceOutcome::Applied(Ok(()))));
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the prepared operation runs once");
 
         let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
@@ -1503,14 +1678,20 @@ mod tests {
             terminal_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         };
-        assert!(SharedState::startup_apply(&old, &mut terminal_apply).is_none());
+        assert!(matches!(
+            SharedState::startup_apply(&old, &mut terminal_apply),
+            bsl_search::FenceOutcome::Terminal
+        ));
         assert!(old.is_superseded());
         assert_eq!(terminal_calls.load(Ordering::SeqCst), 0);
 
         let released_dir = tempdir().unwrap();
         let released = crate::workspace_lease::WorkspaceLease::claim(released_dir.path());
         released.release();
-        assert!(SharedState::startup_apply(&released, &mut || Ok(())).is_none());
+        assert!(matches!(
+            SharedState::startup_apply(&released, &mut || Ok(())),
+            bsl_search::FenceOutcome::Terminal
+        ));
 
         let error = SharedState::startup_apply(
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
@@ -1518,7 +1699,8 @@ mod tests {
         );
         assert!(matches!(
             error,
-            Some(Err(bsl_search::SearchError::Index(message))) if message == "expected"
+            bsl_search::FenceOutcome::Applied(Err(bsl_search::SearchError::Index(message)))
+                if message == "expected"
         ));
     }
 
@@ -1572,7 +1754,7 @@ mod tests {
                     prepared_tx.send(()).unwrap();
                     announced = true;
                 }
-                SharedState::startup_apply(&lease, apply)
+                SharedState::startup_apply_checkpointed(&lease, apply)
             });
             (result, engine)
         });
@@ -1581,13 +1763,18 @@ mod tests {
         fs::write(&source, "Процедура Измененная()\nКонецПроцедуры").unwrap();
         drop(held);
         let (result, engine) = worker.join().unwrap();
-        assert_eq!(result.unwrap(), Some(1));
+        assert_eq!(result.unwrap(), bsl_search::FenceOutcome::Applied(1));
         assert_eq!(engine.text_search("Первичная", 10, Some("code")).unwrap().len(), 1);
         assert!(engine.text_search("Измененная", 10, Some("code")).unwrap().is_empty());
 
         let partial_dir = tempdir().unwrap();
-        fs::write(partial_dir.path().join("A.bsl"), "Процедура А()\nКонецПроцедуры").unwrap();
-        fs::write(partial_dir.path().join("B.bsl"), "Процедура Б()\nКонецПроцедуры").unwrap();
+        for index in 0..=bsl_search::WORKSPACE_APPLY_BATCH_ROWS {
+            fs::write(
+                partial_dir.path().join(format!("Module{index:02}.bsl")),
+                format!("Процедура Метод{index}()\nКонецПроцедуры"),
+            )
+            .unwrap();
+        }
         let mut partial = SearchEngine::fts_only(&partial_dir.path().join("search.db")).unwrap();
         partial
             .initialize_workspace_roots(
@@ -1599,27 +1786,42 @@ mod tests {
         let mut admitted = 0;
         let result = partial
             .index_directory_fts_fenced(partial_dir.path(), |apply| {
-                if admitted == 1 {
+                if admitted == bsl_search::WORKSPACE_APPLY_BATCH_ROWS {
                     newer = Some(crate::workspace_lease::WorkspaceLease::claim(partial_dir.path()));
                 }
-                let result = SharedState::startup_apply(&old, apply);
-                if matches!(result, Some(Ok(()))) {
+                let result = SharedState::startup_apply_checkpointed(&old, apply);
+                if matches!(result, bsl_search::FenceOutcome::Applied(Ok(()))) {
                     admitted += 1;
                 }
                 result
             })
             .unwrap();
-        assert!(result.is_none());
-        assert_eq!(partial.file_count().unwrap(), 1, "the first fenced file survives takeover");
+        assert!(matches!(result, bsl_search::FenceOutcome::Terminal));
+        assert_eq!(
+            admitted,
+            bsl_search::WORKSPACE_APPLY_BATCH_ROWS,
+            "each independently visible file used its own completed fence"
+        );
+        assert_eq!(
+            partial.file_count().unwrap(),
+            bsl_search::WORKSPACE_APPLY_BATCH_ROWS,
+            "all 64 completed file transactions survive takeover before file 65"
+        );
 
         let present = std::collections::HashSet::new();
-        assert!(partial
-            .reconcile_workspace_files_fenced(&present, |apply| {
-                SharedState::startup_apply(&old, apply)
-            })
-            .unwrap()
-            .is_none());
-        assert_eq!(partial.file_count().unwrap(), 1, "terminal reconcile removes nothing");
+        assert!(matches!(
+            partial
+                .reconcile_workspace_files_fenced(&present, |apply| {
+                    SharedState::startup_apply(&old, apply)
+                })
+                .unwrap(),
+            bsl_search::FenceOutcome::Terminal
+        ));
+        assert_eq!(
+            partial.file_count().unwrap(),
+            bsl_search::WORKSPACE_APPLY_BATCH_ROWS,
+            "terminal reconcile removes nothing"
+        );
         drop(newer);
     }
 
@@ -1636,13 +1838,15 @@ mod tests {
             .unwrap();
         let old = crate::workspace_lease::WorkspaceLease::claim(prime_dir.path());
         let mut newer = None;
-        assert!(prime
-            .prime_workspace_overlay_fenced(|apply| {
-                newer = Some(crate::workspace_lease::WorkspaceLease::claim(prime_dir.path()));
-                SharedState::startup_apply(&old, apply)
-            })
-            .unwrap()
-            .is_none());
+        assert!(matches!(
+            prime
+                .prime_workspace_overlay_fenced(|apply| {
+                    newer = Some(crate::workspace_lease::WorkspaceLease::claim(prime_dir.path()));
+                    SharedState::startup_apply(&old, apply)
+                })
+                .unwrap(),
+            bsl_search::FenceOutcome::Terminal
+        ));
         assert!(!prime.workspace_overlay_retry_signals().unwrap().initialized);
         drop(newer);
 
@@ -1810,6 +2014,7 @@ mod tests {
             crate::workspace_lease::WorkspaceLease::unmanaged(),
             None,
             Arc::new(AtomicU64::new(0)),
+            DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET,
         );
 
         for _ in 0..600 {
@@ -1871,6 +2076,7 @@ mod tests {
             crate::workspace_lease::WorkspaceLease::unmanaged(),
             None,
             Arc::new(AtomicU64::new(0)),
+            DEFAULT_EMBEDDING_PUBLISH_RETRY_BUDGET,
         );
     }
 

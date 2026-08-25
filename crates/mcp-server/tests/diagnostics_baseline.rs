@@ -137,7 +137,14 @@ async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
         // the file stays readable, the resident reconciles, and nothing is asserted
         // about an unreadable file at all.
         if std::fs::read(&source).is_err() {
-            let stale = diagnostics(&client, args("workspace")).await;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+            let stale = loop {
+                let response = diagnostics(&client, args("workspace")).await;
+                if response["stale"] == true || tokio::time::Instant::now() >= deadline {
+                    break response;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            };
             assert_eq!(stale["stale"], true);
             assert_eq!(stale["result"]["baseline"]["state"], "partial");
             assert_eq!(stale["result"]["baseline"]["resolved"], 0);

@@ -48,10 +48,11 @@ pub(crate) struct ReferenceSearchState {
 const MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY: usize = 64;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum WorkspaceSearchApply<T> {
+pub(super) enum WorkspaceSearchApply<T, E> {
     Applied(T),
-    Retry,
+    TransientRefusal,
     Terminal,
+    OperationError(E),
 }
 
 #[derive(Clone)]
@@ -115,17 +116,62 @@ impl OnecConnection {
 }
 
 impl SharedState {
+    pub(super) fn search_fence_outcome<T>(
+        outcome: crate::workspace_lease::LeaseOutcome<T>,
+    ) -> bsl_search::FenceOutcome<T> {
+        match outcome {
+            crate::workspace_lease::LeaseOutcome::Applied(value) => {
+                bsl_search::FenceOutcome::Applied(value)
+            }
+            crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                bsl_search::FenceOutcome::TransientRefusal
+            }
+            crate::workspace_lease::LeaseOutcome::Terminal => bsl_search::FenceOutcome::Terminal,
+        }
+    }
+
     pub(super) fn apply_workspace_search<T>(
         shared: &SharedSearchEngine,
         lease: &crate::workspace_lease::WorkspaceLease,
-        apply: impl FnOnce(&mut bsl_search::SearchEngine) -> T,
-    ) -> WorkspaceSearchApply<T> {
-        let Ok(mut guard) = shared.lock() else { return WorkspaceSearchApply::Retry };
-        let Some(engine) = guard.as_mut() else { return WorkspaceSearchApply::Retry };
-        match lease.with_ownership(|| apply(engine)) {
-            Some(result) => WorkspaceSearchApply::Applied(result),
-            None if lease.is_superseded() || lease.is_released() => WorkspaceSearchApply::Terminal,
-            None => WorkspaceSearchApply::Retry,
+        apply: impl FnOnce(&mut bsl_search::SearchEngine) -> Result<T, bsl_search::SearchError>,
+    ) -> WorkspaceSearchApply<T, bsl_search::SearchError> {
+        Self::apply_workspace_search_checkpointed(shared, lease, |engine, _checkpoint| {
+            std::ops::ControlFlow::Continue(apply(engine))
+        })
+    }
+
+    pub(super) fn apply_workspace_search_checkpointed<T>(
+        shared: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnOnce(
+            &mut bsl_search::SearchEngine,
+            &mut dyn FnMut() -> std::ops::ControlFlow<()>,
+        ) -> std::ops::ControlFlow<(), Result<T, bsl_search::SearchError>>,
+    ) -> WorkspaceSearchApply<T, bsl_search::SearchError> {
+        let mut guard = match shared.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                return WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(
+                    format!("workspace search engine lock poisoned: {error}"),
+                ));
+            }
+        };
+        let Some(engine) = guard.as_mut() else {
+            return WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(
+                "workspace search engine is not published".to_owned(),
+            ));
+        };
+        match lease.with_ownership_checkpointed(|checkpoint| apply(engine, checkpoint)) {
+            crate::workspace_lease::LeaseOutcome::Applied(Ok(result)) => {
+                WorkspaceSearchApply::Applied(result)
+            }
+            crate::workspace_lease::LeaseOutcome::Applied(Err(error)) => {
+                WorkspaceSearchApply::OperationError(error)
+            }
+            crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                WorkspaceSearchApply::TransientRefusal
+            }
+            crate::workspace_lease::LeaseOutcome::Terminal => WorkspaceSearchApply::Terminal,
         }
     }
 
@@ -336,8 +382,72 @@ impl SharedState {
 
 #[cfg(test)]
 mod tests {
-    use super::SharedState;
+    use super::{SharedSearchEngine, SharedState, WorkspaceSearchApply};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
+
+    #[test]
+    fn workspace_search_missing_engine_is_an_operation_error() {
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(None));
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| Ok(()),
+        );
+
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message == "workspace search engine is not published"
+        ));
+    }
+
+    #[test]
+    fn workspace_search_poisoned_mutex_is_an_operation_error() {
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(None));
+        let poison = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("poison the search engine mutex");
+        })
+        .join();
+
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| Ok(()),
+        );
+
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message.starts_with("workspace search engine lock poisoned:")
+        ));
+    }
+
+    #[test]
+    fn workspace_search_flattens_callback_error_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = bsl_search::SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), _>(bsl_search::SearchError::Index("store failed".to_owned()))
+            },
+        );
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message == "store failed"
+        ));
+    }
 
     #[test]
     fn terminal_supersession_is_not_transient_nonownership() {

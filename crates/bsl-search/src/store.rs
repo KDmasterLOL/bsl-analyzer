@@ -4,6 +4,7 @@ use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
 use code_chunk::Chunk;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -37,9 +38,18 @@ pub(crate) struct CollectionReplaceOutcome {
 /// One chunk's `(id, symbol_name, kind, graph_context)` as read for a context re-render.
 pub type ChunkContextRow = (i64, String, String, Option<String>);
 
+/// One already-rendered context refresh write. The engine prepares these without a lease;
+/// the store commits at most one bounded slice per fenced transaction.
+pub(crate) enum ContextRefreshMutation {
+    Mark { key: FileKey, seq: i64 },
+    Update { chunk_id: i64, graph_context: Option<String> },
+    Clear { key: FileKey, seq_bound: i64 },
+}
+
 /// The embeddings the vector index is built from (`(chunk_id, vector)` rows) paired with the
 /// `embedding_generation` they were read at, as one consistent snapshot.
 pub type EmbeddingsSnapshot = (i64, Vec<(i64, Vec<f32>)>);
+type OverlayEmbeddingPublication<'a> = (&'a str, usize, &'a HashMap<String, Vec<f32>>);
 
 /// One file prepared off-lock for an atomic workspace-root transition.
 pub(crate) struct WorkspaceTransitionFile {
@@ -57,7 +67,6 @@ pub(crate) struct WorkspaceStoreTransition<'a> {
     pub(crate) cleanup: &'a HashSet<FileKey>,
     pub(crate) tombstones: &'a HashSet<FileKey>,
     pub(crate) upserts: &'a [WorkspaceTransitionFile],
-    pub(crate) dimension: usize,
 }
 
 #[cfg(test)]
@@ -209,17 +218,45 @@ impl Store {
     }
 
     fn open_once(path: &Path) -> Result<Self, SearchError> {
+        let store = Self::prepare_open(path)?;
+        let mut checkpoint = || ControlFlow::Continue(());
+        match store.finish_open_checkpointed(&mut checkpoint)? {
+            ControlFlow::Continue(()) => Ok(store),
+            ControlFlow::Break(()) => unreachable!("permit-all checkpoint cannot cancel"),
+        }
+    }
+
+    /// Open the connection and apply connection-local pragmas without changing schema rows.
+    pub(crate) fn prepare_open(path: &Path) -> Result<Self, SearchError> {
         let conn = Connection::open(path)?;
         // Set this before `journal_mode=WAL`: on a brand-new shared cache, changing journal
         // mode is itself the first contended write and must wait for the peer bootstrap.
         conn.busy_timeout(std::time::Duration::from_secs(30))?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
-        store.migrate_root_keyed_tables()?;
-        store.migrate_structural_schema()?;
-        store.migrate_embed_text_version()?;
-        store.seed_mark_seq()?;
         Ok(store)
+    }
+
+    /// Apply every schema/open mutation as atomic groups under a cooperative fence.
+    pub(crate) fn finish_open_checkpointed(
+        &self,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
+        if self.migrate_root_keyed_tables_checkpointed(checkpoint)?.is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        self.migrate_structural_schema()?;
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        if self.migrate_embed_text_version_checkpointed(checkpoint)?.is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        self.seed_mark_seq()?;
+        Ok(ControlFlow::Continue(()))
     }
 
     /// The database file this store was opened from — the anchor for the sibling persisted
@@ -299,13 +336,16 @@ impl Store {
     /// consistent and belongs to the newer daemon. Splitting the file per schema
     /// would remove the window at the price of copying the whole store on every
     /// upgrade.
-    fn migrate_root_keyed_tables(&self) -> Result<(), SearchError> {
+    fn migrate_root_keyed_tables_checkpointed(
+        &self,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
         let pending: Vec<&RootKeyedTable> = ROOT_KEYED_TABLES
             .iter()
             .filter(|table| Self::table_awaits_root_id(&self.conn, table.name))
             .collect();
         if pending.is_empty() {
-            return Ok(());
+            return Ok(ControlFlow::Continue(()));
         }
 
         // Dropping `files` with foreign keys enforced would cascade its chunks
@@ -313,11 +353,11 @@ impl Store {
         // a no-op inside a transaction, so the window is opened here and closed
         // whatever happens, including on a failed rebuild.
         self.conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-        let rebuilt = self.rebuild_root_keyed_tables(&pending);
+        let rebuilt = self.rebuild_root_keyed_tables(&pending, checkpoint);
         let restored = self.conn.execute_batch("PRAGMA foreign_keys = ON;");
-        rebuilt?;
+        let rebuilt = rebuilt?;
         restored?;
-        Ok(())
+        Ok(rebuilt)
     }
 
     /// Whether the table exists and still lacks `root_id`. A missing table is
@@ -337,7 +377,11 @@ impl Store {
         rows.filter_map(Result::ok).collect()
     }
 
-    fn rebuild_root_keyed_tables(&self, pending: &[&RootKeyedTable]) -> Result<(), SearchError> {
+    fn rebuild_root_keyed_tables(
+        &self,
+        pending: &[&RootKeyedTable],
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
         let tx = self.conn.unchecked_transaction()?;
         for table in pending {
             let staging = format!("{}_root_id_migration", table.name);
@@ -351,11 +395,27 @@ impl Store {
                 .filter(|column| Self::column_names(&tx, &staging).contains(column))
                 .collect();
             let carried = carried.join(", ");
+            let mut offset = 0usize;
+            loop {
+                let copied = tx.execute(
+                    &format!(
+                        "INSERT INTO {staging} ({carried}) SELECT {carried} FROM {} LIMIT ?1 OFFSET ?2",
+                        table.name
+                    ),
+                    params![crate::engine::WORKSPACE_APPLY_BATCH_ROWS as i64, offset as i64],
+                )?;
+                offset += copied;
+                if copied == crate::engine::WORKSPACE_APPLY_BATCH_ROWS && checkpoint().is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+                if copied < crate::engine::WORKSPACE_APPLY_BATCH_ROWS {
+                    break;
+                }
+            }
             tx.execute_batch(&format!(
-                "INSERT INTO {staging} ({carried}) SELECT {carried} FROM {};
-                 DROP TABLE {};
+                "DROP TABLE {};
                  ALTER TABLE {staging} RENAME TO {};",
-                table.name, table.name, table.name
+                table.name, table.name
             ))?;
         }
 
@@ -381,7 +441,7 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     /// Reconcile the structural schema in a single transaction: wipe a stale cache,
@@ -518,11 +578,33 @@ impl Store {
     /// Force a full re-embed when the embedding-text format has changed since this
     /// database was built (see [`EMBED_TEXT_VERSION`]). A fresh database just records
     /// the current version.
-    fn migrate_embed_text_version(&self) -> Result<(), SearchError> {
+    fn migrate_embed_text_version_checkpointed(
+        &self,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
         let version: i64 = self.conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version != EMBED_TEXT_VERSION {
-            let cleared = self.conn.execute("UPDATE files SET hash = zeroblob(0)", [])?;
-            self.conn.pragma_update(None, "user_version", EMBED_TEXT_VERSION)?;
+            let tx = self.conn.unchecked_transaction()?;
+            let mut cleared = 0usize;
+            loop {
+                let batch = tx.execute(
+                    "UPDATE files SET hash = zeroblob(0)
+                     WHERE id IN (SELECT id FROM files WHERE length(hash) > 0 LIMIT ?1)",
+                    params![crate::engine::WORKSPACE_APPLY_BATCH_ROWS as i64],
+                )?;
+                cleared += batch;
+                if batch == crate::engine::WORKSPACE_APPLY_BATCH_ROWS && checkpoint().is_break() {
+                    return Ok(ControlFlow::Break(()));
+                }
+                if batch < crate::engine::WORKSPACE_APPLY_BATCH_ROWS {
+                    break;
+                }
+            }
+            tx.pragma_update(None, "user_version", EMBED_TEXT_VERSION)?;
+            if checkpoint().is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+            tx.commit()?;
             if cleared > 0 {
                 tracing::info!(
                     cleared,
@@ -532,7 +614,7 @@ impl Store {
                 );
             }
         }
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     #[cfg(test)]
@@ -542,9 +624,8 @@ impl Store {
         let store =
             Self { conn, path: PathBuf::from(":memory:"), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
-        store.migrate_root_keyed_tables()?;
-        store.migrate_structural_schema()?;
-        store.seed_mark_seq()?;
+        let mut checkpoint = || ControlFlow::Continue(());
+        assert!(store.finish_open_checkpointed(&mut checkpoint)?.is_continue());
         Ok(store)
     }
 
@@ -1074,6 +1155,66 @@ impl Store {
         Ok(())
     }
 
+    /// Commit one bounded, already-rendered context-refresh slice atomically. The caller keeps
+    /// slices at `WORKSPACE_APPLY_BATCH_ROWS`; the two checkpoints refresh the lease heartbeat
+    /// and turn a release before commit into a full rollback of this slice.
+    pub(crate) fn apply_context_refresh_batch(
+        &self,
+        mutations: &[ContextRefreshMutation],
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<(usize, usize, usize), SearchError>> {
+        if checkpoint().is_break() {
+            return ControlFlow::Break(());
+        }
+        let tx = match self.conn.unchecked_transaction() {
+            Ok(tx) => tx,
+            Err(error) => return ControlFlow::Continue(Err(error.into())),
+        };
+        let marked_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs() as i64)
+            .unwrap_or(0);
+        let mut marked = 0;
+        let mut updated = 0;
+        let mut cleared = 0;
+        for mutation in mutations {
+            let changed = match mutation {
+                ContextRefreshMutation::Mark { key, seq } => tx.execute(
+                    "INSERT INTO context_dirty (root_id, path, collection, marked_at, seq)
+                     VALUES (?1, ?2, 'code', ?3, ?4)
+                     ON CONFLICT(root_id, path, collection) DO UPDATE
+                     SET marked_at = ?3, seq = ?4 WHERE context_dirty.seq <= ?4",
+                    params![key.root_id, key.path, marked_at, seq],
+                ),
+                ContextRefreshMutation::Update { chunk_id, graph_context } => tx.execute(
+                    "UPDATE chunks SET graph_context = ?2, embedding = NULL WHERE id = ?1",
+                    params![chunk_id, graph_context],
+                ),
+                ContextRefreshMutation::Clear { key, seq_bound } => tx.execute(
+                    "DELETE FROM context_dirty
+                     WHERE collection = 'code' AND root_id = ?1 AND path = ?2 AND seq <= ?3",
+                    params![key.root_id, key.path, seq_bound],
+                ),
+            };
+            let changed = match changed {
+                Ok(changed) => changed,
+                Err(error) => return ControlFlow::Continue(Err(error.into())),
+            };
+            match mutation {
+                ContextRefreshMutation::Mark { .. } => marked += changed,
+                ContextRefreshMutation::Update { .. } => updated += changed,
+                ContextRefreshMutation::Clear { .. } => cleared += changed,
+            }
+        }
+        if checkpoint().is_break() {
+            return ControlFlow::Break(());
+        }
+        match tx.commit() {
+            Ok(()) => ControlFlow::Continue(Ok((marked, updated, cleared))),
+            Err(error) => ControlFlow::Continue(Err(error.into())),
+        }
+    }
+
     pub fn insert_chunk(
         &self,
         file_id: i64,
@@ -1123,13 +1264,23 @@ impl Store {
     /// Apply every persistent part of a workspace-root transition in one SQLite transaction.
     ///
     /// The external baseline manifest and value-keyed embedding cache are deliberately not
-    /// touched: neither belongs to the mutable workspace keyspace. The live vector candidate is
-    /// built from the transaction's uncommitted rows, so a vector-build failure rolls SQL back.
+    /// touched: neither belongs to the mutable workspace keyspace. The caller prepares its cache
+    /// and vector candidates before entering the fence, then swaps them only after this commits.
     pub(crate) fn apply_workspace_roots_transition(
         &mut self,
         change: WorkspaceStoreTransition<'_>,
-    ) -> Result<crate::index::VectorIndex, SearchError> {
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         let tx = self.conn.transaction()?;
+        let mut rows = 0usize;
+        let mut tick = || {
+            rows += 1;
+            rows.is_multiple_of(crate::engine::WORKSPACE_APPLY_BATCH_ROWS)
+                && checkpoint().is_break()
+        };
 
         for root_id in change.changed_root_ids {
             tx.execute(
@@ -1158,6 +1309,9 @@ impl Store {
             for table in ["overlay_fingerprint_cache", "context_dirty", "overlay_tombstones"] {
                 let sql = format!("DELETE FROM {table} WHERE root_id = ?1");
                 tx.execute(&sql, params![root_id])?;
+            }
+            if tick() {
+                return Ok(ControlFlow::Break(()));
             }
         }
 
@@ -1189,6 +1343,9 @@ impl Store {
                 let sql = format!("DELETE FROM {table} WHERE root_id = ?1 AND path = ?2");
                 tx.execute(&sql, params![key.root_id, key.path])?;
             }
+            if tick() {
+                return Ok(ControlFlow::Break(()));
+            }
         }
 
         let deleted_at = std::time::SystemTime::now()
@@ -1200,9 +1357,12 @@ impl Store {
             tx.execute(
                 "INSERT INTO overlay_tombstones (root_id, path, collection, deleted_at)
                  VALUES (?1, ?2, 'code', ?3)
-                 ON CONFLICT(root_id, path) DO UPDATE SET collection = 'code', deleted_at = ?3",
+                ON CONFLICT(root_id, path) DO UPDATE SET collection = 'code', deleted_at = ?3",
                 params![key.root_id, key.path, deleted_at],
             )?;
+            if tick() {
+                return Ok(ControlFlow::Break(()));
+            }
         }
 
         let now = std::time::SystemTime::now()
@@ -1261,20 +1421,16 @@ impl Store {
                 ])?;
                 let chunk_id = tx.last_insert_rowid();
                 fts_stmt.execute(params![chunk_id, chunk.name, chunk.text])?;
+                if tick() {
+                    return Ok(ControlFlow::Break(()));
+                }
             }
         }
-
-        #[cfg(test)]
-        if FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(std::cell::Cell::get) {
-            return Err(SearchError::Index(
-                "forced workspace transition vector preparation failure".to_owned(),
-            ));
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
         }
-
-        let embeddings = Self::read_all_embeddings(&tx, change.dimension)?;
-        let index = crate::index::VectorIndex::build(change.dimension, &embeddings)?;
         tx.commit()?;
-        Ok(index)
+        Ok(ControlFlow::Continue(()))
     }
 
     /// As [`Self::reindex_file`], but persists each chunk's graph context (parallel to
@@ -1299,6 +1455,27 @@ impl Store {
         )
     }
 
+    pub(crate) fn reindex_file_with_context_checkpointed(
+        &mut self,
+        key: &FileKey,
+        hash: &[u8],
+        chunks: &[Chunk],
+        embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<(), i64>, SearchError> {
+        self.reindex_file_in_collection_checkpointed(
+            &key.root_id,
+            &key.path,
+            hash,
+            "code",
+            chunks,
+            embeddings,
+            graph_contexts,
+            checkpoint,
+        )
+    }
+
     // Every argument is a distinct input of one write — which row, what it now
     // holds, and the optional vectors and rendered contexts that go with it.
     // Bundling them into a context struct would only rename the same fields, so
@@ -1314,6 +1491,37 @@ impl Store {
         embeddings: Option<&[Vec<f32>]>,
         graph_contexts: Option<&[Option<String>]>,
     ) -> Result<i64, SearchError> {
+        let mut checkpoint = || ControlFlow::Continue(());
+        match self.reindex_file_in_collection_checkpointed(
+            root_id,
+            path,
+            hash,
+            collection,
+            chunks,
+            embeddings,
+            graph_contexts,
+            &mut checkpoint,
+        )? {
+            ControlFlow::Continue(file_id) => Ok(file_id),
+            ControlFlow::Break(()) => unreachable!("the permit-all checkpoint cannot cancel"),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reindex_file_in_collection_checkpointed(
+        &mut self,
+        root_id: &str,
+        path: &str,
+        hash: &[u8],
+        collection: &str,
+        chunks: &[Chunk],
+        embeddings: Option<&[Vec<f32>]>,
+        graph_contexts: Option<&[Option<String>]>,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<(), i64>, SearchError> {
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         let tx = self.conn.transaction()?;
 
         let now = std::time::SystemTime::now()
@@ -1381,11 +1589,19 @@ impl Store {
 
                 let chunk_id = tx.last_insert_rowid();
                 fts_stmt.execute(params![chunk_id, chunk.name, chunk.text])?;
+                if (i + 1).is_multiple_of(crate::engine::WORKSPACE_APPLY_BATCH_ROWS)
+                    && checkpoint().is_break()
+                {
+                    return Ok(ControlFlow::Break(()));
+                }
             }
         }
 
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         tx.commit()?;
-        Ok(file_id)
+        Ok(ControlFlow::Continue(file_id))
     }
 
     pub fn reindex_documents(
@@ -2014,15 +2230,42 @@ impl Store {
     }
 
     pub fn rebuild_fts(&self) -> Result<(), SearchError> {
+        let mut checkpoint = || ControlFlow::Continue(());
+        match self.rebuild_fts_checkpointed(&mut checkpoint)? {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(()) => unreachable!("permit-all checkpoint cannot cancel"),
+        }
+    }
+
+    pub(crate) fn rebuild_fts_checkpointed(
+        &self,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM chunks_fts", [])?;
-        tx.execute(
-            "INSERT INTO chunks_fts(rowid, symbol_name, text)
-             SELECT id, symbol_name, text FROM chunks",
-            [],
-        )?;
+        let mut offset = 0usize;
+        loop {
+            let inserted = tx.execute(
+                "INSERT INTO chunks_fts(rowid, symbol_name, text)
+                 SELECT id, symbol_name, text FROM chunks ORDER BY id LIMIT ?1 OFFSET ?2",
+                params![crate::engine::WORKSPACE_APPLY_BATCH_ROWS as i64, offset as i64],
+            )?;
+            offset += inserted;
+            if inserted == crate::engine::WORKSPACE_APPLY_BATCH_ROWS && checkpoint().is_break() {
+                return Ok(ControlFlow::Break(()));
+            }
+            if inserted < crate::engine::WORKSPACE_APPLY_BATCH_ROWS {
+                break;
+            }
+        }
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
         tx.commit()?;
-        Ok(())
+        Ok(ControlFlow::Continue(()))
     }
 
     pub fn fts_count(&self) -> Result<usize, SearchError> {
@@ -2565,6 +2808,70 @@ impl Store {
         Ok(())
     }
 
+    /// Persist the two shared Phase-C caches in one cancellable transaction. A break drops the
+    /// transaction, allowing the caller to retain and retry the same in-memory publication.
+    pub(crate) fn apply_overlay_publication(
+        &self,
+        fingerprints: Option<(&str, &HashMap<FileKey, PersistedFingerprint>)>,
+        embeddings: Option<OverlayEmbeddingPublication<'_>>,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let mut rows = 0usize;
+        let mut tick = || {
+            rows += 1;
+            rows.is_multiple_of(crate::engine::WORKSPACE_APPLY_BATCH_ROWS)
+                && checkpoint().is_break()
+        };
+        if let Some((snapshot_id, entries)) = fingerprints {
+            tx.execute("DELETE FROM overlay_fingerprint_cache", [])?;
+            let mut stmt = tx.prepare(
+                "INSERT INTO overlay_fingerprint_cache
+                 (root_id, path, file_size, file_mtime_secs, file_mtime_nanos, content_fingerprint,
+                  manifest_snapshot_id, canonical)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            for (key, entry) in entries {
+                stmt.execute(params![
+                    key.root_id,
+                    key.path,
+                    entry.file_size as i64,
+                    entry.file_mtime_secs,
+                    entry.file_mtime_nanos,
+                    entry.content_fingerprint,
+                    snapshot_id,
+                    entry.canonical,
+                ])?;
+                if tick() {
+                    return Ok(ControlFlow::Break(()));
+                }
+            }
+        }
+        if let Some((model_id, dimension, entries)) = embeddings {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO overlay_embedding_cache
+                 (embedding_key, model_id, dimension, embedding)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (embedding_key, embedding) in entries {
+                let blob: Vec<u8> =
+                    embedding.iter().flat_map(|value| value.to_le_bytes()).collect();
+                stmt.execute(params![embedding_key, model_id, dimension as i64, blob])?;
+                if tick() {
+                    return Ok(ControlFlow::Break(()));
+                }
+            }
+        }
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        tx.commit()?;
+        Ok(ControlFlow::Continue(()))
+    }
+
     /// Every key the fingerprint cache holds, whatever snapshot it was written for.
     ///
     /// Deliberately not [`Self::load_overlay_fingerprint_cache`]: that one takes a snapshot id
@@ -2668,6 +2975,67 @@ impl Store {
             .execute("DELETE FROM overlay_files WHERE collection = ?1", params![collection])?;
         self.clear_overlay_tombstones(collection)?;
         Ok(())
+    }
+
+    /// Atomically clear the local collection and its overlay carriers during workspace bootstrap.
+    pub fn clear_workspace_overlay_checkpointed(
+        &self,
+        collection: &str,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> Result<ControlFlow<()>, SearchError> {
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        let file_ids = {
+            let mut stmt = tx.prepare("SELECT id FROM files WHERE collection = ?1 ORDER BY id")?;
+            let ids = stmt
+                .query_map(params![collection], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        let overlay_ids = {
+            let mut stmt =
+                tx.prepare("SELECT id FROM overlay_files WHERE collection = ?1 ORDER BY id")?;
+            let ids = stmt
+                .query_map(params![collection], |row| row.get::<_, i64>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            ids
+        };
+        let mut rows = 0usize;
+        for file_id in file_ids {
+            tx.execute(
+                "DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE file_id = ?1)",
+                params![file_id],
+            )?;
+            tx.execute("DELETE FROM files WHERE id = ?1", params![file_id])?;
+            rows += 1;
+            if rows.is_multiple_of(crate::engine::WORKSPACE_APPLY_BATCH_ROWS)
+                && checkpoint().is_break()
+            {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        for file_id in overlay_ids {
+            tx.execute(
+                "DELETE FROM overlay_chunks_fts
+                 WHERE rowid IN (SELECT id FROM overlay_chunks WHERE file_id = ?1)",
+                params![file_id],
+            )?;
+            tx.execute("DELETE FROM overlay_files WHERE id = ?1", params![file_id])?;
+            rows += 1;
+            if rows.is_multiple_of(crate::engine::WORKSPACE_APPLY_BATCH_ROWS)
+                && checkpoint().is_break()
+            {
+                return Ok(ControlFlow::Break(()));
+            }
+        }
+        tx.execute("DELETE FROM overlay_tombstones WHERE collection = ?1", params![collection])?;
+        if checkpoint().is_break() {
+            return Ok(ControlFlow::Break(()));
+        }
+        tx.commit()?;
+        Ok(ControlFlow::Continue(()))
     }
 }
 
@@ -3025,6 +3393,110 @@ mod tests {
         );
 
         assert_eq!(store.embedding_generation().unwrap(), 17, "the vector generation is preserved");
+    }
+
+    #[test]
+    fn checkpointed_root_migration_rolls_back_at_64_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("search.db");
+        write_pre_root_id_store(&path);
+        let conn = Connection::open(&path).unwrap();
+        for id in 100..165 {
+            conn.execute(
+                "INSERT INTO files (id, path, hash, indexed_at, collection)
+                 VALUES (?1, ?2, x'01', 100, 'code')",
+                params![id, format!("Bulk/{id}.bsl")],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let store = Store::prepare_open(&path).unwrap();
+        assert!(store.finish_open_checkpointed(&mut || ControlFlow::Break(())).unwrap().is_break());
+        assert!(Store::column_names(&store.conn, "files").iter().all(|name| name != "root_id"));
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT COUNT(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            67
+        );
+
+        assert!(store
+            .finish_open_checkpointed(&mut || ControlFlow::Continue(()))
+            .unwrap()
+            .is_continue());
+        assert!(Store::column_names(&store.conn, "files").iter().any(|name| name == "root_id"));
+    }
+
+    #[test]
+    fn checkpointed_fts_rebuild_rolls_back_and_retries() {
+        let mut store = Store::in_memory().unwrap();
+        for index in 0..=crate::engine::WORKSPACE_APPLY_BATCH_ROWS {
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    &format!("M{index}.bsl"),
+                    b"hash",
+                    &[sample_chunk(&format!("P{index}"))],
+                    None,
+                )
+                .unwrap();
+        }
+        store.conn.execute("DELETE FROM chunks_fts", []).unwrap();
+        let mut checkpoints = 0;
+        assert!(store
+            .rebuild_fts_checkpointed(&mut || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap()
+            .is_break());
+        assert_eq!(store.fts_count().unwrap(), 0);
+        assert!(store
+            .rebuild_fts_checkpointed(&mut || ControlFlow::Continue(()))
+            .unwrap()
+            .is_continue());
+        assert_eq!(store.fts_count().unwrap(), crate::engine::WORKSPACE_APPLY_BATCH_ROWS + 1);
+    }
+
+    #[test]
+    fn checkpointed_workspace_clear_is_atomic() {
+        let mut store = Store::in_memory().unwrap();
+        for index in 0..=crate::engine::WORKSPACE_APPLY_BATCH_ROWS {
+            store
+                .reindex_file(
+                    CONFIGURATION_ROOT_ID,
+                    &format!("M{index}.bsl"),
+                    b"hash",
+                    &[sample_chunk(&format!("P{index}"))],
+                    None,
+                )
+                .unwrap();
+        }
+        let mut checkpoints = 0;
+        assert!(store
+            .clear_workspace_overlay_checkpointed("code", &mut || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap()
+            .is_break());
+        assert_eq!(store.file_count().unwrap(), crate::engine::WORKSPACE_APPLY_BATCH_ROWS + 1);
+        assert!(store
+            .clear_workspace_overlay_checkpointed("code", &mut || ControlFlow::Continue(()))
+            .unwrap()
+            .is_continue());
+        assert_eq!(store.file_count().unwrap(), 0);
+        assert_eq!(store.fts_count().unwrap(), 0);
     }
 
     /// Rebuilding a parent table drops the foreign keys and triggers that hang
@@ -4458,15 +4930,18 @@ mod tests {
             .unwrap();
 
         let changed_root_ids = HashSet::from([key.root_id.clone()]);
-        store
-            .apply_workspace_roots_transition(WorkspaceStoreTransition {
-                changed_root_ids: &changed_root_ids,
-                cleanup: &HashSet::new(),
-                tombstones: &HashSet::new(),
-                upserts: &[],
-                dimension: 4,
-            })
-            .unwrap();
+        assert!(store
+            .apply_workspace_roots_transition(
+                WorkspaceStoreTransition {
+                    changed_root_ids: &changed_root_ids,
+                    cleanup: &HashSet::new(),
+                    tombstones: &HashSet::new(),
+                    upserts: &[],
+                },
+                &mut || ControlFlow::Continue(()),
+            )
+            .unwrap()
+            .is_continue());
 
         assert!(store.file_hash(&key.root_id, &key.path).unwrap().is_none());
         assert_eq!(store.overlay_file_count("code").unwrap(), 0);

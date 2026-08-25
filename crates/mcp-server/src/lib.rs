@@ -1667,7 +1667,7 @@ impl McpServer {
 
         // Lazily trigger the background load on first use.
         graph.ensure_loading();
-        let superseded = graph.is_superseded();
+        let superseded = graph.superseded_latched();
 
         // `resolve` is a name lookup, not a graph traversal: the platform answers it
         // with no index at all and the resident's tables answer it without the graph,
@@ -1682,7 +1682,9 @@ impl McpServer {
         }
 
         match graph.status() {
-            _ if superseded => {}
+            _ if superseded => {
+                return Err(McpError::internal_error(crate::graph::SUPERSEDED_GRAPH_ERROR, None))
+            }
             GraphStatus::Disabled => {
                 return Err(McpError::invalid_params(
                     "graph is only available in the workspace profile",
@@ -1701,7 +1703,7 @@ impl McpServer {
         }
 
         let Some(snapshot) = graph.snapshot() else {
-            if superseded || graph.is_superseded() {
+            if graph.superseded_latched() {
                 return Err(McpError::internal_error(crate::graph::SUPERSEDED_GRAPH_ERROR, None));
             }
             return Ok(tools::graph::loading(None));
@@ -2901,6 +2903,7 @@ mod surface_guards {
 #[cfg(test)]
 mod graph_supersession_contract {
     use super::*;
+    use std::time::Duration;
 
     fn params(action: &str, id: Option<&str>) -> Parameters<GraphParams> {
         Parameters(GraphParams {
@@ -2919,6 +2922,100 @@ mod graph_supersession_contract {
         })
     }
 
+    fn resolve_params(query: &str) -> Parameters<GraphParams> {
+        let mut params = params("resolve", None).0;
+        params.query = Some(query.to_owned());
+        Parameters(params)
+    }
+
+    fn symbol_params(symbol: &str) -> Parameters<SymbolInfoParams> {
+        Parameters(SymbolInfoParams {
+            symbol: Some(symbol.to_owned()),
+            root_id: None,
+            path: None,
+            line: None,
+            column: None,
+            include: Vec::new(),
+            member_kind: None,
+            member_name: None,
+            locale: None,
+            max_output_tokens: None,
+        })
+    }
+
+    enum BusyGraphHandler {
+        Graph,
+        ResolveNames,
+        SymbolInfo,
+    }
+
+    async fn assert_busy_graph_handler_returns_immediately(handler: BusyGraphHandler) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::graph::test_support::sample_workspace(root);
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let state = SharedState::workspace_with_cache(root.to_path_buf(), cache.clone()).unwrap();
+        state.diagnostics().ensure_loading();
+        crate::diagnostics_state::test_support::wait_ready(state.diagnostics());
+        let graph = state.graph().clone();
+        graph.ensure_loading();
+        crate::graph::test_support::wait_ready(&graph);
+        let held: Vec<_> = (0..crate::graph::SNAPSHOT_POOL_CAP)
+            .map(|_| graph.snapshot().expect("the published pool has four handles"))
+            .collect();
+        let lock = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &cache,
+            Duration::from_secs(3),
+        );
+        let server = McpServer::new(McpProfile::Workspace, state);
+        let token = || tokio_util::sync::CancellationToken::new();
+
+        let answer = match handler {
+            BusyGraphHandler::Graph => tokio::time::timeout(
+                Duration::from_millis(500),
+                server.graph(params("overview", None), token()),
+            )
+            .await
+            .expect("graph handler must not wait for the lease lock")
+            .expect("an exhausted pool is a temporary loading answer"),
+            BusyGraphHandler::ResolveNames => tokio::time::timeout(
+                Duration::from_millis(500),
+                server.graph(resolve_params("Считать"), token()),
+            )
+            .await
+            .expect("resolve_names must not wait for the lease lock")
+            .expect("resolve still answers from its other providers"),
+            BusyGraphHandler::SymbolInfo => tokio::time::timeout(
+                Duration::from_millis(500),
+                server.symbol_info(symbol_params("Сервер.Считать"), token()),
+            )
+            .await
+            .expect("symbol_info must not wait for the lease lock")
+            .expect("the resident card survives unavailable graph enrichment"),
+        };
+        assert!(answer.structured_content.is_some());
+
+        drop(held);
+        lock.join().unwrap();
+        server.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graph_handler_misses_immediately_when_preopened_handles_are_busy() {
+        assert_busy_graph_handler_returns_immediately(BusyGraphHandler::Graph).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolve_names_misses_immediately_when_preopened_handles_are_busy() {
+        assert_busy_graph_handler_returns_immediately(BusyGraphHandler::ResolveNames).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn symbol_info_misses_immediately_when_preopened_handles_are_busy() {
+        assert_busy_graph_handler_returns_immediately(BusyGraphHandler::SymbolInfo).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn graph_actions_fail_when_superseded_snapshot_is_gone() {
         let dir = tempfile::tempdir().unwrap();
@@ -2933,14 +3030,22 @@ mod graph_supersession_contract {
         let held = graph.snapshot().expect("the old daemon owns one open descriptor");
         let server = McpServer::new(McpProfile::Workspace, state);
         let newer = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(graph.is_superseded(), "background ownership probing latches takeover");
+        std::fs::write(cache.graph_db_path(), b"replacement").unwrap();
 
-        let schema = server.graph(params("schema", None)).await.expect("schema stays static");
+        let schema = server
+            .graph(params("schema", None), tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("schema stays static");
         assert!(schema.structured_content.is_some());
 
         for (action, id) in
             [("overview", None), ("node", Some("method/CommonModule.X.Y")), ("overview", None)]
         {
-            let error = server.graph(params(action, id)).await.expect_err(action);
+            let error = server
+                .graph(params(action, id), tokio_util::sync::CancellationToken::new())
+                .await
+                .expect_err(action);
             assert_eq!(error.message, crate::graph::SUPERSEDED_GRAPH_ERROR, "{action}");
         }
 

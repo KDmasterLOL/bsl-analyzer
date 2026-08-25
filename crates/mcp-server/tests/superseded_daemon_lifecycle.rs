@@ -43,6 +43,18 @@ async fn wait_current_graph(client: &RunningService<RoleClient, ()>, previous: O
     panic!("graph did not publish the expected current generation: {last}");
 }
 
+async fn wait_superseded(client: &RunningService<RoleClient, ()>) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..200 {
+        last = graph_status(client).await;
+        if last["superseded"] == true {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("old daemon did not observe supersession: {last}");
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct FileStamp {
     inode: u64,
@@ -114,8 +126,7 @@ async fn superseded_daemon_lifecycle() {
     );
     let new_client = client(new_server.clone()).await;
 
-    let terminal = graph_status(&old_client).await;
-    assert_eq!(terminal["superseded"], true);
+    let terminal = wait_superseded(&old_client).await;
     assert!(matches!(terminal["state"].as_str(), Some("ready" | "failed")), "{terminal}");
 
     let new_revision = wait_current_graph(&new_client, Some(old_revision)).await;

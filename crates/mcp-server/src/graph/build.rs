@@ -7,12 +7,14 @@ use bsl_search::SearchEngine;
 #[cfg(test)]
 use crate::cache::graph_db_path;
 use crate::graph_query::GraphDb;
+use crate::workspace_lease::LeaseOutcome;
 
 #[cfg(test)]
 use super::input::GRAPH_SOURCE_ROOT;
 use super::scan::classify_changes;
 #[cfg(test)]
 use super::scan::workspace_fingerprint;
+use super::snapshot::{PreparedSnapshotPool, SnapshotInstallError, SnapshotPrepareError};
 use super::state::{lock_recover, GraphState, Published, ReloadState};
 use super::types::GraphStatus;
 
@@ -20,6 +22,78 @@ use super::types::GraphStatus;
 /// 500 keeps peak RSS comfortably bounded on a 25k-module config (measured ~2.9 GB)
 /// while the resident method index resolves cross-batch calls.
 pub(super) const GRAPH_BUILD_BATCH: usize = 500;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LoadFailureReason {
+    TransientRefusal,
+    Terminal,
+    OperationError,
+}
+
+#[derive(Debug)]
+pub(super) struct LoadFailure {
+    pub(super) reason: LoadFailureReason,
+    pub(super) message: String,
+}
+
+impl LoadFailure {
+    fn new(reason: LoadFailureReason, message: impl Into<String>) -> Self {
+        Self { reason, message: message.into() }
+    }
+
+    fn operation(error: impl std::fmt::Display) -> Self {
+        Self::new(LoadFailureReason::OperationError, error.to_string())
+    }
+}
+
+impl std::fmt::Display for LoadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LoadFailure {}
+
+fn install_failure(
+    outcome: LeaseOutcome<Result<(), SnapshotInstallError>>,
+) -> Result<(), LoadFailure> {
+    match outcome {
+        LeaseOutcome::Applied(Ok(())) => Ok(()),
+        LeaseOutcome::Applied(Err(SnapshotInstallError::Changed)) => Err(LoadFailure::new(
+            LoadFailureReason::TransientRefusal,
+            "graph path changed before the prepared snapshot pool could be installed",
+        )),
+        LeaseOutcome::Applied(Err(SnapshotInstallError::Operation(message))) => {
+            Err(LoadFailure::new(LoadFailureReason::OperationError, message))
+        }
+        LeaseOutcome::TransientRefusal => Err(LoadFailure::new(
+            LoadFailureReason::TransientRefusal,
+            "workspace cache ownership was temporarily unavailable during graph snapshot install",
+        )),
+        LeaseOutcome::Terminal => Err(LoadFailure::new(
+            LoadFailureReason::Terminal,
+            "workspace cache ownership ended before graph snapshot install",
+        )),
+    }
+}
+
+fn prepare_failure(error: SnapshotPrepareError) -> LoadFailure {
+    match error {
+        SnapshotPrepareError::Changed => LoadFailure::new(
+            LoadFailureReason::TransientRefusal,
+            "graph changed while its snapshot pool was being prepared",
+        ),
+        SnapshotPrepareError::Open(error) => {
+            LoadFailure::new(LoadFailureReason::OperationError, error.to_string())
+        }
+    }
+}
+
+pub(super) enum PublishAttemptOutcome {
+    Published,
+    FallBack,
+    Refused(LoadFailure),
+}
 
 #[cfg(test)]
 thread_local! {
@@ -33,9 +107,9 @@ impl GraphState {
         engine: &mut SearchEngine,
         source_path: &Path,
         build_start_seq: i64,
-    ) -> anyhow::Result<()> {
+    ) -> Result<(), LoadFailure> {
         let Some(workspace_root) = self.workspace_root.clone() else {
-            anyhow::bail!("fused build on a non-workspace graph");
+            return Err(LoadFailure::operation("fused build on a non-workspace graph"));
         };
         let generation =
             lock_recover(&self.inner).published.as_ref().map(|p| p.generation).unwrap_or(0) + 1;
@@ -47,13 +121,25 @@ impl GraphState {
         }));
         let built = match outcome {
             Ok(Ok(v)) => v,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => anyhow::bail!("fused graph build panicked"),
+            Ok(Err(failure)) => return Err(sink.failure.take().unwrap_or(failure)),
+            Err(_) => return Err(LoadFailure::operation("fused graph build panicked")),
         };
         if built.force_stale {
             tracing::warn!("fused graph build straddled a disk write; snapshot marked stale");
         }
-        self.adopt_prebuilt(generation, built.fp_pre, built.files, built.search_roots.clone());
+        install_failure(self.install_prepared_snapshot(
+            built.prepared,
+            Published {
+                generation,
+                fingerprint: built.fp_pre,
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: built.force_stale,
+                search_roots: built.search_roots.clone(),
+            },
+            GraphStatus::Ready { files: built.files },
+        ))?;
+        *lock_recover(&self.scan) = None;
         self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
         // The fused sink just wrote every indexed document's context from THIS
         // build — nothing persisted predates it, so no whole-collection re-render.
@@ -90,7 +176,10 @@ impl GraphState {
     /// served on failure).
     pub(super) fn run_load(&self, is_reload: bool) {
         if self.is_superseded() {
-            self.record_load_failure(is_reload, super::types::SUPERSEDED_GRAPH_ERROR.to_owned());
+            self.record_load_failure(
+                is_reload,
+                LoadFailure::new(LoadFailureReason::Terminal, super::types::SUPERSEDED_GRAPH_ERROR),
+            );
             return;
         }
         let Some(workspace_root) = self.workspace_root.clone() else {
@@ -116,45 +205,71 @@ impl GraphState {
         // still matches the workspace — turning a multi-minute rebuild into a stat
         // walk plus an open. A reload is skipped here: it only fires once drift has
         // been detected, so the on-disk file is known stale and must be rebuilt.
-        if !force_project_reload
-            && !is_reload
-            && self.try_publish_cached(&workspace_root, build_start_seq)
-        {
-            return;
+        if !force_project_reload && !is_reload {
+            match self.try_publish_cached(&workspace_root, build_start_seq) {
+                PublishAttemptOutcome::Published => return,
+                PublishAttemptOutcome::FallBack => {}
+                PublishAttemptOutcome::Refused(failure) => {
+                    self.record_load_failure(is_reload, failure);
+                    return;
+                }
+            }
         }
 
         // Cached but drifted: serve the stale snapshot immediately and catch up through
         // the reload lifecycle (its failure path keeps the snapshot and flags
         // `reload="failed"`, unlike this initial load's `Failed`). The catch-up build
         // recomputes its own generation from the just-published revision.
-        if !force_project_reload
-            && !is_reload
-            && self.try_publish_stale_and_catch_up(&workspace_root)
-        {
-            return;
+        if !force_project_reload && !is_reload {
+            match self.try_publish_stale_and_catch_up(&workspace_root) {
+                PublishAttemptOutcome::Published => return,
+                PublishAttemptOutcome::FallBack => {}
+                PublishAttemptOutcome::Refused(failure) => {
+                    self.record_load_failure(is_reload, failure);
+                    return;
+                }
+            }
         }
 
         // Everything below writes the shared graph database. Transient non-ownership may re-arm
         // later; terminal supersession was rejected before either cache-adoption path above.
-        if !self.may_build() {
-            self.record_load_failure(
-                is_reload,
-                "another daemon generation owns this workspace's derived caches; \
-                 this one serves without rebuilding the graph"
-                    .to_owned(),
-            );
-            return;
+        match self.lease.with_ownership_outcome(|| ()) {
+            LeaseOutcome::Applied(()) => {}
+            LeaseOutcome::TransientRefusal => {
+                self.record_load_failure(
+                    is_reload,
+                    LoadFailure::new(
+                        LoadFailureReason::TransientRefusal,
+                        "workspace cache ownership is temporarily unavailable; graph build deferred",
+                    ),
+                );
+                return;
+            }
+            LeaseOutcome::Terminal => {
+                self.record_load_failure(
+                    is_reload,
+                    LoadFailure::new(
+                        LoadFailureReason::Terminal,
+                        "workspace cache ownership ended before the graph build started",
+                    ),
+                );
+                return;
+            }
         }
 
         // On reload, try the body-only fast path first: if only `.bsl` bodies changed
         // (signatures intact, nothing added/removed, no `.xml` drift) reproject just
         // those modules instead of the whole config. On any ineligibility or failure
         // it returns false and we fall through to a full rebuild.
-        if !force_project_reload
-            && is_reload
-            && self.try_incremental_reload(&workspace_root, generation, build_start_seq)
-        {
-            return;
+        if !force_project_reload && is_reload {
+            match self.try_incremental_reload(&workspace_root, generation, build_start_seq) {
+                PublishAttemptOutcome::Published => return,
+                PublishAttemptOutcome::FallBack => {}
+                PublishAttemptOutcome::Refused(failure) => {
+                    self.record_load_failure(is_reload, failure);
+                    return;
+                }
+            }
         }
 
         tracing::info!(?workspace_root, is_reload, generation, "graph database build started");
@@ -164,7 +279,15 @@ impl GraphState {
 
         match outcome {
             Ok(Ok(built)) => {
-                if built.force_stale {
+                let PublishedBuild {
+                    files,
+                    fp_pre,
+                    force_stale,
+                    scan_roots,
+                    search_roots,
+                    prepared,
+                } = built;
+                if force_stale {
                     tracing::warn!(
                         is_reload,
                         "graph build straddled a disk write; marking snapshot stale to force reload"
@@ -176,7 +299,7 @@ impl GraphState {
                 *lock_recover(&self.scan) = None;
                 let topology_changed;
                 {
-                    let mut inner = lock_recover(&self.inner);
+                    let inner = lock_recover(&self.inner);
                     // Only a WITNESSED transition (a previously published topology
                     // differing from this build's) requests the whole-collection
                     // re-render. `None` deliberately reads as unchanged: a cold
@@ -187,35 +310,38 @@ impl GraphState {
                     topology_changed = inner
                         .published
                         .as_ref()
-                        .is_some_and(|p| p.fingerprint.topology != built.fp_pre.topology);
-                    inner.published = Some(Published {
+                        .is_some_and(|p| p.fingerprint.topology != fp_pre.topology);
+                }
+                if let Err(error) = install_failure(self.install_prepared_snapshot(
+                    prepared,
+                    Published {
                         generation,
-                        fingerprint: built.fp_pre,
+                        fingerprint: fp_pre,
                         stale: false,
                         reload: ReloadState::Idle,
-                        force_stale: built.force_stale,
-                        search_roots: built.search_roots.clone(),
-                    });
-                    inner.status = GraphStatus::Ready { files: built.files };
+                        force_stale,
+                        search_roots: search_roots.clone(),
+                    },
+                    GraphStatus::Ready { files },
+                )) {
+                    self.record_load_failure(is_reload, error);
+                    return;
                 }
-                self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
+                self.ensure_hub_roots(&scan_roots, fp_pre.topology);
                 self.complete_project_reload_through(project_reload_epoch);
                 self.notify_published(build_start_seq, topology_changed);
-                tracing::info!(
-                    files = built.files,
-                    generation,
-                    is_reload,
-                    "graph database build complete"
-                );
+                tracing::info!(files, generation, is_reload, "graph database build complete");
             }
             Ok(Err(e)) => {
-                let msg = e.to_string();
-                tracing::warn!("graph database build failed: {msg}");
-                self.record_load_failure(is_reload, msg);
+                tracing::warn!("graph database build failed: {}", e.message);
+                self.record_load_failure(is_reload, e);
             }
             Err(_) => {
                 tracing::error!("graph database build panicked");
-                self.record_load_failure(is_reload, "builder panicked".to_owned());
+                self.record_load_failure(
+                    is_reload,
+                    LoadFailure::new(LoadFailureReason::OperationError, "builder panicked"),
+                );
             }
         }
     }
@@ -225,19 +351,18 @@ impl GraphState {
     /// added/removed and no `.xml` drift — then no caller's resolution can have moved,
     /// so reprojecting just those modules yields a database byte-identical to a full
     /// rebuild. Patches a copy of the published file and atomically renames it in,
-    /// then publishes `generation`. Returns `true` on success; `false` (the common
-    /// case for a structural change) leaves nothing published and falls back to a full
-    /// rebuild.
+    /// then publishes `generation`. Structural ineligibility falls back to a full rebuild;
+    /// an ownership refusal retains its classification for the load lifecycle.
     fn try_incremental_reload(
         &self,
         workspace_root: &Path,
         generation: u64,
         build_start_seq: i64,
-    ) -> bool {
+    ) -> PublishAttemptOutcome {
         let db_path = self.graph_db_path().expect("workspace graph has cache layout");
         let stored_fp = read_stored_fingerprints(&db_path);
         if stored_fp.is_empty() {
-            return false; // no per-file record (older build) → full rebuild
+            return PublishAttemptOutcome::FallBack; // older build → full rebuild
         }
         // ONE project snapshot and ONE scanned universe serve the eligibility diff,
         // the profile recompute, the pre-fingerprint and the patch, so neither a
@@ -249,7 +374,7 @@ impl GraphState {
         match GraphDb::open(&db_path).and_then(|g| g.freshness_token()) {
             Ok((_, stored_token, _))
                 if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
-            _ => return false,
+            _ => return PublishAttemptOutcome::FallBack,
         }
         let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
         // Before the diff, not inside the bracket: a diff against a short scan reads
@@ -257,7 +382,7 @@ impl GraphState {
         // stats at all — the diff cannot see incompleteness, only the verdict can.
         if !pre.clean() {
             tracing::info!("incremental reload: incomplete workspace scan; full rebuild");
-            return false;
+            return PublishAttemptOutcome::FallBack;
         }
         let diff = classify_changes(&stored_fp, &pre.stats);
 
@@ -268,7 +393,7 @@ impl GraphState {
             || !diff.removed.is_empty()
             || diff.touches_metadata()
         {
-            return false;
+            return PublishAttemptOutcome::FallBack;
         }
         let modified_paths: Vec<PathBuf> = diff.modified.iter().map(PathBuf::from).collect();
 
@@ -280,7 +405,7 @@ impl GraphState {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!("incremental reload: profile recompute failed: {e}");
-                    return false;
+                    return PublishAttemptOutcome::FallBack;
                 }
             };
         let stored_sig = read_stored_sig_hashes(&db_path);
@@ -288,12 +413,12 @@ impl GraphState {
         for p in &modified_paths {
             let key = p.to_string_lossy().into_owned();
             let Some(profile) = profiles.get(&key) else {
-                return false; // could not profile the module → full rebuild
+                return PublishAttemptOutcome::FallBack;
             };
             match stored_sig.get(&key) {
                 Some(Some(stored)) if *stored == profile.sig_hash => {} // body-only
                 Some(Some(_)) => sig_changed.push((key, profile)),      // signature changed
-                _ => return false, // no stored signature (pre-signature build) → full rebuild
+                _ => return PublishAttemptOutcome::FallBack,
             }
         }
 
@@ -316,11 +441,11 @@ impl GraphState {
                     tracing::info!(
                         "incremental reload: signature change not caller-delta-safe; full rebuild"
                     );
-                    return false;
+                    return PublishAttemptOutcome::FallBack;
                 }
                 Err(e) => {
                     tracing::warn!("incremental reload: caller-delta plan failed: {e}");
-                    return false;
+                    return PublishAttemptOutcome::FallBack;
                 }
             }
             // If the caller fan-out approaches the whole config, a full rebuild (no
@@ -334,7 +459,7 @@ impl GraphState {
                     modules = module_total,
                     "incremental reload: caller-delta too broad; full rebuild"
                 );
-                return false;
+                return PublishAttemptOutcome::FallBack;
             }
         }
 
@@ -358,7 +483,8 @@ impl GraphState {
                     files: 0,
                     built_at,
                 },
-            )?;
+            )
+            .map_err(LoadFailure::operation)?;
             let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
             let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
             let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
@@ -366,35 +492,46 @@ impl GraphState {
             // decisions cannot drift apart if the gate ever moves.
             let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
             {
-                let conn = rusqlite::Connection::open(&tmp_path)?;
+                let conn = rusqlite::Connection::open(&tmp_path).map_err(LoadFailure::operation)?;
                 conn.execute(
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
                     rusqlite::params![if force_stale { "1" } else { "0" }],
-                )?;
+                )
+                .map_err(LoadFailure::operation)?;
             }
             self.publish_or_discard(&tmp_path, &db_path)?;
-            anyhow::Ok((summary.modules, fp_pre, force_stale))
+            let prepared = self
+                .prepare_snapshot_pool(generation, fp_pre, force_stale)
+                .map_err(prepare_failure)?;
+            Ok::<_, LoadFailure>((summary.modules, fp_pre, force_stale, prepared))
         }));
 
         match outcome {
-            Ok(Ok((files, fp, force_stale))) => {
+            Ok(Ok((files, fp, force_stale, prepared))) => {
                 if force_stale {
                     tracing::warn!(
                         "incremental reload straddled a disk write; marking snapshot stale"
                     );
                 }
                 *lock_recover(&self.scan) = None;
-                {
-                    let mut inner = lock_recover(&self.inner);
-                    inner.published = Some(Published {
+                if let Err(error) = install_failure(self.install_prepared_snapshot(
+                    prepared,
+                    Published {
                         generation,
                         fingerprint: fp,
                         stale: false,
                         reload: ReloadState::Idle,
                         force_stale,
                         search_roots: project.search_roots.clone(),
-                    });
-                    inner.status = GraphStatus::Ready { files };
+                    },
+                    GraphStatus::Ready { files },
+                )) {
+                    return match error.reason {
+                        LoadFailureReason::TransientRefusal | LoadFailureReason::Terminal => {
+                            PublishAttemptOutcome::Refused(error)
+                        }
+                        LoadFailureReason::OperationError => PublishAttemptOutcome::FallBack,
+                    };
                 }
                 // The body-only gate proved the stored topology unchanged.
                 self.notify_published(build_start_seq, false);
@@ -404,61 +541,83 @@ impl GraphState {
                     modified = changed_paths.len(),
                     "graph incremental reload complete"
                 );
-                true
+                PublishAttemptOutcome::Published
             }
             Ok(Err(e)) => {
                 tracing::warn!("incremental reload failed, falling back to full rebuild: {e}");
                 let _ = std::fs::remove_file(&tmp_path);
-                false
+                match e.reason {
+                    LoadFailureReason::TransientRefusal | LoadFailureReason::Terminal => {
+                        PublishAttemptOutcome::Refused(e)
+                    }
+                    LoadFailureReason::OperationError => PublishAttemptOutcome::FallBack,
+                }
             }
             Err(_) => {
                 tracing::error!("incremental reload panicked, falling back to full rebuild");
                 let _ = std::fs::remove_file(&tmp_path);
-                false
+                PublishAttemptOutcome::FallBack
             }
         }
     }
 
     /// Publish an existing on-disk build instead of rebuilding, when it is still a
-    /// valid, current, non-straddled match for the workspace. Returns `true` (and
-    /// transitions to `Ready`) when the cache was reused; `false` to fall through to
-    /// a full build. The fingerprint scan it runs is the same one the build would do.
-    pub(super) fn try_publish_cached(&self, workspace_root: &Path, build_start_seq: i64) -> bool {
+    /// valid, current, non-straddled match for the workspace.
+    pub(super) fn try_publish_cached(
+        &self,
+        workspace_root: &Path,
+        build_start_seq: i64,
+    ) -> PublishAttemptOutcome {
         if self.is_superseded() {
-            return false;
+            return PublishAttemptOutcome::Refused(LoadFailure::new(
+                LoadFailureReason::Terminal,
+                super::types::SUPERSEDED_GRAPH_ERROR,
+            ));
         }
         let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
-            return false; // missing, truncated, or stale-schema → rebuild
+            return PublishAttemptOutcome::FallBack; // missing, truncated, or stale-schema → rebuild
         };
         let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
-            return false;
+            return PublishAttemptOutcome::FallBack;
         };
         let project = crate::graph::ProjectSnapshot::load(workspace_root);
         let now = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
         let fp_now = super::scan::fingerprint_of(&now.stats, &project.configs);
         if !cache_is_reusable(force_stale, fingerprint, fp_now, now.clean()) {
-            return false;
+            return PublishAttemptOutcome::FallBack;
         }
         let files = graph.files().unwrap_or(0);
+        drop(graph);
+        let prepared = match self.prepare_snapshot_pool(revision, fingerprint, force_stale) {
+            Ok(prepared) => prepared,
+            Err(SnapshotPrepareError::Open(_)) => return PublishAttemptOutcome::FallBack,
+            Err(error @ SnapshotPrepareError::Changed) => {
+                let error = prepare_failure(error);
+                return PublishAttemptOutcome::Refused(error);
+            }
+        };
 
         *lock_recover(&self.scan) = None;
-        let mut inner = lock_recover(&self.inner);
-        inner.published = Some(Published {
-            generation: revision,
-            fingerprint,
-            stale: false,
-            reload: ReloadState::Idle,
-            force_stale: false,
-            search_roots: project.search_roots.clone(),
-        });
-        inner.status = GraphStatus::Ready { files };
-        drop(inner);
+        if let Err(error) = install_failure(self.install_prepared_snapshot(
+            prepared,
+            Published {
+                generation: revision,
+                fingerprint,
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: project.search_roots.clone(),
+            },
+            GraphStatus::Ready { files },
+        )) {
+            return PublishAttemptOutcome::Refused(error);
+        }
         // Exact fingerprint match (files AND topology): the persisted search
         // contexts were rendered against this same workspace state.
         self.notify_published(build_start_seq, false);
         tracing::info!(files, revision, "reused cached graph database (workspace unchanged)");
-        true
+        PublishAttemptOutcome::Published
     }
 
     /// Boot variant for a cached graph that no longer matches disk: publish it anyway —
@@ -473,19 +632,25 @@ impl GraphState {
     /// straddled build (`force_stale`) was never coherent and is not served. No
     /// `notify_published`: the publish hook must only run against a build that
     /// reflects current disk.
-    pub(super) fn try_publish_stale_and_catch_up(&self, workspace_root: &Path) -> bool {
+    pub(super) fn try_publish_stale_and_catch_up(
+        &self,
+        workspace_root: &Path,
+    ) -> PublishAttemptOutcome {
         if self.is_superseded() {
-            return false;
+            return PublishAttemptOutcome::Refused(LoadFailure::new(
+                LoadFailureReason::Terminal,
+                super::types::SUPERSEDED_GRAPH_ERROR,
+            ));
         }
         let path = self.graph_db_path().expect("workspace graph has cache layout");
         let Ok(graph) = GraphDb::open(&path) else {
-            return false; // missing, truncated, or stale-schema → full rebuild
+            return PublishAttemptOutcome::FallBack; // missing, truncated, or stale-schema → full rebuild
         };
         let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
-            return false;
+            return PublishAttemptOutcome::FallBack;
         };
         if force_stale {
-            return false;
+            return PublishAttemptOutcome::FallBack;
         }
         // Stale on FILES is what this path exists to serve — stale on TOPOLOGY is not. A build
         // made under a different extension topology resolves names differently, so publishing it
@@ -505,14 +670,22 @@ impl GraphState {
                  rebuilding instead of serving it stale, and re-rendering search contexts"
             );
             self.pending_topology_refresh.store(true, std::sync::atomic::Ordering::SeqCst);
-            return false;
+            return PublishAttemptOutcome::FallBack;
         }
         let files = graph.files().unwrap_or(0);
         drop(graph);
+        let prepared = match self.prepare_snapshot_pool(revision, fingerprint, force_stale) {
+            Ok(prepared) => prepared,
+            Err(SnapshotPrepareError::Open(_)) => return PublishAttemptOutcome::FallBack,
+            Err(error @ SnapshotPrepareError::Changed) => {
+                let error = prepare_failure(error);
+                return PublishAttemptOutcome::Refused(error);
+            }
+        };
 
-        {
-            let mut inner = lock_recover(&self.inner);
-            inner.published = Some(Published {
+        if let Err(error) = install_failure(self.install_prepared_snapshot(
+            prepared,
+            Published {
                 generation: revision,
                 fingerprint,
                 stale: true,
@@ -520,8 +693,10 @@ impl GraphState {
                 reload: ReloadState::Running,
                 force_stale: false,
                 search_roots: None,
-            });
-            inner.status = GraphStatus::Ready { files };
+            },
+            GraphStatus::Ready { files },
+        )) {
+            return PublishAttemptOutcome::Refused(error);
         }
         tracing::info!(
             files,
@@ -529,12 +704,12 @@ impl GraphState {
             "published stale cached graph database; catch-up reload starting"
         );
         self.spawn_reload();
-        true
+        PublishAttemptOutcome::Published
     }
 
     /// Move a finished build into the shared path — unless this daemon lost the workspace
     /// while it was building. See [`publish_or_discard`].
-    fn publish_or_discard(&self, tmp_path: &Path, out_path: &Path) -> anyhow::Result<()> {
+    fn publish_or_discard(&self, tmp_path: &Path, out_path: &Path) -> Result<(), LoadFailure> {
         publish_or_discard(self, tmp_path, out_path)
     }
 
@@ -544,17 +719,17 @@ impl GraphState {
     ///
     /// A transient ownership refusal is flagged for retry. Terminal supersession and genuine
     /// build failures stay terminal.
-    fn record_load_failure(&self, is_reload: bool, msg: String) {
-        if !self.is_superseded() && !self.may_build() {
+    pub(super) fn record_load_failure(&self, is_reload: bool, failure: LoadFailure) {
+        if failure.reason == LoadFailureReason::TransientRefusal {
             self.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let mut inner = lock_recover(&self.inner);
         if is_reload {
             if let Some(p) = inner.published.as_mut() {
-                p.reload = ReloadState::Failed(msg);
+                p.reload = ReloadState::Failed(failure.message);
             }
         } else {
-            inner.status = GraphStatus::Failed(msg);
+            inner.status = GraphStatus::Failed(failure.message);
         }
     }
 }
@@ -572,7 +747,7 @@ fn build_and_publish_graph_file(
     generation: u64,
     graph: &GraphState,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
-) -> anyhow::Result<PublishedBuild> {
+) -> Result<PublishedBuild, LoadFailure> {
     // ONE project snapshot and ONE scanned universe serve the pre-fingerprint,
     // the build and the persisted `files` rows: every pre-publication pass sees
     // the same tree by construction. Only the straddle check walks again.
@@ -591,7 +766,7 @@ fn build_and_publish_scanned(
     generation: u64,
     graph: &GraphState,
     chunk_sink: Option<&mut dyn ide::FusedChunkSink>,
-) -> anyhow::Result<PublishedBuild> {
+) -> Result<PublishedBuild, LoadFailure> {
     let fp_pre = super::scan::fingerprint_of(&pre.stats, &project.configs);
     let out_path = graph.graph_db_path().expect("workspace graph has cache layout");
     // Pid-suffixed temp: two daemons over the same workspace (an old topology
@@ -599,7 +774,7 @@ fn build_and_publish_scanned(
     // one temp file — each builds its own and the atomic rename decides.
     let tmp_path = out_path.with_extension(format!("db.building.{}", std::process::id()));
     if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(LoadFailure::operation)?;
     }
     let built_at = chrono::Utc::now().to_rfc3339();
     let meta = crate::graph_db::GraphMeta {
@@ -624,7 +799,7 @@ fn build_and_publish_scanned(
         Ok(summary) => summary,
         Err(error) => {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(error);
+            return Err(LoadFailure::operation(error));
         }
     };
     // The post-scan derives a FRESH project snapshot AND a fresh walk: the straddle
@@ -635,23 +810,28 @@ fn build_and_publish_scanned(
     let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
     let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
     {
-        let conn = rusqlite::Connection::open(&tmp_path)?;
+        let conn = rusqlite::Connection::open(&tmp_path).map_err(LoadFailure::operation)?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('force_stale', ?1)",
             rusqlite::params![if force_stale { "1" } else { "0" }],
-        )?;
+        )
+        .map_err(LoadFailure::operation)?;
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('files', ?1)",
             rusqlite::params![summary.modules.to_string()],
-        )?;
+        )
+        .map_err(LoadFailure::operation)?;
     }
     publish_or_discard(graph, &tmp_path, &out_path)?;
+    let prepared =
+        graph.prepare_snapshot_pool(generation, fp_pre, force_stale).map_err(prepare_failure)?;
     Ok(PublishedBuild {
         files: summary.modules,
         fp_pre,
         force_stale,
         scan_roots: project.scan_roots.clone(),
         search_roots: project.search_roots.clone(),
+        prepared,
     })
 }
 
@@ -693,22 +873,29 @@ fn cache_is_reusable(
 /// ago" is exactly the guarantee a minutes-long build cannot rely on. A rename that cannot go
 /// ahead discards the build, temp file and all, so nothing is left behind.
 ///
-/// Both reasons it can fail — the workspace was taken over, or ownership could not be
-/// established because a peer held the lock — re-arm the build (see
-/// [`GraphState::withheld_build`]). Neither says the build itself was bad, so neither should
-/// leave the graph terminally failed: the second one in particular happens while this daemon is
-/// still the rightful owner. The gates that keep a superseded daemon from STARTING a build are
-/// upstream; this is the one that closes the window a long build opens.
-fn publish_or_discard(graph: &GraphState, tmp_path: &Path, out_path: &Path) -> anyhow::Result<()> {
-    match graph.lease.with_ownership(|| std::fs::rename(tmp_path, out_path)) {
-        Some(renamed) => Ok(renamed?),
-        None => {
+/// The caller decides whether a classified refusal is retryable. This function owns only the
+/// fenced rename and cleanup; it never mutates the load lifecycle as a side effect.
+fn publish_or_discard(
+    graph: &GraphState,
+    tmp_path: &Path,
+    out_path: &Path,
+) -> Result<(), LoadFailure> {
+    match graph.lease.with_ownership_outcome(|| std::fs::rename(tmp_path, out_path)) {
+        LeaseOutcome::Applied(renamed) => renamed.map_err(LoadFailure::operation),
+        LeaseOutcome::TransientRefusal => {
             let _ = std::fs::remove_file(tmp_path);
-            graph.withheld_build.store(true, std::sync::atomic::Ordering::SeqCst);
-            anyhow::bail!(
+            Err(LoadFailure::new(
+                LoadFailureReason::TransientRefusal,
                 "this daemon could not establish ownership of the workspace's derived caches \
-                 when the graph build finished; the build was discarded instead of published"
-            )
+                 when the graph build finished; the build was discarded instead of published",
+            ))
+        }
+        LeaseOutcome::Terminal => {
+            let _ = std::fs::remove_file(tmp_path);
+            Err(LoadFailure::new(
+                LoadFailureReason::Terminal,
+                "workspace cache ownership ended before the graph build could be published",
+            ))
         }
     }
 }
@@ -722,6 +909,7 @@ struct PublishedBuild {
     force_stale: bool,
     scan_roots: Vec<PathBuf>,
     search_roots: Option<bsl_search::WorkspaceRoots>,
+    prepared: PreparedSnapshotPool,
 }
 
 /// Translates the graph pass's [`ide::ChunkRow`] stream into the search store for the
@@ -740,6 +928,7 @@ struct FusedChunkWriter<'e> {
     /// Canonical, `/`-normalised search source root. Only used when no root table is
     /// configured — then the corpus is the configuration alone, as it always was.
     source_prefix: String,
+    failure: Option<LoadFailure>,
 }
 
 impl<'e> FusedChunkWriter<'e> {
@@ -751,7 +940,7 @@ impl<'e> FusedChunkWriter<'e> {
         let roots = engine.workspace_roots().cloned();
         let source_prefix =
             source_path.canonicalize().unwrap_or(source_path).to_string_lossy().replace('\\', "/");
-        Self { engine, lease, roots, source_prefix }
+        Self { engine, lease, roots, source_prefix, failure: None }
     }
 
     /// The store key of one emitted module, or `None` when it belongs to no registered root.
@@ -826,16 +1015,23 @@ impl ide::FusedChunkSink for FusedChunkWriter<'_> {
             {
                 continue;
             }
-            match self
-                .lease
-                .with_ownership(|| self.engine.ingest_fused_file(&key, &hash, chunks, ctxs))
-            {
-                Some(result) => result?,
-                None => {
-                    return Err(std::io::Error::other(
-                        "workspace cache ownership was refused during fused ingest",
-                    )
-                    .into())
+            match self.lease.with_ownership_checkpointed(|checkpoint| {
+                self.engine.ingest_fused_file_checkpointed(&key, &hash, chunks, ctxs, checkpoint)
+            }) {
+                LeaseOutcome::Applied(result) => result?,
+                LeaseOutcome::TransientRefusal => {
+                    self.failure = Some(LoadFailure::new(
+                        LoadFailureReason::TransientRefusal,
+                        "workspace cache ownership was temporarily refused during fused ingest",
+                    ));
+                    return Err(std::io::Error::other("fused ingest stopped").into());
+                }
+                LeaseOutcome::Terminal => {
+                    self.failure = Some(LoadFailure::new(
+                        LoadFailureReason::Terminal,
+                        "workspace cache ownership ended during fused ingest",
+                    ));
+                    return Err(std::io::Error::other("fused ingest stopped").into());
                 }
             }
             #[cfg(test)]
@@ -1056,7 +1252,7 @@ mod tests {
         let error = graph
             .run_fused_cold_build(&mut engine, root, 0)
             .expect_err("takeover after the first file must stop fused ingest");
-        assert!(error.to_string().contains("ownership was refused"), "{error}");
+        assert!(error.to_string().contains("ownership ended"), "{error}");
         assert!(lease.is_superseded(), "the second file's fence observes the new owner");
         assert_eq!(
             engine.store().all_files_in_collection("code").unwrap().len(),
@@ -1110,6 +1306,231 @@ mod tests {
         assert!(build_and_publish_graph_file(root, 1, &graph, Some(&mut sink)).is_err());
         assert_eq!(fs::read(&canonical).unwrap(), b"new-owner-graph");
         assert!(!temp.exists(), "fused failure before publication removes its temp file");
+    }
+
+    #[test]
+    fn transient_publish_refusal_rearms_after_ownership_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        cache.ensure().unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(lease.clone());
+        let temp = cache.root().join("transient.building");
+        let canonical = cache.root().join("transient.db");
+        fs::write(&temp, b"candidate").unwrap();
+
+        let held = lease.hold_file_lock_for_test();
+        let error = publish_or_discard(&graph, &temp, &canonical).unwrap_err();
+        drop(held);
+
+        assert_eq!(error.reason, LoadFailureReason::TransientRefusal);
+        graph.record_load_failure(false, error);
+        assert!(graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            lease.with_ownership_outcome(|| "ownership returned"),
+            LeaseOutcome::Applied("ownership returned")
+        );
+        assert!(!temp.exists());
+        assert!(!canonical.exists());
+    }
+
+    #[test]
+    fn terminal_publish_refusals_do_not_rearm() {
+        let released_dir = tempfile::tempdir().unwrap();
+        let released_cache = crate::cache::WorkspaceCacheLayout::for_workspace(released_dir.path());
+        released_cache.ensure().unwrap();
+        let released_lease = crate::workspace_lease::WorkspaceLease::claim_cache(&released_cache);
+        let released_graph = GraphState::for_workspace_with_cache(
+            released_dir.path().to_path_buf(),
+            released_cache.clone(),
+        )
+        .with_lease(released_lease.clone());
+        released_lease.release();
+        let released_temp = released_cache.root().join("released.building");
+        fs::write(&released_temp, b"candidate").unwrap();
+        let released_error = publish_or_discard(
+            &released_graph,
+            &released_temp,
+            &released_cache.root().join("released.db"),
+        )
+        .unwrap_err();
+        assert_eq!(released_error.reason, LoadFailureReason::Terminal);
+        released_graph.record_load_failure(false, released_error);
+        assert!(!released_graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+
+        let superseded_dir = tempfile::tempdir().unwrap();
+        let superseded_cache =
+            crate::cache::WorkspaceCacheLayout::for_workspace(superseded_dir.path());
+        superseded_cache.ensure().unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim_cache(&superseded_cache);
+        let superseded_graph = GraphState::for_workspace_with_cache(
+            superseded_dir.path().to_path_buf(),
+            superseded_cache.clone(),
+        )
+        .with_lease(old.clone());
+        let newer = crate::workspace_lease::WorkspaceLease::claim_cache(&superseded_cache);
+        let superseded_temp = superseded_cache.root().join("superseded.building");
+        fs::write(&superseded_temp, b"candidate").unwrap();
+        let superseded_error = publish_or_discard(
+            &superseded_graph,
+            &superseded_temp,
+            &superseded_cache.root().join("superseded.db"),
+        )
+        .unwrap_err();
+        assert_eq!(superseded_error.reason, LoadFailureReason::Terminal);
+        superseded_graph.record_load_failure(false, superseded_error);
+        assert!(!superseded_graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        newer.release();
+    }
+
+    #[test]
+    fn rename_error_stays_operational_when_a_later_probe_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        cache.ensure().unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(lease.clone());
+        let missing = cache.root().join("missing.building");
+        let error = publish_or_discard(&graph, &missing, &cache.root().join("output.db"))
+            .expect_err("an admitted rename of a missing file is a real operation error");
+        assert_eq!(error.reason, LoadFailureReason::OperationError);
+
+        let held = lease.hold_file_lock_for_test();
+        graph.record_load_failure(false, error);
+        drop(held);
+
+        assert!(!graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn every_publication_path_rejects_replacement_before_final_install() {
+        let replace_on_install = |path: PathBuf| {
+            super::super::snapshot::set_snapshot_install_hook(Box::new(move || {
+                fs::write(path, b"replacement").unwrap();
+            }));
+        };
+
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh_root = fresh_dir.path();
+        sample_workspace(fresh_root);
+        let fresh = GraphState::for_workspace(fresh_root.to_path_buf());
+        let built = build_and_publish_graph_file(fresh_root, 1, &fresh, None).unwrap();
+        replace_on_install(graph_db_path(fresh_root));
+        let fresh_install = fresh.install_prepared_snapshot(
+            built.prepared,
+            Published {
+                generation: 1,
+                fingerprint: built.fp_pre,
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: built.force_stale,
+                search_roots: built.search_roots,
+            },
+            GraphStatus::Ready { files: built.files },
+        );
+        assert_eq!(fresh_install, LeaseOutcome::Applied(Err(SnapshotInstallError::Changed)));
+        assert!(fresh.snapshot().is_none(), "fresh publish never becomes ready");
+
+        let incremental_dir = tempfile::tempdir().unwrap();
+        let incremental_root = incremental_dir.path();
+        sample_workspace(incremental_root);
+        let incremental = GraphState::for_workspace(incremental_root.to_path_buf());
+        incremental.ensure_loading();
+        wait_ready(&incremental);
+        write(
+            incremental_root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nВозврат 4;\nКонецФункции",
+        );
+        replace_on_install(graph_db_path(incremental_root));
+        assert!(matches!(
+            incremental.try_incremental_reload(incremental_root, 2, 0),
+            PublishAttemptOutcome::Refused(LoadFailure {
+                reason: LoadFailureReason::TransientRefusal,
+                ..
+            })
+        ));
+        assert_eq!(
+            incremental.snapshot().map(|snapshot| snapshot.generation),
+            Some(1),
+            "failed reload keeps serving its old pool"
+        );
+
+        let clean_dir = tempfile::tempdir().unwrap();
+        let clean_root = clean_dir.path();
+        sample_workspace(clean_root);
+        seed_cache(clean_root, workspace_fingerprint(clean_root));
+        let clean = GraphState::for_workspace(clean_root.to_path_buf());
+        replace_on_install(graph_db_path(clean_root));
+        let PublishAttemptOutcome::Refused(failure) = clean.try_publish_cached(clean_root, 0)
+        else {
+            panic!("clean adoption must preserve the final install refusal")
+        };
+        clean.record_load_failure(false, failure);
+        assert!(clean.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(clean.snapshot().is_none(), "clean adoption never becomes ready");
+
+        let stale_dir = tempfile::tempdir().unwrap();
+        let stale_root = stale_dir.path();
+        sample_workspace(stale_root);
+        let mut stale_fingerprint = workspace_fingerprint(stale_root);
+        stale_fingerprint.files = stale_fingerprint.files.wrapping_add(1);
+        seed_cache(stale_root, stale_fingerprint);
+        let stale = GraphState::for_workspace(stale_root.to_path_buf());
+        replace_on_install(graph_db_path(stale_root));
+        let PublishAttemptOutcome::Refused(failure) =
+            stale.try_publish_stale_and_catch_up(stale_root)
+        else {
+            panic!("stale adoption must preserve the final install refusal")
+        };
+        stale.record_load_failure(false, failure);
+        assert!(stale.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(stale.snapshot().is_none(), "stale adoption never becomes ready");
+    }
+
+    #[test]
+    fn invalid_cached_graph_falls_back_without_rearming_ownership_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let path = graph_db_path(root);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not sqlite").unwrap();
+
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.run_load(false);
+
+        assert!(matches!(graph.status(), GraphStatus::Ready { .. }));
+        assert!(!graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(graph.snapshot().is_some(), "the invalid cache fell back to a real build");
+    }
+
+    #[test]
+    fn full_reload_install_refusal_keeps_the_old_snapshot_and_rearms() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+        write(root, "CommonModules/Сервер.xml", "<MetaDataObject><changed/></MetaDataObject>");
+        let path = graph_db_path(root);
+        super::super::snapshot::set_snapshot_install_hook(Box::new(move || {
+            fs::write(path, b"replacement").unwrap();
+        }));
+
+        graph.run_load(true);
+
+        assert_eq!(graph.snapshot().map(|snapshot| snapshot.generation), Some(1));
+        assert!(graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(matches!(
+            lock_recover(&graph.inner).published.as_ref().unwrap().reload,
+            ReloadState::Failed(_)
+        ));
     }
 
     /// End-to-end through `GraphState`: a first use builds the SQLite graph off
@@ -1385,9 +1806,9 @@ mod tests {
         let adopted = graph.try_publish_cached(root, 0);
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
 
-        assert!(!adopted, "equality against a short scan is not a match");
+        assert!(matches!(adopted, PublishAttemptOutcome::FallBack));
         assert!(
-            graph.try_publish_cached(root, 0),
+            matches!(graph.try_publish_cached(root, 0), PublishAttemptOutcome::Published),
             "the same cache is adopted once the scan is clean"
         );
     }
@@ -1520,7 +1941,10 @@ mod tests {
         let took_fast_path = graph.try_incremental_reload(root, 2, 0);
         let walks = project_model::source_set::scans_performed_on_thread() - before;
 
-        assert!(took_fast_path, "a body-only edit takes the incremental path");
+        assert!(
+            matches!(took_fast_path, PublishAttemptOutcome::Published),
+            "a body-only edit takes the incremental path"
+        );
         assert!(walks > 0, "a zero count means the instrumentation broke");
         assert_eq!(walks, 2, "shared pre-scan + straddle post-scan, nothing else");
     }
@@ -1553,14 +1977,44 @@ mod tests {
             return;
         }
 
-        let refused = !graph.try_incremental_reload(root, 2, 0);
+        let refused =
+            matches!(graph.try_incremental_reload(root, 2, 0), PublishAttemptOutcome::FallBack);
         fs::set_permissions(&closed, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(refused, "an incomplete scan must fall back to the full rebuild");
         assert!(
-            graph.try_incremental_reload(root, 3, 0),
+            matches!(graph.try_incremental_reload(root, 3, 0), PublishAttemptOutcome::Published),
             "positive control: the same edit goes incremental once the scan is clean"
         );
+    }
+
+    #[test]
+    fn incremental_publish_propagates_transient_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache)
+            .with_lease(lease.clone());
+        graph.ensure_loading();
+        wait_ready(&graph);
+        write(
+            root,
+            "CommonModules/Сервер/Ext/Module.bsl",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 3;\nВозврат Значение;\nКонецФункции",
+        );
+
+        let held = lease.hold_file_lock_for_test();
+        let outcome = graph.try_incremental_reload(root, 2, 0);
+        drop(held);
+
+        let PublishAttemptOutcome::Refused(failure) = outcome else {
+            panic!("an eligible incremental publication must retain the refusal")
+        };
+        assert_eq!(failure.reason, LoadFailureReason::TransientRefusal);
+        graph.record_load_failure(true, failure);
+        assert!(graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// A cached build whose fingerprint no longer matches the workspace (it moved
@@ -3077,7 +3531,7 @@ mod tests {
 
         let graph = GraphState::for_workspace(root.to_path_buf());
         assert!(
-            !graph.try_publish_stale_and_catch_up(root),
+            matches!(graph.try_publish_stale_and_catch_up(root), PublishAttemptOutcome::FallBack),
             "a build made under another topology is not served, however stale-tolerant we are",
         );
         assert!(
@@ -3096,12 +3550,12 @@ mod tests {
         seed_cache(root, workspace_fingerprint(root));
 
         let graph = GraphState::for_workspace(root.to_path_buf());
-        assert!(graph.try_publish_cached(root, 0), "an unchanged workspace reuses the cache");
+        assert!(matches!(graph.try_publish_cached(root, 0), PublishAttemptOutcome::Published));
 
         write_extension_config(root, true);
         let graph = GraphState::for_workspace(root.to_path_buf());
         assert!(
-            !graph.try_publish_cached(root, 0),
+            matches!(graph.try_publish_cached(root, 0), PublishAttemptOutcome::FallBack),
             "a dependsOn-only edit must invalidate the cached graph"
         );
     }
