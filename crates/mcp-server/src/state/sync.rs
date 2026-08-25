@@ -2338,6 +2338,10 @@ mod tests {
             Some(crate::graph::BackgroundSnapshotFailure::Changed),
             Some(crate::graph::BackgroundSnapshotFailure::Open),
         ] {
+            // Same-process file-lock contention is not a deterministic seam on Windows.
+            if failure.is_none() && cfg!(windows) {
+                continue;
+            }
             let dir = tempdir().unwrap();
             let workspace = dir.path().to_path_buf();
             fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
@@ -2427,9 +2431,7 @@ mod tests {
                 .map(|_| graph.snapshot().expect("published descriptor"))
                 .collect();
             graph.set_background_snapshot_failure_for_test(failure);
-            // Same-process file-lock contention is not a deterministic seam on Windows.
-            let held_lock =
-                (failure.is_none() && !cfg!(windows)).then(|| lease.hold_file_lock_for_test());
+            let held_lock = failure.is_none().then(|| lease.hold_file_lock_for_test());
             let before = hub.events_seen();
             fs::write(
                 &xml,
