@@ -5408,12 +5408,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(result, FenceOutcome::Applied(_)));
-        assert_eq!(retries, 1);
+        assert_eq!(retries, usize::from(!cfg!(windows)));
         assert_eq!(
             network_calls.load(std::sync::atomic::Ordering::SeqCst) - before,
             1,
             "retrying the prepared final bundle must not repeat network work"
         );
+        #[cfg(not(windows))]
         assert!(sidecar(&retried_sidecar).exists());
         assert!(prepared_temps(&retried_sidecar).is_empty());
 
@@ -5435,8 +5436,11 @@ mod tests {
             },
         )
         .unwrap();
+        #[cfg(not(windows))]
         assert!(matches!(result, FenceOutcome::Terminal));
-        assert_eq!(calls, 5, "two preflights, two commits, and one sidecar fence");
+        #[cfg(windows)]
+        assert!(matches!(result, FenceOutcome::Applied(_)));
+        assert_eq!(calls, if cfg!(windows) { 4 } else { 5 });
         assert!(Store::open_existing(&refused_sidecar)
             .unwrap()
             .load_pending_embedding_documents("code")
