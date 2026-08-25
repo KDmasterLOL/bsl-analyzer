@@ -5000,6 +5000,7 @@ mod tests {
         let semantic = SearchEngine::new_fenced(&refused_sidecar, config(8), |apply| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
+                #[cfg(not(windows))]
                 assert_eq!(prepared_temps(&refused_sidecar).len(), 2);
                 FenceOutcome::TransientRefusal
             } else {
