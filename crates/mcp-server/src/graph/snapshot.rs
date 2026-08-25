@@ -59,11 +59,17 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static SNAPSHOT_CHECKOUT_HOOK: std::cell::RefCell<Option<SnapshotOpenHook>> =
         const { std::cell::RefCell::new(None) };
+    static REFUSE_SNAPSHOT_INSTALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
 pub(super) fn set_snapshot_install_hook(hook: SnapshotOpenHook) {
     SNAPSHOT_OPEN_HOOK.with(|slot| slot.replace(Some(hook)));
+}
+
+#[cfg(test)]
+pub(super) fn refuse_snapshot_install_for_test() {
+    REFUSE_SNAPSHOT_INSTALL.with(|refuse| refuse.set(true));
 }
 
 #[cfg(test)]
@@ -351,6 +357,10 @@ impl GraphState {
             }
         });
         self.lease.with_ownership_outcome(|| {
+            #[cfg(test)]
+            if REFUSE_SNAPSHOT_INSTALL.with(|refuse| refuse.replace(false)) {
+                return Err(SnapshotInstallError::Changed);
+            }
             let expected = (
                 prepared.expected_generation,
                 prepared.expected_fingerprint,

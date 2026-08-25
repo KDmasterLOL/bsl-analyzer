@@ -90,8 +90,9 @@ jobs:
           cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession -- --exact &&
           cargo test -p mcp-server state::overlay_retry::tests::transient_budget_fails_once_ignores_active_kicks_and_rearms_on_new_drift -- --exact &&
           cargo test -p mcp-server graph::snapshot::tests::path_identity_detects_equal_size_and_time_replacement -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::final_install_rechecks_token_through_the_preopened_descriptor -- --exact &&
           cargo test -p mcp-server graph::snapshot::tests::publication_without_a_complete_descriptor_pool_cannot_be_ready -- --exact &&
-          cargo test -p mcp-server graph::build::tests::every_publication_path_rejects_replacement_before_final_install -- --exact &&
+          cargo test -p mcp-server graph::build::tests::every_publication_path_propagates_final_install_refusal -- --exact &&
           cargo test -p mcp-server graph_supersession_contract::graph_handler_misses_immediately_when_preopened_handles_are_busy -- --exact &&
           cargo test -p mcp-server graph_supersession_contract::resolve_names_misses_immediately_when_preopened_handles_are_busy -- --exact &&
           cargo test -p mcp-server graph_supersession_contract::symbol_info_misses_immediately_when_preopened_handles_are_busy -- --exact

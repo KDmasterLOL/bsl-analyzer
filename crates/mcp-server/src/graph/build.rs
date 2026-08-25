@@ -1407,19 +1407,15 @@ mod tests {
     }
 
     #[test]
-    fn every_publication_path_rejects_replacement_before_final_install() {
-        let replace_on_install = |path: PathBuf| {
-            super::super::snapshot::set_snapshot_install_hook(Box::new(move || {
-                fs::write(path, b"replacement").unwrap();
-            }));
-        };
+    fn every_publication_path_propagates_final_install_refusal() {
+        let refuse_install = super::super::snapshot::refuse_snapshot_install_for_test;
 
         let fresh_dir = tempfile::tempdir().unwrap();
         let fresh_root = fresh_dir.path();
         sample_workspace(fresh_root);
         let fresh = GraphState::for_workspace(fresh_root.to_path_buf());
         let built = build_and_publish_graph_file(fresh_root, 1, &fresh, None).unwrap();
-        replace_on_install(graph_db_path(fresh_root));
+        refuse_install();
         let fresh_install = fresh.install_prepared_snapshot(
             built.prepared,
             Published {
@@ -1444,9 +1440,9 @@ mod tests {
         write(
             incremental_root,
             "CommonModules/Сервер/Ext/Module.bsl",
-            "&НаСервере\nФункция Считать() Экспорт\nВозврат 444;\nКонецФункции",
+            "&НаСервере\nФункция Считать() Экспорт\nЗначение = 1;\nВозврат Значение;\nКонецФункции",
         );
-        replace_on_install(graph_db_path(incremental_root));
+        refuse_install();
         assert!(matches!(
             incremental.try_incremental_reload(incremental_root, 2, 0),
             PublishAttemptOutcome::Refused(LoadFailure {
@@ -1465,7 +1461,7 @@ mod tests {
         sample_workspace(clean_root);
         seed_cache(clean_root, workspace_fingerprint(clean_root));
         let clean = GraphState::for_workspace(clean_root.to_path_buf());
-        replace_on_install(graph_db_path(clean_root));
+        refuse_install();
         let PublishAttemptOutcome::Refused(failure) = clean.try_publish_cached(clean_root, 0)
         else {
             panic!("clean adoption must preserve the final install refusal")
@@ -1481,7 +1477,7 @@ mod tests {
         stale_fingerprint.files = stale_fingerprint.files.wrapping_add(1);
         seed_cache(stale_root, stale_fingerprint);
         let stale = GraphState::for_workspace(stale_root.to_path_buf());
-        replace_on_install(graph_db_path(stale_root));
+        refuse_install();
         let PublishAttemptOutcome::Refused(failure) =
             stale.try_publish_stale_and_catch_up(stale_root)
         else {
@@ -1518,10 +1514,7 @@ mod tests {
         graph.ensure_loading();
         wait_ready(&graph);
         write(root, "CommonModules/Сервер.xml", "<MetaDataObject><changed/></MetaDataObject>");
-        let path = graph_db_path(root);
-        super::super::snapshot::set_snapshot_install_hook(Box::new(move || {
-            fs::write(path, b"replacement").unwrap();
-        }));
+        super::super::snapshot::refuse_snapshot_install_for_test();
 
         graph.run_load(true);
 
