@@ -235,6 +235,12 @@ impl<'a> Forwarder<'a> {
         }
     }
 
+    /// Разрешается ли вызов в метод конфигурации. Только это и отличает переопределённое
+    /// платформенное имя от самой платформенной функции.
+    pub(crate) fn callee_is_user_method(&self, body: &Body, callee: &Expr) -> bool {
+        self.resolve_callee(body, callee).is_some()
+    }
+
     /// Whether this syntactic call resolves to a user method whose corresponding parameter is
     /// explicitly passed by value. Only that case proves that the caller's structure cannot be
     /// mutated through the argument.

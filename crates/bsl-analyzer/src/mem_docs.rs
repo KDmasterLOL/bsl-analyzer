@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Result};
-use line_index::{LineCol, LineIndex};
+use anyhow::Result;
+use line_index::LineIndex;
 use lsp_types::{TextDocumentContentChangeEvent, Url};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
@@ -163,54 +163,25 @@ impl MemDocs {
     }
 }
 
+/// Byte offset of an LSP position inside the document text.
+///
+/// The bounds and the character boundary are proven by
+/// [`crate::lsp::offset_with_encoding`] — the same conversion the request
+/// handlers use, so an edit range and a cursor position can never disagree
+/// about what a column means.
 fn lsp_position_to_offset(
     line_index: &LineIndex,
     text: &str,
     position: lsp_types::Position,
     encoding: PositionEncoding,
 ) -> Result<usize> {
-    let line_len = line_index
-        .line_len(position.line)
-        .ok_or_else(|| anyhow!("line {} is out of bounds", position.line))?;
-
-    let byte_col = match encoding {
-        PositionEncoding::Utf8 => position.character,
-        PositionEncoding::Utf16 => line_index
-            .utf16_col_to_byte_col(text, position.line, position.character)
-            .ok_or_else(|| {
-                anyhow!(
-                    "UTF-16 column {} is out of bounds on line {}",
-                    position.character,
-                    position.line
-                )
-            })?,
-    };
-
-    if byte_col > line_len {
-        bail!(
-            "column {} is out of bounds on line {} with length {} bytes",
-            byte_col,
-            position.line,
-            line_len
-        );
-    }
-
-    let offset = line_index
-        .offset(LineCol { line: position.line, col: byte_col })
-        .ok_or_else(|| anyhow!("position {:?} is out of bounds", position))?;
-    let offset = usize::from(offset);
-
-    if !text.is_char_boundary(offset) {
-        bail!("position {:?} resolves to non-character boundary byte offset {}", position, offset);
-    }
-
-    Ok(offset)
+    crate::lsp::offset_with_encoding(line_index, text, position, encoding).map(usize::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use line_index::TextSize;
+    use line_index::{LineCol, TextSize};
 
     #[test]
     fn test_insert_and_get() {

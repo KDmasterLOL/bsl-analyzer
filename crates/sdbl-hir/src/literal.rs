@@ -44,7 +44,7 @@ pub(crate) fn extract_query_text(literal_text: &str) -> String {
         if first_line {
             let trimmed = line.trim_start();
             let line_text = trimmed.trim_start_matches('"');
-            tracing::info!(
+            tracing::trace!(
                 "extract_query_text line {}: input={:?} → after trim={:?} → output={:?}",
                 line_num,
                 line,
@@ -57,7 +57,7 @@ pub(crate) fn extract_query_text(literal_text: &str) -> String {
             let trimmed = line.trim_start();
 
             if trimmed.starts_with("//") {
-                tracing::info!(
+                tracing::trace!(
                     "extract_query_text line {}: input={:?} → BSL comment, SKIP",
                     line_num,
                     line
@@ -68,7 +68,7 @@ pub(crate) fn extract_query_text(literal_text: &str) -> String {
             result.push('\n');
 
             if let Some(line_text) = trimmed.strip_prefix('|') {
-                tracing::info!(
+                tracing::trace!(
                     "extract_query_text line {}: input={:?} → skip ws + | → output={:?}",
                     line_num,
                     line,
@@ -90,7 +90,7 @@ pub(crate) fn extract_query_text(literal_text: &str) -> String {
 
     final_result = unescape_bsl_quotes(&final_result);
 
-    tracing::info!("extract_query_text: final result length={}", final_result.len());
+    tracing::trace!("extract_query_text: final result length={}", final_result.len());
     final_result
 }
 
@@ -99,7 +99,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
 
     let query_text = extract_query_text(literal_text);
 
-    tracing::info!(
+    tracing::trace!(
         "map_offset_to_query: offset_in_literal={}, query_text_len={}",
         offset_usize,
         query_text.len()
@@ -128,7 +128,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
             0
         };
 
-        tracing::info!(
+        tracing::trace!(
             "  line {}: literal_pos={}, line_len={}, newline_len={}, line_text={:?}",
             line_num,
             literal_pos,
@@ -157,7 +157,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
                 }
 
                 query_pos += pos_in_query;
-                tracing::info!(
+                tracing::trace!(
                     "  -> FOUND on first line: offset_in_line={}, skip_ws={}, skip_quote={}, skip_total={}, final query_pos={}",
                     offset_in_line,
                     skip_whitespace,
@@ -166,7 +166,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
                     query_pos
                 );
             } else if is_bsl_comment {
-                tracing::info!(
+                tracing::trace!(
                     "  -> FOUND on BSL comment line: returning query_pos={} (end of previous content)",
                     query_pos
                 );
@@ -187,7 +187,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
                 }
 
                 query_pos += pos_in_query;
-                tracing::info!(
+                tracing::trace!(
                     "  -> FOUND on continuation line: offset_in_line={}, skip_total={}, final query_pos={}",
                     offset_in_line,
                     skip_total,
@@ -196,7 +196,7 @@ pub(crate) fn map_offset_to_query(literal_text: &str, offset_in_literal: TextSiz
             }
 
             let result = ensure_char_boundary(&query_text, query_pos);
-            tracing::info!("  -> after ensure_char_boundary: {:?}", result);
+            tracing::trace!("  -> after ensure_char_boundary: {:?}", result);
             return result;
         }
 

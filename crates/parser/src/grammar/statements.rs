@@ -6,24 +6,7 @@ use crate::parser::Parser;
 use super::expressions;
 
 pub fn stmt_list(p: &mut Parser, terminator: Sig) -> bool {
-    let m = p.start();
-    let mut recovered_unknown_statement = false;
-
-    // The list ends at its own terminator and at every closer further out.
-    // Rules inside refuse to consume an enclosing closer, so a list waiting
-    // only for its own would wait for a token nothing will reach.
-    while !p.at_end() && !p.at(terminator) && !p.at_enclosing_boundary() {
-        p.check_iteration_limit();
-
-        if p.at_end() || p.at(terminator) || p.at_enclosing_boundary() {
-            break;
-        }
-
-        recovered_unknown_statement |= statement(p);
-    }
-
-    m.complete(p, NodeKind::StmtList);
-    recovered_unknown_statement
+    stmt_list_of(p, &[terminator], terminator)
 }
 
 pub fn statement(p: &mut Parser) -> bool {
@@ -79,8 +62,14 @@ pub fn statement(p: &mut Parser) -> bool {
     false
 }
 
-pub(super) fn expect_stmt_list_terminator(p: &mut Parser, terminator: Sig, recovered: bool) {
-    if p.at(terminator) || !recovered {
+/// Закрыватель после списка, восстановление в котором съело похожее на него слово.
+///
+/// Опечатка в закрывателе (`КонецЕслли`) разбирается как неизвестный оператор, и требовать
+/// после него ещё и пропущенный `КонецЕсли` значит сообщить об одной ошибке дважды.
+/// Посторонний оператор такой поблажки не даёт: конструкция после него по-прежнему не
+/// закрыта, и сказать об этом больше некому.
+pub(super) fn expect_stmt_list_terminator(p: &mut Parser, terminator: Sig, closer_typo: bool) {
+    if p.at(terminator) || !closer_typo {
         p.expect(terminator);
     }
 }
@@ -161,7 +150,7 @@ fn if_stmt(p: &mut Parser) {
 
         p.expect(T![KwThen]);
 
-        let mut recovered = stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
+        let mut recovered = stmt_list_of(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]], T![KwEndIf]);
 
         while p.at(T![KwElsIf]) {
             p.check_iteration_limit();
@@ -169,14 +158,14 @@ fn if_stmt(p: &mut Parser) {
             p.bump();
             p.within_boundary(at_then, expressions::expression);
             p.expect(T![KwThen]);
-            recovered |= stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
+            recovered |= stmt_list_of(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]], T![KwEndIf]);
             em.complete(p, NodeKind::ElseIfClause);
         }
 
         if p.at(T![KwElse]) {
             let em = p.start();
             p.bump();
-            recovered |= stmt_list_inner(p, &[T![KwEndIf]]);
+            recovered |= stmt_list_of(p, &[T![KwEndIf]], T![KwEndIf]);
             em.complete(p, NodeKind::ElseClause);
         }
         recovered
@@ -448,10 +437,20 @@ fn assignment_or_call(p: &mut Parser) -> bool {
     }
 }
 
-fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) -> bool {
+/// Список операторов до одного из `terminators`.
+///
+/// Возвращает не «было восстановление», а «восстановление съело слово, похожее на
+/// `closer`» — тот закрыватель, о пропаже которого сообщат сразу после списка. Только
+/// такое слово — испорченная попытка закрыть конструкцию, и только после него вторая
+/// жалоба была бы дублем. Список ветки `Если` кончается ещё на `ИначеЕсли` и `Иначе`, но
+/// опечатка в них конструкцию не закрывает и структурную ошибку не отменяет.
+fn stmt_list_of(p: &mut Parser, terminators: &[Sig], closer: Sig) -> bool {
     let m = p.start();
-    let mut recovered_unknown_statement = false;
+    let mut recovered_closer_typo = false;
 
+    // The list ends at its own terminator and at every closer further out.
+    // Rules inside refuse to consume an enclosing closer, so a list waiting
+    // only for its own would wait for a token nothing will reach.
     while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
 
@@ -459,9 +458,12 @@ fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) -> bool {
             break;
         }
 
-        recovered_unknown_statement |= statement(p);
+        let head = p.token_pos();
+        if statement(p) {
+            recovered_closer_typo |= p.resembles_closer(head, closer);
+        }
     }
 
     m.complete(p, NodeKind::StmtList);
-    recovered_unknown_statement
+    recovered_closer_typo
 }

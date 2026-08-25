@@ -60,6 +60,23 @@ impl<'a> Parser<'a> {
         self.current() == Some(kind)
     }
 
+    /// Позиция текущего значимого токена — чтобы вернуться к его тексту после разбора.
+    pub fn token_pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Похоже ли слово в позиции `pos` на закрыватель `closer` — то есть похоже ли на
+    /// испорченную опечаткой попытку его написать.
+    ///
+    /// Вопрос стоит только там, где слово УЖЕ разобрано как неизвестный оператор: от
+    /// ответа зависит, добавлять ли вторую, производную жалобу о пропущенном
+    /// закрывателе. Спрашивают именно про тот закрыватель, о пропаже которого будут
+    /// сообщать: опечатка в разделителе ветки — не попытка закрыть конструкцию.
+    pub fn resembles_closer(&self, pos: usize, closer: Sig) -> bool {
+        let text = self.input.text(pos);
+        closer_spellings(closer.kind()).iter().any(|spelling| is_typo_of(text, spelling))
+    }
+
     pub fn at_ts(&self, set: crate::parser::token_set::TokenSet) -> bool {
         self.current().is_some_and(|k| set.contains(k))
     }
@@ -569,5 +586,129 @@ impl CompletedMarker {
         }
 
         Marker::at_event_pos(new_pos, self.start_token_pos)
+    }
+}
+
+/// Написания закрывателей, на которые смотрит [`Parser::resembles_any_closer`].
+///
+/// Таблица дублирует знание лексера, потому что обратного отображения вида в слово он не
+/// даёт. Расхождение ловится тестом `every_closer_spelling_lexes_to_its_kind`: каждое
+/// написание обязано разбираться именно в свой вид.
+fn closer_spellings(kind: TokenKind) -> &'static [&'static str] {
+    match kind {
+        TokenKind::KwEndIf => &["КонецЕсли", "EndIf"],
+        TokenKind::KwEndDo => &["КонецЦикла", "EndDo"],
+        TokenKind::KwEndTry => &["КонецПопытки", "EndTry"],
+        TokenKind::KwExcept => &["Исключение", "Except"],
+        TokenKind::KwEndProcedure => &["КонецПроцедуры", "EndProcedure"],
+        TokenKind::KwEndFunction => &["КонецФункции", "EndFunction"],
+        TokenKind::KwElse => &["Иначе", "Else"],
+        TokenKind::KwElsIf => &["ИначеЕсли", "ElsIf"],
+        _ => &[],
+    }
+}
+
+/// Опечатка в слове: тот же зачин и не более двух правок.
+///
+/// Один зачин без предела правок роднил бы `КонецЕсли` с любым словом на «Кон», один
+/// предел правок без зачина — короткие закрыватели со случайными именами той же длины.
+fn is_typo_of(text: &str, spelling: &str) -> bool {
+    const PREFIX: usize = 3;
+    const MAX_EDITS: usize = 2;
+
+    let text: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let spelling: Vec<char> = spelling.chars().flat_map(char::to_lowercase).collect();
+    if text == spelling {
+        return false;
+    }
+    if text.len() < PREFIX || spelling.len() < PREFIX || text[..PREFIX] != spelling[..PREFIX] {
+        return false;
+    }
+    edit_distance_within(&text, &spelling, MAX_EDITS)
+}
+
+/// Расстояние Дамерау — Левенштейна, обрезанное сверху: точное значение здесь не нужно.
+fn edit_distance_within(a: &[char], b: &[char], max: usize) -> bool {
+    if a.len().abs_diff(b.len()) > max {
+        return false;
+    }
+    let mut prev_prev: Vec<usize> = Vec::new();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut current: Vec<usize> = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        current[0] = i;
+        for j in 1..=b.len() {
+            let substitution = usize::from(a[i - 1] != b[j - 1]);
+            current[j] = (prev[j] + 1).min(current[j - 1] + 1).min(prev[j - 1] + substitution);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                current[j] = current[j].min(prev_prev[j - 2] + 1);
+            }
+        }
+        prev_prev =
+            std::mem::replace(&mut prev, std::mem::replace(&mut current, vec![0; b.len() + 1]));
+    }
+    prev[b.len()] <= max
+}
+
+#[cfg(test)]
+mod closer_typo_tests {
+    use super::{closer_spellings, is_typo_of};
+    use lexer::TokenKind;
+
+    const CLOSERS: &[TokenKind] = &[
+        TokenKind::KwEndIf,
+        TokenKind::KwEndDo,
+        TokenKind::KwEndTry,
+        TokenKind::KwExcept,
+        TokenKind::KwEndProcedure,
+        TokenKind::KwEndFunction,
+        TokenKind::KwElse,
+        TokenKind::KwElsIf,
+    ];
+
+    /// Таблица написаний живёт отдельно от лексера, поэтому расхождение с ним обязано
+    /// ловиться: каждое написание разбирается ровно в свой вид.
+    #[test]
+    fn every_closer_spelling_lexes_to_its_kind() {
+        for &kind in CLOSERS {
+            let spellings = closer_spellings(kind);
+            assert!(!spellings.is_empty(), "{kind:?} остался без написаний");
+            for spelling in spellings {
+                let tokens = lexer::tokenize(spelling);
+                let significant: Vec<_> =
+                    tokens.iter().filter(|token| token.kind != TokenKind::Whitespace).collect();
+                assert_eq!(significant.len(), 1, "{spelling} разобралось не одним токеном");
+                assert_eq!(significant[0].kind, kind, "{spelling} разобралось не в {kind:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_typo_of_a_closer_is_recognised_in_both_languages() {
+        assert!(is_typo_of("КонецЕслли", "КонецЕсли"));
+        assert!(is_typo_of("конецесл", "КонецЕсли"));
+        assert!(is_typo_of("КонцеЕсли", "КонецЕсли"));
+        assert!(is_typo_of("EndIff", "EndIf"));
+    }
+
+    /// Поблажку получает попытка написать закрыватель, а не всякое слово рядом с ним.
+    #[test]
+    fn an_ordinary_name_is_not_a_typo_of_a_closer() {
+        for name in ["А", "HHH", "Результат", "КонецМесяца", "Конец", "EndOfMonth"]
+        {
+            for &kind in CLOSERS {
+                for spelling in closer_spellings(kind) {
+                    assert!(!is_typo_of(name, spelling), "{name} принято за опечатку {spelling}");
+                }
+            }
+        }
+    }
+
+    /// Само слово опечаткой не считается: закрыватель на месте разбирается закрывателем,
+    /// и до восстановления дело не доходит.
+    #[test]
+    fn the_closer_itself_is_not_a_typo() {
+        assert!(!is_typo_of("КонецЕсли", "КонецЕсли"));
+        assert!(!is_typo_of("конецесли", "КонецЕсли"));
     }
 }

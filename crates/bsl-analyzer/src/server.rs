@@ -23,6 +23,11 @@ use crate::{
 pub fn main_loop(connection: Connection) -> Result<()> {
     tracing::info!("BSL Analyzer LSP server starting");
 
+    // A request that unwinds on a propagated cancellation is told apart from one
+    // that unwinds on a real panic by this counter; without the hook every
+    // propagated unwind would read as "nothing panicked".
+    crate::panic_watch::install();
+
     let (initialize_id, initialize_params) =
         connection.initialize_start().context("Failed to start initialization")?;
 

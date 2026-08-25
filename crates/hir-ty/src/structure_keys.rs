@@ -19,7 +19,7 @@ use bsl_types::facet::StructureFacet;
 use bsl_types::kind::{
     Projection, ProjectionField, ProjectionFieldSource, ProjectionOrigin, TypeId, TypeOrigin,
 };
-use cfg_types::{ExprId, IdConversion};
+use cfg_types::{ExprId, IdConversion, StmtId};
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Literal, Stmt};
 
@@ -88,8 +88,15 @@ impl StructureShape {
         }
     }
 
+    /// Открывает форму вместе со всеми вложенными: значение, о котором больше ничего не
+    /// известно, ничего не говорит и о составе ключей своих вложенных структур.
     fn invalidate(&mut self) {
         self.invalidated = true;
+        for field in &mut self.fields {
+            if let ValueSource::Literal(child) = &mut field.source {
+                child.invalidate();
+            }
+        }
     }
 
     fn is_closed(&self) -> bool {
@@ -121,6 +128,13 @@ pub(crate) fn collect_structure_shapes(
     // Roots that may no longer be extended: a by-reference param that has been reassigned keeps the
     // keys accumulated while it still aliased the caller, but ignores later inserts/forwards.
     let mut frozen: FxHashSet<String> = FxHashSet::default();
+    // Names already used by an earlier statement. The union below is whole-body, but completeness
+    // is claimed at the point of the read: a name that lived before its constructor (a parameter, a
+    // module-level variable) was something else there, and this literal does not describe it.
+    let mut used_before_seed: FxHashSet<String> = FxHashSet::default();
+    // Записи внутри ветки, цикла или попытки могут не состояться, поэтому доказательством
+    // полного состава ключей они не служат: их форма остаётся открытой.
+    let conditional = conditionally_executed_stmts(body);
 
     if let SeedRoots::ParamNames(names) = seed_roots {
         for name in names {
@@ -131,7 +145,8 @@ pub(crate) fn collect_structure_shapes(
     // One pass in statement (≈ source) order. Seeds, `.Вставить` inserts, and interprocedural
     // forwarding all interleave here, so a root is only ever extended after it is live and the last
     // write to a key wins.
-    for (_id, stmt) in body.stmts_iter() {
+    for (id, stmt) in body.stmts_iter() {
+        let conditionally_executed = conditional.contains(&id);
         match stmt {
             Stmt::Assign { target, value } => {
                 invalidate_expression_escapes(body, &mut shapes, *target, forwarder, false);
@@ -139,16 +154,24 @@ pub(crate) fn collect_structure_shapes(
                 // Seed: `Local = Новый Структура(...)` — Stage-1 (`NewLiterals`) only; a constructor
                 // assignment to a parameter is a reassignment that breaks aliasing (handled below).
                 if matches!(seed_roots, SeedRoots::NewLiterals) {
+                    // Правая часть читается ДО того, как имя получит новое значение:
+                    // `С = Новый Структура("А", С.Б)` — это чтение прежнего `С`.
+                    record_used_names_in_expr(body, *value, &mut used_before_seed);
                     if let Expr::Path(name) = body.expr_idx(*target) {
-                        if let Some(shape) = constructor_shape_of(body, ExprId::from_idx(*value), 0)
+                        if let Some(mut shape) =
+                            constructor_shape_of(body, ExprId::from_idx(*value), 0)
                         {
                             let key = name.as_str().fold_lower();
                             if let Some(existing) = shapes.get_mut(&key) {
                                 existing.merge(shape);
                                 existing.invalidate();
                             } else {
+                                if conditionally_executed || used_before_seed.contains(&key) {
+                                    shape.invalidate();
+                                }
                                 shapes.insert(key, shape);
                             }
+                            record_used_names(body, stmt, &mut used_before_seed);
                             continue;
                         }
                     }
@@ -188,6 +211,12 @@ pub(crate) fn collect_structure_shapes(
                                 if let Some(target_shape) = navigate_mut(root_shape, &path) {
                                     apply_insert(body, target_shape, args);
                                 }
+                                // Запись под условием и добавляет ключ, которого может не
+                                // быть, и подменяет значение, которое могло остаться
+                                // прежним, — набор ключей корня после неё не доказан.
+                                if conditionally_executed {
+                                    root_shape.invalidate();
+                                }
                             }
                         }
                     }
@@ -209,7 +238,10 @@ pub(crate) fn collect_structure_shapes(
                 invalidate_escape_expression(body, &mut shapes, *value, forwarder);
             }
             Stmt::Execute { expr } => {
+                // Текст исполняемого кода произволен: он может вставить ключ в любую структуру
+                // тела, не называя её ни одним операндом этого оператора.
                 invalidate_escape_expression(body, &mut shapes, *expr, forwarder);
+                invalidate_every_shape(&mut shapes);
             }
             Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
                 invalidate_escape_expression(body, &mut shapes, *event, forwarder);
@@ -239,9 +271,128 @@ pub(crate) fn collect_structure_shapes(
             }
             _ => {}
         }
+        record_used_names(body, stmt, &mut used_before_seed);
     }
 
     shapes
+}
+
+/// Every name this statement mentions, at any depth of its expressions.
+///
+/// Служит одному вопросу: жило ли имя до своего конструктора. Поэтому берутся и цели
+/// присваивания — имя, которому уже присваивали, к моменту литерала было чем-то другим.
+fn record_used_names(body: &Body, stmt: &Stmt, used: &mut FxHashSet<String>) {
+    let record_expr = |expr: hir_def::hir::ExprIdx, used: &mut FxHashSet<String>| {
+        record_used_names_in_expr(body, expr, used);
+    };
+    match stmt {
+        Stmt::Assign { target, value } => {
+            record_expr(*target, used);
+            record_expr(*value, used);
+        }
+        Stmt::Expr(expr) | Stmt::Execute { expr } => record_expr(*expr, used),
+        Stmt::Return { value } | Stmt::Raise { value } => {
+            if let Some(value) = value {
+                record_expr(*value, used);
+            }
+        }
+        Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+            record_expr(*event, used);
+            record_expr(*handler, used);
+        }
+        Stmt::If(if_stmt) => {
+            record_expr(if_stmt.condition, used);
+            for (condition, _) in if_stmt.elsif_branches.iter() {
+                record_expr(*condition, used);
+            }
+        }
+        Stmt::While { condition, .. } => record_expr(*condition, used),
+        Stmt::For { from, to, .. } => {
+            record_expr(*from, used);
+            record_expr(*to, used);
+        }
+        Stmt::ForEach { collection, .. } => record_expr(*collection, used),
+        _ => {}
+    }
+}
+
+fn record_used_names_in_expr(
+    body: &Body,
+    expr: hir_def::hir::ExprIdx,
+    used: &mut FxHashSet<String>,
+) {
+    if let Expr::Path(name) = body.expr_idx(expr) {
+        used.insert(name.as_str().fold_lower());
+    }
+    crate::narrow::for_each_expr_child(body, expr, &mut |child| {
+        record_used_names_in_expr(body, child, used);
+    });
+}
+
+/// Операторы, исполнение которых зависит от условия: тела ветвей, циклов и попытки.
+///
+/// Плоский обход арены их не отличает — вложенный оператор приходит наравне с внешним и,
+/// более того, РАНЬШЕ него. Поэтому список составляется отдельным проходом по спискам
+/// блоков.
+fn conditionally_executed_stmts(body: &Body) -> FxHashSet<StmtId> {
+    let mut nested: FxHashSet<StmtId> = FxHashSet::default();
+    let extend = |branch: &[hir_def::hir::StmtIdx], nested: &mut FxHashSet<StmtId>| {
+        nested.extend(branch.iter().map(|idx| StmtId::from_idx(*idx)));
+    };
+    for (_id, stmt) in body.stmts_iter() {
+        match stmt {
+            Stmt::If(if_stmt) => {
+                extend(&if_stmt.then_branch, &mut nested);
+                for (_, branch) in if_stmt.elsif_branches.iter() {
+                    extend(branch, &mut nested);
+                }
+                if let Some(branch) = &if_stmt.else_branch {
+                    extend(branch, &mut nested);
+                }
+            }
+            Stmt::PreprocIf(preproc) => {
+                extend(&preproc.then_branch, &mut nested);
+                for (_, _, branch) in preproc.elsif_branches.iter() {
+                    extend(branch, &mut nested);
+                }
+                if let Some(branch) = &preproc.else_branch {
+                    extend(branch, &mut nested);
+                }
+            }
+            Stmt::While { body: branch, .. }
+            | Stmt::For { body: branch, .. }
+            | Stmt::ForEach { body: branch, .. } => extend(branch, &mut nested),
+            Stmt::Try { body: branch, except } => {
+                extend(branch, &mut nested);
+                extend(except, &mut nested);
+            }
+            _ => {}
+        }
+    }
+    nested
+}
+
+/// Открывает формы всех корней, названных в выражении.
+fn invalidate_named_roots(
+    body: &Body,
+    shapes: &mut FxHashMap<String, StructureShape>,
+    expr: hir_def::hir::ExprIdx,
+) {
+    let mut named = FxHashSet::default();
+    record_used_names_in_expr(body, expr, &mut named);
+    for name in named {
+        if let Some(shape) = shapes.get_mut(&name) {
+            shape.invalidate();
+        }
+    }
+}
+
+/// Открывает все формы тела разом — ответ на исполнение произвольного кода, который не
+/// называет ни одного корня своим операндом.
+fn invalidate_every_shape(shapes: &mut FxHashMap<String, StructureShape>) {
+    for shape in shapes.values_mut() {
+        shape.invalidate();
+    }
 }
 
 /// Decompose a method/qualified call into `(receiver, method_name, args)`. A BSL `recv.Method(args)`
@@ -469,15 +620,35 @@ fn invalidate_expression_escapes(
 
     let node = body.expr_idx(expr);
     if let Some((receiver, method, _)) = as_method_call(body, node) {
-        if !is_insert_method(method) {
-            if let Some((root, path)) = receiver_root_path(body, receiver, 0) {
-                invalidate_shape_path(shapes, &root, &path);
+        if !is_key_preserving_method(method) {
+            match receiver_root_path(body, receiver, 0) {
+                Some((root, path)) => {
+                    if !is_insert_method(method) {
+                        invalidate_shape_path(shapes, &root, &path);
+                    }
+                }
+                // Приёмник — не цепочка имён (тернарник, обращение по индексу, результат
+                // вызова): какое из названных в нём значений он вернёт, неизвестно, и
+                // мутация может достаться любому. `Вставить` здесь опаснее прочих: его
+                // ключ не записан ни в один корень, а форма осталась бы закрытой без него.
+                None => invalidate_named_roots(body, shapes, receiver.to_idx()),
             }
         }
     }
 
     match node {
         Expr::Call { callee, args } => {
+            if let Expr::Path(name) = body.expr_idx(*callee) {
+                // Имя платформенной функции разрешено переопределить своей: та строкового
+                // кода не исполняет и до чужой структуры без аргумента не дотянется.
+                let shadowed_by_user_method = forwarder
+                    .is_some_and(|fw| fw.callee_is_user_method(body, body.expr_idx(*callee)));
+                if crate::method_lookup::is_platform_name(name, "Вычислить", "Eval")
+                    && !shadowed_by_user_method
+                {
+                    invalidate_every_shape(shapes);
+                }
+            }
             invalidate_expression_escapes(body, shapes, *callee, forwarder, false);
             for (index, arg) in args.iter().copied().enumerate() {
                 let by_value =
@@ -517,4 +688,15 @@ pub(crate) fn body_constructs_structure(body: &Body) -> bool {
 
 fn is_insert_method(name: &hir_def::Name) -> bool {
     crate::method_lookup::is_platform_name(name, "Вставить", "Insert")
+}
+
+/// Методы `Структура`, которые состава ключей не меняют.
+///
+/// Методов у структуры ровно пять: `Вставить`, `Удалить`, `Очистить`, `Количество` и
+/// `Свойство`. Первые три состав меняют, последние два — читают, и открывать форму после
+/// них значит терять диагностику там, где терять нечего. Имя не из этих пяти — чужой или
+/// неизвестный метод, и он форму открывает.
+fn is_key_preserving_method(name: &hir_def::Name) -> bool {
+    crate::method_lookup::is_platform_name(name, "Количество", "Count")
+        || crate::method_lookup::is_platform_name(name, "Свойство", "Property")
 }

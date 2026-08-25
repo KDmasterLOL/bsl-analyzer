@@ -339,6 +339,9 @@ mod tests {
 
     #[test]
     fn panicking_job_does_not_kill_pool() {
+        // The panic count is process-wide and `dispatch` asserts on it; this
+        // guard keeps an intentional panic out of that assertion's window.
+        let _guard = crate::panic_watch::panic_test_guard();
         let handle = TaskPool::<&'static str>::new_with_workers(1);
         handle.pool.try_spawn(|| panic!("intentional")).unwrap();
         handle.pool.try_spawn(|| "ok").unwrap();

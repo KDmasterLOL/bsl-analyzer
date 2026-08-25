@@ -93,6 +93,59 @@ fn unknown_statement_recovery_preserves_an_earlier_error() {
     );
 }
 
+/// Посторонний оператор — не попытка закрыть блок, и блок после него остаётся незакрытым.
+#[test]
+fn a_stray_statement_does_not_close_the_block_around_it() {
+    for (input, closer) in [
+        ("Процедура П()\nЕсли Истина Тогда\nHHH;\nКонецПроцедуры", "КонецЕсли"),
+        ("Процедура П()\nПока Истина Цикл\nHHH;\nКонецПроцедуры", "КонецЦикла"),
+        ("Процедура П()\nПопытка\nHHH;\nКонецПроцедуры", "Исключение"),
+    ] {
+        let messages = messages(input, true);
+        assert!(
+            messages.iter().any(|message| message.contains(closer)),
+            "{closer} потерян: {messages:?}"
+        );
+    }
+}
+
+/// Опечатка в разделителе ветки конструкцию не закрывает: `Иначее` — не `КонецЕсли`.
+#[test]
+fn a_typo_of_a_branch_separator_does_not_close_the_if() {
+    let input = "Процедура П()\nЕсли Истина Тогда\nИначее;\nКонецПроцедуры";
+    let messages = messages(input, true);
+
+    assert!(
+        messages.iter().any(|message| message.contains("КонецЕсли")),
+        "опечатка в `Иначе` скрыла пропажу закрывателя: {messages:?}"
+    );
+}
+
+/// Английское написание закрывателя портится опечаткой так же, как русское.
+#[test]
+fn an_english_closer_typo_is_the_only_error() {
+    let input = "Procedure P()\nIf True Then\nEndIff;\nEndProcedure";
+    let messages = messages(input, true);
+
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(messages[0].contains("вызов или присваивание"), "{messages:?}");
+}
+
+/// Обрыв файла — не вторая ошибка, а единственная: подавлять её нечем.
+#[test]
+fn a_truncated_block_is_reported_even_after_a_recovery() {
+    for (input, closer) in [
+        ("Процедура П()\nА;\n", "КонецПроцедуры"),
+        ("Процедура П()\nПока Истина Цикл\nА;\n", "КонецЦикла"),
+    ] {
+        let messages = messages(input, true);
+        assert!(
+            messages.iter().any(|message| message.contains(closer)),
+            "обрыв на {closer} потерян: {messages:?}"
+        );
+    }
+}
+
 #[test]
 fn a_genuinely_missing_end_if_is_still_reported() {
     let input = "Процедура П()\nЕсли Истина Тогда\nА = 1;\nКонецПроцедуры";

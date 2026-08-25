@@ -340,15 +340,45 @@ where
 {
     let inner_id = id.clone();
     let started = std::time::Instant::now();
+    // The revision this request reads in, asked of salsa rather than proxied: a
+    // panic stamped with it (or newer) can reach this request, an older one
+    // cannot.
+    let revision = salsa::plumbing::current_revision(ctx.analysis.database());
     let inner = move || -> Response {
         match salsa::Cancelled::catch(AssertUnwindSafe(|| f(ctx, params))) {
             Ok(result) => result_to_response::<R>(inner_id, result),
             Err(cancelled) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 match cancelled {
-                    // Not a cancellation: a thread this query was blocked on
-                    // panicked. Surface it as an internal error instead of
-                    // hiding a real panic behind a `-32800` cancel.
+                    // Salsa says only that the thread owning this query
+                    // unwound — a pending write lands here too, because the
+                    // claim guard keeps `WaitResult::Cancelled` for a
+                    // thread-LOCAL cancellation. Cancellations unwind through
+                    // `resume_unwind`, which skips the panic hook, so a panic
+                    // stamp older than this request means nothing that could
+                    // reach it panicked, and the client should simply ask again.
+                    // Stamps carry salsa's own revision rather than a
+                    // per-request count because salsa also replays the panic of
+                    // a poisoned cycle head to a reader that never blocked on
+                    // anything.
+                    // A real panic still reaches the client: hiding one behind a
+                    // retryable code is the worse error.
+                    salsa::Cancelled::PropagatedPanic
+                        if !crate::panic_watch::panicked_in(revision) =>
+                    {
+                        tracing::info!(
+                            request_id = ?inner_id,
+                            method = R::METHOD,
+                            elapsed_ms,
+                            cancel_kind = "propagated",
+                            "async LSP request unwound (cancelled)"
+                        );
+                        Response::new_err(
+                            inner_id,
+                            ErrorCode::ContentModified as i32,
+                            "content modified".to_string(),
+                        )
+                    }
                     salsa::Cancelled::PropagatedPanic => {
                         tracing::error!(
                             request_id = ?inner_id,
@@ -514,6 +544,7 @@ mod tests {
 
     #[test]
     fn on_latency_panic_becomes_internal_error() {
+        let _guard = crate::panic_watch::panic_test_guard();
         let (sender, _receiver) = unbounded();
         let mut state = GlobalState::new(sender);
         state.vfs_done = true;
@@ -642,6 +673,166 @@ mod tests {
             ErrorCode::RequestCanceled as i32,
             "an unwound cancellation must map to RequestCanceled, not InternalError"
         );
+    }
+
+    /// Salsa reports "the thread owning your query unwound" as
+    /// `PropagatedPanic` whether it unwound on a panic or on a pending write —
+    /// the claim guard keeps `WaitResult::Cancelled` for a thread-LOCAL
+    /// cancellation only. A write-cancelled wait is not an error the user should
+    /// see: the client must re-request, which is what `ContentModified` says.
+    #[test]
+    fn propagated_unwind_without_a_panic_is_content_modified() {
+        let _guard = crate::panic_watch::panic_test_guard();
+        crate::panic_watch::install();
+        crate::panic_watch::reset_for_test();
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+
+        let response = propagated_unwind_response(&state, lsp_server::RequestId::from(13));
+
+        let err = response.error.expect("an unwound request must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::ContentModified as i32,
+            "a propagated cancellation must not be reported as an internal panic"
+        );
+    }
+
+    /// The other half of the same verdict: when a panic really did happen while
+    /// the request was waiting, the propagated unwind keeps reporting one.
+    /// Without this, mapping every propagated unwind to `ContentModified` would
+    /// pass the test above while hiding real panics.
+    #[test]
+    fn propagated_unwind_after_a_real_panic_stays_internal_error() {
+        let _guard = crate::panic_watch::panic_test_guard();
+        crate::panic_watch::install();
+        crate::panic_watch::reset_for_test();
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+
+        let (ctx, _token) = latency_ctx_with_token(&state);
+        let id = lsp_server::RequestId::from(14);
+        let response = run_latency_handler::<HoverRequest>(id, ctx, hover_params(), |ctx, _p| {
+            // Stands in for a sibling thread blowing up inside the query this
+            // request was blocked on. The message it prints to stderr is
+            // expected output of this test.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ctx.analysis.database().attach(|_| panic!("a real panic elsewhere"))
+            }));
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::PropagatedPanic))
+        });
+
+        let err = response.error.expect("an unwound request must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::InternalError as i32,
+            "a real panic must keep reaching the client as one"
+        );
+    }
+
+    /// Salsa propagates a panic a SECOND time, to a reader that never blocked
+    /// on anything: a cycle head that panicked earlier in the same revision
+    /// leaves a valueless provisional memo, and reading it throws
+    /// `PropagatedPanic` (`function/execute.rs`, `previous_iteration`). That
+    /// panic predates the request, so a per-request window cannot see it.
+    #[test]
+    fn propagated_unwind_replaying_an_earlier_panic_stays_internal_error() {
+        let _guard = crate::panic_watch::panic_test_guard();
+        crate::panic_watch::install();
+        crate::panic_watch::reset_for_test();
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+        panic_inside_a_query(&state, "cycle head panicked earlier");
+
+        let response = propagated_unwind_response(&state, lsp_server::RequestId::from(15));
+
+        let err = response.error.expect("an unwound request must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::InternalError as i32,
+            "a panic replayed from a poisoned memo must still reach the client"
+        );
+    }
+
+    /// An LRU eviction takes `&mut` on the database but starts no revision
+    /// (`zalsa::evict_lru` does not call `new_revision`, unlike a synthetic
+    /// write), so the poisoned memo it leaves behind is still live. Any proxy
+    /// for the revision boundary drifts exactly here.
+    #[test]
+    fn an_lru_trim_between_the_panic_and_the_reader_changes_nothing() {
+        let _guard = crate::panic_watch::panic_test_guard();
+        crate::panic_watch::install();
+        crate::panic_watch::reset_for_test();
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+        panic_inside_a_query(&state, "cycle head panicked before the idle trim");
+
+        // What the idle trim and the mid-sweep batch do between requests.
+        state.analysis_host.raw_database_mut().enforce_lru();
+
+        let response = propagated_unwind_response(&state, lsp_server::RequestId::from(16));
+
+        let err = response.error.expect("an unwound request must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::InternalError as i32,
+            "an LRU eviction is not a revision boundary and cannot clear a panic"
+        );
+    }
+
+    /// The counterpart that keeps the verdict from being "always InternalError":
+    /// a real input write does start a revision, and a poisoned memo cannot
+    /// outlive it.
+    #[test]
+    fn a_write_between_the_panic_and_the_reader_clears_the_verdict() {
+        let _guard = crate::panic_watch::panic_test_guard();
+        crate::panic_watch::install();
+        crate::panic_watch::reset_for_test();
+
+        let (sender, _receiver) = unbounded();
+        let mut state = GlobalState::new(sender);
+        state.vfs_done = true;
+        panic_inside_a_query(&state, "a panic of the previous revision");
+
+        // A salsa input write — the real revision boundary.
+        state.analysis_host.raw_database_mut().set_workspace_load_complete(true);
+
+        let response = propagated_unwind_response(&state, lsp_server::RequestId::from(17));
+
+        let err = response.error.expect("an unwound request must produce an error response");
+        assert_eq!(
+            err.code,
+            ErrorCode::ContentModified as i32,
+            "a panic of a finished revision cannot reach a reader of the next one"
+        );
+    }
+
+    /// A panic on a thread with the database attached — the only kind that can
+    /// strand a waiter or poison a memo, and the only kind that is stamped.
+    fn panic_inside_a_query(state: &GlobalState, message: &'static str) {
+        use salsa::Database as _;
+
+        let db = state.analysis_host.raw_database();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            db.attach(|_| panic!("{message}"))
+        }));
+    }
+
+    /// One request whose handler unwinds the way salsa delivers "the thread
+    /// owning your query is gone": `resume_unwind`, which skips the panic hook.
+    fn propagated_unwind_response(state: &GlobalState, id: lsp_server::RequestId) -> Response {
+        let (ctx, _token) = latency_ctx_with_token(state);
+        run_latency_handler::<HoverRequest>(id, ctx, hover_params(), |_ctx, _p| {
+            std::panic::resume_unwind(Box::new(salsa::Cancelled::PropagatedPanic))
+        })
     }
 
     #[test]
