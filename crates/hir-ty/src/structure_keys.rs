@@ -6,8 +6,8 @@
 //! [`bsl_types::facet::StructureFacet`] during inference (Phase 1), so member completion and hover
 //! after a dot can surface the keys (and the keys of a simple nested structure value).
 //!
-//! Soft by construction: it only ever *adds* fields to a structure; it is never consulted by a
-//! diagnostic. Interprocedural key propagation (keys added inside called helpers) is Stage 2.
+//! Known fields stay soft unless the same whole-body pass also proves a non-empty complete shape.
+//! Any alias, escape, dynamic key, or unknown mutation opens that shape conservatively.
 
 use std::sync::Arc;
 
@@ -64,12 +64,12 @@ struct StructField {
 }
 
 /// Collected keys (and nested shapes) of one structure local, flow-insensitive whole-body union.
-/// A non-literal key (`.Вставить(ИмяКлюча, …)`) is simply not recorded — the structure still
-/// surfaces the keys it does know.
+/// Known keys are retained for completion/hover even when an unsafe event opens the shape.
 #[derive(Default)]
 pub(crate) struct StructureShape {
     /// Keys in first-seen order; de-duplicated last-wins on value by case-insensitive name.
     fields: Vec<StructField>,
+    invalidated: bool,
 }
 
 impl StructureShape {
@@ -82,9 +82,18 @@ impl StructureShape {
     }
 
     fn merge(&mut self, other: StructureShape) {
+        self.invalidated |= other.invalidated;
         for f in other.fields {
             self.upsert(&f.name, f.source);
         }
+    }
+
+    fn invalidate(&mut self) {
+        self.invalidated = true;
+    }
+
+    fn is_closed(&self) -> bool {
+        !self.invalidated && !self.fields.is_empty()
     }
 }
 
@@ -125,13 +134,21 @@ pub(crate) fn collect_structure_shapes(
     for (_id, stmt) in body.stmts_iter() {
         match stmt {
             Stmt::Assign { target, value } => {
+                invalidate_expression_escapes(body, &mut shapes, *target, forwarder, false);
+                invalidate_expression_escapes(body, &mut shapes, *value, forwarder, true);
                 // Seed: `Local = Новый Структура(...)` — Stage-1 (`NewLiterals`) only; a constructor
                 // assignment to a parameter is a reassignment that breaks aliasing (handled below).
                 if matches!(seed_roots, SeedRoots::NewLiterals) {
                     if let Expr::Path(name) = body.expr_idx(*target) {
                         if let Some(shape) = constructor_shape_of(body, ExprId::from_idx(*value), 0)
                         {
-                            shapes.entry(name.as_str().fold_lower()).or_default().merge(shape);
+                            let key = name.as_str().fold_lower();
+                            if let Some(existing) = shapes.get_mut(&key) {
+                                existing.merge(shape);
+                                existing.invalidate();
+                            } else {
+                                shapes.insert(key, shape);
+                            }
                             continue;
                         }
                     }
@@ -141,6 +158,11 @@ pub(crate) fn collect_structure_shapes(
                 // before the reassignment completes, so fold BEFORE freezing the root below.
                 if let Some(fw) = forwarder {
                     fw.fold_call(body, &mut shapes, &frozen, body.expr_idx(*value));
+                }
+
+                let target_path = receiver_root_path(body, ExprId::from_idx(*target), 0);
+                if let Some((root, path)) = target_path {
+                    invalidate_shape_path(&mut shapes, &root, &path);
                 }
                 // Stage 2: reassigning a tracked parameter breaks its aliasing with the caller's
                 // argument. Freeze it in source order — keys inserted earlier still reach the
@@ -168,13 +190,52 @@ pub(crate) fn collect_structure_shapes(
                                 }
                             }
                         }
-                        continue;
                     }
                 }
                 // A non-insert call statement may forward a tracked root to a helper (`Заполнить(С)`).
                 if let Some(fw) = forwarder {
                     fw.fold_call(body, &mut shapes, &frozen, call);
                 }
+                invalidate_expression_escapes(body, &mut shapes, *expr_idx, forwarder, false);
+            }
+            Stmt::Return { value: Some(value) } => {
+                let expr = body.expr_idx(*value);
+                if let Some(fw) = forwarder {
+                    fw.fold_call(body, &mut shapes, &frozen, expr);
+                }
+                invalidate_expression_escapes(body, &mut shapes, *value, forwarder, true);
+            }
+            Stmt::Raise { value: Some(value) } => {
+                invalidate_escape_expression(body, &mut shapes, *value, forwarder);
+            }
+            Stmt::Execute { expr } => {
+                invalidate_escape_expression(body, &mut shapes, *expr, forwarder);
+            }
+            Stmt::AddHandler { event, handler } | Stmt::RemoveHandler { event, handler } => {
+                invalidate_escape_expression(body, &mut shapes, *event, forwarder);
+                invalidate_escape_expression(body, &mut shapes, *handler, forwarder);
+            }
+            Stmt::If(if_stmt) => {
+                invalidate_expression_escapes(
+                    body,
+                    &mut shapes,
+                    if_stmt.condition,
+                    forwarder,
+                    false,
+                );
+                for (condition, _) in if_stmt.elsif_branches.iter() {
+                    invalidate_expression_escapes(body, &mut shapes, *condition, forwarder, false);
+                }
+            }
+            Stmt::While { condition, .. } => {
+                invalidate_expression_escapes(body, &mut shapes, *condition, forwarder, false);
+            }
+            Stmt::For { from, to, .. } => {
+                invalidate_expression_escapes(body, &mut shapes, *from, forwarder, false);
+                invalidate_expression_escapes(body, &mut shapes, *to, forwarder, false);
+            }
+            Stmt::ForEach { collection, .. } => {
+                invalidate_expression_escapes(body, &mut shapes, *collection, forwarder, false);
             }
             _ => {}
         }
@@ -211,7 +272,11 @@ pub(crate) fn materialize(
     let shape = shapes.get(local_lower)?;
     // No known keys → keep the plain untyped structure (unchanged display/behaviour).
     let projection = shape_to_projection(db, shape, 0)?;
-    Some(db.structure_typed(projection, TypeOrigin::BslLiteral))
+    Some(if shape.is_closed() {
+        db.structure_typed_closed(projection, TypeOrigin::BslLiteral)
+    } else {
+        db.structure_typed(projection, TypeOrigin::BslLiteral)
+    })
 }
 
 /// The value type of a structure field (`facet.fields`), matched case-insensitively. `None` if the
@@ -242,6 +307,9 @@ pub(crate) fn shape_to_projection(
         .map(|f| {
             let ty = match &f.source {
                 ValueSource::Literal(child) => match shape_to_projection(db, child, depth + 1) {
+                    Some(p) if child.is_closed() => {
+                        db.structure_typed_closed(p, TypeOrigin::BslLiteral)
+                    }
                     Some(p) => db.structure_typed(p, TypeOrigin::BslLiteral),
                     None => db.structure(None),
                 },
@@ -269,7 +337,7 @@ fn scalar_type(db: &dyn HirDatabase, kind: ScalarKind) -> TypeId {
 /// The shape of a `Новый Структура(...)` constructor expression, or `None` if `expr` is not one.
 fn constructor_shape_of(body: &Body, expr: ExprId, depth: usize) -> Option<StructureShape> {
     if depth > MAX_NEST_DEPTH {
-        return Some(StructureShape::default());
+        return Some(StructureShape { invalidated: true, ..StructureShape::default() });
     }
     let Expr::New { type_name: Some(name), args } = body.expr(expr) else { return None };
     if !is_structure_name(name) {
@@ -279,6 +347,7 @@ fn constructor_shape_of(body: &Body, expr: ExprId, depth: usize) -> Option<Struc
     let Some(first) = args.first() else { return Some(shape) };
     let Expr::Literal(Literal::String(keys_str)) = body.expr_idx(*first) else {
         // First constructor arg is not a literal key string → no nameable keys.
+        shape.invalidate();
         return Some(shape);
     };
     for (i, key) in keys_str.split(',').map(str::trim).filter(|k| !k.is_empty()).enumerate() {
@@ -313,9 +382,13 @@ fn value_source_of(body: &Body, expr: ExprId, depth: usize) -> ValueSource {
 }
 
 fn apply_insert(body: &Body, shape: &mut StructureShape, args: &[hir_def::hir::ExprIdx]) {
-    let Some(first) = args.first() else { return };
+    let Some(first) = args.first() else {
+        shape.invalidate();
+        return;
+    };
     let Expr::Literal(Literal::String(key)) = body.expr_idx(*first) else {
-        // Non-literal key (`.Вставить(ИмяКлюча, …)`) — not nameable, leave known keys intact.
+        // Keep known keys for IDE surfaces, but the complete set is no longer proven.
+        shape.invalidate();
         return;
     };
     let key = key.trim();
@@ -357,6 +430,75 @@ fn navigate_mut<'a>(
     match &mut shape.fields[idx].source {
         ValueSource::Literal(child) => navigate_mut(child, rest),
         _ => None,
+    }
+}
+
+fn invalidate_shape_path(
+    shapes: &mut FxHashMap<String, StructureShape>,
+    root: &str,
+    path: &[String],
+) {
+    let Some(shape) = shapes.get_mut(root) else { return };
+    if let Some(target) = navigate_mut(shape, path) {
+        target.invalidate();
+    }
+}
+
+fn invalidate_escape_expression(
+    body: &Body,
+    shapes: &mut FxHashMap<String, StructureShape>,
+    expr: hir_def::hir::ExprIdx,
+    forwarder: Option<&crate::structure_param_keys::Forwarder>,
+) {
+    invalidate_expression_escapes(body, shapes, expr, forwarder, true);
+}
+
+fn invalidate_expression_escapes(
+    body: &Body,
+    shapes: &mut FxHashMap<String, StructureShape>,
+    expr: hir_def::hir::ExprIdx,
+    forwarder: Option<&crate::structure_param_keys::Forwarder>,
+    escapes: bool,
+) {
+    if escapes {
+        if let Some((root, path)) = receiver_root_path(body, ExprId::from_idx(expr), 0) {
+            invalidate_shape_path(shapes, &root, &path);
+            return;
+        }
+    }
+
+    let node = body.expr_idx(expr);
+    if let Some((receiver, method, _)) = as_method_call(body, node) {
+        if !is_insert_method(method) {
+            if let Some((root, path)) = receiver_root_path(body, receiver, 0) {
+                invalidate_shape_path(shapes, &root, &path);
+            }
+        }
+    }
+
+    match node {
+        Expr::Call { callee, args } => {
+            invalidate_expression_escapes(body, shapes, *callee, forwarder, false);
+            for (index, arg) in args.iter().copied().enumerate() {
+                let by_value =
+                    forwarder.is_some_and(|fw| fw.argument_is_by_value(body, node, index));
+                invalidate_expression_escapes(body, shapes, arg, forwarder, !by_value);
+            }
+        }
+        Expr::MethodCall { receiver, args, .. } => {
+            invalidate_expression_escapes(body, shapes, *receiver, forwarder, false);
+            for arg in args.iter().copied() {
+                invalidate_expression_escapes(body, shapes, arg, forwarder, true);
+            }
+        }
+        Expr::New { args, .. } | Expr::Array(args) => {
+            for arg in args.iter().copied() {
+                invalidate_expression_escapes(body, shapes, arg, forwarder, true);
+            }
+        }
+        _ => crate::narrow::for_each_expr_child(body, expr, &mut |child| {
+            invalidate_expression_escapes(body, shapes, child, forwarder, escapes);
+        }),
     }
 }
 

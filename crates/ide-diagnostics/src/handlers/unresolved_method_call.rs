@@ -38,16 +38,39 @@ pub fn from_hir(
         // its own address, once, by the host that failed to read it.
         UnresolvedMethodKind::BodyUnread => return None,
         UnresolvedMethodKind::ReceiverNotResolved | UnresolvedMethodKind::ReceiverNameAbsent => {
-            format!("Не удалось разрешить модуль '{}'", receiver_name.as_str())
+            unresolved_receiver_message(receiver_name, kind)
         }
     };
     crate::simple_hir_diagnostic(DiagnosticCode::UnresolvedMethodCall, message, range, ctx)
 }
 
+fn unresolved_receiver_message(receiver_name: &Name, kind: UnresolvedMethodKind) -> String {
+    debug_assert!(matches!(
+        kind,
+        UnresolvedMethodKind::ReceiverNotResolved | UnresolvedMethodKind::ReceiverNameAbsent
+    ));
+    format!("Не удалось разрешить получателя вызова '{}'", receiver_name.as_str())
+}
+
 #[cfg(test)]
 mod tests {
+    use hir::{Name, UnresolvedMethodKind};
+
+    use super::unresolved_receiver_message;
     use crate::test_utils::check_hir_diagnostic_with_fixtures;
     use crate::DiagnosticCode;
+
+    #[test]
+    fn unresolved_receiver_messages_are_neutral_for_both_reasons() {
+        let receiver = Name::new("НеизвестныйПолучатель");
+        for kind in
+            [UnresolvedMethodKind::ReceiverNotResolved, UnresolvedMethodKind::ReceiverNameAbsent]
+        {
+            let message = unresolved_receiver_message(&receiver, kind);
+            assert_eq!(message, "Не удалось разрешить получателя вызова 'НеизвестныйПолучатель'");
+            assert!(!message.contains("модул"));
+        }
+    }
 
     #[test]
     fn emits_when_method_not_found_on_existing_module() {
@@ -384,9 +407,17 @@ mod tests {
             1,
             "unresolved receiver must surface exactly one UnresolvedMethodCall, got: {umc:?}"
         );
+        let callee = "ЗаведомоНесуществующийПрефикс.КакойТоМетод";
+        let start = code.find(callee).expect("callee in fixture") as u32;
+        assert_eq!(umc[0].code, DiagnosticCode::UnresolvedMethodCall);
+        assert_eq!(
+            umc[0].range,
+            ide_db::TextRange::new(start.into(), (start + callee.len() as u32).into())
+        );
         assert!(
-            umc[0].message.contains("Не удалось разрешить модуль")
-                && umc[0].message.contains("ЗаведомоНесуществующийПрефикс"),
+            umc[0].message.contains("Не удалось разрешить получателя вызова")
+                && umc[0].message.contains("ЗаведомоНесуществующийПрефикс")
+                && !umc[0].message.contains("модул"),
             "message must use the ReceiverNotResolved phrasing and name the receiver; \
              a MethodNotFound-shaped phrasing here would be a regression. got: {}",
             umc[0].message

@@ -138,6 +138,10 @@ pub struct Field {
     pub env: Option<hir_def::execution_env::EnvFlags>,
 }
 
+pub fn platform_data() -> &'static PlatformData {
+    PlatformData::instance()
+}
+
 #[derive(Debug)]
 pub struct Type<'db, DB> {
     db: &'db DB,

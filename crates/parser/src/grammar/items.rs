@@ -111,7 +111,7 @@ pub fn procedure_def_content(p: &mut Parser) {
 
     p.expect(T![KwProcedure]);
 
-    p.within_boundary(at_end_procedure, |p| {
+    let recovered = p.within_boundary(at_end_procedure, |p| {
         if p.at(T![Ident]) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
@@ -122,10 +122,10 @@ pub fn procedure_def_content(p: &mut Parser) {
 
         p.eat(T![KwExport]);
 
-        statements::stmt_list(p, T![KwEndProcedure]);
+        statements::stmt_list(p, T![KwEndProcedure])
     });
 
-    p.expect(T![KwEndProcedure]);
+    statements::expect_stmt_list_terminator(p, T![KwEndProcedure], recovered);
 }
 
 pub fn function_def(p: &mut Parser) {
@@ -146,7 +146,7 @@ pub fn function_def_content(p: &mut Parser) {
 
     p.expect(T![KwFunction]);
 
-    p.within_boundary(at_end_function, |p| {
+    let recovered = p.within_boundary(at_end_function, |p| {
         if p.at(T![Ident]) || p.current().is_some_and(|k| k.is_keyword()) {
             p.bump();
         }
@@ -157,10 +157,10 @@ pub fn function_def_content(p: &mut Parser) {
 
         p.eat(T![KwExport]);
 
-        statements::stmt_list(p, T![KwEndFunction]);
+        statements::stmt_list(p, T![KwEndFunction])
     });
 
-    p.expect(T![KwEndFunction]);
+    statements::expect_stmt_list_terminator(p, T![KwEndFunction], recovered);
 }
 
 fn param_list(p: &mut Parser) {

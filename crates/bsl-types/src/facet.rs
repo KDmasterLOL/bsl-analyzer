@@ -209,10 +209,11 @@ pub struct StructureFacet {
     /// Typed field projection: `None` = untyped structure (keys unknown), `Some` = keys inferred
     /// from a literal `Новый Структура` / `.Вставить` construction (this plan) or a doc-comment.
     pub fields: Option<Arc<Projection>>,
-    /// Soft marker recording where the fields came from (`BslLiteral` / `DocComment`). Load-bearing
-    /// only as a future guard so inferred (possibly incomplete) structures are never turned into a
-    /// hard diagnostic. Stage 1 emits no diagnostics.
+    /// Marker recording where the fields came from (`BslLiteral` / `DocComment`).
     pub origin: Option<TypeOrigin>,
+    /// `true` only when the analyzer proved that [`Self::fields`] is the complete, non-empty key
+    /// set. Open and keyless structures keep permissive field access.
+    pub closed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

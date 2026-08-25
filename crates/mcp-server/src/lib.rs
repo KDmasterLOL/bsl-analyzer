@@ -94,8 +94,11 @@ struct MetadataParams {
     name_mask: Option<String>,
     /// `tree` in infobase mode: maximum returned objects (default 100, max 1000).
     max_items: Option<u32>,
-    /// Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
-    /// `object` and `form`.
+    /// Mode-dependent metadata object type. Use a singular analyzer type for `mode=source`
+    /// and `mode=auto` without `connection`, e.g. `Документ`/`Справочник`/`ОбщийМодуль`.
+    /// Use a plural live-service collection for `mode=infobase` and `mode=auto` with
+    /// `connection`, e.g. `Документы`/`Справочники`. Forms are source-only. Required for
+    /// `object` and `form`; values are passed through without singular/plural conversion.
     object_type: Option<String>,
     /// Metadata object name, e.g. `ЗаказКлиента`. Required for `object`; for `form` it
     /// selects the owner object (omit for a configuration-level common form).
@@ -964,7 +967,10 @@ impl McpServer {
     /// for call relationships (use `graph`) and not for finding code by meaning (use `search`).
     /// Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
     /// `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-    /// managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+    /// source-only managed form layout (needs `object_type`); `status` — resident readiness.
+    /// For `object`, use a singular analyzer type (`Документ`) in source mode or auto without
+    /// `connection`, and a plural live-service collection (`Документы`) in infobase mode or auto
+    /// with `connection`; the server does not convert between the forms. Reads the
     /// resident analysis host; while it builds it returns a retry envelope, not an error —
     /// `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
     /// shortly instead of reading the answer as "no such object".
@@ -3109,7 +3115,10 @@ mod tool_descriptions {
             for call relationships (use `graph`) and not for finding code by meaning (use `search`).
             Actions: `info` — configuration summary; `tree` — the metadata object tree (filterable);
             `object` — one object's structure (needs `object_type` + `object_name`); `form` — a
-            managed form's layout (needs `object_type`); `status` — resident readiness. Reads the
+            source-only managed form layout (needs `object_type`); `status` — resident readiness.
+            For `object`, use a singular analyzer type (`Документ`) in source mode or auto without
+            `connection`, and a plural live-service collection (`Документы`) in infobase mode or auto
+            with `connection`; the server does not convert between the forms. Reads the
             resident analysis host; while it builds it returns a retry envelope, not an error —
             `structuredContent.status == "loading"`, same field `diagnostics`/`graph` set, so retry
             shortly instead of reading the answer as "no such object".
@@ -3125,8 +3134,11 @@ mod tool_descriptions {
               - name_mask: `tree` in infobase mode: case-insensitive object name/synonym substring.
               - object_name: Metadata object name, e.g. `ЗаказКлиента`. Required for `object`; for `form` it
             selects the owner object (omit for a configuration-level common form).
-              - object_type: Metadata object type, e.g. `Документ`/`Справочник`/`ОбщийМодуль`. Required for
-            `object` and `form`.
+              - object_type: Mode-dependent metadata object type. Use a singular analyzer type for `mode=source`
+            and `mode=auto` without `connection`, e.g. `Документ`/`Справочник`/`ОбщийМодуль`.
+            Use a plural live-service collection for `mode=infobase` and `mode=auto` with
+            `connection`, e.g. `Документы`/`Справочники`. Forms are source-only. Required for
+            `object` and `form`; values are passed through without singular/plural conversion.
 
             ## outline
             The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module

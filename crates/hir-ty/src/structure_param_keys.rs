@@ -235,6 +235,19 @@ impl<'a> Forwarder<'a> {
         }
     }
 
+    /// Whether this syntactic call resolves to a user method whose corresponding parameter is
+    /// explicitly passed by value. Only that case proves that the caller's structure cannot be
+    /// mutated through the argument.
+    pub(crate) fn argument_is_by_value(&self, body: &Body, call: &Expr, arg_index: usize) -> bool {
+        let Expr::Call { callee, .. } = call else { return false };
+        let Some(mid) = self.resolve_callee(body, body.expr_idx(*callee)) else { return false };
+        self.db
+            .symbol_tree_ref(mid.module)
+            .find_method_by_id(mid)
+            .and_then(|method| method.params.get(arg_index))
+            .is_some_and(|param| param.is_val)
+    }
+
     /// Resolve a call's callee to a `MethodId` using only syntactic forms (no inferred receiver):
     /// same-module bare, global common-module bare, common-module `Модуль.F`, three-level
     /// `Справочники.X.F`. A bare name shadowed by a local/param is not a method call → `None`.

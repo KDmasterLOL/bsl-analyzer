@@ -118,8 +118,8 @@ fn lookup_field_raw(
     }
 
     if let TypeKind::Structure(facet) = db.lookup_type(effective_ty) {
-        // Permissive: a known literal key resolves; an unknown key yields no field and (crucially)
-        // no `UnresolvedField` — structure field access stays soft.
+        // A known literal key resolves here. A miss is classified by inference from the facet's
+        // explicit completeness proof; lookup itself stays unchanged for completion/hover callers.
         let field_ty =
             crate::structure_keys::structure_projection_field(facet, field_name.as_str())?;
         // SOFT: only a *nested structure* type is surfaced (so `С.Адрес.` can chain). Scalar / leaf

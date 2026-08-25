@@ -13,6 +13,10 @@
 
 use syntax::SyntaxKind;
 
+fn error_ranges(input: &str) -> Vec<syntax::TextRange> {
+    parser::parse(input).errors().iter().map(|error| error.range()).collect()
+}
+
 /// The texts of every `ERROR` node, trimmed.
 fn error_node_texts(input: &str, bsl: bool) -> Vec<String> {
     let parse = if bsl { parser::parse(input) } else { parser::parse_sdbl(input) };
@@ -40,6 +44,85 @@ fn swallowed(input: &str, bsl: bool, closer: &str) -> bool {
 
 fn claims_missing(input: &str, bsl: bool, closer: &str) -> bool {
     messages(input, bsl).iter().any(|m| m.contains(closer) && m.contains("конец файла"))
+}
+
+#[test]
+fn an_unknown_end_if_is_the_only_error_and_owns_its_token() {
+    let input = "Процедура П()\nЕсли Истина Тогда\nКонецЕслли;\nКонецПроцедуры";
+    let typo = "КонецЕслли";
+    let start = input.find(typo).expect("typo") as u32;
+
+    assert_eq!(
+        error_ranges(input),
+        vec![syntax::TextRange::new(start.into(), (start + typo.len() as u32).into())]
+    );
+}
+
+#[test]
+fn unknown_statement_recovery_closes_only_the_nearest_block() {
+    let input = "Процедура П()\nЕсли Истина Тогда\nПока Истина Цикл\nКонецЦиклаа;\nКонецПроцедуры";
+    let errors = parser::parse(input);
+    let messages: Vec<_> = errors.errors().iter().map(|error| error.message()).collect();
+
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(messages.iter().any(|message| message.contains("вызов или присваивание")));
+    assert!(
+        messages.iter().any(|message| message.contains("КонецЕсли")),
+        "the loop recovery must not close its enclosing `Если`: {messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|message| message.contains("КонецЦикла")),
+        "the nearest marked loop is implicitly closed: {messages:?}"
+    );
+}
+
+#[test]
+fn unknown_statement_recovery_preserves_an_earlier_error() {
+    let input = "Процедура П()\nЕсли Истина Тогда\nА = ;\nКонецЕслли;\nКонецПроцедуры";
+    let parse = parser::parse(input);
+    let messages: Vec<_> = parse.errors().iter().map(|error| error.message()).collect();
+
+    assert_eq!(messages.len(), 2, "{messages:?}");
+    assert!(
+        messages.iter().any(|message| message.contains("Неожиданный токен ';'")),
+        "{messages:?}"
+    );
+    assert!(
+        messages.iter().any(|message| message.contains("вызов или присваивание")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_genuinely_missing_end_if_is_still_reported() {
+    let input = "Процедура П()\nЕсли Истина Тогда\nА = 1;\nКонецПроцедуры";
+    let messages = messages(input, true);
+
+    assert!(messages.iter().any(|message| message.contains("КонецЕсли")), "{messages:?}");
+}
+
+#[test]
+fn parsing_continues_after_an_unknown_statement() {
+    let input = "Процедура П()\nКонецЕслли;\nА = 1;\nКонецПроцедуры";
+    let parse = parser::parse(input);
+
+    assert_eq!(parse.errors().len(), 1, "{:?}", parse.errors());
+    assert_eq!(
+        parse
+            .syntax_node()
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::ASSIGN_STMT)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn valid_identifier_statements_do_not_enter_unknown_statement_recovery() {
+    let input = "Процедура П()\nА = Б + В;\nФ();\nОбъект.Метод();\nКонецПроцедуры";
+    let parse = parser::parse(input);
+
+    assert!(!parse.has_errors(), "{:?}", parse.errors());
 }
 
 // --- BSL: a block closer is not a recovery's to take ---------------------

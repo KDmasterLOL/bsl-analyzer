@@ -5,8 +5,9 @@ use crate::parser::Parser;
 
 use super::expressions;
 
-pub fn stmt_list(p: &mut Parser, terminator: Sig) {
+pub fn stmt_list(p: &mut Parser, terminator: Sig) -> bool {
     let m = p.start();
+    let mut recovered_unknown_statement = false;
 
     // The list ends at its own terminator and at every closer further out.
     // Rules inside refuse to consume an enclosing closer, so a list waiting
@@ -18,13 +19,18 @@ pub fn stmt_list(p: &mut Parser, terminator: Sig) {
             break;
         }
 
-        statement(p);
+        recovered_unknown_statement |= statement(p);
     }
 
     m.complete(p, NodeKind::StmtList);
+    recovered_unknown_statement
 }
 
-pub fn statement(p: &mut Parser) {
+pub fn statement(p: &mut Parser) -> bool {
+    if p.at(T![Ident]) {
+        return assignment_or_call(p);
+    }
+
     match p.current() {
         Some(T![Semicolon]) => {
             let m = p.start();
@@ -60,9 +66,6 @@ pub fn statement(p: &mut Parser) {
         Some(T![PreIf]) => super::preprocessor_if(p),
         Some(T![PreDelete]) => super::preprocessor_delete(p),
         Some(T![PreInsert]) => super::preprocessor_insert(p),
-        Some(T![Ident]) => {
-            assignment_or_call(p);
-        }
         _ => {
             if p.current().is_some() {
                 let m = p.start();
@@ -71,6 +74,14 @@ pub fn statement(p: &mut Parser) {
                 p.eat(T![Semicolon]);
             }
         }
+    }
+
+    false
+}
+
+pub(super) fn expect_stmt_list_terminator(p: &mut Parser, terminator: Sig, recovered: bool) {
+    if p.at(terminator) || !recovered {
+        p.expect(terminator);
     }
 }
 
@@ -145,12 +156,12 @@ fn if_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_if_closer, |p| {
+    let recovered = p.within_boundary(at_if_closer, |p| {
         p.within_boundary(at_then, expressions::expression);
 
         p.expect(T![KwThen]);
 
-        stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
+        let mut recovered = stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
 
         while p.at(T![KwElsIf]) {
             p.check_iteration_limit();
@@ -158,19 +169,20 @@ fn if_stmt(p: &mut Parser) {
             p.bump();
             p.within_boundary(at_then, expressions::expression);
             p.expect(T![KwThen]);
-            stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
+            recovered |= stmt_list_inner(p, &[T![KwElsIf], T![KwElse], T![KwEndIf]]);
             em.complete(p, NodeKind::ElseIfClause);
         }
 
         if p.at(T![KwElse]) {
             let em = p.start();
             p.bump();
-            stmt_list_inner(p, &[T![KwEndIf]]);
+            recovered |= stmt_list_inner(p, &[T![KwEndIf]]);
             em.complete(p, NodeKind::ElseClause);
         }
+        recovered
     });
 
-    p.expect(T![KwEndIf]);
+    expect_stmt_list_terminator(p, T![KwEndIf], recovered);
 
     p.eat(T![Semicolon]);
 
@@ -181,15 +193,15 @@ fn while_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_end_do, |p| {
+    let recovered = p.within_boundary(at_end_do, |p| {
         p.within_boundary(at_do, expressions::expression);
 
         p.expect(T![KwDo]);
 
-        stmt_list(p, T![KwEndDo]);
+        stmt_list(p, T![KwEndDo])
     });
 
-    p.expect(T![KwEndDo]);
+    expect_stmt_list_terminator(p, T![KwEndDo], recovered);
 
     p.eat(T![Semicolon]);
 
@@ -201,7 +213,7 @@ fn for_stmt(p: &mut Parser) {
     p.bump();
 
     if p.at(T![KwEach]) {
-        p.within_boundary(at_end_do, |p| {
+        let recovered = p.within_boundary(at_end_do, |p| {
             p.bump();
 
             if p.at(T![Ident]) {
@@ -216,16 +228,16 @@ fn for_stmt(p: &mut Parser) {
 
             p.expect(T![KwDo]);
 
-            stmt_list(p, T![KwEndDo]);
+            stmt_list(p, T![KwEndDo])
         });
 
-        p.expect(T![KwEndDo]);
+        expect_stmt_list_terminator(p, T![KwEndDo], recovered);
 
         p.eat(T![Semicolon]);
 
         m.complete(p, NodeKind::ForEachStmt);
     } else {
-        p.within_boundary(at_end_do, |p| {
+        let recovered = p.within_boundary(at_end_do, |p| {
             if p.at(T![Ident]) {
                 p.bump();
             }
@@ -251,10 +263,10 @@ fn for_stmt(p: &mut Parser) {
 
             p.expect(T![KwDo]);
 
-            stmt_list(p, T![KwEndDo]);
+            stmt_list(p, T![KwEndDo])
         });
 
-        p.expect(T![KwEndDo]);
+        expect_stmt_list_terminator(p, T![KwEndDo], recovered);
 
         p.eat(T![Semicolon]);
 
@@ -266,17 +278,18 @@ fn try_stmt(p: &mut Parser) {
     let m = p.start();
     p.bump();
 
-    p.within_boundary(at_try_closer, |p| {
-        stmt_list(p, T![KwExcept]);
+    let recovered = p.within_boundary(at_try_closer, |p| {
+        let recovered = stmt_list(p, T![KwExcept]);
 
-        p.expect(T![KwExcept]);
+        expect_stmt_list_terminator(p, T![KwExcept], recovered);
 
         let em = p.start();
-        stmt_list(p, T![KwEndTry]);
+        let recovered = stmt_list(p, T![KwEndTry]);
         em.complete(p, NodeKind::ExceptClause);
+        recovered
     });
 
-    p.expect(T![KwEndTry]);
+    expect_stmt_list_terminator(p, T![KwEndTry], recovered);
 
     p.eat(T![Semicolon]);
 
@@ -414,7 +427,7 @@ fn remove_handler_stmt(p: &mut Parser) {
     m.complete(p, NodeKind::RemoveHandlerStmt);
 }
 
-fn assignment_or_call(p: &mut Parser) {
+fn assignment_or_call(p: &mut Parser) -> bool {
     let m = p.start();
 
     let is_valid_stmt = expressions::postfix_expression_for_assignment(p);
@@ -423,17 +436,21 @@ fn assignment_or_call(p: &mut Parser) {
         expressions::expression(p);
         m.complete(p, NodeKind::AssignStmt);
         p.eat(T![Semicolon]);
+        false
     } else if is_valid_stmt {
         m.complete(p, NodeKind::CallStmt);
         p.eat(T![Semicolon]);
+        false
     } else {
         p.error_custom_at_marker(m, "ожидался вызов или присваивание");
         p.eat(T![Semicolon]);
+        true
     }
 }
 
-fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) {
+fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) -> bool {
     let m = p.start();
+    let mut recovered_unknown_statement = false;
 
     while !p.at_end() && !terminators.iter().any(|t| p.at(*t)) && !p.at_enclosing_boundary() {
         p.check_iteration_limit();
@@ -442,8 +459,9 @@ fn stmt_list_inner(p: &mut Parser, terminators: &[Sig]) {
             break;
         }
 
-        statement(p);
+        recovered_unknown_statement |= statement(p);
     }
 
     m.complete(p, NodeKind::StmtList);
+    recovered_unknown_statement
 }
