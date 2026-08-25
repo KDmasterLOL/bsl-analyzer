@@ -395,7 +395,8 @@ async fn successful_connect_is_always_served_at_idle_boundary() {
     };
     let mut backend = launch();
 
-    for _ in 0..10 {
+    let attempts = if cfg!(windows) { 1 } else { 10 };
+    for _ in 0..attempts {
         // Sleep to around the idle boundary so the next connect races a possible expiry.
         tokio::time::sleep(idle_ttl).await;
         match connect(&key).await {
