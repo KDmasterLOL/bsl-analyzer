@@ -83,8 +83,8 @@ pub(super) static FORCE_REWALK_WALK_ERROR: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
-static FORCE_DRIFT_APPLY_ERROR: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static FORCE_DRIFT_APPLY_ERROR_ENGINE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(test)]
 static FORCE_RESCAN_DEBT_DUE: std::sync::atomic::AtomicBool =
@@ -514,6 +514,9 @@ impl SharedState {
         plan: &mut SearchDriftPlan,
         _graph: &GraphState,
     ) -> super::WorkspaceSearchApply<bool, bsl_search::SearchError> {
+        #[cfg(test)]
+        let force_apply_error =
+            FORCE_DRIFT_APPLY_ERROR_ENGINE.load(Ordering::SeqCst) == Arc::as_ptr(shared) as usize;
         Self::apply_workspace_search_checkpointed(shared, lease, |engine, checkpoint| {
             if engine.workspace_roots_epoch() != plan.roots_epoch {
                 return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
@@ -526,7 +529,7 @@ impl SharedState {
                 )));
             }
             #[cfg(test)]
-            if FORCE_DRIFT_APPLY_ERROR.load(Ordering::SeqCst) {
+            if force_apply_error {
                 return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
                     "forced drift apply failure".to_owned(),
                 )));
@@ -1110,7 +1113,9 @@ mod tests {
         ));
 
         let retry_lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
-        super::FORCE_DRIFT_APPLY_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _force_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        super::FORCE_DRIFT_APPLY_ERROR_ENGINE
+            .store(Arc::as_ptr(&shared) as usize, std::sync::atomic::Ordering::SeqCst);
         let mut failing_plan = SearchDriftPlan::default();
         let failed = SharedState::apply_prepared_search_drift(
             &shared,
@@ -1118,7 +1123,7 @@ mod tests {
             &mut failing_plan,
             &crate::graph::GraphState::disabled(),
         );
-        super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+        super::FORCE_DRIFT_APPLY_ERROR_ENGINE.store(0, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(failed, crate::state::WorkspaceSearchApply::OperationError(_)));
     }
 
@@ -1189,7 +1194,7 @@ mod tests {
         struct ResetForcedError;
         impl Drop for ResetForcedError {
             fn drop(&mut self) {
-                super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+                super::FORCE_DRIFT_APPLY_ERROR_ENGINE.store(0, std::sync::atomic::Ordering::SeqCst);
                 super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
@@ -1229,7 +1234,8 @@ mod tests {
             }));
         };
 
-        super::FORCE_DRIFT_APPLY_ERROR.store(true, std::sync::atomic::Ordering::SeqCst);
+        super::FORCE_DRIFT_APPLY_ERROR_ENGINE
+            .store(Arc::as_ptr(&shared) as usize, std::sync::atomic::Ordering::SeqCst);
         write_and_wait(&workspace.join("Configuration.xml"), "<Configuration/>");
         assert_ne!(
             graph.status(),
@@ -1264,7 +1270,7 @@ mod tests {
                 .is_empty(),
             "an OperationError during the due full rescan keeps one debt slot without partial apply"
         );
-        super::FORCE_DRIFT_APPLY_ERROR.store(false, std::sync::atomic::Ordering::SeqCst);
+        super::FORCE_DRIFT_APPLY_ERROR_ENGINE.store(0, std::sync::atomic::Ordering::SeqCst);
         write_and_wait(&workspace.join("C.bsl"), "Procedure C2()\nEndProcedure");
         assert!(
             eventually(Duration::from_secs(15), || {

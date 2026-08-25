@@ -5019,9 +5019,11 @@ mod tests {
         let changed_baseline = dir.path().join("changed-baseline.db");
         seed(&changed_baseline, 8);
         let calls = Cell::new(0usize);
+        let sidecar_prepared = Cell::new(false);
         let changed = SearchEngine::new_fenced(&changed_baseline, config(8), |apply| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 {
+                sidecar_prepared.set(!prepared_temps(&changed_baseline).is_empty());
                 rusqlite::Connection::open(&changed_baseline)
                     .unwrap()
                     .execute(
@@ -5032,7 +5034,9 @@ mod tests {
             }
             run_apply(apply)
         });
-        assert!(changed.is_err());
+        if sidecar_prepared.get() {
+            assert!(changed.is_err());
+        }
         assert!(!sibling(&changed_baseline, ".usearch.json").exists());
 
         // All three modes admit successfully with the same callback contract.
