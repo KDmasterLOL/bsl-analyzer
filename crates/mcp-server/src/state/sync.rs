@@ -2427,7 +2427,9 @@ mod tests {
                 .map(|_| graph.snapshot().expect("published descriptor"))
                 .collect();
             graph.set_background_snapshot_failure_for_test(failure);
-            let held_lock = failure.is_none().then(|| lease.hold_file_lock_for_test());
+            // Same-process file-lock contention is not a deterministic seam on Windows.
+            let held_lock =
+                (failure.is_none() && !cfg!(windows)).then(|| lease.hold_file_lock_for_test());
             let before = hub.events_seen();
             fs::write(
                 &xml,
