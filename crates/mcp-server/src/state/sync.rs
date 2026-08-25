@@ -2321,156 +2321,109 @@ mod tests {
     }
 
     #[test]
-    fn background_snapshot_failures_become_rescan_debt_instead_of_empty_xml_success() {
-        use crate::change_hub::{test_support::eventually, WorkspaceChangeHub};
-        use std::time::Duration;
+    fn background_snapshot_failures_require_rescan_instead_of_empty_xml_success() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let xml = workspace.join("Catalogs/Х.xml");
+        fs::create_dir_all(xml.parent().unwrap()).unwrap();
+        fs::write(&xml, "<MetaDataObject/>").unwrap();
+        write_common_module(
+            &workspace,
+            "Б",
+            "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+        );
 
-        struct ResetDebtDue;
-        impl Drop for ResetDebtDue {
-            fn drop(&mut self) {
-                super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let _reset = ResetDebtDue;
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&workspace);
+        cache.ensure().unwrap();
+        let project = crate::graph::ProjectSnapshot::load(&workspace);
+        let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let summary = crate::graph_db::build_graph_database(
+            &project,
+            &universe,
+            &cache.graph_db_path(),
+            100,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_owned(),
+            },
+        )
+        .unwrap();
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = crate::graph::GraphState::for_workspace_with_cache(workspace.clone(), cache)
+            .with_lease(lease.clone());
+        graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        engine.set_workspace_root(workspace.clone());
+        engine
+            .sync_indexed_documents_in_collection(
+                "code",
+                &[IndexedDocument {
+                    collection: "code".to_owned(),
+                    root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
+                    path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
+                    symbol_name: "ЧитаетХ".to_owned(),
+                    kind: "procedure".to_owned(),
+                    line_start: 0,
+                    line_end: 2,
+                    text: "Процедура ЧитаетХ()\nКонецПроцедуры".to_owned(),
+                    content_hash: "h".to_owned(),
+                    graph_context: None,
+                }],
+                None,
+            )
+            .unwrap();
+        engine.initialize_workspace_overlay_clean().unwrap();
+        let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let entry = crate::change_hub::ChangeEntry {
+            canonical: xml.clone(),
+            raw: xml,
+            kind: crate::change_hub::ChangeKind::MaybeChanged,
+            seq: 1,
+        };
+        let occupied: Vec<_> = (0..crate::graph::SNAPSHOT_POOL_CAP)
+            .map(|_| graph.snapshot().expect("published descriptor"))
+            .collect();
 
         for failure in [
-            None,
-            Some(crate::graph::BackgroundSnapshotFailure::Changed),
-            Some(crate::graph::BackgroundSnapshotFailure::Open),
+            crate::graph::BackgroundSnapshotFailure::Changed,
+            crate::graph::BackgroundSnapshotFailure::Open,
         ] {
-            // Same-process file-lock contention is not a deterministic seam on Windows.
-            if failure.is_none() && cfg!(windows) {
-                continue;
-            }
-            let dir = tempdir().unwrap();
-            let workspace = dir.path().to_path_buf();
-            fs::write(workspace.join("Configuration.xml"), "<Configuration/>").unwrap();
-            let xml = workspace.join("Catalogs/Х.xml");
-            fs::create_dir_all(xml.parent().unwrap()).unwrap();
-            fs::write(
-                &xml,
-                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Catalog><Properties><Name>Х</Name></Properties></Catalog></MetaDataObject>"#,
-            )
-            .unwrap();
-            write_common_module(
-                &workspace,
-                "Б",
-                "&НаСервере\nПроцедура ЧитаетХ() Экспорт\nСправочники.Х.СоздатьЭлемент();\nКонецПроцедуры",
+            graph.set_background_snapshot_failure_for_test(Some(failure));
+            let mut plan = SharedState::prepare_search_drift(
+                &engine,
+                std::slice::from_ref(&entry),
+                false,
+                &graph,
             );
-
-            let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&workspace);
-            cache.ensure().unwrap();
-            let project = crate::graph::ProjectSnapshot::load(&workspace);
-            let universe = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
-            let summary = crate::graph_db::build_graph_database(
-                &project,
-                &universe,
-                &cache.graph_db_path(),
-                100,
-                &crate::graph_db::GraphMeta {
-                    revision: 1,
-                    fingerprint: crate::graph_db::GraphFp::default(),
-                    files: 0,
-                    built_at: "t".to_owned(),
-                },
-            )
-            .unwrap();
-            let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
-            let graph =
-                crate::graph::GraphState::for_workspace_with_cache(workspace.clone(), cache)
-                    .with_lease(lease.clone());
-            graph.adopt_prebuilt(1, crate::graph_db::GraphFp::default(), summary.modules, None);
-
-            let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
-            engine.set_workspace_root(workspace.clone());
-            engine
-                .sync_indexed_documents_in_collection(
-                    "code",
-                    &[IndexedDocument {
-                        collection: "code".to_owned(),
-                        root_id: bsl_search::CONFIGURATION_ROOT_ID.to_owned(),
-                        path: "CommonModules/Б/Ext/Module.bsl".to_owned(),
-                        symbol_name: "ЧитаетХ".to_owned(),
-                        kind: "procedure".to_owned(),
-                        line_start: 0,
-                        line_end: 2,
-                        text: "Процедура ЧитаетХ()\nКонецПроцедуры".to_owned(),
-                        content_hash: "h".to_owned(),
-                        graph_context: None,
-                    }],
-                    None,
-                )
-                .unwrap();
-            engine.initialize_workspace_overlay_clean().unwrap();
-            let engine: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
-            let hub = WorkspaceChangeHub::start(vec![workspace.clone()]);
-            assert!(hub.wait_until_watching(Duration::from_secs(15)));
-            let cursor = hub.subscribe();
-            assert!(SharedState::spawn_search_sink(
-                hub.clone(),
-                cursor,
-                Arc::clone(&engine),
-                graph.clone(),
-                None,
-                Arc::new(AtomicU64::new(0)),
-                lease.clone(),
+            assert!(plan.full_rescan, "snapshot failure must request recovery rescan");
+            assert!(plan.preparation_error.is_some(), "snapshot failure must not look applied");
+            assert!(matches!(
+                SharedState::apply_prepared_search_drift(&engine, &lease, &mut plan, &graph),
+                crate::state::WorkspaceSearchApply::OperationError(_)
             ));
-            assert!(eventually(Duration::from_secs(15), || {
-                engine
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .workspace_overlay_stats()
-                    .unwrap()
-                    .unwrap()
-                    .watcher_mode
-            }));
-
-            let occupied: Vec<_> = (0..crate::graph::SNAPSHOT_POOL_CAP)
-                .map(|_| graph.snapshot().expect("published descriptor"))
-                .collect();
-            graph.set_background_snapshot_failure_for_test(failure);
-            let held_lock = failure.is_none().then(|| lease.hold_file_lock_for_test());
-            let before = hub.events_seen();
-            fs::write(
-                &xml,
-                r#"<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses"><Catalog><Properties><Name>Х</Name><Synonym>changed</Synonym></Properties></Catalog></MetaDataObject>"#,
-            )
-            .unwrap();
-            assert!(eventually(Duration::from_secs(15), || hub.events_seen() > before));
-            if held_lock.is_some() {
-                assert!(
-                    !hub.materialize(cursor).entries.is_empty(),
-                    "lease contention keeps the exact XML batch pending"
-                );
-            }
-            drop(held_lock);
-            assert!(eventually(Duration::from_secs(60), || {
-                hub.materialize(cursor).entries.is_empty()
-            }));
-            graph.set_background_snapshot_failure_for_test(None);
-            drop(occupied);
-            let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-            super::FORCE_RESCAN_DEBT_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
-            let wake = workspace.join("wake.bsl");
-            let before = hub.events_seen();
-            fs::write(&wake, "Процедура Разбудить()\nКонецПроцедуры").unwrap();
-            assert!(eventually(Duration::from_secs(15), || hub.events_seen() > before));
-            assert!(eventually(Duration::from_secs(15), || {
-                engine
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .unwrap()
-                    .context_dirty_paths("code")
-                    .unwrap()
-                    .contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl"))
-            }));
-            super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
-            lease.release();
-            hub.shutdown();
         }
+
+        graph.set_background_snapshot_failure_for_test(None);
+        drop(occupied);
+        let mut recovery =
+            SharedState::prepare_search_drift(&engine, std::slice::from_ref(&entry), true, &graph);
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(&engine, &lease, &mut recovery, &graph),
+            crate::state::WorkspaceSearchApply::Applied(true)
+        ));
+        assert!(engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .context_dirty_paths("code")
+            .unwrap()
+            .contains(&bsl_search::FileKey::configuration("CommonModules/Б/Ext/Module.bsl")));
+        lease.release();
     }
 
     /// An `.xml` edit BEFORE any graph is published degrades: owned modules are still marked

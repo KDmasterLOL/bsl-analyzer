@@ -86,7 +86,7 @@ jobs:
           cargo test -p mcp-server workspace_lease::tests::release_waits_for_only_the_admitted_batch_and_refuses_the_next -- --exact &&
           cargo test -p mcp-server workspace_lease::tests::takeover_between_batches_preserves_the_first_and_terminates_the_next -- --exact &&
           cargo test -p mcp-server state::bootstrap::tests::startup_constructor_fence_distinguishes_retry_terminal_and_error -- --exact &&
-          cargo test -p mcp-server state::sync::tests::background_snapshot_failures_become_rescan_debt_instead_of_empty_xml_success -- --exact &&
+          cargo test -p mcp-server state::sync::tests::background_snapshot_failures_require_rescan_instead_of_empty_xml_success -- --exact &&
           cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession -- --exact &&
           cargo test -p mcp-server state::overlay_retry::tests::transient_budget_fails_once_ignores_active_kicks_and_rearms_on_new_drift -- --exact &&
           cargo test -p mcp-server graph::snapshot::tests::path_identity_detects_equal_size_and_time_replacement -- --exact &&
