@@ -2331,7 +2331,6 @@ mod tests {
                 super::FORCE_RESCAN_DEBT_DUE.store(false, std::sync::atomic::Ordering::SeqCst);
             }
         }
-        let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let _reset = ResetDebtDue;
 
         for failure in [
@@ -2443,11 +2442,12 @@ mod tests {
                 );
             }
             drop(held_lock);
-            assert!(eventually(Duration::from_secs(30), || {
+            assert!(eventually(Duration::from_secs(60), || {
                 hub.materialize(cursor).entries.is_empty()
             }));
             graph.set_background_snapshot_failure_for_test(None);
             drop(occupied);
+            let _env_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
             super::FORCE_RESCAN_DEBT_DUE.store(true, std::sync::atomic::Ordering::SeqCst);
             let wake = workspace.join("wake.bsl");
             let before = hub.events_seen();

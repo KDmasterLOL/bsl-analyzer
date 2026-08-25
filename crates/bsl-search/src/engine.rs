@@ -615,21 +615,37 @@ impl SearchEngine {
             ) -> ControlFlow<(), Result<(), SearchError>>,
         ) -> FenceOutcome<Result<(), SearchError>>,
     {
-        // Existing stores can be opened and inspected before admission. Creating a new shared
-        // file remains inside the fence so a refused boot leaves no artifact behind.
-        let mut store = db_path.exists().then(|| Store::prepare_open(db_path)).transpose()?;
-        match Self::fenced_checkpointed_value(apply, |checkpoint| {
+        // Opening stays inside the fence so a refused boot leaves no artifact behind. Retry the
+        // same bootstrap races as `Store::open`: two processes may create this derived cache.
+        let mut store = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        match Self::fenced_checkpointed_value(apply, |checkpoint| loop {
             if store.is_none() {
                 match Store::prepare_open(db_path) {
                     Ok(opened) => store = Some(opened),
+                    Err(error)
+                        if crate::store::sqlite_bootstrap_retryable(&error)
+                            && std::time::Instant::now() < deadline => {}
                     Err(error) => return ControlFlow::Continue(Err(error)),
                 }
             }
-            match store.as_ref().expect("store opened above").finish_open_checkpointed(checkpoint) {
-                Ok(ControlFlow::Continue(())) => ControlFlow::Continue(Ok(())),
-                Ok(ControlFlow::Break(())) => ControlFlow::Break(()),
-                Err(error) => ControlFlow::Continue(Err(error)),
+            if let Some(opened) = store.as_ref() {
+                match opened.finish_open_checkpointed(checkpoint) {
+                    Ok(ControlFlow::Continue(())) => return ControlFlow::Continue(Ok(())),
+                    Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
+                    Err(error)
+                        if crate::store::sqlite_bootstrap_retryable(&error)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        store = None;
+                    }
+                    Err(error) => return ControlFlow::Continue(Err(error)),
+                }
             }
+            if checkpoint().is_break() {
+                return ControlFlow::Break(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         })? {
             FenceOutcome::Applied(()) => {
                 Ok(FenceOutcome::Applied(store.expect("an admitted store open produces the store")))

@@ -93,15 +93,15 @@ pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 /// already current — the additive migrations keep it compatible — so upgrading does not
 /// trigger a needless full re-index.
 const SCHEMA_VERSION: i64 = 2;
+const SQLITE_IOERR_FSTAT: i32 = 1802;
 
-fn sqlite_bootstrap_busy(error: &SearchError) -> bool {
+pub(crate) fn sqlite_bootstrap_retryable(error: &SearchError) -> bool {
     matches!(
         error,
         SearchError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-            if matches!(
-                code.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
+            if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                // A peer creating the WAL files can briefly invalidate SQLite's file stat.
+                || code.extended_code == SQLITE_IOERR_FSTAT
     )
 }
 
@@ -208,7 +208,8 @@ impl Store {
         loop {
             match Self::open_once(path) {
                 Err(error)
-                    if sqlite_bootstrap_busy(&error) && std::time::Instant::now() < deadline =>
+                    if sqlite_bootstrap_retryable(&error)
+                        && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
