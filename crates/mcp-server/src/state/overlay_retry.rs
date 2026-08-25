@@ -211,6 +211,9 @@ impl OverlayRetry {
                 state = next;
                 continue;
             }
+            if self.stop.load(Ordering::SeqCst) {
+                return;
+            }
             // Run the pass with the state lock RELEASED: a pass embeds for minutes, and
             // kick/disarm/stop must stay responsive meanwhile.
             let epoch_before = state.fresh_epoch;
