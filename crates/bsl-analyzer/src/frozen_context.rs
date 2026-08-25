@@ -84,6 +84,10 @@ pub struct LatencyRequestContext {
     pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
     pub diagnostics_config: DiagnosticsConfigInput,
     pub position_encoding: PositionEncoding,
+    /// Whether the client advertised support for `Diagnostic.codeDescription`, so the
+    /// standard behind a rule may be attached as a property rather than only as the
+    /// message suffix every client can render.
+    pub supports_code_description: bool,
     /// Whether the client advertised support for `InsertTextMode::ADJUST_INDENTATION`,
     /// so the completion handler may ask it to indent snippet continuation lines
     /// to the cursor column.

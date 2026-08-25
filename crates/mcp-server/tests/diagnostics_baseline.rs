@@ -47,6 +47,19 @@ async fn client(root: &Path) -> Client {
     ().serve(client_io).await.expect("session initialized")
 }
 
+/// A workspace answer that has caught up with the watcher: polls until the tree is
+/// reported stale, or gives back the last answer for the assertion to fail on.
+async fn workspace_until_stale(client: &Client) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let body = diagnostics(client, args("workspace")).await;
+        if body["stale"] == true || tokio::time::Instant::now() >= deadline {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn diagnostics(client: &Client, arguments: Map<String, Value>) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
@@ -137,8 +150,17 @@ async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
         // the file stays readable, the resident reconciles, and nothing is asserted
         // about an unreadable file at all.
         if std::fs::read(&source).is_err() {
-            let stale = diagnostics(&client, args("workspace")).await;
-            assert_eq!(stale["stale"], true);
+            // The edit above is announced by the watcher, not by the write returning, so
+            // the first answer can legitimately predate it: the resident is still at the
+            // pre-edit generation with nothing drifted and no hole. Wait for the fact
+            // instead of racing it — once the unreadable file IS observed it becomes a
+            // hole, and a hole keeps the answer stale until it heals, so this settles in
+            // one direction only.
+            let stale = workspace_until_stale(&client).await;
+            assert_eq!(
+                stale["stale"], true,
+                "the unreadable file has to make the answer stale: {stale}"
+            );
             assert_eq!(stale["result"]["baseline"]["state"], "partial");
             assert_eq!(stale["result"]["baseline"]["resolved"], 0);
         } else {

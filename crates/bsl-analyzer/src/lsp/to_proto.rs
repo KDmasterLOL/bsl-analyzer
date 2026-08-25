@@ -2,9 +2,9 @@ use ide::{Diagnostic as IdeDiagnostic, HlMod, HlRange, HlTag, Severity};
 use ide::{DiagnosticTag as IdeTag, TextRange};
 use line_index::{LineIndex, TextSize};
 use lsp_types::{
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, Location,
-    NumberOrString, Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType,
-    SemanticTokensLegend, Url,
+    CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag,
+    Location, NumberOrString, Position, Range, SemanticToken, SemanticTokenModifier,
+    SemanticTokenType, SemanticTokensLegend, Url,
 };
 
 use crate::lsp::PositionEncoding;
@@ -69,7 +69,34 @@ pub fn diagnostic_tags(tags: &[IdeTag]) -> Option<Vec<DiagnosticTag>> {
 }
 
 pub fn diagnostic(line_index: &LineIndex, text: &str, diag: &IdeDiagnostic) -> Option<Diagnostic> {
-    diagnostic_with_encoding(line_index, text, diag, PositionEncoding::Utf16)
+    diagnostic_with_encoding(
+        line_index,
+        text,
+        diag,
+        PositionEncoding::Utf16,
+        CodeDescriptions::Omit,
+    )
+}
+
+/// Публиковать ли `Diagnostic.codeDescription`.
+///
+/// Клиент объявляет поддержку через `publishDiagnostics.codeDescriptionSupport`;
+/// не объявил — свойство не отправляется, и ссылка на стандарт доезжает до него
+/// только суффиксом сообщения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodeDescriptions {
+    Publish,
+    Omit,
+}
+
+impl CodeDescriptions {
+    pub fn from_client_support(supported: bool) -> Self {
+        if supported {
+            Self::Publish
+        } else {
+            Self::Omit
+        }
+    }
 }
 
 pub fn diagnostic_with_encoding(
@@ -77,6 +104,7 @@ pub fn diagnostic_with_encoding(
     text: &str,
     diag: &IdeDiagnostic,
     encoding: PositionEncoding,
+    code_descriptions: CodeDescriptions,
 ) -> Option<Diagnostic> {
     let range = range_with_encoding(line_index, text, diag.range, encoding)?;
     let severity = severity(diag.severity);
@@ -87,17 +115,38 @@ pub fn diagnostic_with_encoding(
         range,
         severity: Some(severity),
         code,
-        code_description: None,
+        code_description: match code_descriptions {
+            CodeDescriptions::Publish => standard_code_description(diag),
+            CodeDescriptions::Omit => None,
+        },
         source: Some("bsl-analyzer".to_string()),
-        message: diag.message.clone(),
+        message: ide::message_with_standards(diag.code, &diag.message),
         related_information: None,
         tags,
         data: None,
     })
 }
 
+/// Ссылка «подробнее о диагностике» — на проверяемое требование стандарта.
+///
+/// Клиенты, рендерящие `codeDescription`, показывают её отдельной ссылкой; те,
+/// что поле игнорируют, видят тот же адрес в суффиксе сообщения. Диагностика без
+/// нормативного источника поля не получает: пустая ссылка выглядела бы как
+/// битая.
+fn standard_code_description(diag: &IdeDiagnostic) -> Option<CodeDescription> {
+    let primary = *ide::standards(diag.code).first()?;
+    let href = Url::parse(&ide::standard_url(primary)).ok()?;
+    Some(CodeDescription { href })
+}
+
 pub fn diagnostics(line_index: &LineIndex, text: &str, diags: &[IdeDiagnostic]) -> Vec<Diagnostic> {
-    diagnostics_with_encoding(line_index, text, diags, PositionEncoding::Utf16)
+    diagnostics_with_encoding(
+        line_index,
+        text,
+        diags,
+        PositionEncoding::Utf16,
+        CodeDescriptions::Omit,
+    )
 }
 
 pub fn diagnostics_with_encoding(
@@ -105,8 +154,12 @@ pub fn diagnostics_with_encoding(
     text: &str,
     diags: &[IdeDiagnostic],
     encoding: PositionEncoding,
+    code_descriptions: CodeDescriptions,
 ) -> Vec<Diagnostic> {
-    diags.iter().filter_map(|d| diagnostic_with_encoding(line_index, text, d, encoding)).collect()
+    diags
+        .iter()
+        .filter_map(|d| diagnostic_with_encoding(line_index, text, d, encoding, code_descriptions))
+        .collect()
 }
 
 pub fn location(
@@ -193,7 +246,13 @@ pub fn code_action_with_encoding(
     Some(lsp_types::CodeAction {
         title: fix.label.clone(),
         kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-        diagnostics: Some(vec![diagnostic_with_encoding(line_index, text, diag, encoding)?]),
+        diagnostics: Some(vec![diagnostic_with_encoding(
+            line_index,
+            text,
+            diag,
+            encoding,
+            CodeDescriptions::Omit,
+        )?]),
         edit: Some(workspace_edit(uri, edits)),
         is_preferred: Some(true),
         ..Default::default()
@@ -382,6 +441,110 @@ fn token_len_for_encoding(text: &str, range: TextRange, encoding: PositionEncodi
 mod tests {
     use super::*;
     use ide::DiagnosticCode;
+
+    fn projected_for(code: DiagnosticCode, message: &str, support: CodeDescriptions) -> Diagnostic {
+        let text = "А = 1;";
+        let line_index = LineIndex::new(text);
+        let diag = IdeDiagnostic {
+            code,
+            message: message.to_string(),
+            range: TextRange::new(0.into(), 1.into()),
+            severity: Severity::Warning,
+            tags: Vec::new(),
+            fixes: Vec::new(),
+        };
+        diagnostic_with_encoding(&line_index, text, &diag, PositionEncoding::Utf16, support)
+            .expect("проекция диагностики")
+    }
+
+    fn projected(code: DiagnosticCode, message: &str) -> Diagnostic {
+        projected_for(code, message, CodeDescriptions::Publish)
+    }
+
+    #[test]
+    fn code_description_waits_for_the_client_to_ask_for_it() {
+        // Клиент, не объявивший `codeDescriptionSupport`, свойства не получает —
+        // но ссылку на стандарт всё равно видит, потому что она есть в суффиксе.
+        let quiet = projected_for(
+            DiagnosticCode::LineLength,
+            "Строка слишком длинная",
+            CodeDescriptions::Omit,
+        );
+        assert!(quiet.code_description.is_none());
+        assert!(
+            quiet.message.contains("https://v8std.ru/std/456/"),
+            "без свойства ссылка обязана доезжать суффиксом, иначе клиент теряет её вовсе"
+        );
+
+        // Без этой половины гейт «никогда не публиковать» прошёл бы проверку.
+        let loud = projected_for(
+            DiagnosticCode::LineLength,
+            "Строка слишком длинная",
+            CodeDescriptions::Publish,
+        );
+        assert!(loud.code_description.is_some());
+    }
+
+    #[test]
+    fn standard_reaches_message_and_code_description() {
+        let projected = projected(DiagnosticCode::LineLength, "Строка слишком длинная");
+        assert_eq!(
+            projected.message,
+            "Строка слишком длинная (Стандарт 456: https://v8std.ru/std/456/)"
+        );
+        assert_eq!(
+            projected.code_description.expect("ссылка на стандарт").href.as_str(),
+            "https://v8std.ru/std/456/"
+        );
+    }
+
+    #[test]
+    fn diagnostic_without_standard_keeps_message_byte_for_byte() {
+        // Без этого входа реализация «суффикс всегда» зелена: пустой суффикс
+        // строку не меняет, а `code_description: Some("")` прошёл бы проверку
+        // на непустоту.
+        assert!(
+            ide::standards(DiagnosticCode::CognitiveComplexity).is_empty(),
+            "вход потерял смысл"
+        );
+        let projected = projected(DiagnosticCode::CognitiveComplexity, "Слишком сложно");
+        assert_eq!(projected.message, "Слишком сложно");
+        assert!(projected.code_description.is_none());
+    }
+
+    #[test]
+    fn multi_standard_lists_all_numbers_and_links_the_checked_one() {
+        // Порядок среза содержательный: std773 — проверяемое требование, а
+        // std464 лишь наименьший номер. Числовая сортировка увела бы ссылку на
+        // смежный стандарт, оставив тест зелёным.
+        let projected = projected(DiagnosticCode::DataExchangeLoading, "Нет проверки");
+        assert_eq!(
+            projected.message,
+            "Нет проверки (Стандарты 773, 465, 464, 752: https://v8std.ru/std/773/)"
+        );
+        assert_eq!(
+            projected.code_description.expect("ссылка на стандарт").href.as_str(),
+            "https://v8std.ru/std/773/"
+        );
+    }
+
+    #[test]
+    fn suffix_stays_out_of_the_internal_diagnostic() {
+        // I5: внутренний слой не несёт формы подачи — иначе уехали бы снапшоты
+        // всех диагностик со стандартом.
+        let text = "А = 1;";
+        let line_index = LineIndex::new(text);
+        let diag = IdeDiagnostic {
+            code: DiagnosticCode::LineLength,
+            message: "Строка слишком длинная".to_string(),
+            range: TextRange::new(0.into(), 1.into()),
+            severity: Severity::Warning,
+            tags: Vec::new(),
+            fixes: Vec::new(),
+        };
+        let _ = diagnostic(&line_index, text, &diag);
+        assert!(!diag.message.contains("v8std.ru"));
+    }
 
     #[test]
     fn test_range_conversion() {

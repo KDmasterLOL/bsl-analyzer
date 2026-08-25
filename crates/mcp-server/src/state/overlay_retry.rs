@@ -68,7 +68,22 @@ impl OverlayRetry {
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         lease: WorkspaceLease,
     ) -> Arc<Self> {
-        let retry = Arc::new(Self {
+        let retry = Self::new(engine, overlay_warmup, semantic_runtime, lease);
+        retry.start();
+        retry
+    }
+
+    /// The driver with no worker behind it yet. Split out from [`OverlayRetry::spawn`] so a
+    /// caller can settle the flags a started worker reads — `stop` above all — before the
+    /// worker exists to read them; the worker's first act is a pass, so there is no other
+    /// way to observe it starting from an already-final state.
+    fn new(
+        engine: SharedSearchEngine,
+        overlay_warmup: Arc<Mutex<OverlayWarmupState>>,
+        semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
+        lease: WorkspaceLease,
+    ) -> Arc<Self> {
+        Arc::new(Self {
             engine,
             overlay_warmup,
             semantic_runtime,
@@ -83,13 +98,16 @@ impl OverlayRetry {
             wake: Condvar::new(),
             stop: AtomicBool::new(false),
             passes: AtomicUsize::new(0),
-        });
-        let worker = Arc::clone(&retry);
+        })
+    }
+
+    /// Start the worker thread. The worker is the ONLY place a pass runs.
+    fn start(self: &Arc<Self>) {
+        let worker = Arc::clone(self);
         std::thread::Builder::new()
             .name("bsl-search-overlay-retry".to_owned())
             .spawn(move || worker.run())
             .ok();
-        retry
     }
 
     /// Fresh drift arrived: whatever kept previous passes incomplete may have changed, so
@@ -308,7 +326,18 @@ mod tests {
     }
 
     fn driver_over(engine: SharedSearchEngine, lease: WorkspaceLease) -> Arc<OverlayRetry> {
-        OverlayRetry::spawn(
+        let retry = unstarted_driver_over(engine, lease);
+        retry.start();
+        retry
+    }
+
+    /// The same driver with its worker not yet running, so a test can settle `stop` before
+    /// the worker exists to read it.
+    fn unstarted_driver_over(
+        engine: SharedSearchEngine,
+        lease: WorkspaceLease,
+    ) -> Arc<OverlayRetry> {
+        OverlayRetry::new(
             engine,
             Arc::new(Mutex::new(OverlayWarmupState::Pending)),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
@@ -477,16 +506,36 @@ mod tests {
     }
 
     /// `stop()` freezes the driver before the lease handover: no pass starts after it.
+    ///
+    /// The worker is started only once the stop is already in place, because a driver built
+    /// by `spawn` opens its own startup pass at once: stopping it afterwards would race that
+    /// pass, and the race — not the freeze — would decide the count.
     #[test]
     fn stop_freezes_the_driver() {
-        let retry = driver_over(
+        let retry = unstarted_driver_over(
             Arc::new(Mutex::new(None)),
             crate::workspace_lease::WorkspaceLease::unmanaged(),
         );
         retry.stop();
+        retry.start();
         retry.kick_fresh();
         std::thread::sleep(Duration::from_millis(200));
         assert_eq!(retry.pass_count(), 0, "a stopped driver runs nothing");
+    }
+
+    /// The counterpart that keeps the freeze above from passing vacuously: the very same
+    /// driver, started with no stop in place, DOES open a pass. No kick is sent — a kick
+    /// would itself demand a pass, and the count could then no longer tell a worker that
+    /// opens its startup pass from one that only ever answers kicks.
+    #[test]
+    fn an_unstopped_driver_opens_its_startup_pass() {
+        let retry = unstarted_driver_over(
+            Arc::new(Mutex::new(None)),
+            crate::workspace_lease::WorkspaceLease::unmanaged(),
+        );
+        retry.start();
+        assert!(wait_for(5_000, || retry.pass_count() >= 1), "the startup pass runs");
+        retry.stop();
     }
 
     /// A lost lease PAUSES the driver (no disarm), and a returned lease resumes it: the

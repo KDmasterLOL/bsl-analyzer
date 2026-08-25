@@ -29,6 +29,7 @@ salsa.workspace = true
 vfs.workspace = true
 walkdir.workspace = true
 rayon.workspace = true
+stdx.workspace = true
 
 rmcp = { version = "1.7", features = [
     "server",

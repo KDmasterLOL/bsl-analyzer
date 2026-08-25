@@ -251,7 +251,12 @@ pub(super) fn cursor_discarder(state: &DiagnosticsState) -> impl FnOnce() + Send
         let current = *lock_recover(&cursor);
         if let (Some(hub), Some(current)) = (hub, current) {
             let batch = hub.drain(current);
-            *lock_recover(&cursor) = Some(batch.cursor);
+            // Store only if the slot still holds the subscription that was drained: an
+            // eviction in between must not be undone by this write-back.
+            let mut slot = lock_recover(&cursor);
+            if *slot == Some(current) {
+                *slot = Some(batch.cursor);
+            }
         }
     }
 }

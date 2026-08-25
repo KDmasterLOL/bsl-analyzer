@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::io::{BufWriter, Write};
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::ser::{Serialize, SerializeSeq, Serializer};
 
@@ -128,14 +129,32 @@ struct Rule<'a> {
     code: &'a str,
 }
 
+impl Rule<'_> {
+    /// Адрес требования, которое проверяет правило.
+    ///
+    /// Код приходит строкой, потому что дальше по конвейеру диагностика уже
+    /// сериализована; разбор обратно в [`ide::DiagnosticCode`] — единственный
+    /// способ добраться до таблицы стандартов, и неизвестный код просто остаётся
+    /// без ссылки.
+    fn help_uri(&self) -> Option<String> {
+        let code = ide::DiagnosticCode::from_str(self.code).ok()?;
+        let primary = *ide::standards(code).first()?;
+        Some(ide::standard_url(primary))
+    }
+}
+
 impl Serialize for Rule<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
 
-        let mut rule = serializer.serialize_struct("rule", 3)?;
+        let help_uri = self.help_uri();
+        let mut rule = serializer.serialize_struct("rule", 3 + usize::from(help_uri.is_some()))?;
         rule.serialize_field("id", self.code)?;
         rule.serialize_field("name", self.code)?;
         rule.serialize_field("shortDescription", &Text { text: self.code })?;
+        if let Some(help_uri) = &help_uri {
+            rule.serialize_field("helpUri", help_uri)?;
+        }
         rule.end()
     }
 }
@@ -377,6 +396,40 @@ mod tests {
         assert_eq!(result["locations"][0]["physicalLocation"]["region"]["startColumn"], 5);
         assert_eq!(result["locations"][0]["physicalLocation"]["region"]["endLine"], 3);
         assert_eq!(result["locations"][0]["physicalLocation"]["region"]["endColumn"], 16);
+    }
+
+    #[test]
+    fn rule_carries_help_uri_only_when_a_standard_backs_it() {
+        let temp = TempDir::new().expect("tempdir");
+        // Два входа в одном документе: без второго реализация «писать helpUri
+        // всегда» проходит, без первого — «не писать вовсе».
+        let mut results = sample_results();
+        results.total_diagnostics = 2;
+        results.diagnostics[0].diagnostics.push(diag("CognitiveComplexity", "Information"));
+
+        SarifReporter.report(&results, temp.path()).expect("write sarif");
+        let sarif: Value = serde_json::from_str(
+            &std::fs::read_to_string(temp.path().join("bsl-analyzer.sarif")).expect("sarif report"),
+        )
+        .expect("valid json");
+
+        let rules = sarif["runs"][0]["tool"]["driver"]["rules"].as_array().expect("rules");
+        let by_id = |id: &str| {
+            rules.iter().find(|r| r["id"] == id).unwrap_or_else(|| panic!("нет правила {id}"))
+        };
+        assert!(
+            !ide::standards(ide::DiagnosticCode::LineLength).is_empty(),
+            "вход потерял стандарт, контроль стал холостым"
+        );
+        assert_eq!(by_id("LineLength")["helpUri"], "https://v8std.ru/std/456/");
+        assert!(
+            ide::standards(ide::DiagnosticCode::CognitiveComplexity).is_empty(),
+            "вход потерял смысл: у CognitiveComplexity появился стандарт"
+        );
+        assert!(
+            by_id("CognitiveComplexity").get("helpUri").is_none(),
+            "ссылка выдумана на пустом месте"
+        );
     }
 
     #[test]

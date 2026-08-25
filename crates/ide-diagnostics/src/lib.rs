@@ -12,6 +12,7 @@ mod runner;
 mod scope_gate;
 mod single_pass;
 mod standalone_query;
+mod standards;
 mod suppression;
 mod types;
 
@@ -33,6 +34,7 @@ pub use metadata::{
 };
 pub use query::file_diagnostics_query;
 pub use standalone_query::{sdbl_query_codes, validate_query_text, METADATA_DEPENDENT_CODES};
+pub use standards::{message_with_standards, standard_url, standards};
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
 
 pub fn all_diagnostic_codes() -> impl Iterator<Item = DiagnosticCode> {

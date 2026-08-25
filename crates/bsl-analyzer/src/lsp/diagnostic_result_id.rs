@@ -9,7 +9,9 @@ use ide::Diagnostic;
 /// answer an unchanged pull with a tiny `Unchanged` report instead of resending the
 /// full set. The hash covers everything the client renders (code, range, severity,
 /// message, tags) but deliberately not code-action fixes, which never change the
-/// reported diagnostic itself.
+/// reported diagnostic itself. The standards of a diagnostic are hashed alongside its
+/// code: they are what the projection appends to the rendered message, so a table edit
+/// that changes the visible text must also change the id.
 ///
 /// This is correct under `inter_file_dependencies` because the caller recomputes the
 /// diagnostics (Salsa-memoized, so an untouched dependency cone is cheap) and re-hashes
@@ -27,6 +29,10 @@ pub fn diagnostics_result_id(diagnostics: &[Diagnostic]) -> String {
         hasher.update(d.code.as_str().as_bytes());
         hasher.update(&[0]);
         hasher.update(d.message.as_bytes());
+        hasher.update(&[0]);
+        for id in ide::standards(d.code) {
+            hasher.update(&id.to_le_bytes());
+        }
         hasher.update(&[0]);
         scratch.clear();
         // Severity and tag are small fieldless enums; their Debug form is a stable,
@@ -63,6 +69,23 @@ mod tests {
         let a = vec![diag(some_code(), "unused", 0, 4)];
         let b = vec![diag(some_code(), "unused", 0, 4)];
         assert_eq!(diagnostics_result_id(&a), diagnostics_result_id(&b));
+    }
+
+    #[test]
+    fn id_pins_the_standards_of_a_diagnostic() {
+        // Честная граница: внутри одной сборки суффикс — чистая функция от
+        // кода, а код и так в хеше, поэтому «разные стандарты дают разные id»
+        // одним прогоном не показать — таблица константна. Расхождение живёт
+        // МЕЖДУ сборками: клиент с сохранённым previousResultId получил бы
+        // Unchanged и оставил на экране старый текст. Единственное, что здесь
+        // способно упасть, — закреплённое значение: уберите подмешивание
+        // стандартов из хеша, и оно изменится.
+        assert!(
+            !ide::standards(DiagnosticCode::LineLength).is_empty(),
+            "вход потерял стандарт, проверка стала холостой"
+        );
+        let id = diagnostics_result_id(&[diag(DiagnosticCode::LineLength, "long", 0, 4)]);
+        assert_eq!(id, "211c177d71de10ddffaa28e9c04ce37f41bfefd693938cef4f057f3437060952");
     }
 
     #[test]

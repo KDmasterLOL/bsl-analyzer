@@ -704,6 +704,7 @@ impl DiagnosticsState {
         Ok(ResidentBuild {
             resident: DiagnosticsResident {
                 db,
+                sweep_pool: std::sync::OnceLock::new(),
                 vfs,
                 by_path,
                 holes,
@@ -818,10 +819,14 @@ impl DiagnosticsState {
             inner.stats.clear();
             inner.baseline_epoch += 1;
             inner.status = DiagnosticsStatus::Idle;
+            // Release the hub cursor while `inner` is still held: `status` reads under the
+            // same lock, so no observer can catch an evicted resident that still pins the
+            // accumulator. Safe in this order because no path holds the cursor and then
+            // asks for `inner` — unlike `scan`, which `throttled_scan` holds across its
+            // own `inner` read and which therefore stays outside.
+            state.drop_cursor();
             drop(inner);
             *lock_recover(&state.scan) = None;
-            // Release the hub cursor: an evicted resident must not pin the accumulator.
-            state.drop_cursor();
             tracing::info!("diagnostics resident db evicted after idle period");
         });
     }

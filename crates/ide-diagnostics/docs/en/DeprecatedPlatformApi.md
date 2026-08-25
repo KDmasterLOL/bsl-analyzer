@@ -34,6 +34,12 @@ written in code.
 
 ## Sources
 
+There is no direct 1C standard behind this diagnostic: the rule covers any
+deprecated platform API, and the platform documentation is what defines the set.
+The numbers below back individual deprecated facilities, not the rule itself.
+
+Related public context:
+
 - [v8std: Work in different time zones](https://v8std.ru/std/643/)
 - [v8std: Opening forms](https://v8std.ru/std/404/)
 - 1C:Enterprise platform changelogs for deprecated APIs.

@@ -81,6 +81,9 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
     }
     let baseline_applies = crate::diagnostics_baseline::applies_under_scope(config.scope.is_some());
     let position_encoding = state.position_encoding;
+    let code_descriptions = crate::lsp::to_proto::CodeDescriptions::from_client_support(
+        state.supports_code_description,
+    );
     let uri = uri.clone();
     let queued_at = Instant::now();
     tracing::info!(%uri, generation, vfs_done = state.vfs_done, "diagnostics scheduled");
@@ -113,6 +116,7 @@ pub fn schedule_diagnostics(state: &mut GlobalState, uri: &Url) {
                 &text,
                 &ide_diagnostics,
                 position_encoding,
+                code_descriptions,
             )
         }));
         let compute_ms = started_at.elapsed().as_millis() as u64;
