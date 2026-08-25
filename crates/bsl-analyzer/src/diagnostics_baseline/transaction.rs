@@ -143,6 +143,7 @@ pub fn repair_object(
     if read_optional(directory, "manifest.json")? != Some(manifest_before) {
         return Err("diagnostics baseline manifest changed".into());
     }
+    lock.unlock()?;
     Ok(())
 }
 
@@ -324,6 +325,7 @@ fn publish_set_with_hook(
         }
     }
     drop(staged);
+    lock.unlock()?;
     Ok(PublishResult {
         manifest,
         stats: PublishStats { serialized_partitions: serialized, reused_partitions: reused },

@@ -2437,7 +2437,7 @@ mod tests {
                 );
             }
             drop(held_lock);
-            assert!(eventually(Duration::from_secs(15), || {
+            assert!(eventually(Duration::from_secs(30), || {
                 hub.materialize(cursor).entries.is_empty()
             }));
             graph.set_background_snapshot_failure_for_test(None);

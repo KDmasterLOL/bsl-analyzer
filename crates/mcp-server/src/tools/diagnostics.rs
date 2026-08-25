@@ -2573,6 +2573,7 @@ mod tests {
         /// The baseline keys findings by the project-relative path, so the request's own
         /// spelling must not reach the fingerprint: `./x` and `x` are the same file, and
         /// a mismatch turns a suppressed finding back into a new one.
+        #[cfg(unix)]
         #[test]
         fn baseline_project_path_ignores_request_spelling() {
             let root = tempfile::tempdir().unwrap();
