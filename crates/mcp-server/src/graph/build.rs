@@ -1444,7 +1444,7 @@ mod tests {
         write(
             incremental_root,
             "CommonModules/Сервер/Ext/Module.bsl",
-            "&НаСервере\nФункция Считать() Экспорт\nВозврат 4;\nКонецФункции",
+            "&НаСервере\nФункция Считать() Экспорт\nВозврат 444;\nКонецФункции",
         );
         replace_on_install(graph_db_path(incremental_root));
         assert!(matches!(
