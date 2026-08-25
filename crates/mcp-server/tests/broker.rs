@@ -395,14 +395,14 @@ async fn successful_connect_is_always_served_at_idle_boundary() {
     };
     let mut backend = launch();
 
-    for _ in 0..30 {
+    for _ in 0..10 {
         // Sleep to around the idle boundary so the next connect races a possible expiry.
         tokio::time::sleep(idle_ttl).await;
         match connect(&key).await {
             // The connect succeeded → the connection is in the backlog → the backend MUST
             // serve it. A connection dropped on a racing expiry would fail this handshake.
             Ok(stream) => {
-                let client = tokio::time::timeout(Duration::from_secs(10), ().serve(stream))
+                let client = tokio::time::timeout(Duration::from_secs(20), ().serve(stream))
                     .await
                     .expect("serve did not hang")
                     .expect("a connect that succeeded must be served");

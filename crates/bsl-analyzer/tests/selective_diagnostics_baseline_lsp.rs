@@ -125,7 +125,11 @@ fn selective_lsp_enabled_error_is_fail_visible_and_recovers() {
     let (mut notified, mut main_seen, mut ext_seen) = (false, false, false);
     while !notified || !main_seen || !ext_seen {
         let message = lsp.wait_for(|_| true);
-        if message["method"] == "window/showMessage" {
+        if message["method"] == "window/showMessage"
+            && message["params"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("diagnostics baseline"))
+        {
             notified = true;
         } else if message["method"] == "textDocument/publishDiagnostics" {
             let uri = message["params"]["uri"].as_str().unwrap();
@@ -141,7 +145,12 @@ fn selective_lsp_enabled_error_is_fail_visible_and_recovers() {
     let duplicate = std::time::Instant::now() + Duration::from_millis(500);
     while std::time::Instant::now() < duplicate {
         match lsp.messages.recv_timeout(Duration::from_millis(50)) {
-            Ok(message) => assert_ne!(message["method"], "window/showMessage"),
+            Ok(message) => assert!(
+                message["method"] != "window/showMessage"
+                    || !message["params"]["message"]
+                        .as_str()
+                        .is_some_and(|message| message.contains("diagnostics baseline"))
+            ),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
