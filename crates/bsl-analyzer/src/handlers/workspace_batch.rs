@@ -203,6 +203,7 @@ fn build_batch_plan(state: &mut GlobalState) -> Option<WorkspaceBatchPlan> {
         diagnostics_baseline: Arc::clone(&state.diagnostics_baseline),
         workspace_root: state.workspace_root.clone(),
         position_encoding: state.position_encoding,
+        supports_code_description: state.supports_code_description,
         chunk_size,
         pool,
         next_chunk: 0,
@@ -228,6 +229,7 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
         workspace_root,
         file_paths,
         position_encoding,
+        supports_code_description,
         pool,
         chunk,
     ) = {
@@ -243,6 +245,7 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
             plan.workspace_root.clone(),
             plan.file_paths.clone(),
             plan.position_encoding,
+            plan.supports_code_description,
             plan.pool.clone(),
             chunk,
         )
@@ -264,7 +267,12 @@ fn dispatch_next_chunk(state: &mut GlobalState) {
                 &config,
                 (&diagnostics_baseline, workspace_root.as_deref()),
                 &file_paths,
-                position_encoding,
+                (
+                    position_encoding,
+                    crate::lsp::to_proto::CodeDescriptions::from_client_support(
+                        supports_code_description,
+                    ),
+                ),
                 pool.as_deref(),
             )
         }));
@@ -334,7 +342,10 @@ fn compute_chunk(
     config: &DiagnosticsConfigInput,
     baseline: (&ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot, Option<&Path>),
     file_paths: &FrozenFilePaths,
-    position_encoding: PositionEncoding,
+    // Согласованное с клиентом представление: кодировка позиций и то, принимает
+    // ли он `codeDescription`. Пара, а не два параметра, — обе величины приходят
+    // из одного рукопожатия и всегда передаются вместе.
+    projection: (PositionEncoding, crate::lsp::to_proto::CodeDescriptions),
     pool: Option<&rayon::ThreadPool>,
 ) -> Vec<WorkspaceBatchItem> {
     // Diagnostics — the heavy per-file work — run in parallel on the bounded pool when one
@@ -370,7 +381,8 @@ fn compute_chunk(
                     &line_index,
                     &text,
                     &diagnostics,
-                    position_encoding,
+                    projection.0,
+                    projection.1,
                 );
                 (result_id, diagnostics)
             }));

@@ -210,6 +210,16 @@ pub(super) enum HoleOrigin {
 /// a reload mutates `db` in place.
 pub(crate) struct DiagnosticsResident {
     pub(super) db: RootDatabaseImpl,
+    /// This resident's OWN pool for the diagnostics fan-out. Dedicated because salsa
+    /// attaches at most one database per thread while every job carries its own db
+    /// clone: a worker shared with another resident's sweep would be asked to attach a
+    /// second database mid-query and panic. Keeping the pool per resident also confines
+    /// any salsa query that parallelises internally to this resident's threads.
+    ///
+    /// Built on the first sweep, not with the resident: a resident that only ever serves
+    /// single-file requests — and one rebuilt while the old one still serves — would
+    /// otherwise each hold a full pool of idle threads for nothing.
+    pub(super) sweep_pool: std::sync::OnceLock<rayon::ThreadPool>,
     /// The VFS pre-seeded with the resident's `.bsl` FileIds and grown by the metadata
     /// bootstrap with the metadata-XML ids. Kept alongside the db so a drift-driven
     /// substrate refresh can intern new composing files onto the same id space without
@@ -624,62 +634,104 @@ impl DiagnosticsResident {
         // a new finding or manufacture a resolved entry.
         type Candidate =
             ide::diagnostics_baseline::BaselineDiagnosticCandidate<(FileId, ide::Diagnostic)>;
-        let prepared: Vec<Option<Vec<Candidate>>> = swept
-            .par_iter()
-            .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
-                if !worker.registered {
-                    cancel
-                        .register(salsa::Database::cancellation_token(worker.analysis.database()));
-                    worker.registered = true;
-                }
-                if cancel.is_cancelled() {
-                    return None;
-                }
-                let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-                    let diagnostics = worker.analysis.diagnostics(file_id, config);
-                    let text = worker.analysis.file_text(file_id);
-                    let path = path_of.get(&file_id).expect("swept file has a resident path");
-                    let relative = Path::new(path)
-                        .strip_prefix(&workspace_root)
-                        .unwrap_or(Path::new(path))
-                        .to_string_lossy()
-                        .replace(std::path::MAIN_SEPARATOR, "/");
-                    let source_lines: Vec<_> = text.lines().collect();
-                    diagnostics
-                        .into_iter()
-                        .map(|d| {
-                            let output = d.to_output(&text);
-                            ide::diagnostics_baseline::BaselineDiagnosticCandidate {
-                                diagnostic: (file_id, d),
-                                path: relative.clone(),
-                                code: output.code,
-                                snippet: Some(ide::diagnostics_baseline::diagnostic_line_snippet(
-                                    &source_lines,
-                                    output.start_line,
-                                )),
-                                message: output.message,
-                                severity: output.severity,
-                                range: ide::diagnostics_baseline::DiagnosticsBaselineRange {
-                                    start_line: output.start_line as u32,
-                                    start_column: output.start_column as u32,
-                                    end_line: output.end_line as u32,
-                                    end_column: output.end_column as u32,
-                                },
-                            }
-                        })
-                        .collect()
-                }));
-                match caught {
-                    Ok(diags) => Some(diags),
-                    // Only the request's own cancellation may degrade to a skipped
-                    // file. A pending write cannot exist under the resident mutex
-                    // and a propagated panic is a real defect in a sibling worker —
-                    // re-raise both instead of hiding them behind valid aggregates.
-                    Err(salsa::Cancelled::Local) => None,
-                    Err(other) => std::panic::resume_unwind(Box::new(other)),
-                }
+        // The pool takes an owned db clone: `&self` is not `Sync` (the resident holds a
+        // `RefCell` VFS), and each worker clones its own handle from this seed anyway.
+        let mut seed = SweepWorker::new(self.db.clone());
+        // Warm the configuration inventory HERE, before the pool opens: a job that
+        // first-loads a config root fans out over the loader's own rayon scope, parks,
+        // and can steal a sibling job carrying a different db clone onto this thread.
+        //
+        // Only when there is something to sweep, and only while the request still wants
+        // an answer: the inventory loads EVERY root, so warming it for an empty sweep
+        // (`max_files: 0`, a scope that admitted nothing) turns a request that asked for
+        // no work into a full configuration parse under the resident lock. Registered
+        // like any worker, so a cancellation arriving mid-warm unwinds it too.
+        if !swept.is_empty() && !cancel.is_cancelled() {
+            #[cfg(test)]
+            sweep_probe::record_warm();
+            cancel.register(salsa::Database::cancellation_token(seed.analysis.database()));
+            seed.registered = true;
+            seed.analysis.warm_configuration_inventory();
+        }
+        // Borrow what the jobs read, so `move` takes the references and leaves the values
+        // to the code after the sweep.
+        let path_of = &path_of;
+        let workspace_root = &workspace_root;
+        // Nothing to sweep: no pool either. Building one costs a thread per core, and a
+        // request that asked for no files must not pay for it under the resident lock.
+        let prepared: Vec<Option<Vec<Candidate>>> = if swept.is_empty() {
+            Vec::new()
+        } else {
+            self.sweep_pool.get_or_init(build_sweep_pool).install(move || {
+                swept
+                    .par_iter()
+                    .map_with(seed, |worker, &file_id| {
+                        // Belt-and-suspenders behind the warm-up: should a query still reach an
+                        // internally parallel path, it runs serially instead of stealing a
+                        // sibling job and attaching a second database to this thread.
+                        let _no_nesting = stdx::par_guard::enter_no_nested_parallelism();
+                        #[cfg(test)]
+                        sweep_probe::record_job(worker.origin);
+                        if !worker.registered {
+                            cancel.register(salsa::Database::cancellation_token(
+                                worker.analysis.database(),
+                            ));
+                            worker.registered = true;
+                        }
+                        if cancel.is_cancelled() {
+                            return None;
+                        }
+                        let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                            let diagnostics = worker.analysis.diagnostics(file_id, config);
+                            let text = worker.analysis.file_text(file_id);
+                            let path =
+                                path_of.get(&file_id).expect("swept file has a resident path");
+                            let relative = Path::new(path)
+                                .strip_prefix(workspace_root)
+                                .unwrap_or(Path::new(path))
+                                .to_string_lossy()
+                                .replace(std::path::MAIN_SEPARATOR, "/");
+                            let source_lines: Vec<_> = text.lines().collect();
+                            diagnostics
+                                .into_iter()
+                                .map(|d| {
+                                    let output = d.to_output(&text);
+                                    ide::diagnostics_baseline::BaselineDiagnosticCandidate {
+                                        diagnostic: (file_id, d),
+                                        path: relative.clone(),
+                                        code: output.code,
+                                        snippet: Some(
+                                            ide::diagnostics_baseline::diagnostic_line_snippet(
+                                                &source_lines,
+                                                output.start_line,
+                                            ),
+                                        ),
+                                        message: output.message,
+                                        severity: output.severity,
+                                        range:
+                                            ide::diagnostics_baseline::DiagnosticsBaselineRange {
+                                                start_line: output.start_line as u32,
+                                                start_column: output.start_column as u32,
+                                                end_line: output.end_line as u32,
+                                                end_column: output.end_column as u32,
+                                            },
+                                    }
+                                })
+                                .collect()
+                        }));
+                        match caught {
+                            Ok(diags) => Some(diags),
+                            // Only the request's own cancellation may degrade to a skipped
+                            // file. A pending write cannot exist under the resident mutex
+                            // and a propagated panic is a real defect in a sibling worker —
+                            // re-raise both instead of hiding them behind valid aggregates.
+                            Err(salsa::Cancelled::Local) => None,
+                            Err(other) => std::panic::resume_unwind(Box::new(other)),
+                        }
+                    })
+                    .collect()
             })
-            .collect();
+        };
 
         let cancelled = cancel.is_cancelled();
         let files_swept = prepared.iter().filter(|result| result.is_some()).count();
@@ -691,7 +743,7 @@ impl DiagnosticsResident {
                 .zip(&prepared)
                 .filter(|(_, result)| result.is_some())
                 .filter_map(|(file_id, _)| path_of.get(file_id))
-                .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
+                .filter_map(|path| Path::new(path).strip_prefix(workspace_root).ok())
                 .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
                 .collect()
         };
@@ -704,7 +756,7 @@ impl DiagnosticsResident {
             .values()
             .map(String::as_str)
             .chain(self.holes.keys().map(String::as_str))
-            .filter_map(|path| Path::new(path).strip_prefix(&workspace_root).ok())
+            .filter_map(|path| Path::new(path).strip_prefix(workspace_root).ok())
             .map(|path| path.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"))
             .collect();
         let complete = !cancelled
@@ -818,50 +870,63 @@ impl DiagnosticsResident {
         // cross rayon into the state lock as a panic.
         let author_filter = self.author_filter.as_ref();
         let author_ignored = std::sync::atomic::AtomicUsize::new(0);
-        let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = swept
-            .par_iter()
-            .map_with(SweepWorker::new(self.db.clone()), |worker, &file_id| {
-                if !worker.registered {
-                    cancel
-                        .register(salsa::Database::cancellation_token(worker.analysis.database()));
-                    worker.registered = true;
-                }
-                if cancel.is_cancelled() {
-                    return Vec::new();
-                }
-                let diagnostics = active_by_file.get(&file_id).cloned().unwrap_or_default();
-                let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-                    let diagnostics = match author_filter {
-                        Some(filter) if !diagnostics.is_empty() => filter_by_author(
-                            &worker.analysis,
-                            file_id,
-                            path_of.get(&file_id).map(Path::new),
-                            filter,
-                            diagnostics,
-                            &author_ignored,
-                        ),
-                        _ => diagnostics,
-                    };
-                    diagnostics
-                        .iter()
-                        .map(|diagnostic| {
-                            (
-                                diagnostic.code.as_str().to_owned(),
-                                ide::SeverityBucket::from(diagnostic.severity),
-                            )
-                        })
-                        .collect()
-                }));
-                match caught {
-                    Ok(codes) => codes,
-                    // Same discipline as the candidate pass above: only this request's
-                    // own cancellation may degrade to an empty file. Anything else is a
-                    // real defect and must not hide behind valid-looking aggregates.
-                    Err(salsa::Cancelled::Local) => Vec::new(),
-                    Err(other) => std::panic::resume_unwind(Box::new(other)),
-                }
+        let seed = SweepWorker::new(self.db.clone());
+        let author_ignored = &author_ignored;
+        let active_by_file = &active_by_file;
+        let per_file: Vec<Vec<(String, ide::SeverityBucket)>> = if swept.is_empty() {
+            Vec::new()
+        } else {
+            self.sweep_pool.get_or_init(build_sweep_pool).install(move || {
+                swept
+                    .par_iter()
+                    .map_with(seed, |worker, &file_id| {
+                        let _no_nesting = stdx::par_guard::enter_no_nested_parallelism();
+                        #[cfg(test)]
+                        sweep_probe::record_job(worker.origin);
+                        if !worker.registered {
+                            cancel.register(salsa::Database::cancellation_token(
+                                worker.analysis.database(),
+                            ));
+                            worker.registered = true;
+                        }
+                        if cancel.is_cancelled() {
+                            return Vec::new();
+                        }
+                        let diagnostics = active_by_file.get(&file_id).cloned().unwrap_or_default();
+                        let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+                            let diagnostics = match author_filter {
+                                Some(filter) if !diagnostics.is_empty() => filter_by_author(
+                                    &worker.analysis,
+                                    file_id,
+                                    path_of.get(&file_id).map(Path::new),
+                                    filter,
+                                    diagnostics,
+                                    author_ignored,
+                                ),
+                                _ => diagnostics,
+                            };
+                            diagnostics
+                                .iter()
+                                .map(|diagnostic| {
+                                    (
+                                        diagnostic.code.as_str().to_owned(),
+                                        ide::SeverityBucket::from(diagnostic.severity),
+                                    )
+                                })
+                                .collect()
+                        }));
+                        match caught {
+                            Ok(codes) => codes,
+                            // Same discipline as the candidate pass above: only this request's
+                            // own cancellation may degrade to an empty file. Anything else is a
+                            // real defect and must not hide behind valid-looking aggregates.
+                            Err(salsa::Cancelled::Local) => Vec::new(),
+                            Err(other) => std::panic::resume_unwind(Box::new(other)),
+                        }
+                    })
+                    .collect()
             })
-            .collect();
+        };
 
         // Fold: code -> (bucket, total count, files-affected). All occurrences of a code
         // share a bucket under one config, so first-seen is representative.
@@ -911,6 +976,105 @@ impl DiagnosticsResident {
     }
 }
 
+/// Thread-name prefix of the sweep's own rayon pool. The global pool's workers are
+/// unnamed, so the prefix is what tells a dedicated worker from a shared one.
+const SWEEP_THREAD_PREFIX: &str = "bsl-diag-fanout-";
+
+/// Build a resident's fan-out pool.
+///
+/// Named so a test can tell a dedicated worker from a shared one, and so a stack in a
+/// report names the pool that owns the frame. Sized BELOW the core count: the sweep is a
+/// batch job and must leave a core for the interactive requests it runs beside.
+fn build_sweep_pool() -> rayon::ThreadPool {
+    let threads =
+        std::thread::available_parallelism().map(|n| n.get().saturating_sub(1).max(1)).unwrap_or(1);
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|i| format!("{SWEEP_THREAD_PREFIX}{i}"))
+        .build()
+        .expect("a rayon pool with an explicit thread count")
+}
+
+/// Where the diagnostics fan-out actually ran.
+///
+/// Salsa attaches at most one database per thread, and every job of this sweep carries
+/// its OWN db clone — so a worker shared with anything else, or a job free to open nested
+/// parallel work, can attach a second database mid-query and panic. Neither property is
+/// visible in a result, so the jobs report them here and a test reads them back.
+///
+/// Everything is keyed by the thread that STARTED the sweep, not by a process-wide
+/// counter: dozens of unit tests call `workspace_aggregates`, they run in parallel, and a
+/// shared tally would make these gates report on whatever else the binary happened to be
+/// doing — a gate that goes red on correct code proves nothing.
+#[cfg(test)]
+pub(super) mod sweep_probe {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::thread::ThreadId;
+
+    #[derive(Default, Clone)]
+    struct Observed {
+        /// One entry per fan-out job: the thread it landed on, and whether nested
+        /// parallel work was barred there.
+        jobs: Vec<(String, bool)>,
+        /// How many times this sweep warmed the configuration inventory. Counted because
+        /// the warm-up loads EVERY config root: a sweep with nothing to sweep, or one
+        /// whose request is already cancelled, must not pay for it.
+        warms: usize,
+    }
+
+    fn observed() -> &'static Mutex<HashMap<ThreadId, Observed>> {
+        static OBSERVED: OnceLock<Mutex<HashMap<ThreadId, Observed>>> = OnceLock::new();
+        OBSERVED.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn with_entry<T>(origin: ThreadId, f: impl FnOnce(&mut Observed) -> T) -> T {
+        let mut map = observed().lock().unwrap_or_else(|e| e.into_inner());
+        f(map.entry(origin).or_default())
+    }
+
+    /// Called from inside a fan-out job, which runs on a pool worker and therefore has to
+    /// be told which sweep it belongs to.
+    pub(super) fn record_job(origin: ThreadId) {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("<unnamed>").to_owned();
+        let guarded = stdx::par_guard::no_nested_parallelism();
+        with_entry(origin, |entry| entry.jobs.push((name, guarded)));
+    }
+
+    /// Called where the sweep warms the inventory — on the thread that started it.
+    pub(super) fn record_warm() {
+        with_entry(std::thread::current().id(), |entry| entry.warms += 1);
+    }
+
+    /// Watch the sweeps started by THIS thread, from an empty slate.
+    pub(crate) fn watch() -> Watch {
+        let origin = std::thread::current().id();
+        with_entry(origin, |entry| *entry = Observed::default());
+        Watch { origin }
+    }
+
+    pub(crate) struct Watch {
+        origin: ThreadId,
+    }
+
+    impl Watch {
+        pub(crate) fn jobs(&self) -> Vec<(String, bool)> {
+            with_entry(self.origin, |entry| entry.jobs.clone())
+        }
+
+        pub(crate) fn warms(&self) -> usize {
+            with_entry(self.origin, |entry| entry.warms)
+        }
+    }
+
+    impl Drop for Watch {
+        fn drop(&mut self) {
+            observed().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.origin);
+        }
+    }
+}
+
 /// Per-rayon-worker sweep state: an [`Analysis`] over an owned db clone plus whether
 /// that clone's salsa cancellation token has been registered with the sweep's
 /// [`RequestCancel`]. A rayon split clones the worker; the fresh db handle carries a
@@ -919,17 +1083,33 @@ impl DiagnosticsResident {
 struct SweepWorker {
     analysis: Analysis,
     registered: bool,
+    /// The thread that started this sweep. A rayon split runs on a worker thread, so a
+    /// job cannot name its own sweep without carrying this along.
+    #[cfg(test)]
+    origin: std::thread::ThreadId,
 }
 
 impl SweepWorker {
     fn new(db: RootDatabaseImpl) -> Self {
-        Self { analysis: Analysis::from_database(db), registered: false }
+        Self {
+            analysis: Analysis::from_database(db),
+            registered: false,
+            #[cfg(test)]
+            origin: std::thread::current().id(),
+        }
     }
 }
 
 impl Clone for SweepWorker {
     fn clone(&self) -> Self {
-        Self::new(self.analysis.database().clone())
+        Self {
+            analysis: Analysis::from_database(self.analysis.database().clone()),
+            registered: false,
+            // Inherited, not re-read: the clone happens ON a pool worker, and reading the
+            // current thread there would name the worker instead of the sweep.
+            #[cfg(test)]
+            origin: self.origin,
+        }
     }
 }
 
@@ -1146,6 +1326,101 @@ mod tests {
     use super::*;
     use crate::tools::file_request::RootedPathError;
     use ide::DiagnosticsConfig;
+
+    /// Every fan-out job of the sweep must land on THIS resident's own pool and must be
+    /// barred from opening nested parallel work.
+    ///
+    /// Both are salsa's rule, not a preference: a job carries its own db clone, so a
+    /// worker shared with another sweep — or a job that parks in a nested `rayon::scope`
+    /// and steals a sibling — attaches a second database to a thread mid-query, and salsa
+    /// panics with `Cannot change database mid-query`. On the shared global pool the jobs
+    /// run on unnamed workers with no guard, which is exactly what this refuses.
+    #[test]
+    fn the_sweep_runs_only_on_its_own_guarded_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let watch = super::sweep_probe::watch();
+        let out = state.read(|resident, _| {
+            resident.workspace_aggregates(
+                resident.config(),
+                &sweep_opts(),
+                &RequestCancel::default(),
+            )
+        });
+        assert!(matches!(out, ResidentOutcome::Ready(..)), "the sweep runs");
+
+        let seen = watch.jobs();
+        assert!(!seen.is_empty(), "the sweep has to have run jobs for this to mean anything");
+        let strays: Vec<_> = seen
+            .iter()
+            .filter(|(thread, guarded)| !thread.starts_with(SWEEP_THREAD_PREFIX) || !*guarded)
+            .cloned()
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "every job belongs on this resident's guarded pool, but these did not: {strays:?}",
+        );
+    }
+
+    /// A sweep with nothing to sweep does no work at all.
+    ///
+    /// The fan-out's safety warm-up loads EVERY configuration root, so running it for a
+    /// request that asked for no files turns `max_files: 0` — or a scope that admitted
+    /// nothing — into a full configuration parse under the resident lock. A cancelled
+    /// request is the same case: it wants an answer no longer.
+    #[test]
+    fn a_sweep_with_nothing_to_sweep_warms_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.ensure_loading();
+        wait_ready(&state);
+
+        let watch = super::sweep_probe::watch();
+
+        let mut empty = sweep_opts();
+        empty.max_files = 0;
+        let pooled = state.read(|resident, _| {
+            resident.workspace_aggregates(resident.config(), &empty, &RequestCancel::default());
+            resident.sweep_pool.get().is_some()
+        });
+        assert_eq!(watch.warms(), 0, "a zero-file sweep loads no configuration");
+        assert!(
+            matches!(pooled, ResidentOutcome::Ready(false, _)),
+            "a zero-file sweep does not raise the fan-out pool either",
+        );
+
+        let cancelled = RequestCancel::default();
+        cancelled.cancel_all();
+        let _ = state.read(|resident, _| {
+            resident.workspace_aggregates(resident.config(), &sweep_opts(), &cancelled)
+        });
+        assert_eq!(watch.warms(), 0, "an already-cancelled sweep loads no configuration");
+
+        // The positive control: with files to sweep and a live request, the warm-up DOES
+        // run — otherwise the two zeroes above would hold for a sweep that never warms.
+        let _ = state.read(|resident, _| {
+            resident.workspace_aggregates(
+                resident.config(),
+                &sweep_opts(),
+                &RequestCancel::default(),
+            )
+        });
+        assert_eq!(watch.warms(), 1, "a real sweep warms exactly once");
+        let pooled = state.read(|resident, _| resident.sweep_pool.get().is_some());
+        assert!(
+            matches!(pooled, ResidentOutcome::Ready(true, _)),
+            "the control has to raise the pool, or the two refusals above prove nothing",
+        );
+    }
 
     /// First use builds the resident db over the workspace and resolves a request
     /// path to a FileId, then computes diagnostics for it.

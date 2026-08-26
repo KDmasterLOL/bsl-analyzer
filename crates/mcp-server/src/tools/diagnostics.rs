@@ -1144,6 +1144,14 @@ fn finding_value(
     if !out.tags.is_empty() {
         v["tags"] = json!(out.tags);
     }
+    // Агенту структура полезнее суффикса в тексте: тот же факт в `message` стоил
+    // бы токенов дважды, а текстовый блок ответа и так зеркалит этот JSON.
+    let standards = ide::standards(diag.code);
+    if !standards.is_empty() {
+        v["standards"] = Value::Array(
+            standards.iter().map(|id| json!({ "id": id, "url": ide::standard_url(*id) })).collect(),
+        );
+    }
     if let Some(graph_id) = graph_id {
         v["graph_id"] = json!(graph_id);
     }
@@ -1236,7 +1244,7 @@ impl Counts {
 
 fn schema_json() -> Value {
     json!({
-        "schema_version": "15",
+        "schema_version": "16",
         "actions": ["catalog", "schema", "status", "file", "workspace"],
         "severities": ["error", "warning", "info", "hint"],
         "status_result": {
@@ -1280,6 +1288,7 @@ fn schema_json() -> Value {
             "range": "{ start_line, start_column, end_line, end_column } — 0-based; DEPRECATED, columns are counted in code POINTS. Use `location.range`, whose units are declared",
             "location": "the location contract v1: { root_id, path, range, enclosing_range, position_encoding, schema_version }. `range` is the finding's own span (a diagnostic has no name of its own), `enclosing_range` the method holding it; 0-based, end-exclusive, columns in UTF-16 code units",
             "location_unavailable": "string — machine reason, present instead of `location` when the file's (root_id, path) pair could not be formed",
+            "standards": "[{ id: u16, url }] — 1C development standards the rule enforces, checked requirement first; omitted when the diagnostic has no standard behind it",
             "tags": "string[] — omitted when empty",
             "has_fix": "bool — whether an automatic fix is attached",
             "graph_id": "durable id of the containing method — pass to `graph callers`/`node` (omitted when not in a method or not an indexable module)",
@@ -1387,7 +1396,7 @@ mod tests {
         let result = schema();
         assert_structured_mirrors_text(&result);
         let body = body_of(&result);
-        assert_eq!(body["schema_version"], "15");
+        assert_eq!(body["schema_version"], "16");
         let actions = body["actions"].as_array().unwrap();
         assert!(actions.iter().any(|a| a == "catalog"));
         assert!(actions.iter().any(|a| a == "status"));
@@ -1395,6 +1404,7 @@ mod tests {
         assert!(actions.iter().any(|a| a == "workspace"));
         assert!(body["status_result"]["state"].is_string(), "status action advertised");
         assert!(body["finding"]["graph_id"].is_string(), "graph bridge advertised");
+        assert!(body["finding"]["standards"].is_string(), "standard refs advertised");
         assert!(body["workspace_result"]["aggregates"].is_string(), "workspace advertised");
         // Asserting the DESCRIPTIONS, not just the version: a bumped number over an
         // unchanged text certifies a contract the server no longer honours.
@@ -1501,7 +1511,7 @@ mod tests {
     #[test]
     fn diagnostics_selective_baseline_response_advertises_schema_15() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "15");
+        assert_eq!(body["schema_version"], "16");
         for field in ["selection", "partitions_enabled", "partitions_unsuppressed", "unsuppressed"]
         {
             assert!(body["baseline_result"][field].is_string());
@@ -1511,7 +1521,7 @@ mod tests {
     #[test]
     fn diagnostics_schema_json() {
         let body = schema_json();
-        assert_eq!(body["schema_version"], "15");
+        assert_eq!(body["schema_version"], "16");
         assert!(body["baseline_result"]["selection"].is_string());
         assert!(body["baseline_result"]["unsuppressed"].is_string());
     }
@@ -2218,6 +2228,60 @@ mod tests {
                 FileFilters { codes: vec!["NoSuchCodeFilter".to_string()], ..default_filters() };
             let body = run(&state, &path, &filters);
             assert_eq!(body["findings"].as_array().unwrap().len(), 0);
+        }
+
+        #[test]
+        fn findings_carry_standards_only_when_a_standard_backs_the_rule() {
+            use std::str::FromStr;
+
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            sample_workspace(root);
+            // Модуль стенда даёт только диагностики со стандартом, поэтому
+            // ветка «поля нет» осталась бы непроверенной. Функция без Возврата
+            // на одном из путей добавляет диагностику без нормативного
+            // источника — второй класс, без которого проверка холостая.
+            write_common_module(
+                root,
+                "БезСтандарта",
+                "&НаСервере\nФункция Проверить() Экспорт\n\tЕсли Истина Тогда\n\t\tВозврат 1;\n\tКонецЕсли;\nКонецФункции\n",
+            );
+            let state = ready_state(root);
+            let path = root.join("CommonModules/БезСтандарта/Ext/Module.bsl");
+
+            let body = run(&state, &path, &default_filters());
+            let findings = body["findings"].as_array().expect("findings");
+
+            let (mut backed, mut bare) = (0, 0);
+            for finding in findings {
+                let code = finding["code"].as_str().expect("code");
+                let code = ide::DiagnosticCode::from_str(code).expect("known code");
+                let expected = ide::standards(code);
+                assert!(
+                    !finding["message"].as_str().expect("message").contains("v8std.ru"),
+                    "суффикс просочился в MCP: агенту тот же факт достаётся структурой"
+                );
+                match expected.first() {
+                    None => {
+                        // Отсутствие ключа, а не пустой массив: иначе
+                        // реализация «всегда пустой список» проходит.
+                        assert!(finding.get("standards").is_none(), "ссылка выдумана у {code:?}");
+                        bare += 1;
+                    }
+                    Some(primary) => {
+                        let listed = finding["standards"].as_array().expect("standards");
+                        assert_eq!(listed.len(), expected.len());
+                        assert_eq!(listed[0]["id"], *primary);
+                        assert_eq!(listed[0]["url"], ide::standard_url(*primary));
+                        backed += 1;
+                    }
+                }
+            }
+            assert!(
+                backed > 0 && bare > 0,
+                "стенд дал {backed} со стандартом и {bare} без — проверка холостая, \
+                 нужен вход с обоими классами"
+            );
         }
 
         fn run_git(dir: &Path, args: &[&str]) {

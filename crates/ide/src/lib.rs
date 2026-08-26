@@ -65,10 +65,11 @@ pub use ide_db::{
 };
 pub use ide_diagnostics::{
     all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
-    file_diagnostics, file_diagnostics_query, get_metadata, validate_query_text,
-    CleanCodeAttribute, Diagnostic, DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel,
-    DiagnosticTag, DiagnosticType, DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity,
-    MetadataTag, Severity, SoftwareQuality, TextEdit, METADATA_DEPENDENT_CODES,
+    file_diagnostics, file_diagnostics_query, get_metadata, message_with_standards, standard_url,
+    standards, validate_query_text, CleanCodeAttribute, Diagnostic, DiagnosticCode,
+    DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType, DiagnosticsConfig,
+    DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity, SoftwareQuality, TextEdit,
+    METADATA_DEPENDENT_CODES,
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use name_lookup::{
@@ -312,6 +313,22 @@ impl Analysis {
             .collect()
     }
 
+    /// Load every configuration root ON THIS THREAD, before a parallel region opens.
+    ///
+    /// The configuration loader fans out over its own rayon scope. Warmed here, the
+    /// parallel jobs find it memoised and never open that nested scope — where a stolen
+    /// sibling job carrying a different `db` clone would attach a second database to a
+    /// thread mid-query, which salsa forbids.
+    ///
+    /// The INVENTORY is what closes the window: it loads every root (base plus all
+    /// extensions), while a per-file `configurations` would warm only that file's visible
+    /// chain and still let an unrelated root first-load inside a worker. Call it per
+    /// chunk — a prior chunk's between-chunk LRU trim can leave it cold again.
+    pub fn warm_configuration_inventory(&self) {
+        use hir::ConfigsDatabase;
+        let _ = self.db.configurations_inventory();
+    }
+
     /// Parallel variant of [`Self::workspace_diagnostics`] for the deferred whole-project
     /// batch. Each file's Salsa-memoised `file_diagnostics_query` runs on the caller's
     /// bounded `pool`, each rayon worker on its own `db` snapshot (`db.clone()` shares the
@@ -328,20 +345,11 @@ impl Analysis {
         config: DiagnosticsConfigInput,
         pool: &rayon::ThreadPool,
     ) -> Vec<(FileId, Arc<Vec<Diagnostic>>)> {
-        use hir::ConfigsDatabase;
         use ide_db::base_db::{DiagnosticsConfigId, FileIdInput};
         use rayon::prelude::*;
 
-        // Nested-rayon guard: the configuration loader fans out over its own rayon scope.
-        // Warm it ONCE on this thread first so the parallel jobs below find it memoised and
-        // never open a nested scope — a stolen sibling job carrying a different `db` clone
-        // would attach a second database to a thread mid-query, which Salsa forbids.
-        // The inventory loads EVERY config root (base + all extensions), closing the
-        // window; per-file `configurations` would warm only that file's visible chain
-        // and let an unrelated root first-load inside a worker. It runs each chunk, so
-        // a prior chunk's between-chunk LRU trim cannot leave it cold.
         if !file_ids.is_empty() {
-            let _ = self.db.configurations_inventory();
+            self.warm_configuration_inventory();
         }
 
         // Move an owned db clone into the pool (Salsa handles are `Send` but `&Analysis`

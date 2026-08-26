@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use crate::change_hub::{ChangeEntry, Health, WorkspaceChangeHub};
+use crate::change_hub::{ChangeEntry, Health, SinkCursor, WorkspaceChangeHub};
 use crate::graph::scan::{classify_changes, FileStat, WorkspaceDiff};
 use crate::graph::universe::ScanVerdict;
 
@@ -67,7 +67,7 @@ impl DiagnosticsState {
         let cursor = *lock_recover(&self.hub_cursor);
         if let (Some(hub), Some(cursor)) = (&self.change_hub, cursor) {
             let batch = hub.drain(cursor);
-            *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+            self.commit_drained_cursor(cursor, batch.cursor);
         }
     }
 
@@ -356,7 +356,7 @@ impl DiagnosticsState {
         self.fire_pre_drain_probe();
 
         let batch = hub.drain(cursor);
-        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        self.commit_drained_cursor(cursor, batch.cursor);
         // A debt raised between the health decision above and this drain: the scan covers
         // what the hub dropped, and the entries cover what the scan's cache is too old to
         // see — this path does not force a fresh walk, so a cache younger than the drift
@@ -765,6 +765,20 @@ impl DiagnosticsState {
             .collect()
     }
 
+    /// Write a drained cursor back only if the slot still holds the SAME subscription.
+    ///
+    /// A drain reads the cursor, advances it at the hub and stores it again, and an
+    /// eviction or a rebuild's resubscribe can land in between. An unconditional store
+    /// would then undo them, leaving an `Idle` resident holding a handle to a
+    /// subscription that no longer exists. Cursor ids are never reused, so identity is
+    /// the whole check.
+    fn commit_drained_cursor(&self, drained: SinkCursor, advanced: SinkCursor) {
+        let mut slot = lock_recover(&self.hub_cursor);
+        if *slot == Some(drained) {
+            *slot = Some(advanced);
+        }
+    }
+
     pub(super) fn drop_cursor(&self) {
         let Some(hub) = &self.change_hub else {
             return;
@@ -781,7 +795,7 @@ impl DiagnosticsState {
             return DeliveredPaths::default();
         };
         let batch = hub.drain(cursor);
-        *lock_recover(&self.hub_cursor) = Some(batch.cursor);
+        self.commit_drained_cursor(cursor, batch.cursor);
         // A demand to reconcile is not a retraction of the paths in the same batch: the hub
         // keeps its entries on every input but a channel overflow, and a path it handed over
         // was handed over whatever else it also asked for. The scan still runs — the entries
@@ -2742,6 +2756,63 @@ mod tests {
         }
         assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
         assert!(!state.has_hub_cursor(), "eviction drops the cursor");
+    }
+
+    /// An eviction that lands while a drain is in flight must not be undone by that drain.
+    ///
+    /// The drain takes the cursor, advances it at the hub and writes it back; if the
+    /// eviction released the cursor in between, an unconditional write-back puts a handle
+    /// to a dead subscription back on a resident that no longer exists.
+    ///
+    /// The release is driven by calling `drop_cursor` — the very call the idle sweeper
+    /// makes — instead of waiting out `eviction_after`. Waiting would put the test at the
+    /// mercy of the scheduler: it needs the drain parked BEFORE the release, and under a
+    /// loaded machine the sweeper wins that race, evicts first, and the drain then finds
+    /// no cursor to hold. What is under test is the write-back, not the sweeper's clock.
+    #[test]
+    fn a_drain_in_flight_never_resurrects_the_evicted_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let (state, hub) = state_with_hub(root);
+        state.ensure_loading();
+        wait_ready(&state);
+        assert!(state.has_hub_cursor(), "a built resident holds a cursor");
+
+        // Park the drain exactly where it holds a cursor it has not yet written back.
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        state.set_pre_drain_probe(move || {
+            entered_tx.send(()).expect("the test is still waiting");
+            let _ = release_rx.recv();
+        });
+
+        // The drain path is entered directly. Going through `poll_pending_drift` would
+        // make the test depend on the hub reporting healthy, and a degraded hub — which a
+        // loaded machine running many watchers produces on its own — silently routes the
+        // poll to the scan instead, where no drain is in flight and nothing is tested.
+        let drainer = {
+            let state = state.clone();
+            let hub = hub.clone();
+            let root = root.to_path_buf();
+            std::thread::spawn(move || state.poll_drift_via_drain(&hub, &root))
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the drain reaches the point where it holds the cursor");
+
+        state.drop_cursor();
+        assert!(!state.has_hub_cursor(), "the release lands while the drain is parked");
+
+        release_tx.send(()).expect("the drain is still parked");
+        drainer.join().expect("the drain finishes");
+        assert!(!state.has_hub_cursor(), "an in-flight drain does not resurrect the cursor");
+        // What the write-back can resurrect is the state's own handle, not the hub's
+        // registration: `unsubscribe` removed the subscription and draining a cursor the
+        // hub no longer knows never re-creates it. Asserted so a drain that starts doing
+        // so — which WOULD pin the accumulator on an evicted resident — is caught here.
+        assert_eq!(hub.active_cursor_count(), 0, "the release leaves no subscription behind");
     }
 
     /// `status_report` surfaces the hub view so an agent can tell an event-driven serve

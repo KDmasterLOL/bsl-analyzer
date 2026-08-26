@@ -47,6 +47,8 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     let position_encoding = PositionEncoding::negotiate(&initialize_params.capabilities);
     let supports_insert_text_mode_adjust_indentation =
         client_supports_insert_text_mode_adjust_indentation(&initialize_params.capabilities);
+    let supports_code_description =
+        client_supports_code_description(&initialize_params.capabilities);
     let supports_workspace_edit_document_changes =
         client_supports_workspace_edit_document_changes(&initialize_params.capabilities);
 
@@ -97,6 +99,7 @@ pub fn main_loop(connection: Connection) -> Result<()> {
     state.position_encoding = position_encoding;
     state.supports_insert_text_mode_adjust_indentation =
         supports_insert_text_mode_adjust_indentation;
+    state.supports_code_description = supports_code_description;
     state.supports_workspace_edit_document_changes = supports_workspace_edit_document_changes;
     // Suppress push publishing only when the client will actually pull, so a
     // pull-capable client does not render open-buffer diagnostics twice; a client
@@ -151,6 +154,17 @@ fn client_supports_insert_text_mode_adjust_indentation(
         .and_then(|c| c.completion_item.as_ref())
         .and_then(|ci| ci.insert_text_mode_support.as_ref())
         .is_some_and(|s| s.value_set.contains(&lsp_types::InsertTextMode::ADJUST_INDENTATION))
+}
+
+/// Whether the client renders `Diagnostic.codeDescription`. Without it the link to the
+/// standard travels only in the message suffix: publishing a property the client did not
+/// ask for is what the capability exists to prevent.
+fn client_supports_code_description(caps: &lsp_types::ClientCapabilities) -> bool {
+    caps.text_document
+        .as_ref()
+        .and_then(|td| td.publish_diagnostics.as_ref())
+        .and_then(|pd| pd.code_description_support)
+        .unwrap_or(false)
 }
 
 /// Whether the client honors versioned `WorkspaceEdit.documentChanges`. When it does,
@@ -1648,6 +1662,7 @@ mod tests {
             generation: state.workspace_batch_generation,
             file_ids: std::sync::Arc::new(Vec::new()),
             file_paths: crate::frozen_context::FrozenFilePaths::default(),
+            supports_code_description: state.supports_code_description,
             config: state.diagnostics_config().clone(),
             diagnostics_baseline: std::sync::Arc::clone(&state.diagnostics_baseline),
             workspace_root: state.workspace_root.clone(),

@@ -184,6 +184,7 @@ pub struct WorkspaceBatchPlan {
     pub diagnostics_baseline: Arc<ide_host_core::diagnostics_baseline::DiagnosticsBaselineSnapshot>,
     pub workspace_root: Option<PathBuf>,
     pub position_encoding: PositionEncoding,
+    pub supports_code_description: bool,
     pub chunk_size: usize,
     /// Bounded rayon pool (≈ `ncpu/2`) the chunk computes on, so the batch never saturates
     /// the cores interactive requests need. `None` if pool creation failed — the sweep
@@ -281,6 +282,10 @@ pub struct GlobalState {
     /// `InsertTextMode::ADJUST_INDENTATION`, so completion snippet continuation
     /// lines can be indented to the cursor column by the client.
     pub supports_insert_text_mode_adjust_indentation: bool,
+    /// Negotiated at `initialize`: whether the client renders
+    /// `Diagnostic.codeDescription`, so the standard's link may be attached as a
+    /// property instead of travelling only inside the message.
+    pub supports_code_description: bool,
     /// Negotiated at `initialize`: whether the client honors versioned
     /// `WorkspaceEdit.documentChanges`. When it does, rename edits carry the open
     /// document's version so the client rejects them if the buffer moved on after
@@ -467,6 +472,7 @@ impl GlobalState {
             lsp_locale: None,
             position_encoding: PositionEncoding::default(),
             supports_insert_text_mode_adjust_indentation: false,
+            supports_code_description: false,
             supports_workspace_edit_document_changes: false,
             pull_diagnostics_active: false,
             supports_workspace_diagnostic_refresh: false,
