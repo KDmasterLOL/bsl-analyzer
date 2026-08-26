@@ -42,9 +42,10 @@ pub use domain::{
 };
 pub use embedder::{Embedder, EmbedderConfig};
 pub use engine::{
-    FtsIngest, IndexProgress, OverlayRetrySignals, ReferenceCollectionReplaceOutcome, SearchConfig,
-    SearchEngine, SearchHit, ValidatedWorkspaceRootsTransitionPlan,
-    WorkspaceRootsTransitionOutcome, WorkspaceRootsTransitionPlan, WorkspaceRootsTransitionSeed,
+    FenceOutcome, FtsIngest, IndexProgress, OverlayRetrySignals, ReferenceCollectionReplaceOutcome,
+    SearchConfig, SearchEngine, SearchHit, ValidatedWorkspaceOverlayPublication,
+    ValidatedWorkspaceRootsTransitionPlan, WorkspaceRootsTransitionOutcome,
+    WorkspaceRootsTransitionPlan, WorkspaceRootsTransitionSeed, WORKSPACE_APPLY_BATCH_ROWS,
 };
 pub use error::SearchError;
 pub use error::SCHEMA_VERSION_CURRENT;

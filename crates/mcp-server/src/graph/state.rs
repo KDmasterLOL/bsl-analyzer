@@ -1,6 +1,8 @@
 //! Graph lifecycle state and publication protocol.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -9,10 +11,11 @@ use bsl_search::SearchEngine;
 
 use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 
-use super::snapshot::{FpMapState, PooledSnapshotEntry, ScanCache};
+use super::build::PublishAttemptOutcome;
+use super::snapshot::{FpMapState, ScanCache, SnapshotPool};
 use super::types::{
     FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus, GraphStatusReport,
-    NudgeOutcome,
+    NudgeOutcome, SUPERSEDED_GRAPH_ERROR,
 };
 
 /// Minimum time between on-disk drift scans. A scan stats every `.bsl`/`.xml`
@@ -42,11 +45,8 @@ impl ReloadState {
     }
 }
 
-/// The published build's freshness metadata. The graph itself lives in the SQLite
-/// file at `graph_db_path(workspace_root)` (atomically renamed into place by the
-/// loader), so only the generation/fingerprint/reload move under the lock; a query
-/// opens the file separately. Keeping these together still gives a reader a torn-free
-/// freshness token.
+/// The published build's freshness metadata. Publication installs this together with
+/// the generation's pre-opened snapshot pool, so request reads never reopen the shared path.
 pub(super) struct Published {
     /// Whether this snapshot was published KNOWING it does not reflect current disk
     /// (the boot stale-publish). Any successful build/reload publish replaces it with
@@ -124,7 +124,9 @@ pub(crate) struct GraphState {
     /// ~a second on a large configuration; a pooled handle keeps serving the same
     /// coherent snapshot for free. Entries for superseded generations are discarded
     /// lazily at checkout (the tag no longer matches the published generation).
-    pub(super) snapshot_pool: Arc<Mutex<Vec<PooledSnapshotEntry>>>,
+    pub(super) snapshot_pool: Arc<Mutex<SnapshotPool>>,
+    #[cfg(test)]
+    pub(super) background_snapshot_failure: Arc<AtomicU8>,
     /// Invoked on this graph's background thread immediately after each publish/adopt,
     /// once the inner lock is released — the moment the graph "has caught up" and a
     /// consumer (search context re-render) may read the fresh graph. Never called on a
@@ -173,10 +175,8 @@ pub(crate) struct GraphState {
     /// builds and publishes nothing — it serves what it already holds and lets the owner
     /// maintain the file. Unmanaged (always owning) for a disabled graph and in tests.
     pub(super) lease: crate::workspace_lease::WorkspaceLease,
-    /// The last load stopped only because another daemon generation owned the workspace's
-    /// derived caches — not because building failed. Kept apart from the `Failed` status it
-    /// produces so that regaining the workspace (the owner exited, or its record went stale)
-    /// re-arms the build, while a real build failure stays terminal as before.
+    /// The last load stopped on a transient ownership refusal rather than a build failure.
+    /// Terminal supersession never re-arms; an unobserved lock/stale-record transition may.
     pub(super) withheld_build: Arc<AtomicBool>,
 }
 
@@ -222,7 +222,9 @@ impl GraphState {
             mark_seq: Arc::new(OnceLock::new()),
             leftover_bound: Arc::new(AtomicI64::new(0)),
             fp_map: Arc::new(Mutex::new(FpMapState::default())),
-            snapshot_pool: Arc::new(Mutex::new(Vec::new())),
+            snapshot_pool: Arc::new(Mutex::new(SnapshotPool::default())),
+            #[cfg(test)]
+            background_snapshot_failure: Arc::new(AtomicU8::new(0)),
             lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             withheld_build: Arc::new(AtomicBool::new(false)),
         }
@@ -240,6 +242,19 @@ impl GraphState {
     /// and two processes rebuilding it only race renames and flicker generations.
     pub(super) fn may_build(&self) -> bool {
         self.lease.owns_caches()
+    }
+
+    /// Refresh the lease from disk and report only the irreversible terminal state.
+    pub(crate) fn is_superseded(&self) -> bool {
+        if !self.lease.is_superseded() {
+            let _ = self.lease.owns_caches_now();
+        }
+        self.lease.is_superseded()
+    }
+
+    /// Request paths may read only the terminal verdict already established by background work.
+    pub(crate) fn superseded_latched(&self) -> bool {
+        self.lease.is_superseded()
     }
 
     pub(crate) fn cache(&self) -> Option<&crate::cache::WorkspaceCacheLayout> {
@@ -362,9 +377,9 @@ impl GraphState {
     /// bound is what keeps the consumption correct: only marks at or below it — drifts this
     /// build already reflects — may be cleared.
     pub(super) fn notify_published(&self, build_start_seq: i64, topology_changed: bool) {
-        // Idle pooled read handles belong to the superseded file; drop them now so
-        // they release it promptly instead of waiting out lazy checkout discards.
-        lock_recover(&self.snapshot_pool).clear();
+        if !self.lease.owns_caches_now() {
+            return;
+        }
         if self.pending_nudge.swap(false, Ordering::SeqCst) {
             self.reclaim_pending_reload();
         }
@@ -389,8 +404,8 @@ impl GraphState {
         // the `swap`. The STORED bound (never a live read) is what keeps the consume from clearing
         // a mark stamped after the capture: that mark is a new drift with its own nudge→publish.
         let leftover_bound = self.leftover_bound.swap(0, Ordering::SeqCst);
-        if leftover_bound != 0 {
-            self.fire_hook(leftover_bound, false, false);
+        if leftover_bound != 0 && !self.fire_hook(leftover_bound, false, false).topology_handled {
+            self.leftover_bound.fetch_max(leftover_bound, Ordering::SeqCst);
         }
     }
 
@@ -433,6 +448,9 @@ impl GraphState {
     /// The bound passed is `0`: the re-render marks the whole collection itself and consumes
     /// exactly that batch's own seq, so no OTHER pending mark is swept up by it.
     pub(crate) fn flush_pending_topology_refresh(&self) {
+        if !self.lease.owns_caches_now() {
+            return;
+        }
         if !self.pending_topology_refresh.load(Ordering::SeqCst) {
             return;
         }
@@ -450,6 +468,9 @@ impl GraphState {
 
     /// Retry a search-root transition without pretending the graph topology changed.
     pub(crate) fn flush_pending_search_roots_refresh(&self) {
+        if !self.lease.owns_caches_now() {
+            return;
+        }
         if !self.pending_roots_refresh.load(Ordering::SeqCst) {
             return;
         }
@@ -482,6 +503,9 @@ impl GraphState {
     /// (`drift_pending`) leaves the one-shot armed so that reload's publish handles it against
     /// the fresher graph.
     pub(crate) fn consume_leftover_marks(&self, leftover_bound: i64) {
+        if !self.lease.owns_caches_now() {
+            return;
+        }
         // Arm first (store the captured bound), then observe state, so a build publishing
         // concurrently either runs the follow-up itself or leaves it for the immediate consume
         // below — the `swap` to `0` in both paths keeps it single-shot.
@@ -495,8 +519,8 @@ impl GraphState {
             && !self.published_stale()
         {
             let bound = self.leftover_bound.swap(0, Ordering::SeqCst);
-            if bound != 0 {
-                self.fire_hook(bound, false, false);
+            if bound != 0 && !self.fire_hook(bound, false, false).topology_handled {
+                self.leftover_bound.fetch_max(bound, Ordering::SeqCst);
             }
         }
     }
@@ -546,10 +570,13 @@ impl GraphState {
     /// served revision and on-disk freshness (and, like every freshness check, kicks an async
     /// reload on drift) — so this walks the filesystem and must be called from a blocking
     /// context. A `Ready` status whose snapshot momentarily cannot be opened is reported as
-    /// `loading` (a reload is renaming the file into place), never as a torn read.
+    /// `loading` (a reload is renaming the file into place), never as a torn read. A
+    /// superseded graph reports ready only while one of its own descriptors is idle in the
+    /// pool; it never reopens the shared path.
     pub(crate) fn status_report(&self) -> GraphStatusReport {
-        let superseded = (!self.may_build()).then_some(true);
-        let report = |state: &'static str| GraphStatusReport {
+        let _ = self.may_build();
+        let superseded = self.lease.is_superseded();
+        let report = |state: &'static str, superseded: Option<bool>| GraphStatusReport {
             state,
             files: None,
             unread_files: None,
@@ -559,10 +586,33 @@ impl GraphState {
             error: None,
             superseded,
         };
+
+        if superseded {
+            if let GraphStatus::Ready { files } = self.status() {
+                if let Some(snapshot) = self.snapshot() {
+                    let freshness = self.freshness(&snapshot);
+                    return GraphStatusReport {
+                        files: Some(files),
+                        unread_files: Some(snapshot.unread_files()),
+                        revision: Some(freshness.revision),
+                        stale: Some(freshness.stale),
+                        reload: Some(freshness.reload),
+                        ..report("ready", Some(true))
+                    };
+                }
+            }
+            return GraphStatusReport {
+                error: Some(SUPERSEDED_GRAPH_ERROR.to_owned()),
+                ..report("failed", Some(true))
+            };
+        }
+
         match self.status() {
-            GraphStatus::Disabled => report("disabled"),
-            GraphStatus::Idle | GraphStatus::Loading => report("loading"),
-            GraphStatus::Failed(msg) => GraphStatusReport { error: Some(msg), ..report("failed") },
+            GraphStatus::Disabled => report("disabled", None),
+            GraphStatus::Idle | GraphStatus::Loading => report("loading", None),
+            GraphStatus::Failed(msg) => {
+                GraphStatusReport { error: Some(msg), ..report("failed", None) }
+            }
             GraphStatus::Ready { files } => match self.snapshot() {
                 Some(snapshot) => {
                     let freshness = self.freshness(&snapshot);
@@ -572,30 +622,26 @@ impl GraphState {
                         revision: Some(freshness.revision),
                         stale: Some(freshness.stale),
                         reload: Some(freshness.reload),
-                        ..report("ready")
+                        ..report("ready", None)
                     }
                 }
-                None => report("loading"),
+                None => report("loading", None),
             },
         }
     }
 
     /// Trigger the background load if this is the first call. Transitions
     /// `Idle → Loading` and spawns exactly one loader thread; later calls return
-    /// immediately. No-op for disabled / already-loading / ready graphs, and for a build
-    /// that genuinely failed — but NOT for the one that only stood aside for another daemon
-    /// generation (see [`Self::withheld_build`]): that graph must build the moment the
-    /// workspace comes back, or a daemon superseded once would serve no graph for the rest of
-    /// its life.
+    /// immediately. No-op for disabled / already-loading / ready / failed / terminally
+    /// superseded graphs. A transient fence refusal may re-arm through [`Self::withheld_build`].
     pub(crate) fn ensure_loading(&self) {
-        if self.workspace_root.is_none() {
+        if self.workspace_root.is_none() || self.superseded_latched() {
             return;
         }
-        // Read before the lock: the lease may go to disk.
-        let regained = self.withheld_build.load(Ordering::SeqCst) && self.may_build();
         {
             let mut inner = lock_recover(&self.inner);
-            let retry_withheld = regained && matches!(inner.status, GraphStatus::Failed(_));
+            let retry_withheld = self.withheld_build.load(Ordering::SeqCst)
+                && matches!(inner.status, GraphStatus::Failed(_));
             if inner.status != GraphStatus::Idle && !retry_withheld {
                 return;
             }
@@ -615,12 +661,12 @@ impl GraphState {
 
     /// Claim the initial build for an external builder (the fused cold-build path).
     /// Transitions `Idle → Loading` like [`Self::ensure_loading`] but spawns no loader
-    /// thread — the caller builds the graph itself and publishes it via
-    /// [`Self::adopt_prebuilt`]. Returns `false` for a disabled graph or one already
+    /// thread — the caller builds and installs the prepared graph itself. Returns
+    /// `false` for a disabled graph or one already
     /// loading/ready/failed, in which case the caller must not build (the normal
     /// lifecycle owns it).
     pub(crate) fn try_begin_external_build(&self) -> bool {
-        if self.workspace_root.is_none() || !self.may_build() {
+        if self.workspace_root.is_none() || !self.lease.owns_caches_now() {
             return false;
         }
         let mut inner = lock_recover(&self.inner);
@@ -631,11 +677,7 @@ impl GraphState {
         true
     }
 
-    /// Publish a graph database an external builder wrote and atomically renamed into
-    /// [`graph_db_path`]. Mirrors the tail of [`Self::run_load`]: clears the scan
-    /// cache and sets `published` + `Ready`. `force_stale` is already stamped into the
-    /// file's meta (read back by a snapshot's freshness token), so it is not tracked
-    /// here. Call only after a successful [`Self::try_begin_external_build`] + rename.
+    #[cfg(test)]
     pub(crate) fn adopt_prebuilt(
         &self,
         generation: u64,
@@ -643,17 +685,20 @@ impl GraphState {
         files: usize,
         search_roots: Option<bsl_search::WorkspaceRoots>,
     ) {
-        *lock_recover(&self.scan) = None;
-        let mut inner = lock_recover(&self.inner);
-        inner.published = Some(Published {
-            generation,
-            fingerprint,
-            stale: false,
-            reload: ReloadState::Idle,
-            force_stale: false,
-            search_roots,
-        });
-        inner.status = GraphStatus::Ready { files };
+        let prepared = self.prepare_snapshot_pool(generation, fingerprint, false).unwrap();
+        let outcome = self.install_prepared_snapshot(
+            prepared,
+            Published {
+                generation,
+                fingerprint,
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots,
+            },
+            GraphStatus::Ready { files },
+        );
+        assert!(matches!(outcome, crate::workspace_lease::LeaseOutcome::Applied(Ok(()))));
     }
 
     /// Abandon a claimed external build that did not produce a usable database, so the
@@ -691,6 +736,9 @@ impl GraphState {
     }
 
     fn nudge_after_recording(&self, force_project: bool) -> NudgeOutcome {
+        if self.is_superseded() {
+            return NudgeOutcome::NoOp;
+        }
         match self.status() {
             GraphStatus::Idle => {
                 self.ensure_loading();
@@ -719,11 +767,8 @@ impl GraphState {
                     NudgeOutcome::NoOp
                 }
             }
-            // A build that only stood aside for another daemon generation retries here as
-            // soon as the workspace is ours again — this is what makes the recovery
-            // autonomous, driven by a delivered change rather than by a client happening to
-            // ask for the graph. `ensure_loading` no-ops unless the stand-aside flag is set,
-            // so a genuinely failed build still does not auto-retry from a nudge.
+            // Only a transient fence refusal is retryable here. Terminal supersession returned
+            // above and never resumes after the foreign owner exits.
             GraphStatus::Failed(_) => {
                 self.ensure_loading();
                 match self.status() {
@@ -756,7 +801,7 @@ impl GraphState {
     fn claim_reload_slot(&self) -> bool {
         // Ahead of the fingerprint walk: a superseded daemon must not even pay for drift
         // detection it is not allowed to act on.
-        if !self.may_build() {
+        if !self.lease.owns_caches_now() {
             return false;
         }
         let disk = self.current_disk_fp();
@@ -778,6 +823,9 @@ impl GraphState {
     /// On spawn failure the reload slot is marked `Failed` so it is never left stuck
     /// `Running` (which would block every later reload claim).
     pub(super) fn spawn_reload(&self) {
+        if self.is_superseded() {
+            return;
+        }
         let state = self.clone();
         let spawned = std::thread::Builder::new()
             .name("bsl-graph-reload".to_owned())
@@ -813,17 +861,29 @@ impl GraphState {
         // is published, so a fused/cached boot build clears nothing here. Marks a prior run left
         // pending are recovered explicitly after wiring (see `consume_leftover_marks`).
         let build_start_seq = self.current_mark_seq();
-        if self.try_publish_cached(&workspace_root, build_start_seq) {
-            // Warm start: the graph is reused from disk and the persisted search index
-            // is reused by the standalone indexer's hash-skip (a near no-op).
-            return FusedStartup::Standalone;
+        match self.try_publish_cached(&workspace_root, build_start_seq) {
+            PublishAttemptOutcome::Published => {
+                // Warm start: the graph is reused from disk and the persisted search index
+                // is reused by the standalone indexer's hash-skip (a near no-op).
+                return FusedStartup::Standalone;
+            }
+            PublishAttemptOutcome::FallBack => {}
+            PublishAttemptOutcome::Refused(failure) => {
+                self.record_load_failure(false, failure);
+                return FusedStartup::Standalone;
+            }
         }
         // Cached but drifted: stale answers now beat a fused multi-minute rebuild. The
         // stale publish (Ready) supersedes this path's external claim (Loading), the
         // pre-claimed reload catches the graph up, and the search index still reuses
         // its persisted store through the standalone hash-skip.
-        if self.try_publish_stale_and_catch_up(&workspace_root) {
-            return FusedStartup::Standalone;
+        match self.try_publish_stale_and_catch_up(&workspace_root) {
+            PublishAttemptOutcome::Published => return FusedStartup::Standalone,
+            PublishAttemptOutcome::FallBack => {}
+            PublishAttemptOutcome::Refused(failure) => {
+                self.record_load_failure(false, failure);
+                return FusedStartup::Standalone;
+            }
         }
         if !engine.has_semantic() {
             // No embedder → no fused semantic pass; build the graph normally and let
@@ -834,10 +894,11 @@ impl GraphState {
         }
         match self.run_fused_cold_build(engine, source_path, build_start_seq) {
             Ok(()) => FusedStartup::Fused,
-            Err(e) => {
-                tracing::warn!("fused cold-build failed; falling back to standalone index: {e}");
-                self.abort_external_build();
-                self.ensure_loading();
+            Err(failure) => {
+                tracing::warn!(
+                    "fused cold-build failed; falling back to standalone index: {failure}"
+                );
+                self.record_load_failure(false, failure);
                 FusedStartup::Standalone
             }
         }
@@ -908,11 +969,7 @@ mod tests {
         assert!(!graph.try_begin_external_build(), "a superseded graph refuses the fused claim");
 
         graph.ensure_loading();
-        wait_for(|| matches!(graph.status(), GraphStatus::Failed(_)));
-        let GraphStatus::Failed(msg) = graph.status() else {
-            panic!("a superseded daemon must report why it is not building: {:?}", graph.status())
-        };
-        assert!(msg.contains("owns this workspace's derived caches"), "{msg}");
+        assert!(matches!(graph.status(), GraphStatus::Idle), "no loader was started");
         assert!(
             !crate::cache::graph_db_path(root).exists(),
             "no graph database was written by the superseded daemon",
@@ -922,6 +979,79 @@ mod tests {
             Some(true),
             "the status says why the graph is not rebuilding",
         );
+    }
+
+    #[test]
+    fn superseded_status_truth_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let lease = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone())
+            .with_lease(lease.clone());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        let held: Vec<_> = (0..super::super::snapshot::SNAPSHOT_POOL_CAP)
+            .map(|_| graph.snapshot().expect("the owner preopens its own descriptors"))
+            .collect();
+        let own_revision = held[0].generation;
+        let _newer = crate::workspace_lease::WorkspaceLease::claim_cache(&cache);
+        assert!(graph.is_superseded(), "the foreign token establishes the terminal verdict");
+
+        for lifecycle in [
+            GraphStatus::Idle,
+            GraphStatus::Loading,
+            GraphStatus::Failed("original failure".to_owned()),
+            GraphStatus::Ready { files: 2 },
+        ] {
+            lock_recover(&graph.inner).status = lifecycle.clone();
+            if lifecycle == GraphStatus::Idle {
+                graph.ensure_loading();
+                assert_eq!(graph.status(), GraphStatus::Idle, "terminal status starts no loader");
+            }
+            let report = graph.status_report();
+            assert_eq!(report.state, "failed", "{lifecycle:?}");
+            assert_eq!(report.superseded, Some(true), "{lifecycle:?}");
+            assert_eq!(report.error.as_deref(), Some(SUPERSEDED_GRAPH_ERROR), "{lifecycle:?}");
+        }
+        assert!(lease.is_superseded());
+
+        lock_recover(&graph.inner).status = GraphStatus::Ready { files: 2 };
+        drop(held);
+        let returned = graph.status_report();
+        assert_eq!(returned.state, "ready");
+        assert_eq!(returned.superseded, Some(true));
+        assert_eq!(returned.revision, Some(own_revision));
+        assert!(matches!(
+            lock_recover(&graph.inner).published.as_ref().map(|p| &p.reload),
+            Some(ReloadState::Idle)
+        ));
+
+        let transient_dir = tempfile::tempdir().unwrap();
+        let transient_root = transient_dir.path();
+        sample_workspace(transient_root);
+        let transient_cache = crate::cache::WorkspaceCacheLayout::for_workspace(transient_root);
+        let transient = GraphState::for_workspace_with_cache(
+            transient_root.to_path_buf(),
+            transient_cache.clone(),
+        );
+        transient.ensure_loading();
+        wait_ready(&transient);
+        drop(transient.snapshot().expect("park one descriptor for read-only status"));
+
+        let holder = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &transient_cache,
+            Duration::from_secs(5),
+        );
+        let transient_lease = crate::workspace_lease::WorkspaceLease::claim_cache(&transient_cache);
+        let transient = transient.with_lease(transient_lease.clone());
+        let report = transient.status_report();
+        assert_eq!(report.state, "ready");
+        assert_eq!(report.superseded, None);
+        assert!(!transient_lease.is_superseded());
+        holder.join().unwrap();
     }
 
     /// A whole-collection re-render requested before the search engine existed to run it must
@@ -961,12 +1091,10 @@ mod tests {
         );
     }
 
-    /// Standing aside for another generation must not be terminal the way a failed build is:
-    /// when the owner hands the workspace back (it exited, or its record went stale), the next
-    /// kick builds. Without the re-arm the graph keeps its `Failed` status forever and the
-    /// daemon serves no graph for the rest of its life, however long its client stays.
+    /// Once a graph observes a live foreign owner it must never adopt, load, or reload the
+    /// shared path again, even after that owner exits.
     #[test]
-    fn a_graph_that_stood_aside_builds_once_the_workspace_comes_back() {
+    fn superseded_graph_never_adopts_or_reloads() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
@@ -976,19 +1104,110 @@ mod tests {
         let newer = crate::workspace_lease::WorkspaceLease::claim(root);
         wait_for(|| !graph.may_build());
 
+        let owner_graph = GraphState::for_workspace(root.to_path_buf()).with_lease(newer.clone());
+        owner_graph.ensure_loading();
+        wait_ready(&owner_graph);
         graph.ensure_loading();
-        wait_for(|| matches!(graph.status(), GraphStatus::Failed(_)));
-
-        // The newer daemon exits and hands the workspace back.
         newer.release();
-        wait_for(|| graph.may_build());
 
-        // Through a NUDGE, not an explicit `ensure_loading`: the recovery has to be driven by a
-        // delivered change, or a client that never asks the graph anything — a search-only
-        // session — would leave the daemon graphless for as long as it stays connected.
-        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::LoadStarted);
-        wait_ready(&graph);
-        assert!(crate::cache::graph_db_path(root).exists(), "the regained workspace is built");
+        assert!(matches!(
+            graph.try_publish_cached(root, 0),
+            PublishAttemptOutcome::Refused(super::super::build::LoadFailure {
+                reason: super::super::build::LoadFailureReason::Terminal,
+                ..
+            })
+        ));
+        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
+        graph.spawn_reload();
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(matches!(graph.status(), GraphStatus::Idle));
+        assert!(lock_recover(&graph.inner).published.is_none());
+    }
+
+    #[test]
+    fn superseded_late_publish_is_fenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let fired = Arc::clone(&fired);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                fired.fetch_add(1, Ordering::SeqCst);
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
+        };
+        let lease = crate::workspace_lease::WorkspaceLease::claim(root);
+        let graph =
+            GraphState::for_workspace(root.to_path_buf()).with_lease(lease).with_publish_hook(hook);
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+        graph.pending_nudge.store(true, Ordering::SeqCst);
+        graph.pending_topology_refresh.store(true, Ordering::SeqCst);
+        graph.pending_roots_refresh.store(true, Ordering::SeqCst);
+        graph.leftover_bound.store(41, Ordering::SeqCst);
+
+        let _newer = crate::workspace_lease::WorkspaceLease::claim(root);
+        graph.notify_published(41, true);
+        graph.flush_pending_topology_refresh();
+        graph.flush_pending_search_roots_refresh();
+        graph.consume_leftover_marks(99);
+
+        assert!(graph.is_superseded());
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "no late hook may apply its prepared plan");
+        assert!(graph.pending_nudge.load(Ordering::SeqCst), "no late reload may start");
+        assert!(graph.pending_topology_refresh.load(Ordering::SeqCst));
+        assert!(graph.pending_roots_refresh.load(Ordering::SeqCst));
+        assert_eq!(graph.leftover_bound.load(Ordering::SeqCst), 41);
+
+        let refusal_dir = tempfile::tempdir().unwrap();
+        let refusal_root = refusal_dir.path().to_path_buf();
+        let refusal_lease = crate::workspace_lease::WorkspaceLease::claim(&refusal_root);
+        let refusal_lease_in_hook = refusal_lease.clone();
+        let newer = Arc::new(Mutex::new(None));
+        let newer_in_hook = Arc::clone(&newer);
+        let root_in_hook = refusal_root.clone();
+        let refusal_hook = Arc::new(move |_signal: GraphPublishSignal| {
+            *newer_in_hook.lock().unwrap() =
+                Some(crate::workspace_lease::WorkspaceLease::claim(&root_in_hook));
+            assert!(matches!(
+                refusal_lease_in_hook.with_ownership_outcome(|| ()),
+                crate::workspace_lease::LeaseOutcome::Terminal
+            ));
+            GraphPublishOutcome { topology_handled: false, roots_handled: true }
+        });
+        let refusal_graph = GraphState::for_workspace(refusal_root)
+            .with_lease(refusal_lease.clone())
+            .with_publish_hook(refusal_hook);
+        {
+            let mut inner = lock_recover(&refusal_graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+        refusal_graph.consume_leftover_marks(99);
+        assert!(refusal_lease.is_superseded());
+        assert_eq!(
+            refusal_graph.leftover_bound.load(Ordering::SeqCst),
+            99,
+            "a refused consume keeps the captured obligation"
+        );
+        drop(newer);
     }
 
     /// Poll `condition` until it holds, so a test does not depend on the lease's verdict

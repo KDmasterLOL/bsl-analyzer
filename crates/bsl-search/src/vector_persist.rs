@@ -58,6 +58,52 @@ pub struct PersistKey<'a> {
     pub dim: usize,
 }
 
+/// Fully written, fsynced and hashed vector artifacts awaiting only their two atomic replaces.
+pub struct PreparedPersist {
+    index_tmp: Option<PathBuf>,
+    index_path: PathBuf,
+    sidecar_tmp: Option<PathBuf>,
+    sidecar_path: PathBuf,
+    generation: i64,
+    installed: bool,
+}
+
+impl PreparedPersist {
+    pub fn generation(&self) -> i64 {
+        self.generation
+    }
+
+    /// Publish already prepared files. No work here scales with the workspace.
+    pub fn install(&mut self) -> Result<(), SearchError> {
+        fs::rename(self.index_tmp.as_ref().expect("prepared index temp"), &self.index_path)
+            .map_err(|e| SearchError::Index(format!("install vector index: {e}")))?;
+        self.index_tmp = None;
+        fs::rename(self.sidecar_tmp.as_ref().expect("prepared sidecar temp"), &self.sidecar_path)
+            .map_err(|e| SearchError::Index(format!("install index sidecar: {e}")))?;
+        self.sidecar_tmp = None;
+        self.installed = true;
+        Ok(())
+    }
+
+    /// Crash-durability hardening is not part of the ownership-protected replace.
+    pub fn finish(&self) {
+        if self.installed {
+            fsync_parent_dir(&self.index_path);
+        }
+    }
+}
+
+impl Drop for PreparedPersist {
+    fn drop(&mut self) {
+        if let Some(path) = self.index_tmp.take() {
+            let _ = fs::remove_file(path);
+        }
+        if let Some(path) = self.sidecar_tmp.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 fn index_path(db_path: &Path) -> PathBuf {
     sibling(db_path, "usearch")
 }
@@ -108,7 +154,7 @@ fn file_blake3(path: &Path) -> Result<String, SearchError> {
 }
 
 /// Try to load a persisted index consistent with the current embeddings. `None` means the
-/// caller must rebuild (and should then [`persist`]). Never returns a stale/wrong index.
+/// caller must rebuild and prepare a new publication. Never returns a stale/wrong index.
 pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
     let sidecar = read_sidecar(&sidecar_path(key.db_path))?;
 
@@ -145,29 +191,33 @@ pub fn try_load(store: &Store, key: &PersistKey) -> Option<VectorIndex> {
     Some(index)
 }
 
-/// Persist `index` + sidecar at `generation` — the `embedding_generation` of the SAME snapshot the
-/// index was built from (captured via `Store::load_all_embeddings_with_generation`), NOT a fresh
-/// read (which could advance past the built data and make the sidecar vouch for a stale index).
-/// Best-effort: callers log the error and continue (the next start just rebuilds), so a persistence
-/// failure never breaks search.
-pub fn persist(index: &VectorIndex, key: &PersistKey, generation: i64) -> Result<(), SearchError> {
+/// Perform every workspace-sized persistence step before the publication fence.
+pub fn prepare(
+    index: &VectorIndex,
+    key: &PersistKey,
+    generation: i64,
+) -> Result<PreparedPersist, SearchError> {
     let idx_path = index_path(key.db_path);
 
     // Write the index to a unique temp (never a shared `.tmp`, which would itself race), fsync,
     // then atomically rename into place.
     let tmp = unique_temp(&idx_path);
-    index.save(&tmp)?;
-    fsync_file(&tmp)?;
+    let index_sha = match (|| {
+        index.save(&tmp)?;
+        fsync_file(&tmp)?;
+        file_blake3(&tmp)
+    })() {
+        Ok(hash) => hash,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
     // Hash OUR temp's exact bytes BEFORE publishing. Hashing the shared `<db>.usearch` after the
     // rename would race a competing writer that overwrites it in between, pairing this sidecar's
     // digest with another writer's index. Hashing the temp binds the sidecar to the bytes this
     // writer published; if another writer's index wins the path, the load-time file hash mismatches
     // and rejects rather than loading a mixed snapshot.
-    let index_sha = file_blake3(&tmp)?;
-    fs::rename(&tmp, &idx_path)
-        .map_err(|e| SearchError::Index(format!("install vector index: {e}")))?;
-    fsync_parent_dir(&idx_path);
-
     let sidecar = Sidecar {
         schema: SIDECAR_SCHEMA,
         usearch_version: usearch::version().to_owned(),
@@ -179,7 +229,30 @@ pub fn persist(index: &VectorIndex, key: &PersistKey, generation: i64) -> Result
         generation,
         index_sha,
     };
-    write_sidecar(&sidecar_path(key.db_path), &sidecar)
+    let sidecar_path = sidecar_path(key.db_path);
+    let sidecar_tmp = match write_sidecar_temp(&sidecar_path, &sidecar) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    };
+    Ok(PreparedPersist {
+        index_tmp: Some(tmp),
+        index_path: idx_path,
+        sidecar_tmp: Some(sidecar_tmp),
+        sidecar_path,
+        generation,
+        installed: false,
+    })
+}
+
+#[cfg(test)]
+pub fn persist(index: &VectorIndex, key: &PersistKey, generation: i64) -> Result<(), SearchError> {
+    let mut prepared = prepare(index, key, generation)?;
+    prepared.install()?;
+    prepared.finish();
+    Ok(())
 }
 
 fn read_sidecar(path: &Path) -> Option<Sidecar> {
@@ -187,7 +260,7 @@ fn read_sidecar(path: &Path) -> Option<Sidecar> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn write_sidecar(path: &Path, sidecar: &Sidecar) -> Result<(), SearchError> {
+fn write_sidecar_temp(path: &Path, sidecar: &Sidecar) -> Result<PathBuf, SearchError> {
     let json = serde_json::to_vec_pretty(sidecar)
         .map_err(|e| SearchError::Index(format!("serialize index sidecar: {e}")))?;
     let tmp = unique_temp(path);
@@ -198,7 +271,7 @@ fn write_sidecar(path: &Path, sidecar: &Sidecar) -> Result<(), SearchError> {
             .map_err(|e| SearchError::Index(format!("write sidecar temp: {e}")))?;
         file.sync_all().map_err(|e| SearchError::Index(format!("fsync sidecar temp: {e}")))?;
     }
-    fs::rename(&tmp, path).map_err(|e| SearchError::Index(format!("install index sidecar: {e}")))
+    Ok(tmp)
 }
 
 fn fsync_file(path: &Path) -> Result<(), SearchError> {
@@ -269,7 +342,29 @@ mod tests {
     fn build_and_persist(store: &Store) {
         let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
         let index = VectorIndex::build(DIM, &data).unwrap();
-        persist(&index, &key(store), generation).unwrap();
+        let mut prepared = prepare(&index, &key(store), generation).unwrap();
+        prepared.install().unwrap();
+        prepared.finish();
+    }
+
+    #[test]
+    fn prepared_bundle_waits_for_install_and_drop_cleans_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seeded_store(dir.path(), 2);
+        let (generation, data) = store.load_all_embeddings_with_generation(DIM).unwrap();
+        let index = VectorIndex::build(DIM, &data).unwrap();
+        let prepared = prepare(&index, &key(&store), generation).unwrap();
+        let index_tmp = prepared.index_tmp.clone().unwrap();
+        let sidecar_tmp = prepared.sidecar_tmp.clone().unwrap();
+
+        assert!(index_tmp.exists());
+        assert!(sidecar_tmp.exists());
+        assert!(!index_path(store.db_path()).exists());
+        assert!(!sidecar_path(store.db_path()).exists());
+
+        drop(prepared);
+        assert!(!index_tmp.exists());
+        assert!(!sidecar_tmp.exists());
     }
 
     #[test]

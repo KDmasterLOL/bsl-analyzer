@@ -16,6 +16,8 @@ pub(crate) mod input;
 pub(crate) mod mdo_files;
 pub(crate) mod scan;
 mod snapshot;
+#[cfg(test)]
+pub(crate) use snapshot::{BackgroundSnapshotFailure, SNAPSHOT_POOL_CAP};
 mod state;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -51,5 +53,5 @@ pub(crate) use state::GraphState;
 )]
 pub(crate) use types::{
     Freshness, FusedStartup, GraphPublishOutcome, GraphPublishSignal, GraphStatus,
-    GraphStatusReport, NudgeOutcome,
+    GraphStatusReport, NudgeOutcome, SUPERSEDED_GRAPH_ERROR,
 };

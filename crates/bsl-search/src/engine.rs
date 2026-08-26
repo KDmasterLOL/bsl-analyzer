@@ -6,11 +6,14 @@ use crate::local_baseline::LocalStoreBaselineAdapter;
 use crate::ports::{ModuleSnapshot, ModuleSnapshotSource, SnapshotCatalog, SnapshotContentStore};
 use crate::publish::EmbeddingExecutionPolicy;
 use crate::resolver::{InMemoryResolvedViewResolver, ResolvedView};
-use crate::store::{Store, WorkspaceStoreTransition, WorkspaceTransitionFile};
+use crate::store::{
+    ContextRefreshMutation, Store, WorkspaceStoreTransition, WorkspaceTransitionFile,
+};
 use crate::workspace_overlay::{
     lexical_hits, normalized_file_hash_for_indexed_documents, semantic_hits, BaselineHashMode,
-    PublicationBaseline, PublishOutcome, RefreshMode, RefreshPlan, WorkspaceOverlayCache,
-    WorkspaceOverlayIndex, WorkspaceOverlayStats, WorkspaceTransitionOverlayFile,
+    OverlayPublicationStaging, PublicationBaseline, PublishOutcome, RefreshPlan,
+    WorkspaceOverlayCache, WorkspaceOverlayIndex, WorkspaceOverlayStats,
+    WorkspaceTransitionOverlayFile,
 };
 use crate::workspace_roots::{FileKey, WorkspaceRoots, CONFIGURATION_ROOT_ID};
 use crate::{
@@ -19,10 +22,16 @@ use crate::{
 };
 use code_chunk::Chunker;
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, warn};
+
+#[cfg(test)]
+std::thread_local! {
+    static CONSTRUCTOR_APPLY_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 #[derive(Debug, Default)]
 pub struct IndexProgress {
@@ -87,6 +96,17 @@ pub struct ReferenceCollectionReplaceOutcome {
     pub committed_fingerprint: String,
     pub written: bool,
 }
+
+/// Host-neutral outcome of admitting one shared-store mutation through an ownership fence.
+#[derive(Debug, PartialEq, Eq)]
+pub enum FenceOutcome<T> {
+    Applied(T),
+    TransientRefusal,
+    Terminal,
+}
+
+#[doc(hidden)]
+pub const WORKSPACE_APPLY_BATCH_ROWS: usize = 64;
 
 impl SearchHit {
     pub fn from_lexical(hit: &crate::domain::LexicalHit) -> Self {
@@ -217,7 +237,32 @@ pub struct WorkspaceRootsTransitionPlan {
 /// [`WorkspaceRootsTransitionPlan::revalidate`]. This separates the expensive second walk and
 /// content reads from [`SearchEngine::apply_validated_workspace_roots_transition`], whose caller
 /// may hold the live engine mutex.
-pub struct ValidatedWorkspaceRootsTransitionPlan(WorkspaceRootsTransitionPlan);
+pub struct ValidatedWorkspaceRootsTransitionPlan {
+    plan: WorkspaceRootsTransitionPlan,
+    staging: Option<WorkspaceRootsTransitionStaging>,
+}
+
+/// Phase-C value bundle retained across transient ownership refusals.
+pub struct ValidatedWorkspaceOverlayPublication {
+    staging: Option<OverlayPublicationStaging>,
+    expected: PublicationBaseline,
+    embedding_identity: Option<(String, usize)>,
+}
+
+struct WorkspaceRootsTransitionStaging {
+    changed_root_ids: HashSet<String>,
+    cleanup: HashSet<FileKey>,
+    obsolete_baseline: HashSet<FileKey>,
+    upserts: Vec<WorkspaceTransitionFile>,
+    next_cache: WorkspaceOverlayCache,
+    next_index: VectorIndex,
+    embedding_generation: i64,
+    removed: usize,
+    rebuilt: usize,
+    added: usize,
+    pending_collection_embeddings: bool,
+    pending_overlay_embeddings: bool,
+}
 
 /// Observable result of applying a prepared root transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,7 +437,7 @@ impl WorkspaceRootsTransitionPlan {
             .map(|file| (&file.key, &file.identity))
             .chain(self.unread_files.iter().map(|file| (&file.key, &file.identity)))
             .all(|(key, identity)| validation.get(key) == Some(identity));
-        Ok(matches.then_some(ValidatedWorkspaceRootsTransitionPlan(self)))
+        Ok(matches.then_some(ValidatedWorkspaceRootsTransitionPlan { plan: self, staging: None }))
     }
 }
 
@@ -455,6 +500,7 @@ impl OverlayRetrySignals {
 /// (and embedding cleared) as a result.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ContextRefreshStats {
+    pub paths_marked: usize,
     pub paths_cleared: usize,
     pub chunks_updated: usize,
     /// Chunks whose live embedding was cleared (set NULL) as part of the re-render, so
@@ -466,18 +512,68 @@ pub struct ContextRefreshStats {
 
 impl SearchEngine {
     pub fn new(db_path: &Path, config: SearchConfig) -> Result<Self, SearchError> {
+        match Self::new_fenced(db_path, config, Self::permit_checkpointed_apply)? {
+            FenceOutcome::Applied(engine) => Ok(engine),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all constructor fence cannot refuse")
+            }
+        }
+    }
+
+    /// [`Self::new`] with each shared-store mutation delegated to `apply`.
+    ///
+    /// Opening/migrating the store, persisting a newly built sidecar and rebuilding FTS are
+    /// separate groups; loading or building the HNSW remains outside the callback.
+    pub fn new_fenced<F>(
+        db_path: &Path,
+        config: SearchConfig,
+        mut apply: F,
+    ) -> Result<FenceOutcome<Self>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         let SearchConfig { embedder: embedder_config, execution } = config;
-        let store = Store::open(db_path)?;
+        let store = match Self::open_store_fenced(db_path, &mut apply)? {
+            FenceOutcome::Applied(store) => store,
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        };
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
 
-        let index = Self::load_or_build_index(&store, dim, Some(&embedder))?;
+        let (index, built_generation) =
+            Self::load_or_build_index_unpublished(&store, dim, Some(&embedder))?;
         let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
         info!(vectors = index.len(), dim, "search index loaded");
 
-        Self::ensure_fts(&store)?;
+        if let Some(generation) = built_generation {
+            if let Some(mut prepared) =
+                Self::prepare_built(&store, dim, Some(&embedder), &index, generation)
+            {
+                let persisted = Self::fenced_checkpointed_value(&mut apply, |_| {
+                    ControlFlow::Continue(Self::install_prepared_built(&store, &mut prepared))
+                })?;
+                match persisted {
+                    FenceOutcome::Applied(()) => prepared.finish(),
+                    FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+                    FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+                }
+            }
+        }
 
-        Ok(Self {
+        match Self::fenced_checkpointed_value(&mut apply, |checkpoint| {
+            Self::ensure_fts_checkpointed(&store, checkpoint)
+        })? {
+            FenceOutcome::Applied(()) => {}
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        }
+
+        Ok(FenceOutcome::Applied(Self {
             store,
             embedder: Some(embedder),
             index,
@@ -492,7 +588,172 @@ impl SearchEngine {
             serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
-        })
+        }))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn permit_checkpointed_apply(
+        operation: &mut dyn FnMut(
+            &mut dyn FnMut() -> ControlFlow<()>,
+        ) -> ControlFlow<(), Result<(), SearchError>>,
+    ) -> FenceOutcome<Result<(), SearchError>> {
+        let mut checkpoint = || ControlFlow::Continue(());
+        match operation(&mut checkpoint) {
+            ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+            ControlFlow::Break(()) => unreachable!("permit-all checkpoint cannot cancel"),
+        }
+    }
+
+    fn open_store_fenced<A>(
+        db_path: &Path,
+        apply: &mut A,
+    ) -> Result<FenceOutcome<Store>, SearchError>
+    where
+        A: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        // Opening stays inside the fence so a refused boot leaves no artifact behind. Retry the
+        // same bootstrap races as `Store::open`: two processes may create this derived cache.
+        let mut store = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        match Self::fenced_checkpointed_value(apply, |checkpoint| loop {
+            if store.is_none() {
+                match Store::prepare_open(db_path) {
+                    Ok(opened) => store = Some(opened),
+                    Err(error)
+                        if crate::store::sqlite_bootstrap_retryable(&error)
+                            && std::time::Instant::now() < deadline => {}
+                    Err(error) => return ControlFlow::Continue(Err(error)),
+                }
+            }
+            if let Some(opened) = store.as_ref() {
+                match opened.finish_open_checkpointed(checkpoint) {
+                    Ok(ControlFlow::Continue(())) => return ControlFlow::Continue(Ok(())),
+                    Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
+                    Err(error)
+                        if crate::store::sqlite_bootstrap_retryable(&error)
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        store = None;
+                    }
+                    Err(error) => return ControlFlow::Continue(Err(error)),
+                }
+            }
+            if checkpoint().is_break() {
+                return ControlFlow::Break(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        })? {
+            FenceOutcome::Applied(()) => {
+                Ok(FenceOutcome::Applied(store.expect("an admitted store open produces the store")))
+            }
+            FenceOutcome::TransientRefusal => Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => Ok(FenceOutcome::Terminal),
+        }
+    }
+
+    /// Run one value-producing operation only when `apply` admits it. The erased callback shape
+    /// matches `WorkspaceLease::with_ownership` without making this crate depend on the MCP host.
+    fn fenced_value<T, F, A>(apply: &mut A, operation: F) -> Result<FenceOutcome<T>, SearchError>
+    where
+        F: FnOnce() -> Result<T, SearchError>,
+        A: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let mut operation = Some(operation);
+        let mut value = None;
+        let mut erased = || {
+            let operation = operation.take().ok_or_else(|| {
+                SearchError::Index("fenced apply operation invoked more than once".to_owned())
+            })?;
+            value = Some(operation()?);
+            Ok(())
+        };
+        match apply(&mut erased) {
+            FenceOutcome::TransientRefusal => Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => Ok(FenceOutcome::Terminal),
+            FenceOutcome::Applied(Err(error)) => Err(error),
+            FenceOutcome::Applied(Ok(())) => value.map(FenceOutcome::Applied).ok_or_else(|| {
+                SearchError::Index(
+                    "fenced apply callback admitted without invoking the operation".to_owned(),
+                )
+            }),
+        }
+    }
+
+    fn fenced_value_retrying<T, F, A, R>(
+        apply: &mut A,
+        mut operation: F,
+        retry_transient: &mut R,
+    ) -> Result<FenceOutcome<T>, SearchError>
+    where
+        F: FnMut() -> Result<T, SearchError>,
+        A: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+        R: FnMut() -> bool + ?Sized,
+    {
+        loop {
+            match Self::fenced_value(apply, &mut operation)? {
+                FenceOutcome::TransientRefusal if retry_transient() => {}
+                outcome => return Ok(outcome),
+            }
+        }
+    }
+
+    /// Erased host adapter for one atomic transaction that must remain fenced but can refresh
+    /// the lease heartbeat and observe terminal shutdown at bounded row boundaries.
+    #[allow(
+        dead_code,
+        reason = "foundation consumed by the workspace mutation leaves that follow this change"
+    )]
+    fn fenced_checkpointed_value<T, F, A>(
+        apply: &mut A,
+        operation: F,
+    ) -> Result<FenceOutcome<T>, SearchError>
+    where
+        F: FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> ControlFlow<(), Result<T, SearchError>>,
+        A: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let mut operation = Some(operation);
+        let mut value = None;
+        let mut erased = |checkpoint: &mut dyn FnMut() -> ControlFlow<()>| {
+            let operation = match operation.take() {
+                Some(operation) => operation,
+                None => {
+                    return ControlFlow::Continue(Err(SearchError::Index(
+                        "checkpointed fenced apply operation invoked more than once".to_owned(),
+                    )))
+                }
+            };
+            match operation(checkpoint) {
+                ControlFlow::Break(()) => ControlFlow::Break(()),
+                ControlFlow::Continue(Err(error)) => ControlFlow::Continue(Err(error)),
+                ControlFlow::Continue(Ok(result)) => {
+                    value = Some(result);
+                    ControlFlow::Continue(Ok(()))
+                }
+            }
+        };
+        match apply(&mut erased) {
+            FenceOutcome::TransientRefusal => Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => Ok(FenceOutcome::Terminal),
+            FenceOutcome::Applied(Err(error)) => Err(error),
+            FenceOutcome::Applied(Ok(())) => value.map(FenceOutcome::Applied).ok_or_else(|| {
+                SearchError::Index(
+                    "checkpointed fenced apply callback admitted without completing the operation"
+                        .to_owned(),
+                )
+            }),
+        }
     }
 
     /// Load a persisted vector index when it still matches the current embeddings, otherwise
@@ -500,18 +761,26 @@ impl SearchEngine {
     /// start cost; loading a prebuilt one is ~40x faster (see `examples/bench_vector_index.rs`).
     /// Only a real, model-backed, file-backed engine persists — in-memory and embedder-less
     /// (FTS-only / overlay) engines fall back to a plain build with no sidecar.
-    fn load_or_build_index(
+    /// Load or build an index without publishing the built sidecar. The fenced workspace
+    /// constructor publishes that sidecar in its own apply group.
+    fn load_or_build_index_unpublished(
         store: &Store,
         dim: usize,
         embedder: Option<&Embedder>,
-    ) -> Result<VectorIndex, SearchError> {
+    ) -> Result<(VectorIndex, Option<i64>), SearchError> {
         if let Some(key) = Self::persist_key(store, dim, embedder) {
             if let Some(index) = crate::vector_persist::try_load(store, &key) {
                 info!(vectors = index.len(), "loaded persisted vector index");
-                return Ok(index);
+                return Ok((index, None));
             }
         }
-        Self::build_persisted_index(store, dim, embedder)
+        let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
+        #[cfg(test)]
+        CONSTRUCTOR_APPLY_ACTIVE.with(|active| {
+            assert!(!active.get(), "HNSW build ran inside the constructor apply callback")
+        });
+        let index = VectorIndex::build(dim, &data)?;
+        Ok((index, Some(generation)))
     }
 
     /// Build the vector index from SQLite and persist it (best-effort) when persistence applies.
@@ -540,14 +809,48 @@ impl SearchEngine {
         index: &VectorIndex,
         generation: i64,
     ) {
-        if index.is_empty() {
-            return;
+        if let Some(mut prepared) = Self::prepare_built(store, dim, embedder, index, generation) {
+            if let Err(error) = Self::install_prepared_built(store, &mut prepared) {
+                warn!("failed to publish vector index: {error}");
+            }
+            prepared.finish();
         }
-        if let Some(key) = Self::persist_key(store, dim, embedder) {
-            if let Err(e) = crate::vector_persist::persist(index, &key, generation) {
-                warn!("failed to persist vector index: {e}");
+    }
+
+    fn prepare_built(
+        store: &Store,
+        dim: usize,
+        embedder: Option<&Embedder>,
+        index: &VectorIndex,
+        generation: i64,
+    ) -> Option<crate::vector_persist::PreparedPersist> {
+        if index.is_empty() {
+            return None;
+        }
+        let key = Self::persist_key(store, dim, embedder)?;
+        match crate::vector_persist::prepare(index, &key, generation) {
+            Ok(prepared) => Some(prepared),
+            Err(error) => {
+                warn!("failed to prepare vector index: {error}");
+                None
             }
         }
+    }
+
+    fn install_prepared_built(
+        store: &Store,
+        prepared: &mut crate::vector_persist::PreparedPersist,
+    ) -> Result<(), SearchError> {
+        let generation = store.embedding_generation()?;
+        if generation != prepared.generation() {
+            return Err(SearchError::Index(
+                "vector index changed while its sidecar was prepared".to_owned(),
+            ));
+        }
+        if let Err(error) = prepared.install() {
+            warn!("failed to persist vector index: {error}");
+        }
+        Ok(())
     }
 
     /// The persistence identity for this engine's index, or `None` when persistence does not
@@ -565,14 +868,44 @@ impl SearchEngine {
     }
 
     pub fn fts_only(db_path: &Path) -> Result<Self, SearchError> {
-        let store = Store::open(db_path)?;
+        match Self::fts_only_fenced(db_path, Self::permit_checkpointed_apply)? {
+            FenceOutcome::Applied(engine) => Ok(engine),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all constructor fence cannot refuse")
+            }
+        }
+    }
+
+    /// [`Self::fts_only`] with store open/migration and FTS rebuild fenced separately.
+    pub fn fts_only_fenced<F>(
+        db_path: &Path,
+        mut apply: F,
+    ) -> Result<FenceOutcome<Self>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let store = match Self::open_store_fenced(db_path, &mut apply)? {
+            FenceOutcome::Applied(store) => store,
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        };
         let dim = 1024;
         let index = VectorIndex::new(dim)?;
         let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
-        Self::ensure_fts(&store)?;
+        match Self::fenced_checkpointed_value(&mut apply, |checkpoint| {
+            Self::ensure_fts_checkpointed(&store, checkpoint)
+        })? {
+            FenceOutcome::Applied(()) => {}
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        }
 
-        Ok(Self {
+        Ok(FenceOutcome::Applied(Self {
             store,
             embedder: None,
             index,
@@ -587,23 +920,56 @@ impl SearchEngine {
             serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
-        })
+        }))
     }
 
     pub fn semantic_overlay_only(
         db_path: &Path,
         config: SearchConfig,
     ) -> Result<Self, SearchError> {
+        match Self::semantic_overlay_only_fenced(db_path, config, |apply| {
+            Self::permit_checkpointed_apply(apply)
+        })? {
+            FenceOutcome::Applied(engine) => Ok(engine),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all constructor fence cannot refuse")
+            }
+        }
+    }
+
+    /// [`Self::semantic_overlay_only`] with store open/migration and FTS rebuild fenced separately.
+    pub fn semantic_overlay_only_fenced<F>(
+        db_path: &Path,
+        config: SearchConfig,
+        mut apply: F,
+    ) -> Result<FenceOutcome<Self>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         let SearchConfig { embedder: embedder_config, execution } = config;
-        let store = Store::open(db_path)?;
+        let store = match Self::open_store_fenced(db_path, &mut apply)? {
+            FenceOutcome::Applied(store) => store,
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        };
         let dim = embedder_config.dim.unwrap_or(1024);
         let embedder = Embedder::new(embedder_config);
         let index = VectorIndex::new(dim)?;
         let loaded_reference_fingerprint = store.reference_collection_fingerprint("platform")?;
 
-        Self::ensure_fts(&store)?;
+        match Self::fenced_checkpointed_value(&mut apply, |checkpoint| {
+            Self::ensure_fts_checkpointed(&store, checkpoint)
+        })? {
+            FenceOutcome::Applied(()) => {}
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        }
 
-        Ok(Self {
+        Ok(FenceOutcome::Applied(Self {
             store,
             embedder: Some(embedder),
             index,
@@ -618,17 +984,30 @@ impl SearchEngine {
             serves_external_baseline: false,
             graph_context_provider: None,
             module_snapshot_source: None,
-        })
+        }))
     }
 
-    fn ensure_fts(store: &Store) -> Result<(), SearchError> {
-        let chunk_count = store.chunk_count()?;
-        let fts_count = store.fts_count()?;
+    fn ensure_fts_checkpointed(
+        store: &Store,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<(), SearchError>> {
+        let chunk_count = match store.chunk_count() {
+            Ok(count) => count,
+            Err(error) => return ControlFlow::Continue(Err(error)),
+        };
+        let fts_count = match store.fts_count() {
+            Ok(count) => count,
+            Err(error) => return ControlFlow::Continue(Err(error)),
+        };
         if chunk_count > 0 && fts_count == 0 {
             info!(chunks = chunk_count, "populating FTS index from existing data");
-            store.rebuild_fts()?;
+            match store.rebuild_fts_checkpointed(checkpoint) {
+                Ok(ControlFlow::Continue(())) => {}
+                Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
+                Err(error) => return ControlFlow::Continue(Err(error)),
+            }
         }
-        Ok(())
+        ControlFlow::Continue(Ok(()))
     }
 
     pub fn store(&self) -> &Store {
@@ -930,15 +1309,39 @@ impl SearchEngine {
         chunks: &[crate::Chunk],
         graph_contexts: &[Option<String>],
     ) -> Result<(), SearchError> {
-        self.store.reindex_file_with_context(
-            &key.root_id,
-            &key.path,
+        let mut checkpoint = || ControlFlow::Continue(());
+        match self.ingest_fused_file_checkpointed(
+            key,
+            hash,
+            chunks,
+            graph_contexts,
+            &mut checkpoint,
+        ) {
+            ControlFlow::Continue(result) => result,
+            ControlFlow::Break(()) => unreachable!("the permit-all checkpoint cannot cancel"),
+        }
+    }
+
+    pub fn ingest_fused_file_checkpointed(
+        &mut self,
+        key: &FileKey,
+        hash: &[u8],
+        chunks: &[crate::Chunk],
+        graph_contexts: &[Option<String>],
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<(), SearchError>> {
+        match self.store.reindex_file_with_context_checkpointed(
+            key,
             hash,
             chunks,
             None,
             Some(graph_contexts),
-        )?;
-        Ok(())
+            checkpoint,
+        ) {
+            Ok(ControlFlow::Continue(_)) => ControlFlow::Continue(Ok(())),
+            Ok(ControlFlow::Break(())) => ControlFlow::Break(()),
+            Err(error) => ControlFlow::Continue(Err(error)),
+        }
     }
 
     /// Run the fused embedding pass against a database without holding a live
@@ -953,19 +1356,99 @@ impl SearchEngine {
         should_continue: Option<&(dyn Fn() -> bool + Sync)>,
     ) -> Result<VectorIndex, SearchError> {
         let store = Store::open(db_path)?;
+        let (index, _) = Self::embed_pending_chunks_with_fence(
+            &store,
+            config,
+            progress,
+            should_continue,
+            |operation| FenceOutcome::Applied(operation()),
+            None,
+        )?;
+        Ok(index)
+    }
+
+    pub fn embed_pending_chunks_fenced<F>(
+        db_path: &Path,
+        config: &SearchConfig,
+        progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
+        apply: F,
+    ) -> Result<FenceOutcome<VectorIndex>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        Self::embed_pending_chunks_fenced_retrying(
+            db_path,
+            config,
+            progress,
+            should_continue,
+            apply,
+            || false,
+        )
+    }
+
+    /// Workspace-fenced embedding with host-owned transient retry policy. A paid network batch
+    /// stays in memory while only its SQLite commit is retried.
+    pub fn embed_pending_chunks_fenced_retrying<F, R>(
+        db_path: &Path,
+        config: &SearchConfig,
+        progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
+        apply: F,
+        mut retry_transient: R,
+    ) -> Result<FenceOutcome<VectorIndex>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+        R: FnMut() -> bool,
+    {
+        let store = Store::open_existing(db_path)?;
+        let (index, completed) = Self::embed_pending_chunks_with_fence(
+            &store,
+            config,
+            progress,
+            should_continue,
+            apply,
+            Some(&mut retry_transient),
+        )?;
+        Ok(match completed {
+            FenceOutcome::Applied(()) => FenceOutcome::Applied(index),
+            FenceOutcome::TransientRefusal => FenceOutcome::TransientRefusal,
+            FenceOutcome::Terminal => FenceOutcome::Terminal,
+        })
+    }
+
+    fn embed_pending_chunks_with_fence<F>(
+        store: &Store,
+        config: &SearchConfig,
+        progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
+        mut apply: F,
+        retry_transient: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<(VectorIndex, FenceOutcome<()>), SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         let dim = config.embedder.dim.unwrap_or(1024);
         let embedder = Embedder::new(config.embedder.clone());
         // `run_embedding_pass` persists the built index from this background thread (it owns the
         // standalone store), NOT after the caller's `set_vector_index` swap which holds the live
         // engine lock — so the ~1.5s save never blocks concurrent search and the swap is instant.
         Self::run_embedding_pass(
-            &store,
+            store,
             &embedder,
             dim,
             config.execution.batch_size(),
             config.execution.concurrency(),
             progress,
             should_continue,
+            &mut apply,
+            retry_transient,
         )
     }
 
@@ -977,10 +1460,104 @@ impl SearchEngine {
         self.index = index;
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn run_fenced_embedding_pass(
+        store: &Store,
+        embedder: &Embedder,
+        dim: usize,
+        batch_size: usize,
+        items: &[(i64, String)],
+        progress: Option<&Arc<IndexProgress>>,
+        should_continue: Option<&(dyn Fn() -> bool + Sync)>,
+        apply: &mut impl FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+        retry_transient: &mut dyn FnMut() -> bool,
+    ) -> Result<(VectorIndex, FenceOutcome<()>), SearchError> {
+        let mut embedded = 0usize;
+        for batch in items.chunks(batch_size) {
+            if should_continue.is_some_and(|keep_going| !keep_going()) {
+                let (_, data) = store.load_all_embeddings_with_generation(dim)?;
+                return Ok((VectorIndex::build(dim, &data)?, FenceOutcome::Terminal));
+            }
+            match Self::fenced_value_retrying(apply, || Ok(()), retry_transient)? {
+                FenceOutcome::Applied(()) => {}
+                FenceOutcome::TransientRefusal => {
+                    let (_, data) = store.load_all_embeddings_with_generation(dim)?;
+                    return Ok((VectorIndex::build(dim, &data)?, FenceOutcome::TransientRefusal));
+                }
+                FenceOutcome::Terminal => {
+                    let (_, data) = store.load_all_embeddings_with_generation(dim)?;
+                    return Ok((VectorIndex::build(dim, &data)?, FenceOutcome::Terminal));
+                }
+            }
+
+            let refs: Vec<&str> = batch.iter().map(|(_, text)| text.as_str()).collect();
+            let embeddings = match embedder.embed_batch(&refs) {
+                Ok(embeddings) => embeddings,
+                Err(error) => {
+                    if let Some(progress) = progress {
+                        progress.active.store(false, Ordering::Relaxed);
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(progress) = progress {
+                progress.done_chunks.fetch_add(batch.len(), Ordering::Relaxed);
+                progress.done_batches.fetch_add(1, Ordering::Relaxed);
+            }
+            let pairs: Vec<_> = batch.iter().map(|(id, _)| *id).zip(embeddings).collect();
+            match Self::fenced_value_retrying(
+                apply,
+                || store.set_chunk_embeddings(&pairs),
+                retry_transient,
+            )? {
+                FenceOutcome::Applied(()) => embedded += pairs.len(),
+                FenceOutcome::TransientRefusal => {
+                    let (_, data) = store.load_all_embeddings_with_generation(dim)?;
+                    return Ok((VectorIndex::build(dim, &data)?, FenceOutcome::TransientRefusal));
+                }
+                FenceOutcome::Terminal => {
+                    let (_, data) = store.load_all_embeddings_with_generation(dim)?;
+                    return Ok((VectorIndex::build(dim, &data)?, FenceOutcome::Terminal));
+                }
+            }
+        }
+
+        if let Some(progress) = progress {
+            progress.active.store(false, Ordering::Relaxed);
+        }
+        let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
+        let index = VectorIndex::build(dim, &data)?;
+        let persisted = if let Some(mut prepared) =
+            Self::prepare_built(store, dim, Some(embedder), &index, generation)
+        {
+            let outcome = Self::fenced_value_retrying(
+                apply,
+                || Self::install_prepared_built(store, &mut prepared),
+                retry_transient,
+            )?;
+            if matches!(outcome, FenceOutcome::Applied(())) {
+                prepared.finish();
+            }
+            outcome
+        } else {
+            FenceOutcome::Applied(())
+        };
+        if matches!(persisted, FenceOutcome::Applied(())) {
+            info!(embedded, total_vectors = index.len(), "fused embedding complete");
+        }
+        Ok((index, persisted))
+    }
+
     /// Core of the fused embedding phase, free of any borrow on a live engine so it can
     /// run against either `self.store` or a standalone connection. Reads the `code`
     /// chunks still missing an embedding, embeds their semantic text concurrently,
     /// updates each row, then builds and returns the vector index.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the pass takes distinct execution controls plus the publish fence; bundling them only renames the same call contract"
+    )]
     fn run_embedding_pass(
         store: &Store,
         embedder: &Embedder,
@@ -989,17 +1566,36 @@ impl SearchEngine {
         concurrency: usize,
         progress: Option<&Arc<IndexProgress>>,
         should_continue: Option<&(dyn Fn() -> bool + Sync)>,
-    ) -> Result<VectorIndex, SearchError> {
+        apply: &mut impl FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+        mut retry_transient: Option<&mut dyn FnMut() -> bool>,
+    ) -> Result<(VectorIndex, FenceOutcome<()>), SearchError> {
         let pending = store.load_pending_embedding_documents("code")?;
         if pending.is_empty() {
             let (generation, data) = store.load_all_embeddings_with_generation(dim)?;
             let index = VectorIndex::build(dim, &data)?;
             // The sidecar is a shared artifact like any other; a caller that may no longer
             // write leaves it to whoever may.
-            if should_continue.is_none_or(|keep_going| keep_going()) {
-                Self::persist_built(store, dim, Some(embedder), &index, generation);
+            if should_continue.is_some_and(|keep_going| !keep_going()) {
+                return Ok((index, FenceOutcome::Terminal));
             }
-            return Ok(index);
+            let persisted = if let Some(mut prepared) =
+                Self::prepare_built(store, dim, Some(embedder), &index, generation)
+            {
+                let mut persist = || Self::install_prepared_built(store, &mut prepared);
+                let outcome = match retry_transient.as_deref_mut() {
+                    Some(retry) => Self::fenced_value_retrying(apply, &mut persist, retry)?,
+                    None => Self::fenced_value(apply, persist)?,
+                };
+                if matches!(outcome, FenceOutcome::Applied(())) {
+                    prepared.finish();
+                }
+                outcome
+            } else {
+                FenceOutcome::Applied(())
+            };
+            return Ok((index, persisted));
         }
 
         let items: Vec<(i64, String)> = pending
@@ -1020,6 +1616,20 @@ impl SearchEngine {
 
         let concurrency = concurrency.min(total_batches.max(1));
         info!(chunks = total, batches = total_batches, concurrency, "embedding fused chunks");
+
+        if let Some(retry_transient) = retry_transient {
+            return Self::run_fenced_embedding_pass(
+                store,
+                embedder,
+                dim,
+                batch_size,
+                &items,
+                progress,
+                should_continue,
+                apply,
+                retry_transient,
+            );
+        }
 
         // Fan batches of (chunk_id, text) out to embedder workers; the main thread
         // applies each batch's vectors (SQLite is single-writer). Nothing larger than
@@ -1074,20 +1684,29 @@ impl SearchEngine {
 
         let mut embedded = 0usize;
         let mut errors = 0usize;
-        let mut stopped = false;
+        let mut stopped = None;
         while let Ok(result) = result_rx.recv() {
             // Asked between batches, never inside one: a pass over a large configuration runs
             // for hours, and the caller's right to write may not outlive it.
             if should_continue.is_some_and(|keep_going| !keep_going()) {
-                stopped = true;
+                stopped = Some(FenceOutcome::Terminal);
                 break;
             }
             match result {
                 Ok(pairs) => {
-                    for (id, emb) in pairs {
-                        store.set_chunk_embedding(id, &emb)?;
-                        embedded += 1;
+                    let batch_len = pairs.len();
+                    match Self::fenced_value(apply, || store.set_chunk_embeddings(&pairs))? {
+                        FenceOutcome::Applied(()) => {}
+                        FenceOutcome::TransientRefusal => {
+                            stopped = Some(FenceOutcome::TransientRefusal);
+                            break;
+                        }
+                        FenceOutcome::Terminal => {
+                            stopped = Some(FenceOutcome::Terminal);
+                            break;
+                        }
                     }
+                    embedded += batch_len;
                 }
                 Err(e) => {
                     warn!("embedding batch failed after retries, skipping: {e}");
@@ -1111,20 +1730,40 @@ impl SearchEngine {
         let index = VectorIndex::build(dim, &data)?;
         // Asked once more before the sidecar: a takeover landing after the last batch would
         // otherwise still leave this pass's index description behind for the new owner.
-        let stopped = stopped || should_continue.is_some_and(|keep_going| !keep_going());
-        if stopped {
+        let stopped = stopped.or_else(|| {
+            should_continue
+                .is_some_and(|keep_going| !keep_going())
+                .then_some(FenceOutcome::Terminal)
+        });
+        if let Some(outcome) = stopped {
             // The vectors already written stay — they were written while the caller still had
             // the right to. What is skipped is the persisted sidecar, the one artifact a
             // stopped pass would leave behind for whoever writes this database next; the index
             // itself is still returned, so this process keeps answering semantic queries from
             // what it has.
             warn!(embedded, errors, "embedding pass stopped early; sidecar not persisted");
-            return Ok(index);
+            return Ok((index, outcome));
         }
-        Self::persist_built(store, dim, Some(embedder), &index, generation);
+        let persisted = if let Some(mut prepared) =
+            Self::prepare_built(store, dim, Some(embedder), &index, generation)
+        {
+            let outcome =
+                Self::fenced_value(apply, || Self::install_prepared_built(store, &mut prepared))?;
+            if matches!(outcome, FenceOutcome::Applied(())) {
+                prepared.finish();
+            }
+            outcome
+        } else {
+            FenceOutcome::Applied(())
+        };
+        match persisted {
+            FenceOutcome::Applied(()) => {}
+            FenceOutcome::TransientRefusal => return Ok((index, FenceOutcome::TransientRefusal)),
+            FenceOutcome::Terminal => return Ok((index, FenceOutcome::Terminal)),
+        }
 
         info!(embedded, errors, total_vectors = index.len(), "fused embedding complete");
-        Ok(index)
+        Ok((index, FenceOutcome::Applied(())))
     }
 
     /// The files a boot ingest must write, each under the key the store knows it by.
@@ -1234,6 +1873,130 @@ impl SearchEngine {
         self.ingest_files_fts(&files)
     }
 
+    fn prepare_boot_file(
+        &self,
+        key: &FileKey,
+        file_path: &Path,
+        with_graph_context: bool,
+    ) -> Result<PreparedBootFile, SearchError> {
+        let content = match std::fs::read_to_string(file_path) {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(?file_path, "failed to read file: {error}");
+                return Ok(PreparedBootFile::Unread);
+            }
+        };
+        let hash = blake3::hash(content.as_bytes());
+        let had_prior = match self.store.file_hash(&key.root_id, &key.path)? {
+            Some(stored_hash) if stored_hash == hash.as_bytes() => {
+                return Ok(PreparedBootFile::Unchanged)
+            }
+            Some(_) => true,
+            None => false,
+        };
+        let chunks = Chunker::chunk(&content);
+        if chunks.is_empty() {
+            return Ok(if had_prior {
+                PreparedBootFile::Remove(key.clone())
+            } else {
+                PreparedBootFile::Unchanged
+            });
+        }
+        let graph_contexts = with_graph_context.then(|| {
+            let provider = self.graph_context_provider.as_deref();
+            chunks
+                .iter()
+                .map(|chunk| {
+                    crate::document::indexed_document_for_chunk(key, chunk, provider).graph_context
+                })
+                .collect()
+        });
+        Ok(PreparedBootFile::Reindex {
+            key: key.clone(),
+            hash: hash.as_bytes().to_vec(),
+            chunks,
+            graph_contexts,
+        })
+    }
+
+    fn apply_prepared_boot_file_checkpointed(
+        &mut self,
+        prepared: PreparedBootFile,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<(), SearchError>> {
+        match prepared {
+            PreparedBootFile::Remove(key) => {
+                if checkpoint().is_break() {
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(self.store.remove_file(&key.root_id, &key.path, "code"))
+            }
+            PreparedBootFile::Reindex { key, hash, chunks, graph_contexts: Some(contexts) } => {
+                match self.store.reindex_file_with_context_checkpointed(
+                    &key,
+                    &hash,
+                    &chunks,
+                    None,
+                    Some(&contexts),
+                    checkpoint,
+                ) {
+                    Ok(ControlFlow::Continue(_)) => ControlFlow::Continue(Ok(())),
+                    Ok(ControlFlow::Break(())) => ControlFlow::Break(()),
+                    Err(error) => ControlFlow::Continue(Err(error)),
+                }
+            }
+            PreparedBootFile::Reindex { key, hash, chunks, graph_contexts: None } => {
+                match self.store.reindex_file_with_context_checkpointed(
+                    &key, &hash, &chunks, None, None, checkpoint,
+                ) {
+                    Ok(ControlFlow::Continue(_)) => ControlFlow::Continue(Ok(())),
+                    Ok(ControlFlow::Break(())) => ControlFlow::Break(()),
+                    Err(error) => ControlFlow::Continue(Err(error)),
+                }
+            }
+            PreparedBootFile::Unchanged | PreparedBootFile::Unread => ControlFlow::Continue(Ok(())),
+        }
+    }
+
+    fn ingest_boot_files_fenced<F>(
+        &mut self,
+        files: &[(FileKey, PathBuf)],
+        with_graph_context: bool,
+        apply: &mut F,
+    ) -> Result<FenceOutcome<FtsIngest>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let mut result = FtsIngest { indexed: 0, unread: 0 };
+        for (key, path) in files {
+            let prepared = self.prepare_boot_file(key, path, with_graph_context)?;
+            match prepared {
+                PreparedBootFile::Unchanged => continue,
+                PreparedBootFile::Unread => {
+                    result.unread += 1;
+                    continue;
+                }
+                prepared => {
+                    match Self::fenced_checkpointed_value(apply, |checkpoint| {
+                        self.apply_prepared_boot_file_checkpointed(prepared, checkpoint)
+                    })? {
+                        FenceOutcome::Applied(()) => {}
+                        FenceOutcome::TransientRefusal => {
+                            return Ok(FenceOutcome::TransientRefusal)
+                        }
+                        FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+                    }
+                    result.indexed += 1;
+                }
+            }
+        }
+        Ok(FenceOutcome::Applied(result))
+    }
+
     /// Index workspace files for *deferred* embedding: chunk each changed file, attach
     /// its graph context via the configured provider, and persist chunk + FTS rows with a
     /// NULL embedding. The vectors are filled later by
@@ -1243,78 +2006,68 @@ impl SearchEngine {
     /// the synchronous [`Self::index_directory`] would have produced, without blocking on
     /// the embed. Returns the number of files (re)indexed.
     pub fn index_directory_deferred(&mut self, root: &Path) -> Result<usize, SearchError> {
-        let bsl_files = self.boot_ingest_files(root);
-
-        info!(total_files = bsl_files.len(), "scanning BSL files (deferred embedding)");
-
-        let provider = self.graph_context_provider.as_deref();
-        let mut indexed = 0;
-        for (key, file_path) in &bsl_files {
-            let content = match std::fs::read_to_string(file_path) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(?file_path, "failed to read file: {e}");
-                    continue;
-                }
-            };
-
-            let hash = blake3::hash(content.as_bytes());
-            let rel_path = key.path.clone();
-
-            let had_prior = match self.store.file_hash(&key.root_id, &rel_path)? {
-                Some(stored_hash) => {
-                    if stored_hash == hash.as_bytes() {
-                        continue;
-                    }
-                    true
-                }
-                None => false,
-            };
-
-            let chunks = Chunker::chunk(&content);
-            if chunks.is_empty() {
-                // The content changed (its hash mismatched above) but now yields no chunks — the
-                // file was gutted to comments/blank while the daemon was down. Any prior chunks are
-                // now stale; leaving them makes a Clean boot false-clean (the vanished symbol is
-                // served forever), and the deletion reconcile does NOT cover this — the file still
-                // EXISTS on disk, so it is never "gone". Remove the stored rows. A file that was
-                // never indexed has nothing to remove and must not gain a spurious zero-chunk row,
-                // so only prior-stored files are touched.
-                if had_prior {
-                    self.store.remove_file(&key.root_id, &rel_path, "code")?;
-                    indexed += 1;
-                }
-                continue;
+        match self.index_directory_deferred_fenced(root, Self::permit_checkpointed_apply)? {
+            FenceOutcome::Applied(indexed) => Ok(indexed),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all ingest fence cannot refuse")
             }
-
-            let graph_contexts: Vec<Option<String>> = chunks
-                .iter()
-                .map(|c| {
-                    crate::document::indexed_document_for_chunk(key, c, provider).graph_context
-                })
-                .collect();
-
-            self.store.reindex_file_with_context(
-                &key.root_id,
-                &rel_path,
-                hash.as_bytes(),
-                &chunks,
-                None,
-                Some(&graph_contexts),
-            )?;
-            indexed += 1;
         }
+    }
 
-        info!(indexed, total_chunks = self.store.chunk_count()?, "deferred indexing complete");
-        Ok(indexed)
+    pub fn index_directory_deferred_fenced<F>(
+        &mut self,
+        root: &Path,
+        mut apply: F,
+    ) -> Result<FenceOutcome<usize>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let bsl_files = self.boot_ingest_files(root);
+        info!(total_files = bsl_files.len(), "scanning BSL files (deferred embedding)");
+        let result = match self.ingest_boot_files_fenced(&bsl_files, true, &mut apply)? {
+            FenceOutcome::Applied(result) => result,
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        };
+        info!(
+            indexed = result.indexed,
+            total_chunks = self.store.chunk_count()?,
+            "deferred indexing complete"
+        );
+        Ok(FenceOutcome::Applied(result.indexed))
     }
 
     pub fn index_directory_fts(&mut self, root: &Path) -> Result<usize, SearchError> {
+        match self.index_directory_fts_fenced(root, Self::permit_checkpointed_apply)? {
+            FenceOutcome::Applied(indexed) => Ok(indexed),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all ingest fence cannot refuse")
+            }
+        }
+    }
+
+    pub fn index_directory_fts_fenced<F>(
+        &mut self,
+        root: &Path,
+        mut apply: F,
+    ) -> Result<FenceOutcome<usize>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         let bsl_files = self.boot_ingest_files(root);
-        // The daemon does not act on unread files here: its own boot decides completeness with
-        // `reconcile_boot_store_with_disk`, which asks its own scan and falls back to priming
-        // the overlay rather than asserting a clean store.
-        Ok(self.ingest_files_fts(&bsl_files)?.indexed)
+        Ok(match self.ingest_boot_files_fenced(&bsl_files, false, &mut apply)? {
+            FenceOutcome::Applied(result) => FenceOutcome::Applied(result.indexed),
+            FenceOutcome::TransientRefusal => FenceOutcome::TransientRefusal,
+            FenceOutcome::Terminal => FenceOutcome::Terminal,
+        })
     }
 
     /// Index only the registered roots that have no rows at all yet.
@@ -1324,13 +2077,34 @@ impl SearchEngine {
     /// out of the index until someone edited a file in it. Roots that already have rows are not
     /// walked, read or hashed here, so the restart stays as cheap as it was.
     pub fn index_unindexed_roots_fts(&mut self) -> Result<usize, SearchError> {
+        match self.index_unindexed_roots_fts_fenced(Self::permit_checkpointed_apply)? {
+            FenceOutcome::Applied(indexed) => Ok(indexed),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all ingest fence cannot refuse")
+            }
+        }
+    }
+
+    pub fn index_unindexed_roots_fts_fenced<F>(
+        &mut self,
+        mut apply: F,
+    ) -> Result<FenceOutcome<usize>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         let indexed_roots: HashSet<String> = self
             .store
             .all_files_in_collection("code")?
             .into_iter()
             .map(|(key, _hash)| key.root_id)
             .collect();
-        let Some(roots) = self.workspace_roots.as_ref() else { return Ok(0) };
+        let Some(roots) = self.workspace_roots.as_ref() else {
+            return Ok(FenceOutcome::Applied(0));
+        };
         // Only the unindexed roots are WALKED: a warm root must not be traversed, canonicalised
         // or stat-ed at all, or the per-root skip would cost exactly what it exists to avoid.
         let cold: Vec<std::path::PathBuf> = roots
@@ -1339,7 +2113,7 @@ impl SearchEngine {
             .map(|(_, declared)| declared.to_path_buf())
             .collect();
         if cold.is_empty() {
-            return Ok(0);
+            return Ok(FenceOutcome::Applied(0));
         }
         let files: Vec<(FileKey, std::path::PathBuf)> = self
             .boot_ingest_files_over(Path::new(""), Some(&cold))
@@ -1347,9 +2121,13 @@ impl SearchEngine {
             .filter(|(key, _)| !indexed_roots.contains(&key.root_id))
             .collect();
         if files.is_empty() {
-            return Ok(0);
+            return Ok(FenceOutcome::Applied(0));
         }
-        Ok(self.ingest_files_fts(&files)?.indexed)
+        Ok(match self.ingest_boot_files_fenced(&files, false, &mut apply)? {
+            FenceOutcome::Applied(result) => FenceOutcome::Applied(result.indexed),
+            FenceOutcome::TransientRefusal => FenceOutcome::TransientRefusal,
+            FenceOutcome::Terminal => FenceOutcome::Terminal,
+        })
     }
 
     fn ingest_files_fts(
@@ -1668,6 +2446,10 @@ impl SearchEngine {
         self.workspace_roots.as_ref()
     }
 
+    pub fn workspace_roots_epoch(&self) -> u64 {
+        self.workspace_roots_epoch
+    }
+
     /// Point the engine at a workspace whose only source root is the workspace
     /// directory itself. Every file found under it is the configuration's, which
     /// is what a caller with no project model to consult can honestly say.
@@ -1781,39 +2563,40 @@ impl SearchEngine {
         })
     }
 
-    /// Atomically publish a filesystem-validated root transition. This method performs no
-    /// filesystem walk or file read: production calls it under the outer engine mutex, so only
-    /// cheap in-memory fences and the atomic SQLite/cache/vector mutation may happen here.
-    pub fn apply_validated_workspace_roots_transition(
-        &mut self,
-        validated: ValidatedWorkspaceRootsTransitionPlan,
-    ) -> Result<WorkspaceRootsTransitionOutcome, SearchError> {
-        let plan = validated.0;
+    /// Prepare the cache and HNSW candidates without an ownership fence. `None` means a live
+    /// input moved past the validated filesystem snapshot; no candidate is published.
+    pub fn stage_validated_workspace_roots_transition(
+        &self,
+        mut validated: ValidatedWorkspaceRootsTransitionPlan,
+    ) -> Result<Option<ValidatedWorkspaceRootsTransitionPlan>, SearchError> {
+        let plan = &validated.plan;
         if self.workspace_roots_epoch != plan.epoch
             || self.workspace_roots.as_ref() != Some(&plan.old_roots)
             || self.serves_external_baseline != plan.serves_external_baseline
         {
-            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+            return Ok(None);
         }
         if plan.old_roots == plan.next_roots {
-            return Ok(WorkspaceRootsTransitionOutcome::Unchanged);
+            return Ok(Some(validated));
         }
         if plan.serves_external_baseline {
             let live_manifest = self.dispatched_manifest_fingerprints()?.unwrap_or_default();
             if live_manifest != plan.manifest {
-                return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+                return Ok(None);
             }
         }
         let carriers = self.carrier_keys()?;
-        let mut cache = self.workspace_overlay_cache.lock().map_err(|error| {
+        let cache = self.workspace_overlay_cache.lock().map_err(|error| {
             SearchError::Index(format!("workspace overlay cache lock error: {error}"))
         })?;
         if cache.transition_epoch() != plan.overlay_epoch {
-            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+            return Ok(None);
         }
+        let mut next_cache = cache.clone();
+        drop(cache);
 
         let mut known = carriers.all_keys();
-        known.extend(cache.root_keyed_keys());
+        known.extend(next_cache.root_keyed_keys());
         let changed_ids = plan.old_roots.changed_root_ids(&plan.next_roots);
         let readable_keys: HashSet<FileKey> =
             plan.files.iter().map(|file| file.key.clone()).collect();
@@ -1887,36 +2670,145 @@ impl SearchEngine {
             Vec::new()
         };
 
-        let next_index = self.store.apply_workspace_roots_transition(WorkspaceStoreTransition {
-            changed_root_ids: &changed_ids,
-            cleanup: &cleanup,
-            tombstones: &obsolete_baseline,
-            upserts: &upserts,
-            dimension: self.dim,
-        })?;
-        cache.transition_roots(
+        next_cache.transition_roots(
             &changed_ids,
             &cleanup,
             &obsolete_baseline,
             &unread_keys,
             overlay_files,
         );
-        self.index = next_index;
-        self.workspace_roots = Some(plan.next_roots);
-        self.workspace_roots_epoch += 1;
-
         let pending_collection_embeddings = !plan.serves_external_baseline
             && self.embedder.is_some()
             && upserts.iter().any(|file| !file.chunks.is_empty());
         let pending_overlay_embeddings = plan.serves_external_baseline
             && (!unread_keys.is_empty() || (self.embedder.is_some() && !affected_files.is_empty()));
-        Ok(WorkspaceRootsTransitionOutcome::Applied {
+
+        let mut removed_chunk_ids = HashSet::new();
+        for key in &cleanup {
+            removed_chunk_ids.extend(self.store.chunk_ids_for_file(
+                "code",
+                &key.root_id,
+                &key.path,
+            )?);
+        }
+        let (embedding_generation, mut embeddings) =
+            self.store.load_all_embeddings_with_generation(self.dim)?;
+        embeddings.retain(|(id, _)| !removed_chunk_ids.contains(id));
+        #[cfg(test)]
+        if crate::store::FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR.with(std::cell::Cell::get) {
+            return Err(SearchError::Index(
+                "forced workspace transition vector preparation failure".to_owned(),
+            ));
+        }
+        let next_index = VectorIndex::build(self.dim, &embeddings)?;
+        validated.staging = Some(WorkspaceRootsTransitionStaging {
+            changed_root_ids: changed_ids,
+            cleanup,
+            obsolete_baseline,
+            upserts,
+            next_cache,
+            next_index,
+            embedding_generation,
             removed: obsolete.len(),
             rebuilt,
             added,
             pending_collection_embeddings,
             pending_overlay_embeddings,
-        })
+        });
+        Ok(Some(validated))
+    }
+
+    /// Commit one staged root transition under the ownership fence. The only fallible persistent
+    /// mutation is one cooperatively-cancellable SQLite transaction; cache, vector and root-table
+    /// publication happen together after commit while the already-acquired cache guard is held.
+    pub fn apply_staged_workspace_roots_transition(
+        &mut self,
+        validated: &mut ValidatedWorkspaceRootsTransitionPlan,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<WorkspaceRootsTransitionOutcome, SearchError>> {
+        let plan = &validated.plan;
+        if self.workspace_roots_epoch != plan.epoch
+            || self.workspace_roots.as_ref() != Some(&plan.old_roots)
+            || self.serves_external_baseline != plan.serves_external_baseline
+        {
+            return ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Superseded));
+        }
+        if plan.old_roots == plan.next_roots {
+            return ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Unchanged));
+        }
+        if plan.serves_external_baseline {
+            match self.dispatched_manifest_fingerprints() {
+                Ok(Some(manifest)) if manifest == plan.manifest => {}
+                Ok(_) => {
+                    return ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Superseded));
+                }
+                Err(error) => return ControlFlow::Continue(Err(error)),
+            }
+        }
+        let Some(staging) = validated.staging.as_ref() else {
+            return ControlFlow::Continue(Err(SearchError::Index(
+                "workspace root transition was not staged".to_owned(),
+            )));
+        };
+        match self.store.embedding_generation() {
+            Ok(generation) if generation == staging.embedding_generation => {}
+            Ok(_) => {
+                return ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Superseded));
+            }
+            Err(error) => return ControlFlow::Continue(Err(error)),
+        }
+        let mut cache = match self.workspace_overlay_cache.lock() {
+            Ok(cache) if cache.transition_epoch() == plan.overlay_epoch => cache,
+            Ok(_) => {
+                return ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Superseded));
+            }
+            Err(error) => {
+                return ControlFlow::Continue(Err(SearchError::Index(format!(
+                    "workspace overlay cache lock error: {error}"
+                ))));
+            }
+        };
+        match self.store.apply_workspace_roots_transition(
+            WorkspaceStoreTransition {
+                changed_root_ids: &staging.changed_root_ids,
+                cleanup: &staging.cleanup,
+                tombstones: &staging.obsolete_baseline,
+                upserts: &staging.upserts,
+            },
+            checkpoint,
+        ) {
+            Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
+            Err(error) => return ControlFlow::Continue(Err(error)),
+            Ok(ControlFlow::Continue(())) => {}
+        }
+        let staging =
+            validated.staging.take().expect("staging checked immediately before the transaction");
+        *cache = staging.next_cache;
+        self.index = staging.next_index;
+        self.workspace_roots = Some(plan.next_roots.clone());
+        self.workspace_roots_epoch += 1;
+        ControlFlow::Continue(Ok(WorkspaceRootsTransitionOutcome::Applied {
+            removed: staging.removed,
+            rebuilt: staging.rebuilt,
+            added: staging.added,
+            pending_collection_embeddings: staging.pending_collection_embeddings,
+            pending_overlay_embeddings: staging.pending_overlay_embeddings,
+        }))
+    }
+
+    /// Compatibility wrapper for boot and tests that do not own a workspace lease.
+    pub fn apply_validated_workspace_roots_transition(
+        &mut self,
+        validated: ValidatedWorkspaceRootsTransitionPlan,
+    ) -> Result<WorkspaceRootsTransitionOutcome, SearchError> {
+        let Some(mut staged) = self.stage_validated_workspace_roots_transition(validated)? else {
+            return Ok(WorkspaceRootsTransitionOutcome::Superseded);
+        };
+        let mut checkpoint = || ControlFlow::Continue(());
+        match self.apply_staged_workspace_roots_transition(&mut staged, &mut checkpoint) {
+            ControlFlow::Continue(result) => result,
+            ControlFlow::Break(()) => unreachable!("permit-all checkpoint cannot cancel"),
+        }
     }
 
     pub fn enable_workspace_watcher_mode(&mut self) {
@@ -1939,13 +2831,18 @@ impl SearchEngine {
         let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
+        self.mark_workspace_key_dirty(key)?;
+        Ok(true)
+    }
+
+    pub fn mark_workspace_key_dirty(&self, key: FileKey) -> Result<(), SearchError> {
         let mut cache = self
             .workspace_overlay_cache
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.enable_watcher_mode();
         cache.mark_dirty_path(key);
-        Ok(true)
+        Ok(())
     }
 
     /// The store key of a workspace `.bsl` file, or `None` when it is not a
@@ -1958,7 +2855,7 @@ impl SearchEngine {
     /// is why [`WorkspaceRoots::root_of`] takes two; both come from the one procedure
     /// [`WorkspaceRoots::spellings_of`], so a `.bsl` and a descriptor cannot be
     /// attributed by different rules.
-    fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
+    pub fn workspace_file_key(&self, path: &Path) -> Option<FileKey> {
         let roots = self.workspace_roots.as_ref()?;
         if !bsl_conventions::has_extension(path, bsl_conventions::BSL_EXTENSION) {
             return None;
@@ -1995,8 +2892,13 @@ impl SearchEngine {
         let Some(key) = self.workspace_file_key(path.as_ref()) else {
             return Ok(false);
         };
-        self.store.mark_context_dirty("code", &key.root_id, &key.path)?;
+        self.mark_workspace_key_context_dirty(&key)?;
         Ok(true)
+    }
+
+    pub fn mark_workspace_key_context_dirty(&self, key: &FileKey) -> Result<(), SearchError> {
+        self.store.mark_context_dirty("code", &key.root_id, &key.path)?;
+        Ok(())
     }
 
     /// Mark every indexed workspace file context-dirty (a configuration-root descriptor
@@ -2084,8 +2986,15 @@ impl SearchEngine {
     /// [`Self::carrier_keys`]): against a remote baseline there are no local rows at all.
     /// Returns the number of removed keys.
     pub fn remove_vanished_under(&mut self, dirs: &[PathBuf]) -> Result<usize, SearchError> {
+        let candidates = self.vanished_workspace_keys(dirs)?;
+        self.remove_workspace_keys(candidates)
+    }
+
+    /// Materialize subtree removals, including filesystem absence checks, before a caller enters
+    /// its publication barrier.
+    pub fn vanished_workspace_keys(&self, dirs: &[PathBuf]) -> Result<Vec<FileKey>, SearchError> {
         let Some(roots) = self.workspace_roots.as_ref() else {
-            return Ok(0);
+            return Ok(Vec::new());
         };
         // Attributed by the DECLARED spellings alone: the directory is gone, so there is
         // nothing left on disk to canonicalise, and its keys were spelled the way the walk
@@ -2120,17 +3029,10 @@ impl SearchEngine {
             );
         }
         if prefixes.is_empty() && swallowed_roots.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
         let carriers = self.carrier_keys()?;
-        let hidden = match self.workspace_overlay_cache.lock() {
-            Ok(cache) => cache.hidden_keys(),
-            Err(error) => {
-                tracing::warn!("failed to read overlay hidings for a subtree removal: {error}");
-                HashSet::new()
-            }
-        };
-        let candidates = carriers
+        Ok(carriers
             .all_keys()
             .into_iter()
             .filter(|key| {
@@ -2143,15 +3045,35 @@ impl SearchEngine {
                     .and_then(|roots| roots.resolve(key))
                     .is_some_and(|path| proven_absent(&path))
             })
-            .collect();
+            .collect())
+    }
+
+    /// Apply an already-materialized removal set without further filesystem probes.
+    pub fn remove_workspace_keys(
+        &mut self,
+        candidates: Vec<FileKey>,
+    ) -> Result<usize, SearchError> {
+        let carriers = self.carrier_keys()?;
+        let hidden = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache.hidden_keys(),
+            Err(error) => {
+                tracing::warn!("failed to read overlay hidings for a removal batch: {error}");
+                HashSet::new()
+            }
+        };
         let batch = self.remove_key_batch(candidates, &carriers, &hidden);
         if let Some(error) = batch.first_error {
             return Err(SearchError::Index(format!(
-                "subtree removal cleared {} keys and failed on {}; first failure: {error}",
+                "removal batch cleared {} keys and failed on {}; first failure: {error}",
                 batch.removed, batch.failed
             )));
         }
         Ok(batch.removed)
+    }
+
+    /// Snapshot every known workspace key from all carriers for an external reconcile plan.
+    pub fn known_workspace_keys(&self) -> Result<HashSet<FileKey>, SearchError> {
+        Ok(self.carrier_keys()?.all_keys())
     }
 
     /// [`Self::remove_workspace_key`] with the baseline evidence already resolved, so a batch
@@ -2273,8 +3195,28 @@ impl SearchEngine {
         &mut self,
         present_abs: &HashSet<std::path::PathBuf>,
     ) -> Result<usize, SearchError> {
+        match self
+            .reconcile_workspace_files_fenced(present_abs, |apply| FenceOutcome::Applied(apply()))?
+        {
+            FenceOutcome::Applied(removed) => Ok(removed),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all reconcile fence cannot refuse")
+            }
+        }
+    }
+
+    pub fn reconcile_workspace_files_fenced<F>(
+        &mut self,
+        present_abs: &HashSet<std::path::PathBuf>,
+        mut apply: F,
+    ) -> Result<FenceOutcome<usize>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         if self.workspace_roots.is_none() {
-            return Ok(0);
+            return Ok(FenceOutcome::Applied(0));
         }
         // The present files under the same keying the `code` collection uses, so
         // a file of one root never answers for the same relative path in another.
@@ -2293,16 +3235,45 @@ impl SearchEngine {
                 HashSet::new()
             }
         };
-        let candidates =
+        let mut candidates: Vec<_> =
             carriers.all_keys().into_iter().filter(|key| !present.contains(key)).collect();
-        let batch = self.remove_key_batch(candidates, &carriers, &hidden);
+        candidates.sort();
+        let mut batch = RemovedBatch::default();
+        for key in candidates {
+            if carriers.manifest_is_sole_carrier(&key) && hidden.contains(&key) {
+                continue;
+            }
+            let has_baseline = carriers.manifest.contains(&key);
+            let mut removal = None;
+            let admitted = Self::fenced_value(&mut apply, || {
+                removal = Some(self.remove_workspace_key_with(&key, has_baseline));
+                Ok(())
+            })?;
+            match admitted {
+                FenceOutcome::Applied(()) => {}
+                FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+                FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+            }
+            match removal.expect("an admitted reconcile operation runs once") {
+                Ok(()) => batch.removed += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        root = %key.root_id,
+                        path = %key.path,
+                        "failed to remove a deleted file from the index: {error}"
+                    );
+                    batch.failed += 1;
+                    batch.first_error.get_or_insert(error);
+                }
+            }
+        }
         if let Some(error) = batch.first_error {
             return Err(SearchError::Index(format!(
                 "reconcile removed {} keys and failed on {}; first failure: {error}",
                 batch.removed, batch.failed
             )));
         }
-        Ok(batch.removed)
+        Ok(FenceOutcome::Applied(batch.removed))
     }
 
     /// Remove a chosen set of keys, with the carrier reading and the hiding reading already
@@ -2364,29 +3335,92 @@ impl SearchEngine {
     /// its mark is not cleared against a graph that predates it, and a re-mark of an
     /// in-flight path survives the bounded clear. Pass [`i64::MAX`] to consume every mark
     /// (an unbounded caller, e.g. a graph with no wired mark-seq source).
+    #[allow(
+        clippy::type_complexity,
+        reason = "the local permit-all adapter mirrors the existing host checkpoint callback"
+    )]
     pub fn refresh_dirty_contexts(
         &self,
         provider: &dyn crate::ports::GraphContextProvider,
         seq_bound: i64,
     ) -> Result<ContextRefreshStats, SearchError> {
-        let mut stats = ContextRefreshStats::default();
-        for key in self.store.context_dirty_paths_bounded("code", seq_bound)? {
+        let mut apply = |operation: &mut dyn FnMut(
+            &mut dyn FnMut() -> ControlFlow<()>,
+        )
+            -> ControlFlow<(), Result<(), SearchError>>| {
+            let mut checkpoint = || ControlFlow::Continue(());
+            match operation(&mut checkpoint) {
+                ControlFlow::Break(()) => FenceOutcome::Terminal,
+                ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+            }
+        };
+        let (stats, outcome) =
+            self.refresh_dirty_contexts_fenced(provider, seq_bound, false, &mut apply)?;
+        match outcome {
+            FenceOutcome::Applied(()) => Ok(stats),
+            FenceOutcome::TransientRefusal | FenceOutcome::Terminal => {
+                unreachable!("the permit-all context refresh fence cannot refuse")
+            }
+        }
+    }
+
+    /// Prepare graph-context strings before lease admission, then publish no more than 64
+    /// mark/chunk/clear mutations per fenced SQLite transaction. A topology refresh marks every
+    /// eligible code file at the graph build's existing sequence bound; a fresher mark is never
+    /// overwritten or consumed.
+    pub fn refresh_dirty_contexts_fenced<A>(
+        &self,
+        provider: &dyn crate::ports::GraphContextProvider,
+        seq_bound: i64,
+        topology_changed: bool,
+        apply: &mut A,
+    ) -> Result<(ContextRefreshStats, FenceOutcome<()>), SearchError>
+    where
+        A: FnMut(
+            &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        let bounded = self.store.context_dirty_paths_bounded("code", seq_bound)?;
+        let mut keys = bounded.clone();
+        if topology_changed {
+            let all_dirty = self.store.context_dirty_paths("code")?;
+            for (key, _) in self.store.all_files_in_collection("code")? {
+                if !all_dirty.contains(&key) || bounded.contains(&key) {
+                    keys.insert(key);
+                }
+            }
+        }
+        let mut keys: Vec<_> = keys.into_iter().collect();
+        keys.sort();
+
+        let mut mutations = Vec::new();
+        if topology_changed {
+            mutations.extend(
+                keys.iter()
+                    .cloned()
+                    .map(|key| ContextRefreshMutation::Mark { key, seq: seq_bound }),
+            );
+        }
+        for key in keys {
             // A render error for ANY method of this path keeps the mark: the failure is
             // transient (the graph DB could not be read), so the next publish must retry
             // the whole path rather than clearing it against a half-failed render. A
             // legitimate `Ok(None)` (a method with no graph presence, or a file entirely
             // gone from the graph) is not an error and clears normally.
             let mut render_failed = false;
+            let mut updates = Vec::new();
             for (id, symbol_name, kind, stored) in
                 self.store.chunks_with_context_for_file("code", &key.root_id, &key.path)?
             {
                 match provider.try_graph_context(&key.path, &symbol_name, &kind) {
                     Ok(rendered) => {
                         if rendered.as_deref() != stored.as_deref() {
-                            self.store.set_chunk_graph_context(id, rendered.as_deref())?;
-                            self.store.clear_chunk_embedding(id)?;
-                            stats.chunks_updated += 1;
-                            stats.cleared_embeddings += 1;
+                            updates.push(ContextRefreshMutation::Update {
+                                chunk_id: id,
+                                graph_context: rendered,
+                            });
                         }
                     }
                     Err(e) => {
@@ -2403,10 +3437,29 @@ impl SearchEngine {
             if render_failed {
                 continue;
             }
-            self.store.clear_context_dirty_bounded("code", &key.root_id, &key.path, seq_bound)?;
-            stats.paths_cleared += 1;
+            mutations.extend(updates);
+            mutations.push(ContextRefreshMutation::Clear { key, seq_bound });
         }
-        Ok(stats)
+
+        let mut stats = ContextRefreshStats::default();
+        for batch in mutations.chunks(WORKSPACE_APPLY_BATCH_ROWS) {
+            let outcome = Self::fenced_checkpointed_value(apply, |checkpoint| {
+                self.store.apply_context_refresh_batch(batch, checkpoint)
+            })?;
+            match outcome {
+                FenceOutcome::Applied((marked, updated, cleared)) => {
+                    stats.paths_marked += marked;
+                    stats.paths_cleared += cleared;
+                    stats.chunks_updated += updated;
+                    stats.cleared_embeddings += updated;
+                }
+                FenceOutcome::TransientRefusal => {
+                    return Ok((stats, FenceOutcome::TransientRefusal));
+                }
+                FenceOutcome::Terminal => return Ok((stats, FenceOutcome::Terminal)),
+            }
+        }
+        Ok((stats, FenceOutcome::Applied(())))
     }
 
     /// Declare whether this engine serves an external (remote) baseline. `false`
@@ -2494,6 +3547,21 @@ impl SearchEngine {
         Ok(Some(cache.stats()))
     }
 
+    /// Snapshot status counters without consuming dirty marks, refreshing fingerprints, or
+    /// touching the Store. MCP status is observational even after workspace supersession.
+    pub fn workspace_overlay_stats_read_only(
+        &self,
+    ) -> Result<Option<WorkspaceOverlayStats>, SearchError> {
+        if self.workspace_roots.is_none() {
+            return Ok(None);
+        }
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(Some(cache.stats()))
+    }
+
     /// Whether the overlay's last full publication ran over an incomplete scan and withheld its
     /// removals, so only a future clean full scan can catch up. Read-only: takes the cache lock,
     /// refreshes nothing.
@@ -2510,11 +3578,45 @@ impl SearchEngine {
     /// NOT use this (it would serialize all search behind a multi-minute embed) and instead drives
     /// the lock-free [`Self::prime_workspace_overlay_standalone`] + [`Self::publish_workspace_overlay`].
     pub fn prime_workspace_overlay(&self) -> Result<(), SearchError> {
-        if self.workspace_roots.is_none() {
-            return Ok(());
-        }
-        let _ = self.workspace_overlay_snapshot(RefreshMode::Embed)?;
+        self.refresh_workspace_overlay_snapshot(true)?;
         Ok(())
+    }
+
+    /// Prepare the cold overlay refresh off the caller's publication barrier, then swap the
+    /// completed in-memory cache while that barrier is held. `Prime` is a local-baseline path;
+    /// its clone refresh reads/scans/embeds but writes no shared Store rows.
+    pub fn prime_workspace_overlay_fenced<F>(
+        &self,
+        mut apply: F,
+    ) -> Result<FenceOutcome<()>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        if self.workspace_roots.is_none() {
+            return Ok(FenceOutcome::Applied(()));
+        }
+        let roots = self.workspace_roots.as_ref().expect("checked above");
+        let mut prepared = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?
+            .clone();
+        prepared.refresh(
+            &self.store,
+            roots,
+            self.embedder.as_ref(),
+            self.batch_size,
+            self.workspace_baseline_hash_mode,
+            true,
+        )?;
+        Self::fenced_value(&mut apply, || {
+            *self.workspace_overlay_cache.lock().map_err(|e| {
+                SearchError::Index(format!("workspace overlay cache lock error: {e}"))
+            })? = prepared;
+            Ok(())
+        })
     }
 
     /// Mark the workspace overlay initialized with zero entries, WITHOUT a disk scan. The caller
@@ -2574,15 +3676,57 @@ impl SearchEngine {
     /// the live engine's store. Newly embedded vectors are persisted to that standalone store at
     /// the end of Phase B so a crash mid-warmup does not throw away embedding work already paid
     /// for; Phase C persists the merged live cache once more.
-    pub fn prime_workspace_overlay_standalone(
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::type_complexity,
+        reason = "the standalone pass returns its existing plan/vector pair plus the typed fence outcome; one-use aliases or options would only rename them"
+    )]
+    pub fn prime_workspace_overlay_standalone<F>(
         db_path: &Path,
         embedder_config: EmbedderConfig,
         roots: &WorkspaceRoots,
         warm_embeddings: HashMap<String, Vec<f32>>,
         graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
         should_continue: &dyn Fn() -> bool,
+        apply: F,
         distrusted: &HashSet<FileKey>,
-    ) -> Result<(RefreshPlan, HashMap<String, Vec<f32>>), SearchError> {
+    ) -> Result<FenceOutcome<(RefreshPlan, HashMap<String, Vec<f32>>)>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
+        Self::prime_workspace_overlay_standalone_retrying(
+            db_path,
+            embedder_config,
+            roots,
+            warm_embeddings,
+            graph_provider,
+            should_continue,
+            apply,
+            distrusted,
+            || false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn prime_workspace_overlay_standalone_retrying<F, R>(
+        db_path: &Path,
+        embedder_config: EmbedderConfig,
+        roots: &WorkspaceRoots,
+        warm_embeddings: HashMap<String, Vec<f32>>,
+        graph_provider: Option<Arc<dyn crate::ports::GraphContextProvider>>,
+        should_continue: &dyn Fn() -> bool,
+        mut apply: F,
+        distrusted: &HashSet<FileKey>,
+        mut retry_transient: R,
+    ) -> Result<FenceOutcome<(RefreshPlan, HashMap<String, Vec<f32>>)>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+        R: FnMut() -> bool,
+    {
         let batch_size = EmbeddingExecutionPolicy::default().batch_size();
         // `open_existing`, not `open`: this standalone pass runs while another daemon may own
         // the workspace, and the migrating constructor could wipe and recreate the owner's
@@ -2620,13 +3764,19 @@ impl SearchEngine {
             distrusted,
         )?;
 
-        let mut new_embeddings = Self::embed_missing_overlay_chunks(
+        let mut new_embeddings = match Self::embed_missing_overlay_chunks(
             &store,
             &embedder,
             plan.missing_embeddings(),
             batch_size,
             should_continue,
-        )?;
+            &mut apply,
+            &mut retry_transient,
+        )? {
+            FenceOutcome::Applied(embeddings) => embeddings,
+            FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+            FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
+        };
 
         // Include the warm-reused vectors for the plan's chunks in the published set so Phase C
         // builds complete vectors regardless of the live cache's state (it may be empty on a
@@ -2642,21 +3792,28 @@ impl SearchEngine {
             }
         }
 
-        Ok((plan, new_embeddings))
+        Ok(FenceOutcome::Applied((plan, new_embeddings)))
     }
 
     /// Phase B: embed the plan's missing `embedding_key -> input` pairs in batches off any lock,
     /// persisting each batch's vectors to the standalone `store` as it lands so a mid-pass crash
     /// keeps the progress already paid for.
-    fn embed_missing_overlay_chunks(
+    fn embed_missing_overlay_chunks<F>(
         store: &Store,
         embedder: &Embedder,
         missing: &HashMap<String, String>,
         batch_size: usize,
         should_continue: &dyn Fn() -> bool,
-    ) -> Result<HashMap<String, Vec<f32>>, SearchError> {
+        apply: &mut F,
+        retry_transient: &mut dyn FnMut() -> bool,
+    ) -> Result<FenceOutcome<HashMap<String, Vec<f32>>>, SearchError>
+    where
+        F: FnMut(
+            &mut dyn FnMut() -> Result<(), SearchError>,
+        ) -> FenceOutcome<Result<(), SearchError>>,
+    {
         if missing.is_empty() {
-            return Ok(HashMap::new());
+            return Ok(FenceOutcome::Applied(HashMap::new()));
         }
 
         let pairs: Vec<(&String, &String)> = missing.iter().collect();
@@ -2667,9 +3824,12 @@ impl SearchEngine {
             // vectors to the shared store, and a caller that lost the workspace lease must
             // stop writing over the new owner's rows.
             if !should_continue() {
-                return Err(SearchError::Embedder(
-                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
-                ));
+                return Ok(FenceOutcome::Terminal);
+            }
+            match Self::fenced_value_retrying(apply, || Ok(()), retry_transient)? {
+                FenceOutcome::Applied(()) => {}
+                FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+                FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
             }
             let inputs: Vec<&str> = batch.iter().map(|(_, input)| input.as_str()).collect();
             let embeddings = embedder.embed_batch_interactive(&inputs)?;
@@ -2679,25 +3839,34 @@ impl SearchEngine {
                 batch_persist.insert((*embedding_key).clone(), embedding.clone());
                 new_embeddings.insert((*embedding_key).clone(), embedding);
             }
-            // Re-checked AFTER the embed round-trip too: ownership (or the driver itself) may
-            // have gone away while the request was in flight, and the save below writes the
-            // shared table. The residual sub-batch window is the accepted vector-row trade —
-            // a re-embed replaces a vector, unlike a fingerprint row it cannot lie durably.
+            // Re-checked AFTER the embed round-trip too: the stop signal may have changed while
+            // the request was in flight. The actual SQLite save is separately fenced below.
             if !should_continue() {
-                return Err(SearchError::Embedder(
-                    "overlay embed pass stopped: workspace ownership lost".to_owned(),
-                ));
+                return Ok(FenceOutcome::Terminal);
             }
             // Persist to the standalone store (NOT the live engine) so partial progress survives
-            // a mid-pass failure. The shared live cache is touched only once, in Phase C.
-            if let Err(error) =
-                store.save_overlay_embedding_cache(embedder.model(), embedder.dim(), &batch_persist)
-            {
-                tracing::warn!("failed to persist overlay embedding batch: {error}");
+            // a mid-pass failure. The callback holds the host ownership barrier for this one
+            // atomic SQLite batch; a refusal stops before touching the shared store.
+            let admitted = Self::fenced_value_retrying(
+                apply,
+                || {
+                    store.save_overlay_embedding_cache(
+                        embedder.model(),
+                        embedder.dim(),
+                        &batch_persist,
+                    )?;
+                    Ok(())
+                },
+                retry_transient,
+            )?;
+            match admitted {
+                FenceOutcome::Applied(()) => {}
+                FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+                FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
             }
         }
 
-        Ok(new_embeddings)
+        Ok(FenceOutcome::Applied(new_embeddings))
     }
 
     /// Phase C: merge the plan and Phase-B embeddings into the live overlay cache under a brief
@@ -2716,6 +3885,70 @@ impl SearchEngine {
             .lock()
             .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
         cache.publish_plan(plan, new_embeddings, baseline, self.embedder.as_ref(), &self.store)
+    }
+
+    /// Build the complete Phase-C map and persistence bundle outside the ownership fence.
+    pub fn stage_workspace_overlay_publication(
+        &self,
+        plan: RefreshPlan,
+        new_embeddings: HashMap<String, Vec<f32>>,
+        baseline: &PublicationBaseline,
+    ) -> Result<ValidatedWorkspaceOverlayPublication, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        let staging = cache.stage_plan(plan, new_embeddings, baseline)?;
+        Ok(ValidatedWorkspaceOverlayPublication {
+            staging: Some(staging),
+            expected: cache.publication_baseline(),
+            embedding_identity: self
+                .embedder
+                .as_ref()
+                .map(|embedder| (embedder.model().to_owned(), embedder.dim())),
+        })
+    }
+
+    /// Commit one staged Phase-C bundle and swap its map only after the Store transaction lands.
+    pub fn apply_staged_workspace_overlay_publication(
+        &self,
+        publication: &mut ValidatedWorkspaceOverlayPublication,
+        checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<PublishOutcome, SearchError>> {
+        let mut cache = match self.workspace_overlay_cache.lock() {
+            Ok(cache) => cache,
+            Err(error) => {
+                return ControlFlow::Continue(Err(SearchError::Index(format!(
+                    "workspace overlay cache lock error: {error}"
+                ))));
+            }
+        };
+        if cache.publication_baseline() != publication.expected {
+            return ControlFlow::Continue(Ok(PublishOutcome::Superseded));
+        }
+        let Some(staging) = publication.staging.as_ref() else {
+            return ControlFlow::Continue(Err(SearchError::Index(
+                "workspace overlay publication was already consumed".to_owned(),
+            )));
+        };
+        let embedding_cache = staging.next_cache.embedding_cache_snapshot();
+        let embedding = publication
+            .embedding_identity
+            .as_ref()
+            .map(|(model, dim)| (model.as_str(), *dim, &embedding_cache));
+        match self.store.apply_overlay_publication(
+            staging.fingerprints.as_ref().map(|(id, rows)| (id.as_str(), rows)),
+            embedding,
+            checkpoint,
+        ) {
+            Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
+            Err(error) => return ControlFlow::Continue(Err(error)),
+            Ok(ControlFlow::Continue(())) => {}
+        }
+        let staging =
+            publication.staging.take().expect("staging checked immediately before the transaction");
+        *cache = staging.next_cache;
+        ControlFlow::Continue(Ok(staging.outcome))
     }
 
     /// The atomic pre-plan snapshot (live marks + freshness fence) a planned publication is
@@ -2751,12 +3984,24 @@ impl SearchEngine {
         if self.workspace_roots.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         if overlay.is_empty() {
             return Ok((Vec::new(), HashSet::new()));
         }
         let hits = lexical_hits(&overlay, query, limit);
         Ok((hits, overlay.hidden_paths.clone()))
+    }
+
+    pub fn workspace_overlay_lexical_hits_read_only(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let overlay = self.workspace_overlay_snapshot()?;
+        Ok((lexical_hits(&overlay, query, limit), overlay.hidden_paths))
     }
 
     pub fn workspace_overlay_semantic_hits(
@@ -2770,11 +4015,9 @@ impl SearchEngine {
         let Some(embedder) = &self.embedder else {
             return Ok((Vec::new(), HashSet::new()));
         };
-        // ReuseOnly: the refresh attaches only already-cached overlay vectors and never embeds
-        // inline on this hot, lock-held query path. Chunks lacking a cached vector contribute no
-        // overlay semantic hit this turn (they remain lexical); the background warmup is the only
-        // place that embeds overlay chunks. The embedder is still used below for the query vector.
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        // The resident snapshot contains only vectors a prior fenced publication installed.
+        // Chunks lacking one remain lexical; the embedder below is used only for the query vector.
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         if overlay.is_empty() {
             return Ok((Vec::new(), HashSet::new()));
         }
@@ -2796,7 +4039,7 @@ impl SearchEngine {
         if self.embedder.is_none() {
             return Ok((Vec::new(), HashSet::new()));
         }
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         if overlay.is_empty() {
             return Ok((Vec::new(), HashSet::new()));
         }
@@ -2804,12 +4047,32 @@ impl SearchEngine {
         Ok((hits, overlay.hidden_paths.clone()))
     }
 
+    pub fn workspace_overlay_semantic_hits_with_embedding_read_only(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+    ) -> Result<(Vec<SearchHit>, HashSet<FileKey>), SearchError> {
+        if self.workspace_roots.is_none() || self.embedder.is_none() {
+            return Ok((Vec::new(), HashSet::new()));
+        }
+        let overlay = self.workspace_overlay_snapshot()?;
+        Ok((semantic_hits(&overlay, query_embedding, limit), overlay.hidden_paths))
+    }
+
     pub fn resolve_workspace_code_view(&self) -> Result<Option<ResolvedView>, SearchError> {
-        self.resolve_workspace_code_view_with(
-            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline"),
+        if self.workspace_roots.is_none() {
+            return Ok(None);
+        }
+        let baseline =
+            BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "local-workspace-baseline");
+        let mut overlay = self.workspace_overlay_snapshot()?.overlay;
+        overlay.baseline = baseline.clone();
+        BaselineOverlaySearchService::new(
             LocalStoreBaselineAdapter::workspace_code(&self.store),
             LocalStoreBaselineAdapter::workspace_code(&self.store),
+            InMemoryResolvedViewResolver,
         )
+        .resolve_view(baseline, overlay)
     }
 
     pub fn resolve_workspace_code_view_with<C, S>(
@@ -2826,7 +4089,7 @@ impl SearchEngine {
             return Ok(None);
         }
 
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         let mut overlay = overlay.overlay;
         overlay.baseline = baseline.clone();
         let service =
@@ -2844,7 +4107,7 @@ impl SearchEngine {
             return Ok(None);
         }
 
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         let mut overlay = overlay.overlay;
         overlay.baseline = baseline.clone();
 
@@ -2882,12 +4145,28 @@ impl SearchEngine {
     ) -> Result<Vec<SearchHit>, SearchError> {
         if collection == Some("code") {
             if let Some(overlay_hits) =
-                self.search_with_workspace_overlay_embedding(query_embedding, limit)?
+                self.search_with_workspace_overlay_embedding(query_embedding, limit, true)?
             {
                 return Ok(overlay_hits);
             }
         }
 
+        self.search_persisted_with_embedding(query_embedding, limit, collection)
+    }
+
+    pub fn search_with_embedding_read_only(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        if collection == Some("code") {
+            if let Some(hits) =
+                self.search_with_workspace_overlay_embedding(query_embedding, limit, false)?
+            {
+                return Ok(hits);
+            }
+        }
         self.search_persisted_with_embedding(query_embedding, limit, collection)
     }
 
@@ -2959,10 +4238,9 @@ impl SearchEngine {
         let Some(embedder) = &self.embedder else {
             return Ok(None);
         };
-        // ReuseOnly: reuse cached overlay vectors only, never embed inline under the engine lock.
         // Snapshot before embedding so an empty overlay returns `None` without paying for a query
         // embed the persisted fallback would only repeat.
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = self.refresh_workspace_overlay_snapshot(false)?;
         if overlay.is_empty() {
             return Ok(None);
         }
@@ -2984,13 +4262,17 @@ impl SearchEngine {
         &self,
         query_embedding: &[f32],
         limit: usize,
+        refresh: bool,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
         if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
-        // ReuseOnly: reuse cached overlay vectors only, never embed inline under the engine lock.
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = if refresh {
+            self.refresh_workspace_overlay_snapshot(false)?
+        } else {
+            self.workspace_overlay_snapshot()?
+        };
         if overlay.is_empty() {
             return Ok(None);
         }
@@ -3013,11 +4295,27 @@ impl SearchEngine {
         collection: Option<&str>,
     ) -> Result<Vec<SearchHit>, SearchError> {
         if collection == Some("code") {
-            if let Some(overlay_hits) = self.text_search_with_workspace_overlay(query, limit)? {
+            if let Some(overlay_hits) =
+                self.text_search_with_workspace_overlay(query, limit, true)?
+            {
                 return Ok(overlay_hits);
             }
         }
 
+        self.text_search_persisted(query, limit, collection)
+    }
+
+    pub fn text_search_read_only(
+        &self,
+        query: &str,
+        limit: usize,
+        collection: Option<&str>,
+    ) -> Result<Vec<SearchHit>, SearchError> {
+        if collection == Some("code") {
+            if let Some(hits) = self.text_search_with_workspace_overlay(query, limit, false)? {
+                return Ok(hits);
+            }
+        }
         self.text_search_persisted(query, limit, collection)
     }
 
@@ -3061,12 +4359,17 @@ impl SearchEngine {
         &self,
         query: &str,
         limit: usize,
+        refresh: bool,
     ) -> Result<Option<Vec<SearchHit>>, SearchError> {
         if self.workspace_roots.is_none() {
             return Ok(None);
         }
 
-        let overlay = self.workspace_overlay_snapshot(RefreshMode::ReuseOnly)?;
+        let overlay = if refresh {
+            self.refresh_workspace_overlay_snapshot(false)?
+        } else {
+            self.workspace_overlay_snapshot()?
+        };
         if overlay.is_empty() {
             return Ok(None);
         }
@@ -3081,28 +4384,31 @@ impl SearchEngine {
         Ok(Some(combined))
     }
 
+    /// Clone the currently published workspace overlay without refreshing fingerprints,
+    /// manifests, dirty paths, or the Store. Interactive queries use this after the host's
+    /// fenced prefetch/apply attempt, so a refused apply serves the last resident publication.
+    pub fn workspace_overlay_snapshot(&self) -> Result<WorkspaceOverlayIndex, SearchError> {
+        let cache = self
+            .workspace_overlay_cache
+            .lock()
+            .map_err(|e| SearchError::Index(format!("workspace overlay cache lock error: {e}")))?;
+        Ok(cache.snapshot())
+    }
+
     /// Refresh and snapshot the workspace overlay.
     ///
-    /// `mode` selects how chunks without a cached vector are treated: [`RefreshMode::ReuseOnly`]
-    /// (every interactive query) reuses only cached vectors and never embeds inline under the
-    /// engine lock; [`RefreshMode::Embed`] (the background warmup) may embed missing vectors.
-    /// In [`RefreshMode::Embed`] the engine's own embedder is supplied; in [`RefreshMode::ReuseOnly`]
-    /// no embedder is passed down, so the refresh stays off the network.
-    fn workspace_overlay_snapshot(
+    /// `embed_missing` selects whether chunks without a cached vector may be embedded inline.
+    fn refresh_workspace_overlay_snapshot(
         &self,
-        mode: RefreshMode,
+        embed_missing: bool,
     ) -> Result<WorkspaceOverlayIndex, SearchError> {
         let roots = self
             .workspace_roots
             .as_ref()
             .ok_or_else(|| SearchError::Index("workspace root is not configured".to_owned()))?;
-        let embedder = match mode {
-            RefreshMode::Embed => self.embedder.as_ref(),
-            RefreshMode::ReuseOnly => None,
-        };
-        // Only the background warmup (Embed) may pay for a cold full-tree scan under the lock.
-        // Interactive query paths (ReuseOnly) must stay O(cached) — see `WorkspaceOverlayCache::refresh`.
-        let allow_cold_scan = matches!(mode, RefreshMode::Embed);
+        let embedder = if embed_missing { self.embedder.as_ref() } else { None };
+        // Only the embedding refresh may pay for a cold full-tree scan under the lock.
+        let allow_cold_scan = embed_missing;
         let mut cache = self
             .workspace_overlay_cache
             .lock()
@@ -3336,6 +4642,18 @@ pub struct FtsIngest {
     pub unread: usize,
 }
 
+enum PreparedBootFile {
+    Unchanged,
+    Unread,
+    Remove(FileKey),
+    Reindex {
+        key: FileKey,
+        hash: Vec<u8>,
+        chunks: Vec<code_chunk::Chunk>,
+        graph_contexts: Option<Vec<Option<String>>>,
+    },
+}
+
 struct FileTask {
     key: FileKey,
     hash: Vec<u8>,
@@ -3387,17 +4705,171 @@ mod walk_ownership {
 
 #[cfg(test)]
 mod tests {
-    use super::{SearchEngine, FORCE_VECTOR_REMOVE_ERROR};
+    use super::{
+        FenceOutcome, SearchEngine, CONSTRUCTOR_APPLY_ACTIVE, FORCE_VECTOR_REMOVE_ERROR,
+        WORKSPACE_APPLY_BATCH_ROWS,
+    };
     use crate::key_carriers::KeyCarrier;
     use crate::ports::{SnapshotCatalog, SnapshotContentStore};
-    use crate::workspace_overlay::RefreshMode;
     use crate::workspace_roots::{FileKey, CONFIGURATION_ROOT_ID};
     use crate::{BaselineRef, CorpusId, Document, IndexedDocument, SearchError, Snapshot};
     use std::collections::HashMap;
     use std::collections::HashSet;
     use std::fs;
+    use std::ops::ControlFlow;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn workspace_apply_n_plus_one_rows_use_two_fenced_transactions() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute("CREATE TABLE applied (value INTEGER NOT NULL)", []).unwrap();
+        let rows: Vec<usize> = (0..=WORKSPACE_APPLY_BATCH_ROWS).collect();
+        let mut admissions = 0;
+        let mut apply = |operation: &mut dyn FnMut() -> Result<(), SearchError>| {
+            admissions += 1;
+            FenceOutcome::Applied(operation())
+        };
+
+        for batch in rows.chunks(WORKSPACE_APPLY_BATCH_ROWS) {
+            let outcome = SearchEngine::fenced_value(&mut apply, || {
+                let transaction = connection.unchecked_transaction()?;
+                for value in batch {
+                    transaction.execute(
+                        "INSERT INTO applied (value) VALUES (?1)",
+                        rusqlite::params![*value as i64],
+                    )?;
+                }
+                transaction.commit()?;
+                Ok(())
+            })
+            .unwrap();
+            assert!(matches!(outcome, FenceOutcome::Applied(())));
+        }
+
+        assert_eq!(admissions, 2);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM applied", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            (WORKSPACE_APPLY_BATCH_ROWS + 1) as i64
+        );
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn checkpointed_atomic_transaction_rolls_back_at_batch_boundary() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute("CREATE TABLE applied (value INTEGER NOT NULL)", []).unwrap();
+        let mut admissions = 0;
+        let mut checkpoints = 0;
+        let mut apply = |operation: &mut dyn FnMut(
+            &mut dyn FnMut() -> ControlFlow<()>,
+        )
+            -> ControlFlow<(), Result<(), SearchError>>| {
+            admissions += 1;
+            let mut checkpoint = || {
+                checkpoints += 1;
+                ControlFlow::Break(())
+            };
+            match operation(&mut checkpoint) {
+                ControlFlow::Break(()) => FenceOutcome::Terminal,
+                ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+            }
+        };
+
+        let outcome = SearchEngine::fenced_checkpointed_value(&mut apply, |checkpoint| {
+            let transaction = connection.unchecked_transaction().unwrap();
+            for value in 0..=WORKSPACE_APPLY_BATCH_ROWS {
+                transaction
+                    .execute(
+                        "INSERT INTO applied (value) VALUES (?1)",
+                        rusqlite::params![value as i64],
+                    )
+                    .unwrap();
+                if (value + 1) % WORKSPACE_APPLY_BATCH_ROWS == 0 && checkpoint().is_break() {
+                    return ControlFlow::Break(());
+                }
+            }
+            transaction.commit().unwrap();
+            ControlFlow::Continue(Ok(()))
+        })
+        .unwrap();
+
+        assert!(matches!(outcome, FenceOutcome::Terminal));
+        assert_eq!(admissions, 1);
+        assert_eq!(checkpoints, 1);
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM applied", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "dropping the interrupted transaction rolls back every row"
+        );
+    }
+
+    #[test]
+    fn fused_file_rolls_back_hash_and_all_chunks_at_the_64_chunk_checkpoint() {
+        let dir = tempdir().unwrap();
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let key = FileKey::configuration("Module.bsl");
+        let old = crate::Chunk {
+            kind: code_chunk::ChunkKind::Procedure,
+            name: "Старая".to_owned(),
+            is_export: true,
+            annotations: Vec::new(),
+            line_start: 1,
+            line_end: 2,
+            text: "Процедура Старая() Экспорт\nКонецПроцедуры".to_owned(),
+        };
+        engine.ingest_fused_file(&key, b"old", &[old], &[None]).unwrap();
+
+        let chunks: Vec<_> = (0..=WORKSPACE_APPLY_BATCH_ROWS)
+            .map(|index| crate::Chunk {
+                kind: code_chunk::ChunkKind::Procedure,
+                name: format!("Новая{index}"),
+                is_export: true,
+                annotations: Vec::new(),
+                line_start: index as u32 * 2 + 1,
+                line_end: index as u32 * 2 + 2,
+                text: format!("Процедура Новая{index}() Экспорт\nКонецПроцедуры"),
+            })
+            .collect();
+        let contexts = vec![None; chunks.len()];
+        let mut checkpoints = 0;
+        let cancelled =
+            engine.ingest_fused_file_checkpointed(&key, b"new", &chunks, &contexts, &mut || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            });
+        assert!(cancelled.is_break());
+        assert_eq!(checkpoints, 2, "initial admission plus the 64-chunk heartbeat");
+        assert_eq!(
+            engine.store().file_hash(&key.root_id, &key.path).unwrap(),
+            Some(b"old".to_vec())
+        );
+        assert_eq!(engine.chunk_count().unwrap(), 1);
+        assert_eq!(engine.text_search("Старая", 10, Some("code")).unwrap().len(), 1);
+        assert!(engine.text_search("Новая64", 10, Some("code")).unwrap().is_empty());
+
+        let mut permit = || ControlFlow::Continue(());
+        assert!(matches!(
+            engine.ingest_fused_file_checkpointed(&key, b"new", &chunks, &contexts, &mut permit,),
+            ControlFlow::Continue(Ok(()))
+        ));
+        assert_eq!(
+            engine.store().file_hash(&key.root_id, &key.path).unwrap(),
+            Some(b"new".to_vec())
+        );
+        assert_eq!(engine.chunk_count().unwrap(), WORKSPACE_APPLY_BATCH_ROWS + 1);
+        assert!(engine.text_search("Старая", 10, Some("code")).unwrap().is_empty());
+        assert_eq!(engine.text_search("Новая64", 10, Some("code")).unwrap().len(), 1);
+    }
 
     #[derive(Default)]
     struct TestCatalog {
@@ -3426,6 +4898,666 @@ mod tests {
         ) -> Result<Vec<IndexedDocument>, SearchError> {
             Ok(self.documents.get(&snapshot.id.0).cloned().unwrap_or_default())
         }
+    }
+
+    #[test]
+    fn workspace_constructor_publish_fence() {
+        use crate::{
+            Chunk, ChunkKind, EmbedderConfig, EmbeddingExecutionPolicy, SearchConfig, Store,
+        };
+        use std::cell::Cell;
+
+        fn config(dim: usize) -> SearchConfig {
+            SearchConfig {
+                embedder: EmbedderConfig { dim: Some(dim), ..EmbedderConfig::default() },
+                execution: EmbeddingExecutionPolicy::default(),
+            }
+        }
+
+        fn seed(db_path: &std::path::Path, dim: usize) {
+            let mut store = Store::open(db_path).unwrap();
+            let chunk = Chunk {
+                kind: ChunkKind::Procedure,
+                name: "Процедура".to_owned(),
+                is_export: true,
+                annotations: Vec::new(),
+                line_start: 1,
+                line_end: 2,
+                text: "Процедура Процедура()\nКонецПроцедуры".to_owned(),
+            };
+            store
+                .reindex_file(
+                    crate::workspace_roots::CONFIGURATION_ROOT_ID,
+                    "Module.bsl",
+                    b"hash",
+                    &[chunk],
+                    Some(&[vec![1.0; dim]]),
+                )
+                .unwrap();
+        }
+
+        fn sibling(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+            let mut value = path.as_os_str().to_os_string();
+            value.push(suffix);
+            value.into()
+        }
+
+        fn prepared_temps(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+            let name = path.file_name().unwrap().to_string_lossy();
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|candidate| {
+                    let candidate = candidate.file_name().unwrap().to_string_lossy();
+                    candidate.starts_with(name.as_ref()) && candidate.contains(".tmp-")
+                })
+                .collect()
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn run_apply(
+            apply: &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>,
+        ) -> FenceOutcome<Result<(), SearchError>> {
+            CONSTRUCTOR_APPLY_ACTIVE.with(|active| {
+                assert!(!active.replace(true));
+                let mut checkpoint = || ControlFlow::Continue(());
+                let result = match apply(&mut checkpoint) {
+                    ControlFlow::Continue(result) => result,
+                    ControlFlow::Break(()) => unreachable!("permit checkpoint cannot cancel"),
+                };
+                active.set(false);
+                FenceOutcome::Applied(result)
+            })
+        }
+
+        let dir = tempdir().unwrap();
+
+        // Refusing the first group neither creates nor migrates a store.
+        let refused_open = dir.path().join("refused-open.db");
+        assert!(matches!(
+            SearchEngine::fts_only_fenced(&refused_open, |_| FenceOutcome::TransientRefusal)
+                .unwrap(),
+            FenceOutcome::TransientRefusal
+        ));
+        assert!(!refused_open.exists());
+
+        // FTS is its own group in the overlay constructor. The refused rebuild leaves the
+        // deliberately emptied FTS table untouched.
+        let refused_fts = dir.path().join("refused-fts.db");
+        seed(&refused_fts, 8);
+        rusqlite::Connection::open(&refused_fts)
+            .unwrap()
+            .execute("DELETE FROM chunks_fts", [])
+            .unwrap();
+        let calls = Cell::new(0usize);
+        let overlay =
+            SearchEngine::semantic_overlay_only_fenced(&refused_fts, config(8), |apply| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    run_apply(apply)
+                } else {
+                    FenceOutcome::Terminal
+                }
+            })
+            .unwrap();
+        assert!(matches!(overlay, FenceOutcome::Terminal));
+        assert_eq!(calls.get(), 2);
+        assert_eq!(Store::open_existing(&refused_fts).unwrap().fts_count().unwrap(), 0);
+
+        // A semantic constructor builds HNSW between callbacks. The thread-local assertion in
+        // `load_or_build_index_unpublished` proves the build does not run while `run_apply` marks
+        // the callback active; refusing the following sidecar group publishes neither artifact.
+        let refused_sidecar = dir.path().join("refused-sidecar.db");
+        seed(&refused_sidecar, 8);
+        let calls = Cell::new(0usize);
+        let semantic = SearchEngine::new_fenced(&refused_sidecar, config(8), |apply| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                #[cfg(not(windows))]
+                assert_eq!(prepared_temps(&refused_sidecar).len(), 2);
+                FenceOutcome::TransientRefusal
+            } else {
+                run_apply(apply)
+            }
+        })
+        .unwrap();
+        assert!(matches!(semantic, FenceOutcome::TransientRefusal));
+        assert_eq!(calls.get(), 2);
+        assert!(!sibling(&refused_sidecar, ".usearch").exists());
+        assert!(!sibling(&refused_sidecar, ".usearch.json").exists());
+        assert!(prepared_temps(&refused_sidecar).is_empty());
+
+        // A database change after prepare is an operation error, not a lease refusal or a stale
+        // sidecar publication.
+        let changed_baseline = dir.path().join("changed-baseline.db");
+        seed(&changed_baseline, 8);
+        let calls = Cell::new(0usize);
+        let sidecar_prepared = Cell::new(false);
+        let changed = SearchEngine::new_fenced(&changed_baseline, config(8), |apply| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                sidecar_prepared.set(!prepared_temps(&changed_baseline).is_empty());
+                rusqlite::Connection::open(&changed_baseline)
+                    .unwrap()
+                    .execute(
+                        "UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'embedding_generation'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            run_apply(apply)
+        });
+        if sidecar_prepared.get() {
+            assert!(changed.is_err());
+        }
+        assert!(!sibling(&changed_baseline, ".usearch.json").exists());
+
+        // All three modes admit successfully with the same callback contract.
+        assert!(matches!(
+            SearchEngine::fts_only_fenced(&dir.path().join("fts.db"), run_apply).unwrap(),
+            FenceOutcome::Applied(_)
+        ));
+        assert!(matches!(
+            SearchEngine::semantic_overlay_only_fenced(
+                &dir.path().join("overlay.db"),
+                config(8),
+                run_apply,
+            )
+            .unwrap(),
+            FenceOutcome::Applied(_)
+        ));
+        assert!(matches!(
+            SearchEngine::new_fenced(&dir.path().join("semantic.db"), config(8), run_apply)
+                .unwrap(),
+            FenceOutcome::Applied(_)
+        ));
+
+        // An admitted operation error remains `Err`, never a callback refusal.
+        let missing_parent = dir.path().join("missing").join("error.db");
+        assert!(SearchEngine::fts_only_fenced(&missing_parent, run_apply).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn embedding_publish_fence() {
+        use crate::{
+            Chunk, ChunkKind, EmbedderConfig, EmbeddingExecutionPolicy, SearchConfig, Store,
+        };
+        use std::io::{Read, Write};
+
+        fn server(
+            calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            max_active: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+        ) -> String {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let Ok(mut stream) = stream else { continue };
+                    let calls = std::sync::Arc::clone(&calls);
+                    let active = std::sync::Arc::clone(&active);
+                    let max_active = max_active.clone();
+                    std::thread::spawn(move || {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let mut bytes = Vec::new();
+                        let mut buffer = [0u8; 2048];
+                        loop {
+                            let read = stream.read(&mut buffer).unwrap_or(0);
+                            if read == 0 {
+                                break;
+                            }
+                            bytes.extend_from_slice(&buffer[..read]);
+                            let Some(split) =
+                                bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                            else {
+                                continue;
+                            };
+                            let headers = String::from_utf8_lossy(&bytes[..split]).to_lowercase();
+                            let length = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if bytes.len() >= split + 4 + length {
+                                break;
+                            }
+                        }
+                        let split =
+                            bytes.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+                        let input_count =
+                            serde_json::from_slice::<serde_json::Value>(&bytes[split + 4..])
+                                .unwrap()["input"]
+                                .as_array()
+                                .unwrap()
+                                .len();
+                        if let Some(max_active) = max_active.as_ref() {
+                            let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            max_active.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                        }
+                        let data: Vec<_> = (0..input_count)
+                        .map(|index| serde_json::json!({"index": index, "embedding": [1.0, 0.0, 0.0]}))
+                        .collect();
+                        let body = serde_json::json!({"data": data}).to_string();
+                        write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .unwrap();
+                        if max_active.is_some() {
+                            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    });
+                }
+            });
+            format!("http://{address}")
+        }
+
+        fn seed(path: &Path, files: usize) {
+            let mut store = Store::open(path).unwrap();
+            for index in 0..files {
+                let name = format!("П{index}");
+                let chunk = Chunk {
+                    kind: ChunkKind::Procedure,
+                    name: name.clone(),
+                    is_export: false,
+                    annotations: Vec::new(),
+                    line_start: 1,
+                    line_end: 2,
+                    text: format!("Процедура {name}()\nКонецПроцедуры"),
+                };
+                store
+                    .reindex_file(
+                        CONFIGURATION_ROOT_ID,
+                        &format!("M{index}.bsl"),
+                        name.as_bytes(),
+                        &[chunk],
+                        None,
+                    )
+                    .unwrap();
+            }
+        }
+
+        fn sidecar(path: &Path) -> PathBuf {
+            let mut value = path.as_os_str().to_os_string();
+            value.push(".usearch.json");
+            value.into()
+        }
+
+        fn prepared_temps(path: &Path) -> Vec<PathBuf> {
+            let name = path.file_name().unwrap().to_string_lossy();
+            let mut paths: Vec<_> = fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|candidate| {
+                    let candidate = candidate.file_name().unwrap().to_string_lossy();
+                    candidate.starts_with(name.as_ref()) && candidate.contains(".tmp-")
+                })
+                .collect();
+            paths.sort();
+            paths
+        }
+
+        let network_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let config = SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: server(std::sync::Arc::clone(&network_calls), None),
+                model: "test".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: EmbeddingExecutionPolicy {
+                batch_size: 2,
+                concurrency: 1,
+                progress_interval: 1,
+            },
+        };
+        let dir = tempdir().unwrap();
+
+        let created = dir.path().join("created-by-wrapper.db");
+        assert!(
+            !created.exists()
+                && SearchEngine::embed_pending_chunks_standalone(&created, &config, None, None)
+                    .unwrap()
+                    .is_empty()
+                && created.exists(),
+            "the direct compatibility wrapper still creates and initializes its database"
+        );
+
+        let wrapper = dir.path().join("wrapper.db");
+        seed(&wrapper, 2);
+        assert_eq!(
+            SearchEngine::embed_pending_chunks_standalone(&wrapper, &config, None, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(Store::open_existing(&wrapper)
+            .unwrap()
+            .load_pending_embedding_documents("code")
+            .unwrap()
+            .is_empty());
+
+        let parallel_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let parallel_config = SearchConfig {
+            embedder: EmbedderConfig {
+                base_url: server(
+                    std::sync::Arc::clone(&parallel_calls),
+                    Some(std::sync::Arc::clone(&max_active)),
+                ),
+                model: "parallel-test".to_owned(),
+                dim: Some(3),
+                api_key: None,
+                provider: None,
+            },
+            execution: EmbeddingExecutionPolicy {
+                batch_size: 1,
+                concurrency: 2,
+                progress_interval: 1,
+            },
+        };
+        let parallel = dir.path().join("parallel-direct.db");
+        seed(&parallel, 2);
+        SearchEngine::embed_pending_chunks_standalone(&parallel, &parallel_config, None, None)
+            .unwrap();
+        assert_eq!(parallel_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::SeqCst) > 1,
+            "the direct non-fenced path preserves configured concurrency"
+        );
+
+        let stop = || false;
+        assert!(matches!(
+            SearchEngine::embed_pending_chunks_fenced(
+                &wrapper,
+                &config,
+                None,
+                Some(&stop),
+                |operation| FenceOutcome::Applied(operation()),
+            )
+            .unwrap(),
+            FenceOutcome::Terminal
+        ));
+        assert_eq!(
+            SearchEngine::embed_pending_chunks_standalone(&wrapper, &config, None, Some(&stop),)
+                .unwrap()
+                .len(),
+            2,
+            "the direct wrapper preserves its partial-index return contract on stop"
+        );
+
+        let preflight_refused = dir.path().join("preflight-refused.db");
+        seed(&preflight_refused, 2);
+        let before = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            SearchEngine::embed_pending_chunks_fenced(
+                &preflight_refused,
+                &config,
+                None,
+                None,
+                |_| FenceOutcome::TransientRefusal,
+            )
+            .unwrap(),
+            FenceOutcome::TransientRefusal
+        ));
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a refused fresh collection preflight performs no network call"
+        );
+
+        let refused_batch = dir.path().join("refused-batch.db");
+        seed(&refused_batch, 4);
+        let mut calls = 0;
+        let result = SearchEngine::embed_pending_chunks_fenced(
+            &refused_batch,
+            &config,
+            None,
+            None,
+            |operation| {
+                calls += 1;
+                if calls == 1 {
+                    FenceOutcome::Applied(operation())
+                } else {
+                    FenceOutcome::TransientRefusal
+                }
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, FenceOutcome::TransientRefusal));
+        assert_eq!(calls, 2);
+        assert_eq!(
+            Store::open_existing(&refused_batch)
+                .unwrap()
+                .load_pending_embedding_documents("code")
+                .unwrap()
+                .len(),
+            4,
+            "the paid batch remains pending when its first commit is refused"
+        );
+
+        let retried_batch = dir.path().join("retried-batch.db");
+        seed(&retried_batch, 2);
+        let before = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let mut admissions = 0;
+        let mut retries = 0;
+        let result = SearchEngine::embed_pending_chunks_fenced_retrying(
+            &retried_batch,
+            &config,
+            None,
+            None,
+            |operation| {
+                admissions += 1;
+                if admissions == 2 {
+                    FenceOutcome::TransientRefusal
+                } else {
+                    FenceOutcome::Applied(operation())
+                }
+            },
+            || {
+                retries += 1;
+                true
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, FenceOutcome::Applied(_)));
+        assert_eq!(retries, 1);
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "retrying a refused SQLite commit must not repeat its paid network batch"
+        );
+
+        let retried_sidecar = dir.path().join("retried-sidecar.db");
+        seed(&retried_sidecar, 2);
+        let before = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let mut admissions = 0;
+        let mut retries = 0;
+        let mut refused_temps = Vec::new();
+        let result = SearchEngine::embed_pending_chunks_fenced_retrying(
+            &retried_sidecar,
+            &config,
+            None,
+            None,
+            |operation| {
+                admissions += 1;
+                if admissions == 3 {
+                    refused_temps = prepared_temps(&retried_sidecar);
+                    assert_eq!(refused_temps.len(), 2);
+                    FenceOutcome::TransientRefusal
+                } else {
+                    if admissions == 4 {
+                        assert_eq!(prepared_temps(&retried_sidecar), refused_temps);
+                    }
+                    FenceOutcome::Applied(operation())
+                }
+            },
+            || {
+                retries += 1;
+                true
+            },
+        )
+        .unwrap();
+        assert!(matches!(result, FenceOutcome::Applied(_)));
+        assert_eq!(retries, usize::from(!cfg!(windows)));
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "retrying the prepared final bundle must not repeat network work"
+        );
+        #[cfg(not(windows))]
+        assert!(sidecar(&retried_sidecar).exists());
+        assert!(prepared_temps(&retried_sidecar).is_empty());
+
+        let refused_sidecar = dir.path().join("refused-sidecar.db");
+        seed(&refused_sidecar, 4);
+        let mut calls = 0;
+        let result = SearchEngine::embed_pending_chunks_fenced(
+            &refused_sidecar,
+            &config,
+            None,
+            None,
+            |operation| {
+                calls += 1;
+                if calls < 5 {
+                    FenceOutcome::Applied(operation())
+                } else {
+                    FenceOutcome::Terminal
+                }
+            },
+        )
+        .unwrap();
+        #[cfg(not(windows))]
+        assert!(matches!(result, FenceOutcome::Terminal));
+        #[cfg(windows)]
+        assert!(matches!(result, FenceOutcome::Applied(_)));
+        assert_eq!(calls, if cfg!(windows) { 4 } else { 5 });
+        assert!(Store::open_existing(&refused_sidecar)
+            .unwrap()
+            .load_pending_embedding_documents("code")
+            .unwrap()
+            .is_empty());
+        assert!(!sidecar(&refused_sidecar).exists());
+
+        let refused_overlay = dir.path().join("refused-overlay");
+        fs::create_dir(&refused_overlay).unwrap();
+        fs::write(refused_overlay.join("Changed.bsl"), "Процедура Измененная()\nКонецПроцедуры")
+            .unwrap();
+        let overlay_db = refused_overlay.join("search.db");
+        Store::open(&overlay_db)
+            .unwrap()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "baseline".to_owned(),
+                snapshot_fingerprint: None,
+                files: Vec::new(),
+            })
+            .unwrap();
+        let roots = crate::WorkspaceRoots::build(&refused_overlay, &refused_overlay, &[]).0;
+        let before = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let result = SearchEngine::prime_workspace_overlay_standalone(
+            &overlay_db,
+            config.embedder.clone(),
+            &roots,
+            std::collections::HashMap::new(),
+            None,
+            &|| true,
+            |_| FenceOutcome::TransientRefusal,
+            &std::collections::HashSet::new(),
+        );
+        assert!(matches!(result.unwrap(), FenceOutcome::TransientRefusal));
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "a refused fresh overlay preflight performs no network call"
+        );
+        assert!(Store::open_existing(&overlay_db)
+            .unwrap()
+            .load_overlay_embedding_cache("test", 3)
+            .unwrap()
+            .is_empty());
+
+        let before = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let mut admissions = 0;
+        let mut retries = 0;
+        let primed = SearchEngine::prime_workspace_overlay_standalone_retrying(
+            &overlay_db,
+            config.embedder.clone(),
+            &roots,
+            std::collections::HashMap::new(),
+            None,
+            &|| true,
+            |operation| {
+                admissions += 1;
+                if admissions == 2 {
+                    FenceOutcome::TransientRefusal
+                } else {
+                    FenceOutcome::Applied(operation())
+                }
+            },
+            &std::collections::HashSet::new(),
+            || {
+                retries += 1;
+                true
+            },
+        )
+        .unwrap();
+        let FenceOutcome::Applied((plan, embeddings)) = primed else {
+            panic!("the retained overlay batch must commit on retry")
+        };
+        assert_eq!(retries, 1);
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1,
+            "retrying the refused overlay cache commit retains its paid batch"
+        );
+
+        let mut overlay_engine = SearchEngine::fts_only(&overlay_db).unwrap();
+        overlay_engine.initialize_workspace_roots(roots).unwrap();
+        overlay_engine.set_serves_external_baseline(true).unwrap();
+        let baseline = overlay_engine.workspace_overlay_publication_baseline().unwrap();
+        let mut staged = overlay_engine
+            .stage_workspace_overlay_publication(plan, embeddings, &baseline)
+            .unwrap();
+        let after_phase_b = network_calls.load(std::sync::atomic::Ordering::SeqCst);
+        let mut refuse_once = true;
+        let mut publish =
+            |operation: &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>| {
+                if std::mem::take(&mut refuse_once) {
+                    FenceOutcome::TransientRefusal
+                } else {
+                    SearchEngine::permit_checkpointed_apply(operation)
+                }
+            };
+        assert!(matches!(
+            SearchEngine::fenced_checkpointed_value(&mut publish, |checkpoint| {
+                overlay_engine.apply_staged_workspace_overlay_publication(&mut staged, checkpoint)
+            })
+            .unwrap(),
+            FenceOutcome::TransientRefusal
+        ));
+        assert!(matches!(
+            SearchEngine::fenced_checkpointed_value(&mut publish, |checkpoint| {
+                overlay_engine.apply_staged_workspace_overlay_publication(&mut staged, checkpoint)
+            })
+            .unwrap(),
+            FenceOutcome::Applied(super::PublishOutcome::Applied { .. })
+        ));
+        assert_eq!(
+            network_calls.load(std::sync::atomic::Ordering::SeqCst),
+            after_phase_b,
+            "retrying the staged Phase C bundle performs no network call"
+        );
     }
 
     #[test]
@@ -3792,6 +5924,89 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_overlay_phase_c_rolls_back_and_retries_the_same_bundle() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path();
+        let mut manifest = HashMap::new();
+        let mut manifest_files = Vec::new();
+        for index in 0..=WORKSPACE_APPLY_BATCH_ROWS {
+            let path = format!("M{index}.bsl");
+            fs::write(
+                workspace.join(&path),
+                format!("Процедура Локальная{index}()\nКонецПроцедуры"),
+            )
+            .unwrap();
+            let key = FileKey::configuration(&path);
+            manifest.insert(key, "remote-version".to_owned());
+            manifest_files.push(crate::BaselineManifestFile {
+                root_id: CONFIGURATION_ROOT_ID.to_owned(),
+                collection: "code".to_owned(),
+                path,
+                file_fingerprint: "remote-version".to_owned(),
+                document_count: 1,
+                file_object_id: format!("object-{index}"),
+            });
+        }
+        let mut engine = SearchEngine::fts_only(&workspace.join("search.db")).unwrap();
+        let roots = crate::WorkspaceRoots::build(workspace, workspace, &[]).0;
+        engine.initialize_workspace_roots(roots.clone()).unwrap();
+        engine
+            .store()
+            .save_baseline_manifest(&crate::WorkspaceBaselineManifest {
+                snapshot_id: "snap".to_owned(),
+                snapshot_fingerprint: Some("fingerprint".to_owned()),
+                files: manifest_files,
+            })
+            .unwrap();
+        engine.set_serves_external_baseline(true).unwrap();
+        let baseline = engine.workspace_overlay_publication_baseline().unwrap();
+        let plan =
+            crate::workspace_overlay::WorkspaceOverlayCache::plan_full_refresh_from_manifest(
+                &manifest,
+                &roots,
+                engine.store(),
+                &HashMap::new(),
+                None,
+                baseline.distrusted(),
+            )
+            .unwrap();
+        let cache_before = engine.workspace_overlay_stats().unwrap();
+        let mut prepared =
+            engine.stage_workspace_overlay_publication(plan, HashMap::new(), &baseline).unwrap();
+
+        let mut checkpoints = 0;
+        assert!(engine
+            .apply_staged_workspace_overlay_publication(&mut prepared, &mut || {
+                checkpoints += 1;
+                if checkpoints == 2 {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .is_break());
+        assert_eq!(checkpoints, 2);
+        assert_eq!(engine.workspace_overlay_stats().unwrap(), cache_before);
+        assert!(engine
+            .store()
+            .load_overlay_fingerprint_cache("snap")
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+
+        let mut permit = || ControlFlow::Continue(());
+        assert!(matches!(
+            engine.apply_staged_workspace_overlay_publication(&mut prepared, &mut permit),
+            ControlFlow::Continue(Ok(super::PublishOutcome::Applied { overlay_files, .. }))
+                if overlay_files == WORKSPACE_APPLY_BATCH_ROWS + 1
+        ));
+        assert_eq!(
+            engine.store().load_overlay_fingerprint_cache("snap").unwrap().unwrap().len(),
+            WORKSPACE_APPLY_BATCH_ROWS + 1
+        );
+    }
+
+    #[test]
     fn interactive_overlay_semantic_does_not_embed_overlay_chunks_when_vectors_absent() {
         use crate::embedder::EmbedderConfig;
         use std::time::{Duration, Instant};
@@ -3959,6 +6174,124 @@ mod tests {
         let pending = engine.store().load_pending_embedding_documents("code").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1.symbol_name, "Изменённая");
+    }
+
+    #[test]
+    #[allow(clippy::type_complexity)]
+    fn fenced_context_refresh_preserves_completed_batch_and_clears_mark_only_after_retry() {
+        use crate::{Chunk, ChunkKind, Store};
+
+        struct NewContext;
+        impl crate::ports::GraphContextProvider for NewContext {
+            fn graph_context(&self, _rel: &str, _symbol: &str, _kind: &str) -> Option<String> {
+                Some("new context".to_owned())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("bsl-search.db");
+        let chunks: Vec<_> = (0..=WORKSPACE_APPLY_BATCH_ROWS)
+            .map(|index| Chunk {
+                kind: ChunkKind::Procedure,
+                name: format!("P{index}"),
+                is_export: true,
+                annotations: vec![],
+                line_start: index as u32,
+                line_end: index as u32 + 1,
+                text: format!("Procedure P{index}()\nEndProcedure"),
+            })
+            .collect();
+        let embeddings = vec![vec![1.0f32, 0.0, 0.0]; chunks.len()];
+        let contexts = vec![Some("old context".to_owned()); chunks.len()];
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    CONFIGURATION_ROOT_ID,
+                    "Owned.bsl",
+                    b"hash",
+                    &chunks,
+                    Some(&embeddings),
+                    Some(&contexts),
+                )
+                .unwrap();
+        }
+        let engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.store().mark_context_dirty("code", CONFIGURATION_ROOT_ID, "Owned.bsl").unwrap();
+
+        let mut admissions = 0;
+        let mut checkpoints = 0;
+        let mut virtual_now = 0u64;
+        let mut heartbeat = 0u64;
+        const VIRTUAL_STALE_AFTER: u64 = 60;
+        let mut stop_before_second =
+            |operation: &mut dyn FnMut(
+                &mut dyn FnMut() -> ControlFlow<()>,
+            ) -> ControlFlow<(), Result<(), SearchError>>| {
+                admissions += 1;
+                assert!(
+                    virtual_now - heartbeat <= VIRTUAL_STALE_AFTER,
+                    "the refreshed heartbeat keeps the live owner admissible"
+                );
+                if admissions == 2 {
+                    return FenceOutcome::Terminal;
+                }
+                let mut checkpoint = || {
+                    checkpoints += 1;
+                    virtual_now += 31;
+                    heartbeat = virtual_now;
+                    ControlFlow::Continue(())
+                };
+                match operation(&mut checkpoint) {
+                    ControlFlow::Break(()) => FenceOutcome::Terminal,
+                    ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+                }
+            };
+        let (partial, outcome) = engine
+            .refresh_dirty_contexts_fenced(&NewContext, i64::MAX, false, &mut stop_before_second)
+            .unwrap();
+        assert!(matches!(outcome, FenceOutcome::Terminal));
+        assert_eq!(admissions, 2, "65 chunk writes require a second fence");
+        assert_eq!(checkpoints, 2, "the committed batch heartbeats before and after its write");
+        assert!(virtual_now > VIRTUAL_STALE_AFTER, "the virtual refresh exceeds stale interval");
+        assert_eq!(partial.chunks_updated, WORKSPACE_APPLY_BATCH_ROWS);
+        assert_eq!(partial.paths_cleared, 0);
+        assert_eq!(
+            engine.store().load_pending_embedding_documents("code").unwrap().len(),
+            WORKSPACE_APPLY_BATCH_ROWS,
+            "the completed batch remains visible"
+        );
+        assert!(
+            engine
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&FileKey::configuration("Owned.bsl")),
+            "the path mark survives until its last chunk is committed"
+        );
+
+        let mut retry_admissions = 0;
+        let mut retry = |operation: &mut dyn FnMut(
+            &mut dyn FnMut() -> ControlFlow<()>,
+        )
+            -> ControlFlow<(), Result<(), SearchError>>| {
+            retry_admissions += 1;
+            let mut checkpoint = || ControlFlow::Continue(());
+            match operation(&mut checkpoint) {
+                ControlFlow::Break(()) => FenceOutcome::Terminal,
+                ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+            }
+        };
+        let (completed, outcome) =
+            engine.refresh_dirty_contexts_fenced(&NewContext, i64::MAX, false, &mut retry).unwrap();
+        assert!(matches!(outcome, FenceOutcome::Applied(())));
+        assert_eq!(retry_admissions, 1, "the retry writes only the unfinished tail and clear");
+        assert_eq!(completed.chunks_updated, 1);
+        assert_eq!(completed.paths_cleared, 1);
+        assert!(engine.context_dirty_paths("code").unwrap().is_empty());
+        assert_eq!(
+            engine.store().load_pending_embedding_documents("code").unwrap().len(),
+            WORKSPACE_APPLY_BATCH_ROWS + 1
+        );
     }
 
     /// A render FAILURE (transient — the graph DB could not be read) must NOT clear the
@@ -4350,7 +6683,7 @@ mod tests {
         engine.set_workspace_root(workspace);
         engine.initialize_workspace_overlay_clean().unwrap();
         assert!(engine.mark_workspace_path_dirty(&file).unwrap());
-        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine.refresh_workspace_overlay_snapshot(false).unwrap();
 
         let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {}));
@@ -4534,7 +6867,7 @@ mod tests {
         engine.set_workspace_root(workspace);
         engine.initialize_workspace_overlay_clean().unwrap();
         assert!(engine.mark_workspace_path_dirty(&file).unwrap());
-        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine.refresh_workspace_overlay_snapshot(false).unwrap();
         let key = FileKey::configuration("AfterBoot.bsl");
         assert_eq!(engine.file_count().unwrap(), 0, "no boot walk ever wrote a row");
         assert!(
@@ -4677,7 +7010,7 @@ mod tests {
         let live = workspace.join("Dir/Live.bsl");
         fs::write(&live, "Процедура Живая()\nКонецПроцедуры").unwrap();
         assert!(engine.mark_workspace_path_dirty(&live).unwrap());
-        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine.refresh_workspace_overlay_snapshot(false).unwrap();
         engine
             .store()
             .save_overlay_fingerprint_cache(
@@ -4813,7 +7146,7 @@ mod tests {
             fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
             return;
         }
-        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine.refresh_workspace_overlay_snapshot(false).unwrap();
         fs::set_permissions(&unread, fs::Permissions::from_mode(0o644)).unwrap();
 
         let key = FileKey::configuration("Dir/Unread.bsl");
@@ -4978,7 +7311,7 @@ mod tests {
         // A clean full pass over a tree the file has left: it hides the baseline key and
         // leaves the row exactly as it was.
         fs::remove_file(&file).unwrap();
-        engine.workspace_overlay_snapshot(RefreshMode::Embed).unwrap();
+        engine.refresh_workspace_overlay_snapshot(true).unwrap();
         assert!(
             engine.workspace_overlay_cache.lock().unwrap().hidden_keys().contains(&key),
             "the clean pass hid the vanished baseline key",
@@ -5006,7 +7339,7 @@ mod tests {
         engine.set_workspace_root(workspace);
         engine.initialize_workspace_overlay_clean().unwrap();
         assert!(engine.mark_workspace_path_dirty(&file).unwrap());
-        engine.workspace_overlay_snapshot(RefreshMode::ReuseOnly).unwrap();
+        engine.refresh_workspace_overlay_snapshot(false).unwrap();
         let key = FileKey::configuration("Alive.bsl");
 
         let present = HashSet::from([file.clone()]);
@@ -6370,6 +8703,71 @@ mod tests {
         assert_eq!(engine.vector_count(), vectors_before);
         assert_eq!(engine.file_count().unwrap(), 1, "the inserted extension row was rolled back");
         assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelled_root_transition_publishes_nothing_and_retries_the_same_staging() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+        fs::create_dir_all(extension_file.parent().unwrap()).unwrap();
+        let content = (0..=WORKSPACE_APPLY_BATCH_ROWS)
+            .map(|index| format!("Процедура Расширение{index}() Экспорт\nКонецПроцедуры\n"))
+            .collect::<String>();
+        fs::write(extension_file, content).unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial.clone()).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        let roots_before = engine.workspace_roots().cloned();
+        let files_before = engine.file_count().unwrap();
+        let vectors_before = engine.vector_count();
+        let cache_before = engine.workspace_overlay_stats().unwrap();
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let validated = engine
+            .workspace_roots_transition_seed(next)
+            .unwrap()
+            .plan()
+            .unwrap()
+            .revalidate()
+            .unwrap()
+            .unwrap();
+        let mut staged =
+            engine.stage_validated_workspace_roots_transition(validated).unwrap().unwrap();
+
+        let mut checkpoints = 0;
+        let outcome = engine.apply_staged_workspace_roots_transition(&mut staged, &mut || {
+            checkpoints += 1;
+            if checkpoints == 2 {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert!(outcome.is_break());
+        assert_eq!(checkpoints, 2, "the transaction checks again after one 64-row slice");
+        assert_eq!(engine.workspace_roots(), roots_before.as_ref());
+        assert_eq!(engine.file_count().unwrap(), files_before);
+        assert_eq!(engine.vector_count(), vectors_before);
+        assert_eq!(engine.workspace_overlay_stats().unwrap(), cache_before);
+        assert!(engine.text_search("Расширение64", 10, Some("code")).unwrap().is_empty());
+
+        let mut permit = || ControlFlow::Continue(());
+        assert!(matches!(
+            engine.apply_staged_workspace_roots_transition(&mut staged, &mut permit),
+            ControlFlow::Continue(Ok(super::WorkspaceRootsTransitionOutcome::Applied { .. }))
+        ));
+        assert_eq!(engine.file_count().unwrap(), files_before + 1);
+        assert_eq!(engine.text_search("Расширение64", 10, Some("code")).unwrap().len(), 1);
     }
 
     #[test]

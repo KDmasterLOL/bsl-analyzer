@@ -49,6 +49,11 @@ async fn client(root: &Path) -> Client {
 
 /// A workspace answer that has caught up with the watcher: polls until the tree is
 /// reported stale, or gives back the last answer for the assertion to fail on.
+///
+/// Gated like its only caller: the unreadable-file case it serves needs a permission bit
+/// Windows does not have, and an ungated helper is dead code there — which the mirror's
+/// Windows job, unlike ours, builds with warnings denied and so reports as an error.
+#[cfg(unix)]
 async fn workspace_until_stale(client: &Client) -> Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {

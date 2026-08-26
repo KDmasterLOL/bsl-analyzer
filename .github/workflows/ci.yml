@@ -48,6 +48,55 @@ jobs:
         run: cargo test -p mcp-server --test http
       - name: Broker runtime tests
         run: cargo test -p mcp-server --test broker
+      - name: Superseded workspace lease lifecycle
+        run: >-
+          cargo test -p mcp-server workspace_lease::tests::observed_foreign_owner_is_permanent &&
+          cargo test -p mcp-server workspace_lease::tests::publish_fence_latches_supersession &&
+          cargo test -p mcp-server workspace_lease::tests::observed_owner_race_cannot_reclaim &&
+          cargo test -p mcp-server workspace_lease::tests::transient_unclaimed_is_not_superseded &&
+          cargo test -p mcp-server workspace_lease::tests::non_witness_states_remain_reclaimable
+      - name: Fenced search construction and apply
+        run: >-
+          cargo test -p bsl-search engine::tests::workspace_constructor_publish_fence &&
+          cargo test -p mcp-server state::bootstrap::tests::startup_constructor_fence_distinguishes_retry_terminal_and_error &&
+          cargo test -p mcp-server state::bootstrap::tests::startup_metadata_fence_stops_after_takeover &&
+          cargo test -p mcp-server state::bootstrap::tests::startup_ingest_fence_does_not_repeat_preparation &&
+          cargo test -p mcp-server state::bootstrap::tests::superseded_bootstrap_stops_mutating &&
+          cargo test -p mcp-server state::sync::tests::superseded_daemon_cannot_mutate_shared_search &&
+          cargo test -p mcp-server search_code_does_not_write_after_supersession
+      - name: Terminal graph snapshot lifecycle
+        run: >-
+          cargo test -p mcp-server graph::state::tests::superseded_graph_never_adopts_or_reloads &&
+          cargo test -p mcp-server graph::state::tests::superseded_late_publish_is_fenced &&
+          cargo test -p mcp-server graph::build::tests::superseded_fused_writer_stops_mutating &&
+          cargo test -p mcp-server graph::build::tests::superseded_build_is_discarded_after_owner_release &&
+          cargo test -p mcp-server graph::snapshot::tests::superseded_graph_serves_only_preopened_snapshot &&
+          cargo test -p mcp-server graph::state::tests::superseded_status_truth_table &&
+          cargo test -p mcp-server graph_actions_fail_when_superseded_snapshot_is_gone
+      - name: Terminal retry embedding and broker lifecycle
+        run: >-
+          cargo test -p mcp-server state::overlay_retry::tests::observed_supersession_never_resumes &&
+          cargo test -p bsl-search engine::tests::embedding_publish_fence &&
+          cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession &&
+          cargo test -p mcp-server state::tests::terminal_supersession_is_not_transient_nonownership &&
+          cargo test -p mcp-server --test broker superseded_backend_lifecycle
+      - name: Workspace lease operation semantics portable regressions
+        run: >-
+          cargo test -p mcp-server workspace_lease::tests::release_during_checkpointed_callback_rolls_back_as_terminal -- --exact &&
+          cargo test -p mcp-server workspace_lease::tests::release_waits_for_only_the_admitted_batch_and_refuses_the_next -- --exact &&
+          cargo test -p mcp-server workspace_lease::tests::takeover_between_batches_preserves_the_first_and_terminates_the_next -- --exact &&
+          cargo test -p mcp-server state::bootstrap::tests::startup_constructor_fence_distinguishes_retry_terminal_and_error -- --exact &&
+          cargo test -p mcp-server state::sync::tests::background_snapshot_failures_require_rescan_instead_of_empty_xml_success -- --exact &&
+          cargo test -p mcp-server state::embed::tests::embedding_fence_distinguishes_retry_from_supersession -- --exact &&
+          cargo test -p mcp-server state::overlay_retry::tests::transient_budget_fails_once_ignores_active_kicks_and_rearms_on_new_drift -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::path_identity_detects_equal_size_and_time_replacement -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::final_install_rechecks_token_through_the_preopened_descriptor -- --exact &&
+          cargo test -p mcp-server graph::snapshot::tests::publication_without_a_complete_descriptor_pool_cannot_be_ready -- --exact &&
+          cargo test -p mcp-server graph::build::tests::incremental_publish_propagates_transient_refusal -- --exact &&
+          cargo test -p mcp-server graph::build::tests::fresh_and_cached_publication_paths_propagate_final_install_refusal -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::graph_handler_misses_immediately_when_preopened_handles_are_busy -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::resolve_names_misses_immediately_when_preopened_handles_are_busy -- --exact &&
+          cargo test -p mcp-server graph_supersession_contract::symbol_info_misses_immediately_when_preopened_handles_are_busy -- --exact
 
   partitioned-baseline-scale:
     name: Partitioned baseline 1.6M release gate

@@ -42,7 +42,7 @@ pub(super) fn write_common_module(root: &Path, name: &str, server: bool, body: &
     write(root, &format!("CommonModules/{name}/Ext/Module.bsl"), body);
 }
 
-pub(super) fn sample_workspace(root: &Path) {
+pub(crate) fn sample_workspace(root: &Path) {
     write_common_module(
         root,
         "Клиент",
@@ -52,8 +52,8 @@ pub(super) fn sample_workspace(root: &Path) {
     write_common_module(root, "Сервер", true, "&НаСервере\nФункция Считать() Экспорт КонецФункции");
 }
 
-pub(super) fn wait_ready(graph: &GraphState) {
-    for _ in 0..200 {
+pub(crate) fn wait_ready(graph: &GraphState) {
+    for _ in 0..1000 {
         match graph.status() {
             GraphStatus::Ready { .. } => return,
             GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),

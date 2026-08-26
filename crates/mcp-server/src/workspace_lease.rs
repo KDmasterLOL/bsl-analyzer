@@ -33,6 +33,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -49,15 +50,14 @@ use crate::cache::LEASE_LOCK_FILE;
 
 /// How often the owner restamps its record so the others can tell it is still alive.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-/// A record older than this is treated as abandoned, and a superseded daemon may take the
-/// workspace back. Comfortably above [`HEARTBEAT_INTERVAL`] so a loaded machine cannot make a
-/// live owner look dead; the cost of being wrong is bounded — the mistaken reclaim writes a
-/// higher generation, which demotes the original owner at its next check.
+/// A record older than this is treated as abandoned, and a daemon that has not observed a live
+/// foreign owner may take the workspace. Comfortably above [`HEARTBEAT_INTERVAL`] so a loaded
+/// machine cannot make a live owner look dead.
 const STALE_AFTER: Duration = Duration::from_secs(60);
 /// How long a cached ownership verdict is reused before the record is read again. Every gated
 /// write path consults the lease, so this keeps the check off the syscall path without letting
 /// a demotion go unnoticed for long.
-const VERDICT_TTL: Duration = Duration::from_secs(2);
+pub(crate) const VERDICT_TTL: Duration = Duration::from_secs(2);
 /// How long a claim waits for the lock file. The critical section is a read and one small
 /// write, so anything beyond this means a peer wedged holding the lock — give up on this
 /// attempt (the caller retries at its next check) rather than block a daemon's startup on it.
@@ -66,6 +66,13 @@ const LOCK_WAIT: Duration = Duration::from_secs(2);
 /// Generation of a lease that has not (yet) written a record: it owns nothing, and every
 /// ownership check retries the claim.
 const UNCLAIMED: u64 = 0;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LeaseOutcome<T> {
+    Applied(T),
+    TransientRefusal,
+    Terminal,
+}
 
 /// The on-disk record: who owns the workspace's derived caches, and since when.
 #[derive(Serialize, Deserialize)]
@@ -118,6 +125,9 @@ struct Inner {
     /// The token this daemon last wrote into the record; `0` while unclaimed.
     token: AtomicU64,
     owns: AtomicBool,
+    /// Set permanently after this lease, having owned the workspace, observes a live foreign
+    /// token. All clones share the verdict and never attempt to reclaim after it is set.
+    superseded: AtomicBool,
     /// Set by [`WorkspaceLease::release`] and never cleared: this process is going away, so it
     /// must not take the workspace back — a background pass still finishing during shutdown
     /// would otherwise see the record it just removed as "nobody owns this" and re-claim it.
@@ -134,6 +144,33 @@ impl WorkspaceLease {
     pub(crate) fn claim(workspace_root: &Path) -> Self {
         let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace_root);
         Self::claim_cache(&cache)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn while_cache_lock_held<T>(
+        cache: &crate::cache::WorkspaceCacheLayout,
+        run: impl FnOnce() -> T,
+    ) -> T {
+        cache.ensure().unwrap();
+        let _guard = LockGuard::acquire(&cache.lease_lock_path(), LOCK_WAIT).unwrap();
+        run()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_cache_lock_for(
+        cache: &crate::cache::WorkspaceCacheLayout,
+        duration: Duration,
+    ) -> std::thread::JoinHandle<()> {
+        cache.ensure().unwrap();
+        let path = cache.lease_lock_path();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _guard = LockGuard::acquire(&path, LOCK_WAIT).unwrap();
+            ready_tx.send(()).unwrap();
+            std::thread::sleep(duration);
+        });
+        ready_rx.recv().unwrap();
+        handle
     }
 
     /// Claim the derived caches rooted at `cache` for this process.
@@ -161,6 +198,7 @@ impl WorkspaceLease {
                 generation: AtomicU64::new(0),
                 token: AtomicU64::new(0),
                 owns: AtomicBool::new(true),
+                superseded: AtomicBool::new(false),
                 released: AtomicBool::new(false),
                 checked_at: Mutex::new(None),
             }),
@@ -178,6 +216,7 @@ impl WorkspaceLease {
             generation: AtomicU64::new(UNCLAIMED),
             token: AtomicU64::new(0),
             owns: AtomicBool::new(false),
+            superseded: AtomicBool::new(false),
             released: AtomicBool::new(false),
             checked_at: Mutex::new(None),
         });
@@ -202,6 +241,21 @@ impl WorkspaceLease {
     /// `false` when the lock, the predicate, or the write did not go through — the caller stays
     /// as it was (an unclaimed lease owns nothing) and tries again at its next check.
     fn take_generation(&self, claimable: impl Fn(Option<&LeaseRecord>) -> bool) -> bool {
+        let mut checked_at = lock_recover(&self.inner.checked_at);
+        self.take_generation_locked(&mut checked_at, claimable)
+    }
+
+    /// [`Self::take_generation`] with the process-local lifecycle lock already held.
+    fn take_generation_locked(
+        &self,
+        checked_at: &mut Option<Instant>,
+        claimable: impl Fn(Option<&LeaseRecord>) -> bool,
+    ) -> bool {
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
+            return false;
+        }
         let Some(path) = self.inner.path.as_deref() else {
             return false;
         };
@@ -236,7 +290,7 @@ impl WorkspaceLease {
         self.inner.generation.store(generation, Ordering::SeqCst);
         self.inner.token.store(token, Ordering::SeqCst);
         self.inner.owns.store(true, Ordering::SeqCst);
-        *lock_recover(&self.inner.checked_at) = Some(Instant::now());
+        *checked_at = Some(Instant::now());
         tracing::info!(
             generation,
             path = %path.display(),
@@ -248,28 +302,33 @@ impl WorkspaceLease {
     /// Whether this daemon may write the workspace's derived caches. The verdict is cached for
     /// [`VERDICT_TTL`], so gating a write path on it costs an atomic load in the common case.
     pub(crate) fn owns_caches(&self) -> bool {
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
+            return false;
+        }
         let Some(path) = self.inner.path.as_deref() else {
             return true;
         };
-        if self.inner.released.load(Ordering::SeqCst) {
+        let mut checked_at = lock_recover(&self.inner.checked_at);
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
             return false;
         }
-        {
-            let mut checked_at = lock_recover(&self.inner.checked_at);
-            match *checked_at {
-                Some(at) if at.elapsed() < VERDICT_TTL => {
-                    return self.inner.owns.load(Ordering::SeqCst)
-                }
-                _ => *checked_at = Some(Instant::now()),
+        match *checked_at {
+            Some(at) if at.elapsed() < VERDICT_TTL => {
+                return self.inner.owns.load(Ordering::SeqCst)
             }
+            _ => *checked_at = Some(Instant::now()),
         }
         // A claim that could not be written at startup is retried here rather than leaving this
         // daemon permanently outside the coordination — which, since an unclaimed lease never
         // owns anything, would otherwise mean it never maintains the caches at all.
         if self.inner.generation.load(Ordering::SeqCst) == UNCLAIMED {
-            return self.take_generation(|_| true);
+            return self.take_generation_locked(&mut checked_at, |_| true);
         }
-        let owns = self.recheck(path);
+        let owns = self.recheck_locked(path, &mut checked_at);
         self.inner.owns.store(owns, Ordering::SeqCst);
         owns
     }
@@ -283,61 +342,151 @@ impl WorkspaceLease {
     /// [`Self::with_ownership`] does), which is the right trade where the write is a vector
     /// that a re-embed can replace rather than a rename that destroys another daemon's build.
     pub(crate) fn owns_caches_now(&self) -> bool {
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
+            return false;
+        }
         let Some(path) = self.inner.path.as_deref() else {
             return true;
         };
-        if self.inner.released.load(Ordering::SeqCst) {
+        let mut checked_at = lock_recover(&self.inner.checked_at);
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
             return false;
         }
-        *lock_recover(&self.inner.checked_at) = Some(Instant::now());
+        *checked_at = Some(Instant::now());
         if self.inner.generation.load(Ordering::SeqCst) == UNCLAIMED {
-            return self.take_generation(|_| true);
+            return self.take_generation_locked(&mut checked_at, |_| true);
         }
-        let owns = self.recheck(path);
+        let owns = self.recheck_locked(path, &mut checked_at);
         self.inner.owns.store(owns, Ordering::SeqCst);
         owns
     }
 
-    /// Run `write` with ownership held for its whole duration.
+    /// Run `write` with ownership held for its whole duration and preserve why admission failed.
     ///
     /// A cached verdict (or even a fresh read) only says we owned the workspace an instant ago;
     /// a claim landing between the check and the write would leave two daemons publishing. This
     /// holds the same lock a claim takes, so a peer's claim either completes before this write
     /// begins or waits until it is done — the fence a rename into the shared path needs.
-    /// `None` when the workspace is no longer ours, or when the lock could not be taken.
-    pub(crate) fn with_ownership<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
-        let Some(path) = self.inner.path.as_deref() else {
-            return Some(write()); // unmanaged: nothing to coordinate with
-        };
-        if self.inner.released.load(Ordering::SeqCst) {
-            return None;
+    pub(crate) fn with_ownership_outcome<T>(&self, write: impl FnOnce() -> T) -> LeaseOutcome<T> {
+        self.with_ownership_checkpointed(|_| ControlFlow::Continue(write()))
+    }
+
+    /// The same fence with a heartbeat/termination checkpoint for an indivisible transaction.
+    /// A callback that observes `Break` rolls its work back and returns `Break`; the primitive
+    /// then classifies that stop as terminal while the fence still holds.
+    pub(crate) fn with_ownership_checkpointed<T>(
+        &self,
+        write: impl FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> ControlFlow<(), T>,
+    ) -> LeaseOutcome<T> {
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
+            return LeaseOutcome::Terminal;
         }
-        let dir = path.parent()?;
-        let _guard = LockGuard::acquire(&dir.join(LEASE_LOCK_FILE), LOCK_WAIT).ok()?;
+        let Some(path) = self.inner.path.as_deref() else {
+            let mut checkpoint = || {
+                if self.inner.released.load(Ordering::SeqCst) {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            };
+            return match write(&mut checkpoint) {
+                ControlFlow::Continue(value) => LeaseOutcome::Applied(value),
+                ControlFlow::Break(()) => LeaseOutcome::Terminal,
+            };
+        };
+        let mut checked_at = lock_recover(&self.inner.checked_at);
+        if self.inner.released.load(Ordering::SeqCst)
+            || self.inner.superseded.load(Ordering::SeqCst)
+        {
+            return LeaseOutcome::Terminal;
+        }
+        let Some(dir) = path.parent() else { return LeaseOutcome::TransientRefusal };
+        let Ok(_guard) = LockGuard::acquire(&dir.join(LEASE_LOCK_FILE), LOCK_WAIT) else {
+            return LeaseOutcome::TransientRefusal;
+        };
         if self.inner.generation.load(Ordering::SeqCst) == UNCLAIMED {
-            return None;
+            return LeaseOutcome::TransientRefusal;
         }
         let mine = self.inner.token.load(Ordering::SeqCst);
         // Exactly ours, or not ours: a missing record is not an invitation to write. Restoring
         // our own claim here would let a superseded daemon publish over the owner's build
         // whenever `.build` was cleared. Re-claiming an unowned workspace is [`Self::recheck`]'s
         // job, where the loser of that race learns it lost.
-        if read_record(path).is_none_or(|record| record.token != mine) {
-            self.inner.owns.store(false, Ordering::SeqCst);
-            *lock_recover(&self.inner.checked_at) = Some(Instant::now());
-            return None;
+        match read_record(path) {
+            Some(record) if record.token == mine => {
+                let mut checkpoint = || {
+                    if self.inner.released.load(Ordering::SeqCst)
+                        || self.inner.superseded.load(Ordering::SeqCst)
+                    {
+                        return ControlFlow::Break(());
+                    }
+                    let _ = write_record(
+                        path,
+                        self.inner.generation.load(Ordering::SeqCst),
+                        self.inner.token.load(Ordering::SeqCst),
+                    );
+                    ControlFlow::Continue(())
+                };
+                match write(&mut checkpoint) {
+                    ControlFlow::Continue(value) => LeaseOutcome::Applied(value),
+                    ControlFlow::Break(()) => LeaseOutcome::Terminal,
+                }
+            }
+            Some(record) if !is_stale(&record) => {
+                self.latch_superseded(&record);
+                self.inner.owns.store(false, Ordering::SeqCst);
+                *checked_at = Some(Instant::now());
+                LeaseOutcome::Terminal
+            }
+            _ => {
+                self.inner.owns.store(false, Ordering::SeqCst);
+                *checked_at = Some(Instant::now());
+                LeaseOutcome::TransientRefusal
+            }
         }
-        Some(write())
     }
 
-    /// Hand the workspace back on a clean exit.
+    pub(crate) fn is_superseded(&self) -> bool {
+        self.inner.superseded.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn is_released(&self) -> bool {
+        self.inner.released.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_file_lock_for_test(&self) -> impl Send {
+        let path = self.inner.path.as_deref().expect("test lease is managed");
+        LockGuard::acquire(
+            &path.parent().expect("lease path has a parent").join(LEASE_LOCK_FILE),
+            LOCK_WAIT,
+        )
+        .expect("test acquires lease file lock")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn invalidate_verdict_for_test(&self) {
+        *lock_recover(&self.inner.checked_at) = None;
+    }
+
+    /// Release this process's record on a clean exit.
     ///
     /// Ownership survives a crash by design — the heartbeat is what tells the others the owner
     /// is gone, and it takes [`STALE_AFTER`] to conclude that. A process that exits on purpose
-    /// knows better and says so, so the daemon it superseded can resume maintaining the caches
-    /// at once instead of waiting that window out. Only OUR record is removed: a generation
+    /// knows better and says so, so a fresh process can claim without waiting that window out.
+    /// A previously superseded lease remains terminal. Only OUR record is removed: a generation
     /// that took the workspace over in the meantime keeps it.
     pub(crate) fn release(&self) {
+        self.inner.released.store(true, Ordering::SeqCst);
+        let mut checked_at = lock_recover(&self.inner.checked_at);
+        self.inner.owns.store(false, Ordering::SeqCst);
+        *checked_at = Some(Instant::now());
         let Some(path) = self.inner.path.as_deref() else {
             return;
         };
@@ -351,11 +500,7 @@ impl WorkspaceLease {
         let guard = path
             .parent()
             .and_then(|dir| LockGuard::acquire(&dir.join(LEASE_LOCK_FILE), LOCK_WAIT).ok());
-        let owned = self.inner.owns.swap(false, Ordering::SeqCst);
-        self.inner.released.store(true, Ordering::SeqCst);
-        if !owned || guard.is_none() {
-            return;
-        }
+        let Some(_guard) = guard else { return };
         let mine = self.inner.token.load(Ordering::SeqCst);
         if read_record(path).is_some_and(|record| record.token == mine) {
             let _ = std::fs::remove_file(path);
@@ -381,25 +526,17 @@ impl WorkspaceLease {
     /// stopped reporting, or none at all, means the workspace is free: claim it afresh under
     /// the lock, where two daemons doing the same thing get distinct generations and the loser
     /// demotes at its next check.
-    fn recheck(&self, path: &Path) -> bool {
+    fn recheck_locked(&self, path: &Path, checked_at: &mut Option<Instant>) -> bool {
         let mine = self.inner.token.load(Ordering::SeqCst);
         match read_record(path) {
             Some(record) if record.token == mine => true,
             Some(record) if !is_stale(&record) => {
-                if self.inner.owns.load(Ordering::SeqCst) {
-                    tracing::info!(
-                        mine = self.inner.generation.load(Ordering::SeqCst),
-                        owner = record.generation,
-                        owner_pid = record.pid,
-                        "another daemon generation now owns this workspace's derived caches; \
-                         this one stops writing them"
-                    );
-                }
+                self.latch_superseded(&record);
                 false
             }
             found => {
                 let abandoned = found.map(|r| r.generation);
-                let claimed = self.take_generation(|under_lock| {
+                let claimed = self.take_generation_locked(checked_at, |under_lock| {
                     under_lock.is_none_or(is_stale) // still free once we hold the lock
                 });
                 if claimed {
@@ -411,6 +548,21 @@ impl WorkspaceLease {
                 }
                 claimed
             }
+        }
+    }
+
+    fn latch_superseded(&self, owner: &LeaseRecord) {
+        if self.inner.generation.load(Ordering::SeqCst) == UNCLAIMED {
+            return;
+        }
+        if !self.inner.superseded.swap(true, Ordering::SeqCst) {
+            tracing::info!(
+                mine = self.inner.generation.load(Ordering::SeqCst),
+                owner = owner.generation,
+                owner_pid = owner.pid,
+                "another daemon generation now owns this workspace's derived caches; this one \
+                 is permanently superseded"
+            );
         }
     }
 }
@@ -437,9 +589,8 @@ fn spawn_heartbeat(inner: Weak<Inner>) {
                 return;
             }
             let lease = WorkspaceLease { inner };
-            // Re-deciding ownership here, not just when a write path asks, is what lets a
-            // superseded daemon come back on its own: the owner may have exited while this one
-            // served a client that never touches a gated path, and nothing else would look.
+            // Re-deciding ownership here, not just when a write path asks, promptly latches a
+            // live foreign owner even while this daemon only serves reads.
             if !lease.owns_caches() {
                 continue;
             }
@@ -453,7 +604,7 @@ fn spawn_heartbeat(inner: Weak<Inner>) {
             // fence validated. Values captured beforehand could be a generation a concurrent
             // reclaim has already replaced — stamping them back would leave a record on disk
             // that no live lease recognises as its own.
-            lease.with_ownership(|| {
+            let _ = lease.with_ownership_outcome(|| {
                 write_record(
                     path,
                     lease.inner.generation.load(Ordering::SeqCst),
@@ -603,10 +754,10 @@ mod tests {
     /// cached verdict said otherwise — otherwise a build that started while it owned the
     /// workspace would rename itself over what the new owner had just published.
     #[test]
-    fn a_write_is_refused_once_the_record_moved_on() {
+    fn publish_fence_latches_supersession() {
         let dir = tempfile::tempdir().unwrap();
         let lease = WorkspaceLease::claim(dir.path());
-        assert_eq!(lease.with_ownership(|| "written"), Some("written"));
+        assert_eq!(lease.with_ownership_outcome(|| "written"), LeaseOutcome::Applied("written"));
 
         let newer = LeaseRecord {
             generation: lease.generation().unwrap() + 1,
@@ -619,7 +770,170 @@ mod tests {
         // No sleep: the fence reads the record itself rather than trusting the cached verdict,
         // which still says this daemon owns the workspace.
         assert!(lease.owns_caches(), "the cached verdict has not expired yet");
-        assert_eq!(lease.with_ownership(|| "written"), None, "the write is refused anyway");
+        assert_eq!(
+            lease.with_ownership_outcome(|| "written"),
+            LeaseOutcome::Terminal,
+            "the write is refused anyway"
+        );
+        assert!(lease.is_superseded(), "the live foreign token is terminal");
+    }
+
+    #[test]
+    fn typed_fence_distinguishes_transient_and_terminal_refusals() {
+        let busy_dir = tempfile::tempdir().unwrap();
+        let busy = WorkspaceLease::claim(busy_dir.path());
+        let held = busy.hold_file_lock_for_test();
+        assert_eq!(busy.with_ownership_outcome(|| "written"), LeaseOutcome::TransientRefusal);
+        drop(held);
+
+        let unclaimed_dir = tempfile::tempdir().unwrap();
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(unclaimed_dir.path());
+        cache.ensure().unwrap();
+        let unclaimed = WorkspaceLease {
+            inner: Arc::new(Inner {
+                path: Some(cache.lease_path()),
+                generation: AtomicU64::new(UNCLAIMED),
+                token: AtomicU64::new(0),
+                owns: AtomicBool::new(false),
+                superseded: AtomicBool::new(false),
+                released: AtomicBool::new(false),
+                checked_at: Mutex::new(None),
+            }),
+        };
+        assert_eq!(unclaimed.with_ownership_outcome(|| "written"), LeaseOutcome::TransientRefusal);
+
+        let foreign_dir = tempfile::tempdir().unwrap();
+        let foreign = WorkspaceLease::claim(foreign_dir.path());
+        let newer = LeaseRecord {
+            generation: foreign.generation().unwrap() + 1,
+            token: new_token(),
+            pid: 424242,
+            heartbeat_secs: now_secs(),
+        };
+        std::fs::write(lease_path(foreign_dir.path()), serde_json::to_string(&newer).unwrap())
+            .unwrap();
+        assert_eq!(foreign.with_ownership_outcome(|| "written"), LeaseOutcome::Terminal);
+        assert!(foreign.is_superseded());
+
+        let released_dir = tempfile::tempdir().unwrap();
+        let released = WorkspaceLease::claim(released_dir.path());
+        released.release();
+        assert_eq!(released.with_ownership_outcome(|| "written"), LeaseOutcome::Terminal);
+    }
+
+    #[test]
+    fn checkpoint_refreshes_heartbeat_and_preserves_callback_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let path = lease_path(dir.path());
+        let record = LeaseRecord {
+            generation: lease.generation().unwrap(),
+            token: lease.inner.token.load(Ordering::SeqCst),
+            pid: std::process::id(),
+            heartbeat_secs: 0,
+        };
+        std::fs::write(&path, serde_json::to_string(&record).unwrap()).unwrap();
+
+        let outcome: LeaseOutcome<Result<(), &'static str>> =
+            lease.with_ownership_checkpointed(|checkpoint| {
+                assert_eq!(checkpoint(), ControlFlow::Continue(()));
+                assert!(record_at(&path).heartbeat_secs > 0);
+                ControlFlow::Continue(Err("store failed"))
+            });
+
+        assert_eq!(outcome, LeaseOutcome::Applied(Err("store failed")));
+    }
+
+    #[test]
+    fn release_during_checkpointed_callback_rolls_back_as_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let worker_lease = lease.clone();
+        let releaser_lease = lease.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (check_tx, check_rx) = std::sync::mpsc::channel();
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let worker_rolled_back = Arc::clone(&rolled_back);
+
+        let worker = std::thread::spawn(move || {
+            worker_lease.with_ownership_checkpointed(|checkpoint| {
+                let mut transaction = vec!["pending"];
+                entered_tx.send(()).unwrap();
+                check_rx.recv().unwrap();
+                if checkpoint().is_break() {
+                    transaction.clear();
+                    worker_rolled_back.store(true, Ordering::SeqCst);
+                    return ControlFlow::Break(());
+                }
+                ControlFlow::Continue(transaction)
+            })
+        });
+        entered_rx.recv().unwrap();
+        let releaser = std::thread::spawn(move || releaser_lease.release());
+        while !lease.is_released() {
+            std::thread::yield_now();
+        }
+        check_tx.send(()).unwrap();
+
+        assert_eq!(worker.join().unwrap(), LeaseOutcome::Terminal);
+        assert!(rolled_back.load(Ordering::SeqCst));
+        releaser.join().unwrap();
+    }
+
+    #[test]
+    fn release_waits_for_only_the_admitted_batch_and_refuses_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let worker_lease = lease.clone();
+        let releaser_lease = lease.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            worker_lease.with_ownership_outcome(|| {
+                entered_tx.send(()).unwrap();
+                finish_rx.recv().unwrap();
+                "first batch"
+            })
+        });
+        entered_rx.recv().unwrap();
+        let releaser = std::thread::spawn(move || {
+            releaser_lease.release();
+            released_tx.send(()).unwrap();
+        });
+        while !lease.is_released() {
+            std::thread::yield_now();
+        }
+        assert!(released_rx.try_recv().is_err(), "release waits for the admitted batch");
+        finish_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), LeaseOutcome::Applied("first batch"));
+        released_rx.recv().unwrap();
+        releaser.join().unwrap();
+        let calls = AtomicU64::new(0);
+        assert_eq!(
+            lease.with_ownership_outcome(|| calls.fetch_add(1, Ordering::SeqCst)),
+            LeaseOutcome::Terminal
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn takeover_between_batches_preserves_the_first_and_terminates_the_next() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let applied = Arc::new(Mutex::new(Vec::new()));
+        let first = Arc::clone(&applied);
+        assert_eq!(
+            lease.with_ownership_outcome(|| first.lock().unwrap().extend(0..64)),
+            LeaseOutcome::Applied(())
+        );
+        let _newer = WorkspaceLease::claim(dir.path());
+        let second = Arc::clone(&applied);
+        assert_eq!(
+            lease.with_ownership_outcome(|| second.lock().unwrap().push(64)),
+            LeaseOutcome::Terminal
+        );
+        assert_eq!(applied.lock().unwrap().len(), 64);
     }
 
     /// Generations restart at 1 whenever the record is deleted, so the number cannot be the
@@ -645,7 +959,11 @@ mod tests {
 
         assert!(!first.owns_caches(), "the generation it shares is not its claim");
         assert!(!third.owns_caches(), "and the newest daemon gave the workspace up too");
-        assert_eq!(first.with_ownership(|| "published"), None, "its writes are refused");
+        assert_eq!(
+            first.with_ownership_outcome(|| "published"),
+            LeaseOutcome::Terminal,
+            "its writes are refused"
+        );
     }
 
     /// `.build` is a cache directory users are told they may delete, and deleting it takes the
@@ -666,7 +984,7 @@ mod tests {
     /// an unclaimed lease owns nothing (so it cannot be a second writer), and it keeps trying,
     /// so a moment's contention costs a check interval rather than the daemon's whole life.
     #[test]
-    fn a_claim_blocked_by_the_lock_is_retried_on_the_next_check() {
+    fn transient_unclaimed_is_not_superseded() {
         let dir = tempfile::tempdir().unwrap();
         let cache_dir = crate::cache::ensure_workspace_cache_dir(dir.path()).unwrap();
         let held = LockGuard::acquire(&cache_dir.join(LEASE_LOCK_FILE), LOCK_WAIT).unwrap();
@@ -674,30 +992,69 @@ mod tests {
         let lease = WorkspaceLease::claim(dir.path());
         assert_eq!(lease.generation(), Some(UNCLAIMED), "the claim could not be written");
         assert!(!lease.owns_caches(), "and an unclaimed lease writes nothing");
+        assert!(!lease.is_superseded(), "temporary lock contention is not supersession");
 
         drop(held);
         std::thread::sleep(VERDICT_TTL);
         assert!(lease.owns_caches(), "the retry claims the workspace once the lock frees");
         assert_eq!(record_at(&lease_path(dir.path())).generation, lease.generation().unwrap());
+        lease.release();
+        assert!(lease.is_released());
+        assert!(!lease.is_superseded(), "shutdown remains distinct from supersession");
     }
 
-    /// A server that exits cleanly hands the workspace back, so the daemon it superseded
-    /// resumes maintaining the caches immediately instead of waiting out the staleness window.
-    /// This is what keeps a short stdio session from demoting a long-running daemon for a
-    /// minute just by having started later.
+    /// Once a daemon has actually observed a live foreign owner, that observation is terminal:
+    /// neither the owner's clean exit nor a third claim lets the old process write again.
     #[test]
-    fn releasing_on_exit_returns_the_workspace_to_the_older_daemon() {
+    fn observed_foreign_owner_is_permanent() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = WorkspaceLease::claim(dir.path());
         let short_lived = WorkspaceLease::claim(dir.path());
 
         std::thread::sleep(VERDICT_TTL);
         assert!(!daemon.owns_caches(), "the newer claim demoted the daemon");
+        assert!(daemon.is_superseded());
 
         short_lived.release();
-        std::thread::sleep(VERDICT_TTL);
-        assert!(daemon.owns_caches(), "the released workspace goes back to the daemon");
-        assert_eq!(record_at(&lease_path(dir.path())).generation, daemon.generation().unwrap());
+        let third = WorkspaceLease::claim(dir.path());
+        third.release();
+        std::fs::remove_dir_all(crate::cache::workspace_cache_dir(dir.path())).unwrap();
+
+        assert!(!daemon.owns_caches(), "a superseded daemon never reclaims");
+        assert!(!daemon.owns_caches_now());
+        assert_eq!(daemon.with_ownership_outcome(|| "published"), LeaseOutcome::Terminal);
+        assert!(!daemon.take_generation(|_| true));
+        assert!(!crate::cache::workspace_cache_dir(dir.path()).exists(), "no disk I/O after latch");
+    }
+
+    #[test]
+    fn observed_owner_race_cannot_reclaim() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let contender = lease.clone();
+        let newer = WorkspaceLease::claim(dir.path());
+        let mut lifecycle = lock_recover(&lease.inner.checked_at);
+        let owner = read_record(&lease_path(dir.path())).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reclaim = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(contender.take_generation(|_| true)).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "reclaim waits behind the lifecycle observation"
+        );
+        lease.latch_superseded(&owner);
+        *lifecycle = Some(Instant::now());
+        drop(lifecycle);
+        newer.release();
+
+        assert!(!done_rx.recv().unwrap(), "a clone cannot race the terminal latch");
+        reclaim.join().unwrap();
+        assert!(lease.is_superseded());
+        assert!(read_record(&lease_path(dir.path())).is_none());
     }
 
     /// Releasing is final for the process that did it: a background pass still finishing during
@@ -775,11 +1132,10 @@ mod tests {
         assert!(lease.owns_caches(), "an unmanaged lease never withholds ownership");
     }
 
-    /// A daemon that took the workspace and then died leaves its record behind. The superseded
-    /// daemon must not stay read-only forever behind a ghost: once the record stops being
-    /// restamped it takes the workspace back, at a generation above the abandoned one.
+    /// A stale record that was never observed while live is not evidence of supersession. The
+    /// current daemon may reclaim it, preserving recovery after crashes and missed brief claims.
     #[test]
-    fn an_abandoned_lease_is_reclaimed_by_the_superseded_daemon() {
+    fn non_witness_states_remain_reclaimable() {
         let dir = tempfile::tempdir().unwrap();
         let lease = WorkspaceLease::claim(dir.path());
         let mine = lease.generation().unwrap();
@@ -794,10 +1150,23 @@ mod tests {
         };
         std::fs::write(&path, serde_json::to_string(&ghost).unwrap()).unwrap();
 
-        std::thread::sleep(VERDICT_TTL);
-        assert!(lease.owns_caches(), "an abandoned workspace is taken back");
+        assert!(lease.owns_caches_now(), "an abandoned workspace is taken back");
+        assert!(!lease.is_superseded());
         assert_eq!(lease.generation(), Some(mine + 6), "the reclaim steps above the ghost");
         assert_eq!(record_at(&path).generation, mine + 6);
+
+        let corrupt_dir = tempfile::tempdir().unwrap();
+        let corrupt = WorkspaceLease::claim(corrupt_dir.path());
+        std::fs::write(lease_path(corrupt_dir.path()), "not a lease record").unwrap();
+        assert!(corrupt.owns_caches_now(), "a corrupt record remains recoverable");
+        assert!(!corrupt.is_superseded());
+
+        let brief_dir = tempfile::tempdir().unwrap();
+        let incumbent = WorkspaceLease::claim(brief_dir.path());
+        let brief = WorkspaceLease::claim(brief_dir.path());
+        brief.release();
+        assert!(incumbent.owns_caches_now(), "an unobserved brief claim leaves no terminal proof");
+        assert!(!incumbent.is_superseded());
     }
 
     /// A live newer owner is NOT reclaimed: its record keeps a current heartbeat, so the
@@ -861,6 +1230,6 @@ mod tests {
         );
         // And the loser's writes are refused at the fence, not merely by its cached verdict.
         let loser = if older_owns { &newer } else { &older };
-        assert_eq!(loser.with_ownership(|| "published"), None);
+        assert_eq!(loser.with_ownership_outcome(|| "published"), LeaseOutcome::Terminal);
     }
 }

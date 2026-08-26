@@ -47,6 +47,14 @@ pub(crate) struct ReferenceSearchState {
 /// while covering the common "edit a handful of files, then search" case in one shot.
 const MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY: usize = 64;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceSearchApply<T, E> {
+    Applied(T),
+    TransientRefusal,
+    Terminal,
+    OperationError(E),
+}
+
 #[derive(Clone)]
 pub struct SharedState {
     workspace_root: Option<PathBuf>,
@@ -108,6 +116,65 @@ impl OnecConnection {
 }
 
 impl SharedState {
+    pub(super) fn search_fence_outcome<T>(
+        outcome: crate::workspace_lease::LeaseOutcome<T>,
+    ) -> bsl_search::FenceOutcome<T> {
+        match outcome {
+            crate::workspace_lease::LeaseOutcome::Applied(value) => {
+                bsl_search::FenceOutcome::Applied(value)
+            }
+            crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                bsl_search::FenceOutcome::TransientRefusal
+            }
+            crate::workspace_lease::LeaseOutcome::Terminal => bsl_search::FenceOutcome::Terminal,
+        }
+    }
+
+    pub(super) fn apply_workspace_search<T>(
+        shared: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnOnce(&mut bsl_search::SearchEngine) -> Result<T, bsl_search::SearchError>,
+    ) -> WorkspaceSearchApply<T, bsl_search::SearchError> {
+        Self::apply_workspace_search_checkpointed(shared, lease, |engine, _checkpoint| {
+            std::ops::ControlFlow::Continue(apply(engine))
+        })
+    }
+
+    pub(super) fn apply_workspace_search_checkpointed<T>(
+        shared: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnOnce(
+            &mut bsl_search::SearchEngine,
+            &mut dyn FnMut() -> std::ops::ControlFlow<()>,
+        ) -> std::ops::ControlFlow<(), Result<T, bsl_search::SearchError>>,
+    ) -> WorkspaceSearchApply<T, bsl_search::SearchError> {
+        let mut guard = match shared.lock() {
+            Ok(guard) => guard,
+            Err(error) => {
+                return WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(
+                    format!("workspace search engine lock poisoned: {error}"),
+                ));
+            }
+        };
+        let Some(engine) = guard.as_mut() else {
+            return WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(
+                "workspace search engine is not published".to_owned(),
+            ));
+        };
+        match lease.with_ownership_checkpointed(|checkpoint| apply(engine, checkpoint)) {
+            crate::workspace_lease::LeaseOutcome::Applied(Ok(result)) => {
+                WorkspaceSearchApply::Applied(result)
+            }
+            crate::workspace_lease::LeaseOutcome::Applied(Err(error)) => {
+                WorkspaceSearchApply::OperationError(error)
+            }
+            crate::workspace_lease::LeaseOutcome::TransientRefusal => {
+                WorkspaceSearchApply::TransientRefusal
+            }
+            crate::workspace_lease::LeaseOutcome::Terminal => WorkspaceSearchApply::Terminal,
+        }
+    }
+
     pub(crate) fn graph(&self) -> &GraphState {
         &self.graph
     }
@@ -130,7 +197,12 @@ impl SharedState {
     }
 
     pub(crate) fn superseded(&self) -> bool {
-        !self.workspace_lease.owns_caches()
+        let _ = self.workspace_lease.owns_caches();
+        self.workspace_lease.is_superseded()
+    }
+
+    pub(crate) fn owns_caches(&self) -> bool {
+        self.workspace_lease.owns_caches()
     }
 
     /// Start building the diagnostics resident now instead of on the first tool call.
@@ -240,6 +312,10 @@ impl SharedState {
         self.workspace_search_mode.clone()
     }
 
+    pub(crate) fn workspace_lease(&self) -> &crate::workspace_lease::WorkspaceLease {
+        &self.workspace_lease
+    }
+
     /// A single-lock snapshot of the baseline lifecycle — the only read surface for
     /// tool handlers. While the deferred connect is `pending`, gates answer "warming —
     /// retry shortly" instead of a config error; one snapshot per request keeps the
@@ -296,8 +372,115 @@ impl SharedState {
     /// lock that only touches the overlay cache (never the resident). A resident that is
     /// absent/loading, or a path it cannot serve, is simply missing from the map and the
     /// reindex disk-reads it — so search never regresses when the resident is unavailable.
-    pub(crate) fn prefetch_resident_overlay(engine: &SharedSearchEngine) {
-        sync::prefetch_resident_overlay(engine);
+    pub(crate) fn prefetch_resident_overlay_fenced(
+        engine: &SharedSearchEngine,
+        lease: &crate::workspace_lease::WorkspaceLease,
+    ) {
+        sync::prefetch_resident_overlay(engine, lease);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SharedSearchEngine, SharedState, WorkspaceSearchApply};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[test]
+    fn workspace_search_missing_engine_is_an_operation_error() {
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(None));
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| Ok(()),
+        );
+
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message == "workspace search engine is not published"
+        ));
+    }
+
+    #[test]
+    fn workspace_search_poisoned_mutex_is_an_operation_error() {
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(None));
+        let poison = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.lock().unwrap();
+            panic!("poison the search engine mutex");
+        })
+        .join();
+
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| Ok(()),
+        );
+
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message.starts_with("workspace search engine lock poisoned:")
+        ));
+    }
+
+    #[test]
+    fn workspace_search_flattens_callback_error_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = bsl_search::SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let shared: SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+
+        let outcome = SharedState::apply_workspace_search(
+            &shared,
+            &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err::<(), _>(bsl_search::SearchError::Index("store failed".to_owned()))
+            },
+        );
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            outcome,
+            WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(message))
+                if message == "store failed"
+        ));
+    }
+
+    #[test]
+    fn terminal_supersession_is_not_transient_nonownership() {
+        let transient_dir = tempfile::tempdir().unwrap();
+        let transient_cache =
+            crate::cache::WorkspaceCacheLayout::for_workspace(transient_dir.path());
+        let holder = crate::workspace_lease::WorkspaceLease::hold_cache_lock_for(
+            &transient_cache,
+            Duration::from_secs(6),
+        );
+        let transient = crate::workspace_lease::WorkspaceLease::claim_cache(&transient_cache);
+        let mut state = SharedState::shared();
+        state.workspace_lease = transient.clone();
+        assert!(!state.superseded(), "temporary UNCLAIMED is not terminal");
+        assert!(!transient.is_superseded());
+        holder.join().unwrap();
+
+        let released_dir = tempfile::tempdir().unwrap();
+        let released = crate::workspace_lease::WorkspaceLease::claim(released_dir.path());
+        state.workspace_lease = released.clone();
+        released.release();
+        assert!(!state.superseded(), "normal release is not supersession");
+        assert!(!state.owns_caches());
+
+        let terminal_dir = tempfile::tempdir().unwrap();
+        let old = crate::workspace_lease::WorkspaceLease::claim(terminal_dir.path());
+        state.workspace_lease = old.clone();
+        let newer = crate::workspace_lease::WorkspaceLease::claim(terminal_dir.path());
+        old.invalidate_verdict_for_test();
+        assert!(state.superseded(), "the refreshed live foreign token is terminal");
+        newer.release();
+        assert!(state.superseded(), "owner release cannot clear the terminal flag");
+        assert!(!state.owns_caches());
     }
 }
 

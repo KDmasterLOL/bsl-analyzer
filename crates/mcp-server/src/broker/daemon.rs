@@ -173,10 +173,10 @@ async fn serve(
                     idle_since = None;
                 } else if server.superseded() {
                     // A newer generation owns this workspace's derived caches, so this backend
-                    // can no longer maintain them — the warm hold buys a reconnecting client
-                    // nothing, and holding a multi-gigabyte resident until the TTL expires
-                    // starves the daemon that CAN work. No session is connected at this point,
-                    // so nobody's link is cut by leaving now.
+                    // is terminally unable to maintain them — a transient ownership refusal is
+                    // not enough. The warm hold buys a reconnecting client nothing, and holding
+                    // a multi-gigabyte resident until the TTL expires starves the daemon that
+                    // CAN work. No session is connected at this point, so nobody's link is cut.
                     tracing::info!(
                         "backend superseded by a newer daemon generation and idle; shutting down"
                     );

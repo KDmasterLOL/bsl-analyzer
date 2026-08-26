@@ -164,13 +164,13 @@ impl Watch {
 /// spelling it was declared with, and a refusal keyed by a different spelling of the same
 /// directory would silently never fire — a seam that cannot refuse is worse than none,
 /// because the tests built on it go green over the behaviour they meant to pin.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[derive(Default)]
 pub(crate) struct RefusedWatches {
     paths: Mutex<Vec<PathBuf>>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl RefusedWatches {
     /// Declared before the hub starts, for a root that must never arm in the first place.
     pub(crate) fn refusing(paths: Vec<PathBuf>) -> Arc<Self> {
@@ -357,6 +357,9 @@ pub(crate) struct DrainBatch {
     pub(crate) entries: Vec<ChangeEntry>,
     pub(crate) cursor: SinkCursor,
     pub(crate) rescan_required: bool,
+    through_seq: u64,
+    start_pos: u64,
+    generation: u64,
 }
 
 /// Per-cursor state held by the accumulator.
@@ -528,25 +531,40 @@ impl Accumulator {
         }
     }
 
-    fn drain(&mut self, id: u64) -> DrainBatch {
+    fn materialize(&self, id: u64) -> DrainBatch {
         let max = self.max_seq();
         let pos = self.cursors.get(&id).map(|c| c.pos).unwrap_or(max);
         let mut entries: Vec<ChangeEntry> =
             self.entries.values().filter(|e| e.seq > pos).cloned().collect();
         entries.sort_by_key(|e| e.seq);
+        let rescan_required = self.cursors.get(&id).is_some_and(|cursor| cursor.pending.is_some());
+        DrainBatch {
+            entries,
+            cursor: SinkCursor { id },
+            rescan_required,
+            through_seq: max,
+            start_pos: pos,
+            generation: self.generation,
+        }
+    }
 
-        let rescan_required = match self.cursors.get_mut(&id) {
-            Some(cursor) => {
-                cursor.pos = max;
-                cursor.pending.take().is_some()
-            }
-            None => false,
-        };
-
+    fn acknowledge(&mut self, batch: &DrainBatch) {
+        let Some(cursor) = self.cursors.get_mut(&batch.cursor.id) else { return };
+        if cursor.pos != batch.start_pos {
+            return;
+        }
+        cursor.pos = batch.through_seq;
+        if batch.rescan_required && self.generation == batch.generation {
+            cursor.pending.take();
+        }
         self.close_window_if_settled();
         self.reclaim();
+    }
 
-        DrainBatch { entries, cursor: SinkCursor { id }, rescan_required }
+    fn drain(&mut self, id: u64) -> DrainBatch {
+        let batch = self.materialize(id);
+        self.acknowledge(&batch);
+        batch
     }
 
     /// Recover once no live cursor still owes THE WINDOW.
@@ -1255,7 +1273,7 @@ impl WorkspaceChangeHub {
     /// watches. The refusal is declared BEFORE the thread starts: an ordinary hub arms
     /// within milliseconds, so a refusal installed afterwards would race the arming it is
     /// meant to prevent.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn start_targets_refusing(
         targets: Vec<WatchTarget>,
         period: Duration,
@@ -1494,6 +1512,16 @@ impl WorkspaceChangeHub {
     /// Cursors are independent: draining one never affects another's view.
     pub(crate) fn drain(&self, cursor: SinkCursor) -> DrainBatch {
         self.inner.lock_acc().drain(cursor.id)
+    }
+
+    /// Materialize this cursor's next batch without advancing it. The caller acknowledges the
+    /// exact checkpoint only after its fenced apply succeeds.
+    pub(crate) fn materialize(&self, cursor: SinkCursor) -> DrainBatch {
+        self.inner.lock_acc().materialize(cursor.id)
+    }
+
+    pub(crate) fn acknowledge(&self, batch: &DrainBatch) {
+        self.inner.lock_acc().acknowledge(batch);
     }
 
     /// Reported health: the accumulator's transient reason, or — once that has been
@@ -2339,10 +2367,11 @@ fn apply_rearm(
 /// standing-degraded, and that stand can only be built here, next to what it exercises.
 #[cfg(test)]
 pub(crate) mod test_support {
+    #[cfg(unix)]
     use super::{RefusedWatches, WatchTarget, WorkspaceChangeHub};
-    use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
+    #[cfg(unix)]
+    use std::{path::PathBuf, sync::Arc};
 
     pub(crate) fn eventually(timeout: Duration, mut f: impl FnMut() -> bool) -> bool {
         let deadline = Instant::now() + timeout;
@@ -2363,6 +2392,7 @@ pub(crate) mod test_support {
     /// and the only thing wrong with it is that nothing watches it — which is the branch
     /// these tests are about. The root that cannot even be described is a different branch
     /// with a test of its own.
+    #[cfg(unix)]
     pub(crate) fn partly_blind_hub(
     ) -> (tempfile::TempDir, PathBuf, PathBuf, WorkspaceChangeHub, Arc<RefusedWatches>) {
         let dir = tempfile::tempdir().unwrap();
@@ -2443,6 +2473,7 @@ mod tests {
 
     /// A workspace whose scan root is reached through a symlink, so the root can be
     /// retargeted in place — the move that produces no filesystem event at all.
+    #[cfg(unix)]
     struct LinkedRoot {
         _dir: tempfile::TempDir,
         workspace: PathBuf,
@@ -3750,6 +3781,7 @@ mod tests {
         assert_eq!(batch.entries[0].kind, ChangeKind::MaybeRemoved);
     }
 
+    #[cfg(unix)]
     #[test]
     fn create_then_remove_coalesce_under_symlinked_root() {
         // A symlinked directory component makes the raw and canonical spellings
@@ -3846,6 +3878,32 @@ mod tests {
             assert_eq!(batch.entries.len(), 1, "step {n}: and must deliver the path itself");
         }
         assert!(acc.entries.len() <= acc.cap, "the cap still bounds the accumulator");
+    }
+
+    #[test]
+    fn materialized_batch_advances_only_after_ack() {
+        let mut acc = Accumulator::new(8);
+        let cursor = acc.subscribe(None);
+        let first = PathBuf::from("/first.bsl");
+        acc.record(first.clone(), first, ChangeKind::MaybeChanged);
+        acc.enter_rescan(false, DegradeReason::Overflow);
+
+        let batch = acc.materialize(cursor);
+        assert_eq!(batch.entries.len(), 1);
+        assert!(batch.rescan_required);
+        assert_eq!(acc.materialize(cursor).entries.len(), 1, "refusal keeps the same batch");
+
+        let second = PathBuf::from("/second.bsl");
+        acc.record(second.clone(), second, ChangeKind::MaybeChanged);
+        acc.acknowledge(&batch);
+        let next = acc.materialize(cursor);
+        assert_eq!(next.entries.len(), 1, "drift newer than the checkpoint remains pending");
+        assert!(next.rescan_required, "a changed generation keeps the rescan obligation");
+
+        acc.acknowledge(&next);
+        let empty = acc.materialize(cursor);
+        assert!(empty.entries.is_empty());
+        assert!(!empty.rescan_required);
     }
 
     /// The one who fell behind is told, and told once: it lost detail, and silence would

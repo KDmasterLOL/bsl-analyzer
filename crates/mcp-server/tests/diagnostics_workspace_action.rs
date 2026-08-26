@@ -14,6 +14,7 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{json, Map, Value};
 
 type Client = RunningService<RoleClient, ()>;
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn write(root: &Path, relative: &str, contents: &str) {
     let path = root.join(relative);
@@ -66,6 +67,7 @@ async fn diagnostics(client: &Client, arguments: Map<String, Value>) -> Value {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_action_answers_without_a_baseline() {
+    let _guard = TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_module(root, "Первый", "Процедура Выполнить() Экспорт\n    А = 1;\nКонецПроцедуры\n");
@@ -103,10 +105,12 @@ async fn workspace_action_answers_without_a_baseline() {
         }
         std::fs::set_permissions(&source, original).unwrap();
     }
+    client.cancel().await.expect("session closed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_action_answers_with_a_baseline_configured() {
+    let _guard = TEST_LOCK.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     write_module(root, "Первый", "Процедура Выполнить() Экспорт\n    А = 1;\nКонецПроцедуры\n");
@@ -153,4 +157,5 @@ async fn workspace_action_answers_with_a_baseline_configured() {
         }
         std::fs::set_permissions(&source, original).unwrap();
     }
+    client.cancel().await.expect("session closed");
 }
