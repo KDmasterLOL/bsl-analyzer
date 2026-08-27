@@ -2407,7 +2407,30 @@ mod tests {
             ));
         }
 
+        // The third way the background snapshot can fail to answer, and the one the failure
+        // injector cannot produce: the pool is empty and the fallback cannot take the lease
+        // because a peer holds it. A refused lease is not an empty answer — it must leave the
+        // same recovery debt as a broken one, or an `.xml` edit silently resolves to "no
+        // referencing modules" and the modules that read the changed object keep stale context.
         graph.set_background_snapshot_failure_for_test(None);
+        {
+            let _held = lease.hold_file_lock_for_test();
+            let contended = SharedState::prepare_search_drift(
+                &engine,
+                std::slice::from_ref(&entry),
+                false,
+                &graph,
+            );
+            assert!(
+                contended.full_rescan,
+                "a lease refused under an empty pool must request recovery rescan"
+            );
+            assert!(
+                contended.preparation_error.is_some(),
+                "a refused lease must not pass for an XML drift that resolved to nothing"
+            );
+        }
+
         drop(occupied);
         let mut recovery =
             SharedState::prepare_search_drift(&engine, std::slice::from_ref(&entry), true, &graph);

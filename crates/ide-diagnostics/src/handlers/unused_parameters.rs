@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::utils::platform_event_handlers::is_platform_event_handler;
+use crate::utils::platform_event_handlers::{
+    is_platform_event_handler, is_report_object_module_event_handler, ModuleOwner,
+};
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::{Expr, ModItem};
 use ide_db::TextRange;
@@ -100,6 +102,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
+    let exemptions = SignatureExemptions {
+        fixed_handlers: &fixed_signature_handlers,
+        owner: ModuleOwner {
+            module_type: metadata.module_type,
+            mdo_type: metadata.mdo.as_ref().map(|mdo| mdo.mdo_type),
+        },
+    };
+
     for (local_id, body) in module_bodies.iter_bodies() {
         let method_name = get_method_name(&item_tree, local_id);
 
@@ -108,13 +118,21 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             body,
             method_name.as_deref(),
             &module_bodies,
-            &fixed_signature_handlers,
+            &exemptions,
             code,
             ctx,
         ));
     }
 
     diagnostics
+}
+
+/// What keeps a method's signature out of the author's hands: names bound at runtime
+/// or declared in metadata, plus the module kind that decides which platform events
+/// this module can receive at all.
+struct SignatureExemptions<'a> {
+    fixed_handlers: &'a FxHashSet<String>,
+    owner: ModuleOwner,
 }
 
 fn get_method_name(item_tree: &hir::ItemTree, local_id: u32) -> Option<String> {
@@ -132,7 +150,7 @@ fn check_method(
     body: &hir::Body,
     method_name: Option<&str>,
     module_bodies: &hir::ModuleBodies,
-    fixed_signature_handlers: &FxHashSet<String>,
+    exemptions: &SignatureExemptions<'_>,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Vec<Diagnostic> {
@@ -150,7 +168,12 @@ fn check_method(
         return diagnostics;
     }
 
-    if method_name.is_some_and(|name| fixed_signature_handlers.contains(&name.fold_lower())) {
+    if method_name.is_some_and(|name| is_report_object_module_event_handler(name, exemptions.owner))
+    {
+        return diagnostics;
+    }
+
+    if method_name.is_some_and(|name| exemptions.fixed_handlers.contains(&name.fold_lower())) {
         return diagnostics;
     }
 
@@ -280,6 +303,83 @@ mod tests {
 КонецПроцедуры"#;
 
         check_diagnostics_snapshot_for(code, DiagnosticCode::UnusedParameters, expect![[r#""#]]);
+    }
+
+    fn object_module_of(mdo_type: bsl_metadata::MdoType, name: &str) -> hir::ModuleMetadata {
+        let mut metadata = crate::test_utils::make_non_common_module_metadata(
+            bsl_metadata::ModuleType::ObjectModule,
+        );
+        metadata.mdo = Some(std::sync::Arc::new(bsl_metadata::MetadataObject::new(mdo_type, name)));
+        metadata
+    }
+
+    fn check_object_module_snapshot(
+        metadata: hir::ModuleMetadata,
+        code: &str,
+        expected: expect_test::Expect,
+    ) {
+        use crate::test_utils::{check_metadata_diagnostic, format_diags};
+
+        let diagnostics = check_metadata_diagnostic(metadata, code, |_meta, ctx| super::check(ctx));
+        expected.assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn test_report_compose_result_handler_no_diagnostic() {
+        let code = r#"Процедура ПриКомпоновкеРезультата(ДокументРезультат, ДанныеРасшифровки, СтандартнаяОбработка)
+    ДокументРезультат.Очистить();
+КонецПроцедуры"#;
+
+        check_object_module_snapshot(
+            object_module_of(bsl_metadata::MdoType::Report, "ИсторияРеквизитов"),
+            code,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_report_compose_result_handler_english_no_diagnostic() {
+        let code = r#"Процедура OnComposeResult(ДокументРезультат, ДанныеРасшифровки, СтандартнаяОбработка)
+    ДокументРезультат.Очистить();
+КонецПроцедуры"#;
+
+        check_object_module_snapshot(
+            object_module_of(bsl_metadata::MdoType::Report, "ИсторияРеквизитов"),
+            code,
+            expect![[r#""#]],
+        );
+    }
+
+    #[test]
+    fn test_compose_result_name_in_catalog_object_module_is_flagged() {
+        let code = r#"Процедура ПриКомпоновкеРезультата(ДокументРезультат, Лишний)
+    ДокументРезультат.Очистить();
+КонецПроцедуры"#;
+
+        check_object_module_snapshot(
+            object_module_of(bsl_metadata::MdoType::Catalog, "Товары"),
+            code,
+            expect![[r#"
+                UnusedParameters @ 1:54..1:60
+                  message: Уберите неиспользуемый параметр "Лишний"
+                  severity: Warning"#]],
+        );
+    }
+
+    #[test]
+    fn test_compose_result_name_outside_object_module_is_flagged() {
+        let code = r#"Процедура ПриКомпоновкеРезультата(ДокументРезультат, Лишний)
+    ДокументРезультат.Очистить();
+КонецПроцедуры"#;
+
+        check_diagnostics_snapshot_for(
+            code,
+            DiagnosticCode::UnusedParameters,
+            expect![[r#"
+            UnusedParameters @ 1:54..1:60
+              message: Уберите неиспользуемый параметр "Лишний"
+              severity: Warning"#]],
+        );
     }
 
     #[test]

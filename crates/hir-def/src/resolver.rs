@@ -655,41 +655,110 @@ impl Resolver {
     /// Locate the manager module of `manager_type`/`mdo_name` (config visibility +
     /// path index), without looking at any method. Shared by
     /// [`Self::resolve_manager_method`] and the graph-index build.
-    pub(crate) fn locate_manager_module(
+    /// The first body that declares `method_name`, with the unread barrier: a body
+    /// nobody could read stops the walk instead of letting a lower-priority body
+    /// answer in its place.
+    fn first_method_in(
+        db: &dyn ConfigsDatabase,
+        candidates: &CommonModuleCandidates,
+        method_name: &Name,
+    ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
+        match candidates.search(|module| {
+            db.symbol_tree_ref(module).find_method(method_name).map(|m| (m.id, m.is_export))
+        }) {
+            crate::configs::BodySearch::Found((method_id, is_export)) => {
+                Ok(QualifiedMethodResolution { method_id, is_export })
+            }
+            crate::configs::BodySearch::Absent => Err(QualifiedMethodError::NotFound),
+            crate::configs::BodySearch::Unread => Err(QualifiedMethodError::BodyUnread),
+        }
+    }
+
+    /// Bodies of the `role` module of `mdo_type`/`mdo_name` that this resolver's
+    /// file may resolve against, in priority order — base first.
+    ///
+    /// TWO different visibility questions meet here, and conflating them is the
+    /// defect this exists to close. `mdo_visible` asks whether the caller can see
+    /// the OBJECT, and a catalog adopted by the base configuration is visible to
+    /// every extension — so that check passes even when the body about to answer
+    /// lives in a root the caller never declared a dependency on. The second
+    /// question, whose BODY may answer, is what the candidate lookup answers.
+    fn locate_mdo_module(
         &self,
         db: &dyn ConfigsDatabase,
-        manager_type: crate::body::ManagerType,
+        role: crate::configs::MdoModuleRole,
+        mdo_type: bsl_metadata::MdoType,
         mdo_name: &Name,
-    ) -> Result<ManagerModuleTarget, QualifiedMethodError> {
-        let mdo_type = manager_type.to_mdo_type();
-
+    ) -> Result<CommonModuleCandidates, QualifiedMethodError> {
         let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("locate_manager_module called without module scope");
+            tracing::warn!("locate_mdo_module called without module scope");
             QualifiedMethodError::NotFound
         })?;
-
         let current_file_id = current_module_id.file_id;
+
         if db.file_has_visible_config(current_file_id)
             && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
         {
             return Err(QualifiedMethodError::NotVisibleInConfigs);
         }
 
+        if let Some(bodies) = db.resolve_mdo_module_file_candidates(
+            current_file_id,
+            role,
+            mdo_type,
+            mdo_name.as_str(),
+        ) {
+            // Empty means no VISIBLE root holds such a body, and that is an answer.
+            // The common-module route degrades to the path index here instead,
+            // because its listing can disagree with the file set; doing that here
+            // would hand back the very body the filter just removed.
+            if bodies.is_empty() {
+                return Err(QualifiedMethodError::NotFound);
+            }
+            return Ok(CommonModuleCandidates::new(
+                bodies.iter().map(|b| (crate::ModuleId::new(b.file), b.unread)).collect(),
+                false,
+            ));
+        }
+
+        // No configured visibility at all: the path index, exactly as before.
         let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
         let module_index = db.module_index(source_root_id);
+        let target_file_id = match role {
+            crate::configs::MdoModuleRole::Manager => {
+                crate::body::ManagerType::from_mdo_type(mdo_type)
+                    .and_then(|manager_type| module_index.resolve_manager(manager_type, mdo_name))
+            }
+            crate::configs::MdoModuleRole::Object => {
+                module_index.resolve_object_module(mdo_type, mdo_name)
+            }
+            crate::configs::MdoModuleRole::RecordSet => {
+                module_index.resolve_record_set_module(mdo_type, mdo_name)
+            }
+        }
+        .ok_or(QualifiedMethodError::NotFound)?;
 
-        let target_file_id = module_index
-            .resolve_manager(manager_type, mdo_name)
-            .ok_or(QualifiedMethodError::NotFound)?;
+        Ok(CommonModuleCandidates::new(
+            vec![(crate::ModuleId::new(target_file_id), db.file_is_unread(target_file_id))],
+            false,
+        ))
+    }
 
-        // Composition, not a verdict — same reason as the common-module route. Callers
-        // that know the method name turn "not found in an unread body" into
-        // `BodyUnread`; the graph index needs the id either way, or healing the body
-        // reprojects nobody.
-        Ok(ManagerModuleTarget {
-            module: crate::ModuleId::new(target_file_id),
-            unread: db.file_is_unread(target_file_id),
-        })
+    /// Locate the manager module of `manager_type`/`mdo_name`, without looking at
+    /// any method. Shared by [`Self::resolve_manager_method`] and the graph-index
+    /// build, so both agree on which bodies a manager call targets.
+    pub(crate) fn locate_manager_module(
+        &self,
+        db: &dyn ConfigsDatabase,
+        manager_type: crate::body::ManagerType,
+        mdo_name: &Name,
+    ) -> Result<CommonModuleCandidates, QualifiedMethodError> {
+        self.locate_mdo_module(
+            db,
+            crate::configs::MdoModuleRole::Manager,
+            manager_type.to_mdo_type(),
+            mdo_name,
+        )
     }
 
     pub fn resolve_manager_method(
@@ -707,19 +776,8 @@ impl Resolver {
         )
         .entered();
 
-        let target = self.locate_manager_module(db, manager_type, mdo_name)?;
-        let symbol_tree = db.symbol_tree_ref(target.module);
-
-        let method_symbol = symbol_tree.find_method(method_name).ok_or(if target.unread {
-            QualifiedMethodError::BodyUnread
-        } else {
-            QualifiedMethodError::NotFound
-        })?;
-
-        Ok(QualifiedMethodResolution {
-            method_id: method_symbol.id,
-            is_export: method_symbol.is_export,
-        })
+        let candidates = self.locate_manager_module(db, manager_type, mdo_name)?;
+        Self::first_method_in(db, &candidates, method_name)
     }
 
     pub fn resolve_aliased_manager_method(
@@ -760,62 +818,9 @@ impl Resolver {
         )
         .entered();
 
-        let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_object_module_method called without module scope");
-            QualifiedMethodError::NotFound
-        })?;
-
-        let current_file_id = current_module_id.file_id;
-        if db.file_has_visible_config(current_file_id)
-            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
-        {
-            tracing::debug!(
-                "resolve_object_module_method: {:?} '{}' not declared in any visible config",
-                mdo_type,
-                mdo_name
-            );
-            return Err(QualifiedMethodError::NotVisibleInConfigs);
-        }
-
-        let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
-        let module_index = db.module_index(source_root_id);
-
-        let target_file_id =
-            module_index.resolve_object_module(mdo_type, mdo_name).ok_or_else(|| {
-                tracing::debug!("Object module not found: {:?} / {}", mdo_type, mdo_name);
-                QualifiedMethodError::NotFound
-            })?;
-
-        let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree_ref(target_module_id);
-
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "Object module '{:?}/{}' found but method '{}' NOT found",
-                mdo_type,
-                mdo_name,
-                method_name
-            );
-            // Not finding it in a body nobody could read is not a finding.
-            if db.file_is_unread(target_file_id) {
-                QualifiedMethodError::BodyUnread
-            } else {
-                QualifiedMethodError::NotFound
-            }
-        })?;
-
-        tracing::info!(
-            "SUCCESS - object module method '{}' in '{:?}/{}' (is_export={})",
-            method_name,
-            mdo_type,
-            mdo_name,
-            method_symbol.is_export
-        );
-
-        Ok(QualifiedMethodResolution {
-            method_id: method_symbol.id,
-            is_export: method_symbol.is_export,
-        })
+        let candidates =
+            self.locate_mdo_module(db, crate::configs::MdoModuleRole::Object, mdo_type, mdo_name)?;
+        Self::first_method_in(db, &candidates, method_name)
     }
 
     pub fn resolve_record_set_module_method(
@@ -833,62 +838,13 @@ impl Resolver {
         )
         .entered();
 
-        let current_module_id = self.module_id().ok_or_else(|| {
-            tracing::warn!("resolve_record_set_module_method called without module scope");
-            QualifiedMethodError::NotFound
-        })?;
-
-        let current_file_id = current_module_id.file_id;
-        if db.file_has_visible_config(current_file_id)
-            && !Self::mdo_visible(db, current_file_id, mdo_type, mdo_name)
-        {
-            tracing::debug!(
-                "resolve_record_set_module_method: {:?} '{}' not declared in any visible config",
-                mdo_type,
-                mdo_name
-            );
-            return Err(QualifiedMethodError::NotVisibleInConfigs);
-        }
-
-        let source_root_id = db.file_source_root_input(current_file_id).source_root_id(db);
-        let module_index = db.module_index(source_root_id);
-
-        let target_file_id =
-            module_index.resolve_record_set_module(mdo_type, mdo_name).ok_or_else(|| {
-                tracing::debug!("Record-set module not found: {:?} / {}", mdo_type, mdo_name);
-                QualifiedMethodError::NotFound
-            })?;
-
-        let target_module_id = crate::ModuleId::new(target_file_id);
-        let symbol_tree = db.symbol_tree_ref(target_module_id);
-
-        let method_symbol = symbol_tree.find_method(method_name).ok_or_else(|| {
-            tracing::debug!(
-                "Record-set module '{:?}/{}' found but method '{}' NOT found",
-                mdo_type,
-                mdo_name,
-                method_name
-            );
-            // Not finding it in a body nobody could read is not a finding.
-            if db.file_is_unread(target_file_id) {
-                QualifiedMethodError::BodyUnread
-            } else {
-                QualifiedMethodError::NotFound
-            }
-        })?;
-
-        tracing::info!(
-            "SUCCESS - record-set module method '{}' in '{:?}/{}' (is_export={})",
-            method_name,
+        let candidates = self.locate_mdo_module(
+            db,
+            crate::configs::MdoModuleRole::RecordSet,
             mdo_type,
             mdo_name,
-            method_symbol.is_export
-        );
-
-        Ok(QualifiedMethodResolution {
-            method_id: method_symbol.id,
-            is_export: method_symbol.is_export,
-        })
+        )?;
+        Self::first_method_in(db, &candidates, method_name)
     }
 
     fn resolve_three_level(
@@ -1014,14 +970,6 @@ pub enum QualifiedMethodError {
     /// The module exists, but a body of it could not be read, so nothing can be
     /// concluded about the call — least of all against the file making it.
     BodyUnread,
-}
-
-/// A manager module the path index named, and whether its bytes could be read.
-/// Reported rather than judged for the same reason as [`CommonModuleCandidates`]:
-/// the verdict needs the method name, and the graph index needs the id regardless.
-pub(crate) struct ManagerModuleTarget {
-    pub(crate) module: ModuleId,
-    pub(crate) unread: bool,
 }
 
 /// The bodies of a common module that name resolution may look a method up in,

@@ -274,6 +274,37 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         }
 
         let method_name = Name::new(token.text());
+
+        // The USER method is asked for first, and the platform surface only after
+        // it declines. Inference resolves the same call in that order, and a
+        // navigation that reversed it would answer the platform for every user
+        // method spelled like one — `Записать` on a catalog object, `НайтиПоКоду`
+        // on its manager — leaving the call out of that method's references.
+        let resolver = hir_def::resolver::Resolver::with_workspace_scope(self.module_id);
+        if let hir_ty::method_resolution::UserCallTarget::Method(hit) =
+            hir_ty::method_resolution::resolve_user_call(
+                self.db(),
+                receiver_id,
+                &method_name,
+                &resolver,
+            )
+        {
+            // The export boundary is a CROSS-module rule, as the name of
+            // `Resolver::resolve_cross_module` says: calling a non-exported method
+            // from another module is an error, and naming its declaration here
+            // would contradict the answer the qualified route gives for the very
+            // same call. Inside its own module a private method is a legitimate
+            // call, and inference binds it, so navigation names it too.
+            if hit.resolution.is_export || hit.resolution.method_id.module == self.module_id {
+                return Some(Definition::Method(hit.resolution.method_id));
+            }
+            // Found and barred — NOT a reason to consult the platform. Falling
+            // through would answer a platform member for a call inference has
+            // already bound to this user method, which is the exact disagreement
+            // this shared entry exists to make impossible.
+            return None;
+        }
+
         let resolution = hir_ty::resolve_method(self.db(), receiver_id, &method_name)?;
 
         Some(Definition::BuiltinMethodHandle { handle: resolution.handle, method_name })

@@ -430,28 +430,38 @@ pub fn resolve_summary_via_index(
                     mdo_type: manager_type.to_mdo_type(),
                     object_name: object_name.clone(),
                 };
-                match resolver.locate_manager_module(db, *manager_type, object_name) {
-                    Ok(located) => match index.find_method(located.module, method_name) {
+                match resolver
+                    .locate_manager_module(db, *manager_type, object_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
+                {
+                    Ok(candidates) => match candidates
+                        .search(|m| index.find_method(m, method_name).map(|hit| (m, hit)))
+                    {
                         // A user manager-module method on a fully-literal
                         // `Коллекция.Объект.Метод()` path: the object name is a token and its
                         // manager module is uniquely determined, so locating the exported method
                         // is a direct lookup — as trustworthy as a qualified `Модуль.Метод()`
                         // call. The edge is about the method.
-                        Some(m) if m.is_export => (
+                        BodySearch::Found((target_module, m)) if m.is_export => (
                             ResolvedTarget::Method(MethodId {
-                                module: located.module,
+                                module: target_module,
                                 local_id: m.local_id,
                             }),
                             EdgeProvenance::Resolved,
                             edge.kind,
                         ),
-                        Some(_) => (
+                        BodySearch::Found(_) => (
                             ResolvedTarget::Unresolved(edge.target.clone()),
                             EdgeProvenance::VisibilityBlocked,
                             edge.kind,
                         ),
                         // No user method → a platform manager method touching the object.
-                        None => (
+                        // `Unread` joins `Absent` here, and this is where the manager route
+                        // parts with `QualifiedModule` above: a manager call has a legitimate
+                        // answer that does not depend on any body at all, so an unreadable
+                        // module leaves the platform reading intact instead of erasing the
+                        // edge. The qualified-module branch has no such fallback.
+                        BodySearch::Absent | BodySearch::Unread => (
                             to_mdo(),
                             EdgeProvenance::Inferred,
                             crate::queries::manager_edge_kind(*manager_type, method_name.as_str()),
@@ -769,7 +779,6 @@ pub fn extract_unresolved_refs(
     let summary = db.module_call_summary(module);
     let resolver = Resolver::with_workspace_scope(module);
     let mut out = Vec::new();
-    let unresolved = |m: Option<MethodRef>| !matches!(m, Some(r) if r.is_export);
     for edge in &summary.call_edges {
         match &edge.target {
             CallTarget::QualifiedModule { module_name, method_name } => {
@@ -789,15 +798,18 @@ pub fn extract_unresolved_refs(
                 object_name,
                 method_name: Some(method_name),
             } => {
-                if let Ok(located) = resolver.locate_manager_module(db, *manager_type, object_name)
+                if let Ok(candidates) = resolver
+                    .locate_manager_module(db, *manager_type, object_name)
+                    .map(|c| c.reflagged(|m| index.is_unread(m)))
                 {
                     // An unread manager module is tracked unconditionally, for the same
                     // reason as an unread common-module body: its surface is unknown, so
                     // becoming readable can add the method, and without the reference the
                     // caller is never reprojected.
-                    if located.unread || unresolved(index.find_method(located.module, method_name))
+                    for target in
+                        reference_targets(&candidates, |m| index.find_method(m, method_name))
                     {
-                        out.push((located.module, method_name.as_str().fold_lower()));
+                        out.push((target, method_name.as_str().fold_lower()));
                     }
                 }
             }

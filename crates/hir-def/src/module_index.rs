@@ -9,6 +9,22 @@ use crate::Name;
 
 type NormalizedFormKey = (Option<(MdoType, String)>, String);
 
+/// Which place in the configuration a module file occupies.
+///
+/// Two files share a group exactly when they are two BODIES of one module — the base
+/// configuration's and an extension's. Weaving is a property of that pair and not of the
+/// module's kind, so a consumer asking "what else declares this same module" asks once here
+/// instead of knowing whether it is holding a common module, an object module, a manager or
+/// a record set — a question it answers wrong the moment a new kind appears.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BodyGroup {
+    Common(String),
+    Manager(ManagerType, String),
+    Object(MdoType, String),
+    RecordSet(MdoType, String),
+    Form(NormalizedFormKey),
+}
+
 /// Approximate live heap bytes for Salsa's `memory_usage` report: each map's
 /// table plus its owned `String` keys (and, for `common_modules_display`, its
 /// owned `String` values too). New heap-owning fields must be added here too.
@@ -20,6 +36,11 @@ pub(crate) fn module_index_heap(v: &Arc<ModuleIndex>) -> usize {
 
     bytes += map_table_bytes::<String, FileId>(idx.common_modules.len());
     bytes += idx.common_modules.keys().map(String::capacity).sum::<usize>();
+
+    bytes += map_table_bytes::<String, Vec<FileId>>(idx.common_module_candidates.len());
+    for (name, files) in &idx.common_module_candidates {
+        bytes += name.capacity() + files.capacity() * std::mem::size_of::<FileId>();
+    }
 
     bytes += map_table_bytes::<String, String>(idx.common_modules_display.len());
     for (k, v) in &idx.common_modules_display {
@@ -55,6 +76,28 @@ pub(crate) fn module_index_heap(v: &Arc<ModuleIndex>) -> usize {
     for (owner_key, form_name) in idx.forms.keys() {
         bytes += owner_key.as_ref().map_or(0, |(_, s)| s.capacity()) + form_name.capacity();
     }
+    bytes += map_table_bytes::<(MdoType, String), Vec<FileId>>(idx.record_set_candidates.len());
+    for ((_, name), files) in &idx.record_set_candidates {
+        bytes += name.capacity() + files.capacity() * std::mem::size_of::<FileId>();
+    }
+
+    bytes += map_table_bytes::<FileId, BodyGroup>(idx.group_of_file.len());
+    // The values own their strings, and the contract right above says every heap-owning field
+    // is counted here. Counting only the table would understate the index by one module name
+    // per file — systematically, and worse the longer the names.
+    for group in idx.group_of_file.values() {
+        bytes += match group {
+            BodyGroup::Common(name) => name.capacity(),
+            BodyGroup::Manager(_, name)
+            | BodyGroup::Object(_, name)
+            | BodyGroup::RecordSet(_, name) => name.capacity(),
+            BodyGroup::Form((owner, form_name)) => {
+                owner.as_ref().map(|(_, object)| object.capacity()).unwrap_or(0)
+                    + form_name.capacity()
+            }
+        };
+    }
+
     bytes += map_table_bytes::<NormalizedFormKey, Vec<FileId>>(idx.form_candidates.len());
     for ((owner_key, form_name), files) in &idx.form_candidates {
         bytes += owner_key.as_ref().map_or(0, |(_, s)| s.capacity())
@@ -68,6 +111,7 @@ pub(crate) fn module_index_heap(v: &Arc<ModuleIndex>) -> usize {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleIndex {
     common_modules: FxHashMap<String, FileId>,
+    common_module_candidates: FxHashMap<String, Vec<FileId>>,
 
     common_modules_display: FxHashMap<String, String>,
 
@@ -78,9 +122,14 @@ pub struct ModuleIndex {
     object_module_candidates: FxHashMap<(MdoType, String), Vec<FileId>>,
 
     record_set_modules: FxHashMap<(MdoType, String), FileId>,
+    record_set_candidates: FxHashMap<(MdoType, String), Vec<FileId>>,
 
     forms: FxHashMap<NormalizedFormKey, FileId>,
     form_candidates: FxHashMap<NormalizedFormKey, Vec<FileId>>,
+
+    /// The place each file occupies, so a holder of a `FileId` alone can find the other
+    /// bodies of the same module without first deciding what kind of module it is.
+    group_of_file: FxHashMap<FileId, BodyGroup>,
 }
 
 impl ModuleIndex {
@@ -90,11 +139,17 @@ impl ModuleIndex {
 
     /// Build the path-derived index. The input is sorted by path here, and
     /// same-name collisions (a module adopted by a configuration extension
-    /// shares its base module's name) are FIRST-wins — together that makes the
-    /// winner independent of the caller's iteration order, and the ascending
-    /// order lets the base-config file beat its extension sibling. This index
-    /// is the visibility-blind fallback: consumers with a caller file resolve
-    /// through the config-scoped
+    /// shares its base module's name) are FIRST-wins, which makes the winner
+    /// independent of the caller's iteration order.
+    ///
+    /// It does NOT make the base configuration win. Path order and root
+    /// topology are different orders, and they disagree whenever an extension's
+    /// directory sorts before the configuration's — then this index answers with
+    /// the extension body and the base declaration is the one that disappears
+    /// (see `candidates_follow_path_order_and_not_root_topology`). This index is
+    /// the topology-blind fallback: a consumer that must not lose the base
+    /// declaration ranks `common_module_candidates` by config-root rank itself,
+    /// and one holding a caller file resolves through the config-scoped
     /// `ConfigsDatabase::resolve_common_module_file_candidates` instead.
     pub fn build_from_paths<'a>(paths: impl Iterator<Item = (FileId, &'a str)>) -> Self {
         let mut paths: Vec<(FileId, &str)> = paths.collect();
@@ -113,11 +168,9 @@ impl ModuleIndex {
                     .forms
                     .entry((owner.clone(), form_key.form_name.as_str().fold_lower()))
                     .or_insert(file_id);
-                index
-                    .form_candidates
-                    .entry((owner, form_key.form_name.as_str().fold_lower()))
-                    .or_default()
-                    .push(file_id);
+                let key = (owner, form_key.form_name.as_str().fold_lower());
+                index.form_candidates.entry(key.clone()).or_default().push(file_id);
+                index.group_of_file.insert(file_id, BodyGroup::Form(key));
                 continue;
             }
 
@@ -132,16 +185,21 @@ impl ModuleIndex {
                         .common_modules_display
                         .entry(lower.clone())
                         .or_insert_with(|| name.to_string());
-                    index.common_modules.entry(lower).or_insert(file_id);
+                    index.common_modules.entry(lower.clone()).or_insert(file_id);
+                    index.common_module_candidates.entry(lower.clone()).or_default().push(file_id);
+                    index.group_of_file.insert(file_id, BodyGroup::Common(lower));
                 }
                 ModuleFileKind::Manager => {
                     if let Some(manager_type) = module_type.to_manager_type() {
                         index.managers.entry((manager_type, lower.clone())).or_insert(file_id);
                         index
                             .manager_candidates
-                            .entry((manager_type, lower))
+                            .entry((manager_type, lower.clone()))
                             .or_default()
                             .push(file_id);
+                        index
+                            .group_of_file
+                            .insert(file_id, BodyGroup::Manager(manager_type, lower));
                     }
                 }
                 ModuleFileKind::Object => {
@@ -149,14 +207,24 @@ impl ModuleIndex {
                         index.object_modules.entry((mdo_type, lower.clone())).or_insert(file_id);
                         index
                             .object_module_candidates
-                            .entry((mdo_type, lower))
+                            .entry((mdo_type, lower.clone()))
                             .or_default()
                             .push(file_id);
+                        index.group_of_file.insert(file_id, BodyGroup::Object(mdo_type, lower));
                     }
                 }
                 ModuleFileKind::RecordSet => {
                     if let Some(mdo_type) = module_type.to_mdo_type() {
-                        index.record_set_modules.entry((mdo_type, lower)).or_insert(file_id);
+                        index
+                            .record_set_modules
+                            .entry((mdo_type, lower.clone()))
+                            .or_insert(file_id);
+                        index
+                            .record_set_candidates
+                            .entry((mdo_type, lower.clone()))
+                            .or_default()
+                            .push(file_id);
+                        index.group_of_file.insert(file_id, BodyGroup::RecordSet(mdo_type, lower));
                     }
                 }
             }
@@ -176,6 +244,20 @@ impl ModuleIndex {
 
     pub fn resolve_common_module(&self, name: &Name) -> Option<FileId> {
         self.common_modules.get(&name.as_str().fold_lower()).copied()
+    }
+
+    /// EVERY body declaring this common module name, in path order.
+    ///
+    /// A configuration extension adopts its base module's name, so one name can have
+    /// several bodies. [`ModuleIndex::resolve_common_module`] answers with one of them and
+    /// cannot say which root it came from; a consumer that must not lose the base
+    /// declaration — or must see the interceptors beside it — walks these and orders them
+    /// by config-root rank itself, which this path-derived index does not know.
+    pub fn common_module_candidates(&self, name: &Name) -> &[FileId] {
+        self.common_module_candidates
+            .get(&name.as_str().fold_lower())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     }
 
     /// Canonical (original-case) name of a common module, or `None` if no such module
@@ -202,6 +284,51 @@ impl ModuleIndex {
 
     pub fn object_module_candidates(&self, mdo_type: MdoType, name: &Name) -> &[FileId] {
         self.object_module_candidates
+            .get(&(mdo_type, name.as_str().fold_lower()))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every OTHER body of the module `file` belongs to, in path order.
+    ///
+    /// The answer excludes `file` itself, so a caller holding one declaration gets exactly
+    /// the bodies that may weave onto it. Empty when the file is not a module this index
+    /// recognises, or when it is the only body there is.
+    pub fn sibling_bodies(&self, file: FileId) -> Vec<FileId> {
+        let Some(group) = self.group_of_file.get(&file) else {
+            return Vec::new();
+        };
+        let bodies: &[FileId] = match group {
+            BodyGroup::Common(name) => {
+                self.common_module_candidates.get(name).map(Vec::as_slice).unwrap_or_default()
+            }
+            BodyGroup::Manager(kind, name) => self
+                .manager_candidates
+                .get(&(*kind, name.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            BodyGroup::Object(kind, name) => self
+                .object_module_candidates
+                .get(&(*kind, name.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            BodyGroup::RecordSet(kind, name) => self
+                .record_set_candidates
+                .get(&(*kind, name.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            BodyGroup::Form(key) => {
+                self.form_candidates.get(key).map(Vec::as_slice).unwrap_or_default()
+            }
+        };
+        bodies.iter().copied().filter(|&other| other != file).collect()
+    }
+
+    /// EVERY body of this record-set module, in path order. See
+    /// [`ModuleIndex::common_module_candidates`] for why a consumer walks these instead of
+    /// taking the single answer.
+    pub fn record_set_candidates(&self, mdo_type: MdoType, name: &Name) -> &[FileId] {
+        self.record_set_candidates
             .get(&(mdo_type, name.as_str().fold_lower()))
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -954,5 +1081,39 @@ mod tests {
         };
 
         assert_eq!(index.resolve(&external_ref), Some(file_id));
+    }
+}
+
+#[cfg(test)]
+mod common_module_candidate_order_tests {
+    use super::*;
+
+    /// The index orders bodies by PATH, which is not the same thing as by root topology: an
+    /// extension whose directory sorts before the configuration's comes first here. A
+    /// consumer that needs the base declaration to win must therefore rank the bodies
+    /// itself; this test is what says that ranking is load-bearing rather than decorative.
+    #[test]
+    fn candidates_follow_path_order_and_not_root_topology() {
+        let configuration = FileId(1);
+        let extension = FileId(2);
+        let index = ModuleIndex::build_from_paths(
+            [
+                (configuration, "/ws/configuration/CommonModules/Общий/Ext/Module.bsl"),
+                (extension, "/ws/00-extension/CommonModules/Общий/Ext/Module.bsl"),
+            ]
+            .into_iter(),
+        );
+
+        assert_eq!(
+            index.common_module_candidates(&Name::new("Общий")),
+            [extension, configuration],
+            "the extension's path sorts first, so the index lists it first — the base \
+             declaration does NOT win here on its own",
+        );
+        assert_eq!(
+            index.resolve_common_module(&Name::new("Общий")),
+            Some(extension),
+            "and the single-answer lookup hands back that same extension body",
+        );
     }
 }

@@ -2002,9 +2002,7 @@ impl McpServer {
     /// returns a retry envelope.
     #[tool(
         name = "references",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<
-            tools::references::ReferencesResponse,
-        >(),
+        output_schema = tools::references::references_output_schema(),
         annotations(read_only_hint = true)
     )]
     async fn references(
@@ -2026,6 +2024,11 @@ impl McpServer {
             ));
         }
 
+        // The call graph anchors names of its own, and its state is what `providers`
+        // reports: passing no source at all would report it as never consulted while the
+        // answer quietly depended on the resident alone.
+        let graph = self.state.graph().clone();
+
         let diag = self.state.diagnostics().clone();
         // Kicks the lazy build, and nothing more. The lifecycle is NOT branched on here:
         // an answer decided before `resident_call` is an answer decided before the
@@ -2038,6 +2041,15 @@ impl McpServer {
 
         let started = std::time::Instant::now();
         let outcome = resident_call(diag.clone(), ct, move |session| {
+            let snapshot = graph.snapshot();
+            let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
+            let graph_source = match (&snapshot, graph_state) {
+                (Some(snapshot), ide::ProviderState::Answered) => {
+                    crate::graph_query::GraphNameSource::answering(&snapshot.graph)
+                }
+                (_, state) => crate::graph_query::GraphNameSource::absent(state),
+            };
+
             // The whole answer is assembled under the resident read lock: the hits, the
             // paths they are published under and the root table that names them all
             // describe ONE revision, and taking any of them afterwards would stamp the
@@ -2065,6 +2077,7 @@ impl McpServer {
                         analysis.database(),
                         &params,
                         max_output_tokens,
+                        &[&graph_source],
                     )
                 })
             };
@@ -2093,7 +2106,9 @@ impl McpServer {
                     freshness.topology,
                     freshness.stale,
                 )),
-                ResidentOutcome::Loading => Ok(tools::metadata::loading(&session.status_report())),
+                ResidentOutcome::Loading => {
+                    Ok(tools::references::loading(&session.status_report()))
+                }
                 ResidentOutcome::Disabled => Err(McpError::invalid_params(
                     "references is only available in the workspace profile",
                     None,
@@ -2105,7 +2120,7 @@ impl McpServer {
         })
         .await;
         cancellable_answer(outcome, "references", started, || {
-            tools::metadata::loading(&diag.status_report())
+            tools::references::loading(&diag.status_report())
         })
     }
 

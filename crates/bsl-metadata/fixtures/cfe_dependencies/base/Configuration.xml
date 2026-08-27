@@ -11,6 +11,7 @@
 		<ChildObjects>
 			<CommonModule>БазовыйМодуль</CommonModule>
 					<Catalog>Товары</Catalog>
+			<InformationRegister>ЦеныТоваров</InformationRegister>
 		</ChildObjects>
 	</Configuration>
 </MetaDataObject>

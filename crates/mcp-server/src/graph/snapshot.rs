@@ -344,11 +344,24 @@ impl GraphState {
 
     /// Revalidate the prepared path under a short ownership fence, then install the
     /// descriptors and readiness metadata while request snapshots are excluded.
+    ///
+    /// `reload_obligation` names the forced-reload epoch this publication discharges,
+    /// or `None` when it discharges none. It is discharged inside the same critical
+    /// section that installs the snapshot, so an observer holding `inner` — such as
+    /// [`GraphState::claim_reload_slot`] — sees the new publication and the discharged
+    /// obligation as ONE state. Discharging it after the section leaves a window in
+    /// which the graph reads "reloaded, and still owing a reload", and a claim landing
+    /// there starts a second full rebuild of what was just published.
+    ///
+    /// Only a successful install discharges: a refused lease, a `Changed` revalidation
+    /// and a failed build all leave the obligation outstanding, so the forced reload is
+    /// retried rather than silently dropped.
     pub(super) fn install_prepared_snapshot(
         &self,
         prepared: PreparedSnapshotPool,
         published: Published,
         status: GraphStatus,
+        reload_obligation: Option<usize>,
     ) -> crate::workspace_lease::LeaseOutcome<Result<(), SnapshotInstallError>> {
         #[cfg(test)]
         SNAPSHOT_OPEN_HOOK.with(|slot| {
@@ -395,6 +408,9 @@ impl GraphState {
             pool.entries = prepared.entries;
             inner.published = Some(published);
             inner.status = status;
+            if let Some(epoch) = reload_obligation {
+                self.complete_project_reload_through(epoch);
+            }
             Ok(())
         })
     }
@@ -769,7 +785,9 @@ fn stat_pair(path: &Path) -> Option<(u128, u64)> {
 mod tests {
     use super::super::scan::workspace_fingerprint;
     use super::super::state::{lock_recover, GraphState};
-    use super::super::test_support::{sample_workspace, seed_cache, wait_ready, write};
+    use super::super::test_support::{
+        sample_workspace, seed_cache, wait_ready, wait_until, wait_until_within, write,
+    };
     use super::*;
     use crate::change_hub::WorkspaceChangeHub;
     use std::time::Duration;
@@ -892,6 +910,7 @@ mod tests {
                 search_roots: None,
             },
             GraphStatus::Ready { files: 0 },
+            None,
         );
         assert_eq!(
             outcome,
@@ -1111,11 +1130,9 @@ mod tests {
             BackgroundSnapshotFailure::PrepareSecondChanged,
         ));
         graph.ensure_loading();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !matches!(graph.status(), GraphStatus::Failed { .. }) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(matches!(graph.status(), GraphStatus::Failed { .. }));
+        wait_until_within(&graph, Duration::from_secs(5), "the publication to fail", || {
+            matches!(graph.status(), GraphStatus::Failed { .. })
+        });
         assert!(graph.snapshot().is_none());
         graph.set_background_snapshot_failure_for_test(None);
         graph.ensure_loading();
@@ -1150,16 +1167,13 @@ mod tests {
         assert_eq!(drifted.revision, 1, "the stale response still serves the old generation");
         assert!(matches!(drifted.reload, "running" | "failed"));
 
-        let mut settled = None;
-        for _ in 0..200 {
-            let snap = graph.snapshot().expect("snapshot");
-            if snap.generation == 2 {
-                settled = Some(graph.freshness(&snap));
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let settled = settled.expect("reload did not publish a new generation");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(2),
+            "the reload to publish generation 2",
+            || graph.snapshot().is_some_and(|snap| snap.generation == 2),
+        );
+        let settled = graph.freshness(&graph.snapshot().expect("the reload published"));
         assert!(!settled.stale);
         assert_eq!(settled.revision, 2);
         assert_eq!(settled.reload, "none");
@@ -1189,6 +1203,8 @@ mod tests {
             "CommonModules/Сервер/Ext/Module.bsl",
             "&НаСервере\nФункция Считать() Экспорт Возврат 1; КонецФункции",
         );
+        // Waits on the hub's delivery queue, not on graph state: a graph-state summary
+        // would say nothing about whether inotify delivered.
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut delivered = false;
         while Instant::now() < deadline {
@@ -1231,16 +1247,13 @@ mod tests {
         assert!(drifted.stale, "a dependsOn-only edit must read as stale");
         assert!(matches!(drifted.reload, "running" | "failed"));
 
-        let mut settled = None;
-        for _ in 0..500 {
-            let snap = graph.snapshot().expect("snapshot");
-            if snap.generation == 2 {
-                settled = Some(graph.freshness(&snap));
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let settled = settled.expect("the topology-triggered reload did not publish");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(5),
+            "the topology-triggered reload to publish generation 2",
+            || graph.snapshot().is_some_and(|snap| snap.generation == 2),
+        );
+        let settled = graph.freshness(&graph.snapshot().expect("the reload published"));
         assert!(!settled.stale, "the reloaded graph reflects the new topology");
     }
 
@@ -1280,25 +1293,23 @@ mod tests {
         .unwrap();
         // Staleness lands once the hub delivers the config event (the throttled
         // fast path deliberately serves the cached topology until then).
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline && !graph.freshness(&snap).stale {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(graph.freshness(&snap).stale, "the new extension root must read as drift");
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if graph.snapshot().map(|s| s.generation) == Some(2) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(graph.snapshot().map(|s| s.generation), Some(2), "reload published");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(5),
+            "the new extension root to read as drift",
+            || graph.freshness(&snap).stale,
+        );
+        wait_until(&graph, "the drift reload to publish generation 2", || {
+            graph.snapshot().map(|s| s.generation) == Some(2)
+        });
 
         // The re-armed hub must deliver events under the NEW root. The write is
         // repeated per poll so a delivery is observed even if the ack landed a
         // moment after the generation became visible.
         let cursor = hub.subscribe();
         let file = ext.join("Новый.bsl");
+        // Waits on the hub's delivery queue, not on graph state: a graph-state summary
+        // would say nothing about whether inotify delivered.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut cursor = cursor;
         let mut seen = false;
@@ -1415,6 +1426,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         // Re-written per poll: under a fully parallel test run the inotify queue
         // can lag well past a single write's event window.
+        // Waits on the hub's delivery queue, not on graph state: a graph-state summary
+        // would say nothing about whether inotify delivered.
         let deadline = Instant::now() + Duration::from_secs(20);
         let mut delivered = false;
         while Instant::now() < deadline {
@@ -1460,6 +1473,8 @@ mod tests {
         let mut observer = hub.subscribe();
         std::thread::sleep(Duration::from_millis(10));
         write(root, "CommonModules/Сервер/Ext/Module.bsl.tmp", "editor swap file");
+        // Waits on the hub's delivery queue, not on graph state: a graph-state summary
+        // would say nothing about whether inotify delivered.
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut delivered = false;
         while Instant::now() < deadline {

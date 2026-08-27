@@ -75,6 +75,11 @@ thread_local! {
     /// built, proving that dropping the transaction restores every persistent carrier.
     pub(crate) static FORCE_WORKSPACE_TRANSITION_VECTOR_ERROR: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+
+    /// How many further opens must lose the bootstrap race. Each consumed attempt decrements it,
+    /// so a test states the number of retries it wants rather than racing a real peer for them.
+    pub(crate) static FORCE_BOOTSTRAP_RETRIES: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// Bumped whenever the embedding text composed by
@@ -94,6 +99,16 @@ pub(crate) const EMBED_TEXT_VERSION: i64 = 1;
 /// trigger a needless full re-index.
 const SCHEMA_VERSION: i64 = 2;
 const SQLITE_IOERR_FSTAT: i32 = 1802;
+
+/// How long an unfenced open lets SQLite wait out a contended write before giving up.
+pub(crate) const DEFAULT_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The same budget for an open that runs under an ownership fence: long enough to ride out the
+/// ordinary WAL handover, short enough that one admission is not a stall. The total wait is
+/// unchanged — the caller's deadline spans many admissions, and it waits between them with the
+/// fence released.
+pub(crate) const FENCED_OPEN_BUSY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 pub(crate) fn sqlite_bootstrap_retryable(error: &SearchError) -> bool {
     matches!(
@@ -229,16 +244,56 @@ impl Store {
 
     /// Open the connection and apply connection-local pragmas without changing schema rows.
     pub(crate) fn prepare_open(path: &Path) -> Result<Self, SearchError> {
+        Self::prepare_open_with_busy_timeout(path, DEFAULT_BUSY_TIMEOUT)
+    }
+
+    /// The same open with an explicit contention budget.
+    ///
+    /// A caller that opens under an ownership fence must pass a SHORT one. The budget set here
+    /// governs the whole connection, and [`Self::finish_open_checkpointed`] goes on to take a
+    /// writer reservation in [`Self::migrate_structural_schema`] — a wait SQLite serves inside
+    /// that call. Under the fence such a wait is an interprocess lock and the lease's lifecycle
+    /// mutex held for its whole length, which is how a shutdown ends up queued behind a peer's
+    /// bootstrap. A fenced caller keeps its own deadline across attempts and waits between them
+    /// with the fence released, so the budget belongs to the retry and not to one admission.
+    pub(crate) fn prepare_open_with_busy_timeout(
+        path: &Path,
+        busy_timeout: std::time::Duration,
+    ) -> Result<Self, SearchError> {
+        #[cfg(test)]
+        if FORCE_BOOTSTRAP_RETRIES.with(|left| {
+            let remaining = left.get();
+            left.set(remaining.saturating_sub(1));
+            remaining > 0
+        }) {
+            return Err(SearchError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(SQLITE_IOERR_FSTAT),
+                Some("forced bootstrap race".to_owned()),
+            )));
+        }
         let conn = Connection::open(path)?;
         // Set this before `journal_mode=WAL`: on a brand-new shared cache, changing journal
         // mode is itself the first contended write and must wait for the peer bootstrap.
-        conn.busy_timeout(std::time::Duration::from_secs(30))?;
+        conn.busy_timeout(busy_timeout)?;
         let store = Self { conn, path: path.to_path_buf(), mark_seq: Arc::new(AtomicI64::new(0)) };
         store.apply_pragmas()?;
         Ok(store)
     }
 
     /// Apply every schema/open mutation as atomic groups under a cooperative fence.
+    /// Put the connection back on the operational contention budget.
+    ///
+    /// The short budget a fenced open runs under belongs to that open alone: it exists so one
+    /// admission cannot sit under the ownership fence waiting for a peer's bootstrap. The store
+    /// that open produces then lives for the whole daemon and shares its database with the
+    /// background embedding pass, which holds the WAL writer for far longer than the admission
+    /// budget — a live write that gave up after it would return `SQLITE_BUSY` where it used to
+    /// wait and succeed.
+    pub(crate) fn restore_operational_busy_timeout(&self) -> Result<(), SearchError> {
+        self.conn.busy_timeout(DEFAULT_BUSY_TIMEOUT)?;
+        Ok(())
+    }
+
     pub(crate) fn finish_open_checkpointed(
         &self,
         checkpoint: &mut dyn FnMut() -> ControlFlow<()>,

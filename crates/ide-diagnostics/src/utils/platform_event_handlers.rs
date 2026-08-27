@@ -67,6 +67,22 @@ const MANAGED_APP_UI_HANDLERS: &[&str] = &[
     "приизменениидоступностиосновногосервера",
 ];
 
+/// Result composition — exposed only by the object module of a report. Gated for the
+/// same reason as the application-family sets: a name exempted where the platform never
+/// invokes it masks a genuinely unused method. A catalog's object module is also an
+/// `ObjectModule`, so the module kind alone is not enough — the owning metadata object
+/// decides.
+const REPORT_OBJECT_MODULE_HANDLERS: &[&str] = &["прикомпоновкерезультата", "oncomposeresult"];
+
+/// The module the platform is looking at: its kind plus, for an object module, the
+/// metadata object that owns it. Both facts together decide which events can be raised
+/// here at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ModuleOwner {
+    pub module_type: bsl_metadata::ModuleType,
+    pub mdo_type: Option<bsl_metadata::MdoType>,
+}
+
 /// Event handlers the platform invokes in the session module.
 const SESSION_MODULE_EVENT_HANDLERS: &[&str] =
     &["установкапараметровсеанса", "sessionparameterssetting"];
@@ -92,6 +108,17 @@ pub fn is_ordinary_application_module_event_handler(name: &str) -> bool {
 pub fn is_external_connection_module_event_handler(name: &str) -> bool {
     let lower = name.fold_lower();
     APP_RUN_LIFECYCLE_HANDLERS.contains(&lower.as_str())
+}
+
+pub fn is_report_object_module_event_handler(name: &str, owner: ModuleOwner) -> bool {
+    if owner.module_type != bsl_metadata::ModuleType::ObjectModule
+        || owner.mdo_type != Some(bsl_metadata::MdoType::Report)
+    {
+        return false;
+    }
+
+    let lower = name.fold_lower();
+    REPORT_OBJECT_MODULE_HANDLERS.contains(&lower.as_str())
 }
 
 pub fn is_session_module_event_handler(name: &str) -> bool {
@@ -127,6 +154,43 @@ mod tests {
         assert!(is_platform_event_handler("Posting"));
         assert!(is_platform_event_handler("ОбработкаУдаленияПроведения"));
         assert!(is_platform_event_handler("UndoPosting"));
+    }
+
+    fn owner(
+        module_type: bsl_metadata::ModuleType,
+        mdo_type: Option<bsl_metadata::MdoType>,
+    ) -> ModuleOwner {
+        ModuleOwner { module_type, mdo_type }
+    }
+
+    #[test]
+    fn test_report_object_module_handlers() {
+        let report =
+            owner(bsl_metadata::ModuleType::ObjectModule, Some(bsl_metadata::MdoType::Report));
+
+        assert!(is_report_object_module_event_handler("ПриКомпоновкеРезультата", report));
+        assert!(is_report_object_module_event_handler("OnComposeResult", report));
+        assert!(is_report_object_module_event_handler("прикомпоновкерезультата", report));
+        assert!(!is_report_object_module_event_handler("МойМетод", report));
+
+        assert!(is_platform_event_handler("ОбработкаПроверкиЗаполнения"));
+        assert!(is_platform_event_handler("FillCheckProcessing"));
+
+        assert!(!is_platform_event_handler("ПриКомпоновкеРезультата"));
+        assert!(!is_platform_event_handler("OnComposeResult"));
+    }
+
+    #[test]
+    fn test_report_handler_not_exempt_for_other_owners() {
+        let catalog =
+            owner(bsl_metadata::ModuleType::ObjectModule, Some(bsl_metadata::MdoType::Catalog));
+        let unknown_owner = owner(bsl_metadata::ModuleType::ObjectModule, None);
+        let common = owner(bsl_metadata::ModuleType::CommonModule, None);
+
+        for other in [catalog, unknown_owner, common] {
+            assert!(!is_report_object_module_event_handler("ПриКомпоновкеРезультата", other));
+            assert!(!is_report_object_module_event_handler("OnComposeResult", other));
+        }
     }
 
     #[test]

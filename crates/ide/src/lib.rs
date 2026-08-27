@@ -35,8 +35,8 @@ pub use call_hierarchy_index::{
 };
 pub use completion::{CompletionItem, CompletionItemKind};
 pub use declarations::{
-    classify_unreferenceable, resolve_declarations, Declaration, DeclarationKind,
-    UnsupportedCategory,
+    classify_unreferenceable, graph_id_of_declaration, resolve_declarations, Declaration,
+    DeclarationKind, UnsupportedCategory,
 };
 pub use diagnostics_catalog::{catalog_entry, diagnostic_catalog, CatalogEntry, SeverityBucket};
 pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
@@ -86,10 +86,10 @@ pub use references::{
 pub use rename::{prepare_rename, rename, RenameError, RenameTarget};
 pub use signature_help::{ParameterInfo, SignatureHelp, SignatureInformation};
 pub use symbol_info::{
-    is_well_formed_symbol, symbol_info, SymbolContainer, SymbolDefinition, SymbolInfoCard,
-    SymbolInfoRequest, SymbolInfoSections, SymbolMember, SymbolMemberAvailability,
-    SymbolMemberContextStatus, SymbolMemberOrigin, SymbolMemberSignature, SymbolPosition,
-    SymbolTypeVariant,
+    is_well_formed_symbol, symbol_info, DefinitionRole, SymbolContainer, SymbolDefinition,
+    SymbolDefinitionSite, SymbolInfoCard, SymbolInfoRequest, SymbolInfoSections, SymbolMember,
+    SymbolMemberAvailability, SymbolMemberContextStatus, SymbolMemberOrigin, SymbolMemberSignature,
+    SymbolPosition, SymbolTypeVariant, SYMBOL_KINDS,
 };
 pub use syntax_highlighting::{highlight, HighlightResult, HlMod, HlRange, HlTag};
 

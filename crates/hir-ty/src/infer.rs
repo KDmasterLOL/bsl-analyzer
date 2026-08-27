@@ -2860,191 +2860,69 @@ impl<'db> InferenceContext<'db> {
                 self.expr_types.insert(callee, self.db.unknown());
                 return return_ty;
             }
-            if let TypeKind::MetadataRef(facet) = workspace_receiver_kind {
-                let kind = facet.kind;
-                let mdo_name = hir_def::Name::new(&facet.name);
-                let resolver = self.get_resolver();
-                match crate::method_resolution::resolve_object_module_call(
-                    self.db,
-                    kind,
-                    &mdo_name,
-                    &method_name,
-                    &resolver,
-                ) {
-                    Ok(resolution) => {
-                        let receiver_name = receiver_display_name(self.db, workspace_receiver_ty)
-                            .unwrap_or_else(|| mdo_name.clone());
-                        if !resolution.is_export {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::UnresolvedMethodCall {
-                                    expr: callee,
-                                    receiver_name: receiver_name.clone(),
-                                    method_name: method_name.clone(),
-                                    kind: UnresolvedMethodKind::MethodNotExport,
-                                },
-                            );
-                        }
-                        self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self.effective_local_return(
-                            resolution.method_id,
-                            self.documented_return(resolution.method_id, resolution.return_type),
-                        );
-                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                            self.db,
-                            &method_name,
-                            resolution.method_id,
-                            return_ty,
-                        ) else {
-                            return self.db.unknown();
-                        };
-                        return self.record_candidate_call_arg_binding(callee, args, candidates);
-                    }
-                    Err(UnresolvedMethodKind::MethodNotFound) => {}
-                    Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Fall through exactly like a missing user method: the platform
-                        // surface is still worth resolving. Only the verdict is barred.
-                        self.calls_with_unread_target.insert(callee);
-                    }
-                    Err(
-                        kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::ReceiverNotResolved
-                        | UnresolvedMethodKind::ReceiverNameAbsent),
-                    ) => {
-                        unreachable!(
-                            "resolve_object_module_call returned unexpected kind: {:?}",
-                            kind
-                        )
-                    }
-                }
-            }
-
-            let receiver_kind = self.db.lookup_type(receiver_ty);
-            if let TypeKind::MetadataRef(facet) = receiver_kind {
-                let kind = facet.kind;
-                let mdo_name = hir_def::Name::new(&facet.name);
-                let resolver = self.get_resolver();
-                match crate::method_resolution::resolve_record_set_module_call(
-                    self.db,
-                    kind,
-                    &mdo_name,
-                    &method_name,
-                    &resolver,
-                ) {
-                    Ok(resolution) => {
-                        let receiver_name = receiver_display_name(self.db, receiver_ty)
-                            .unwrap_or_else(|| mdo_name.clone());
-                        if !resolution.is_export {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::UnresolvedMethodCall {
-                                    expr: callee,
-                                    receiver_name: receiver_name.clone(),
-                                    method_name: method_name.clone(),
-                                    kind: UnresolvedMethodKind::MethodNotExport,
-                                },
-                            );
-                        }
-                        self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self.effective_local_return(
-                            resolution.method_id,
-                            self.documented_return(resolution.method_id, resolution.return_type),
-                        );
-                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                            self.db,
-                            &method_name,
-                            resolution.method_id,
-                            return_ty,
-                        ) else {
-                            return self.db.unknown();
-                        };
-                        return self.record_candidate_call_arg_binding(callee, args, candidates);
-                    }
-                    Err(UnresolvedMethodKind::MethodNotFound) => {}
-                    Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Fall through exactly like a missing user method: the platform
-                        // surface is still worth resolving. Only the verdict is barred.
-                        self.calls_with_unread_target.insert(callee);
-                    }
-                    Err(
-                        kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::ReceiverNotResolved
-                        | UnresolvedMethodKind::ReceiverNameAbsent),
-                    ) => {
-                        unreachable!(
-                            "resolve_record_set_module_call returned unexpected kind: {:?}",
-                            kind
-                        )
-                    }
-                }
-            }
-
-            let manager_receiver_ty =
-                crate::this_object::coerce_to_metadata_ref_id(self.db, receiver_ty)
-                    .unwrap_or(receiver_ty);
-            let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
-            if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
-                let mdo_type = facet.mdo;
-                let mdo_name = hir_def::Name::new(&facet.name);
+            // The spelled-out-chain report belongs to the manager receiver, not to
+            // whether a user method answers, so it fires before resolution — the
+            // same position it held when this was three separate branches.
+            if let TypeKind::ObjectManager(facet) = &workspace_receiver_kind {
                 self.report_spelled_out_chain_diagnostics(
                     call_expr,
                     base_id,
-                    mdo_type,
-                    &mdo_name,
+                    facet.mdo,
+                    &hir_def::Name::new(&facet.name),
                     &method_name,
                     args,
                 );
-                let resolver = self.get_resolver();
-                match crate::method_resolution::resolve_aliased_manager_call(
-                    self.db,
-                    mdo_type,
-                    &mdo_name,
-                    &method_name,
-                    &resolver,
-                ) {
-                    Ok(resolution) => {
-                        let receiver_name = receiver_display_name(self.db, receiver_ty)
-                            .unwrap_or_else(|| mdo_name.clone());
-                        if !resolution.is_export {
-                            self.push_inference_diagnostic(
-                                InferenceDiagnostic::UnresolvedMethodCall {
-                                    expr: callee,
-                                    receiver_name: receiver_name.clone(),
-                                    method_name: method_name.clone(),
-                                    kind: UnresolvedMethodKind::MethodNotExport,
-                                },
-                            );
-                        }
-                        self.expr_types.insert(callee, self.db.unknown());
-                        let return_ty = self.effective_local_return(
-                            resolution.method_id,
-                            self.documented_return(resolution.method_id, resolution.return_type),
-                        );
-                        let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
-                            self.db,
-                            &method_name,
-                            resolution.method_id,
-                            return_ty,
-                        ) else {
-                            return self.db.unknown();
+            }
+
+            let resolver = self.get_resolver();
+            match crate::method_resolution::resolve_user_call(
+                self.db,
+                receiver_ty,
+                &method_name,
+                &resolver,
+            ) {
+                crate::method_resolution::UserCallTarget::Method(hit) => {
+                    let crate::method_resolution::UserCall { route, resolution, mdo_name } = hit;
+                    if !resolution.is_export {
+                        // The object route names the COERCED receiver, the other two
+                        // the one as written; the spellings differ only on
+                        // `ЭтотОбъект`/`ЭтотМенеджер`.
+                        let named_ty = match route {
+                            crate::method_resolution::UserCallRoute::ObjectModule => {
+                                workspace_receiver_ty
+                            }
+                            _ => receiver_ty,
                         };
-                        return self.record_candidate_call_arg_binding(callee, args, candidates);
+                        let receiver_name = receiver_display_name(self.db, named_ty)
+                            .unwrap_or_else(|| mdo_name.clone());
+                        self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedMethodCall {
+                            expr: callee,
+                            receiver_name,
+                            method_name: method_name.clone(),
+                            kind: UnresolvedMethodKind::MethodNotExport,
+                        });
                     }
-                    Err(UnresolvedMethodKind::MethodNotFound) => {}
-                    Err(UnresolvedMethodKind::BodyUnread) => {
-                        // Fall through exactly like a missing user method: the platform
-                        // surface is still worth resolving. Only the verdict is barred.
-                        self.calls_with_unread_target.insert(callee);
-                    }
-                    Err(
-                        kind @ (UnresolvedMethodKind::MethodNotExport
-                        | UnresolvedMethodKind::ReceiverNotResolved
-                        | UnresolvedMethodKind::ReceiverNameAbsent),
-                    ) => {
-                        unreachable!(
-                            "resolve_aliased_manager_call returned unexpected kind: {:?}",
-                            kind
-                        )
-                    }
+                    self.expr_types.insert(callee, self.db.unknown());
+                    let return_ty = self.effective_local_return(
+                        resolution.method_id,
+                        self.documented_return(resolution.method_id, resolution.return_type),
+                    );
+                    let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
+                        self.db,
+                        &method_name,
+                        resolution.method_id,
+                        return_ty,
+                    ) else {
+                        return self.db.unknown();
+                    };
+                    return self.record_candidate_call_arg_binding(callee, args, candidates);
                 }
+                crate::method_resolution::UserCallTarget::BodyUnread => {
+                    // Fall through exactly like a missing user method: the platform
+                    // surface is still worth resolving. Only the verdict is barred.
+                    self.calls_with_unread_target.insert(callee);
+                }
+                crate::method_resolution::UserCallTarget::NotUserMethod => {}
             }
 
             let refine_ctx = crate::method_lookup::RefineCtx {
@@ -3071,8 +2949,9 @@ impl<'db> InferenceContext<'db> {
                     );
                     self.check_member_env(callee, &method_name, info.env, EnvMemberKind::Method);
                     let mut candidates = info.candidates;
-                    let manager_receiver_kind = self.db.lookup_type(manager_receiver_ty);
-                    if let TypeKind::ObjectManager(facet) = manager_receiver_kind {
+                    // Same coercion the user cascade dispatched on: the manager
+                    // receiver and the workspace receiver are one value.
+                    if let TypeKind::ObjectManager(facet) = &workspace_receiver_kind {
                         if facet.mdo == bsl_metadata::MdoType::Constant {
                             let mdo_name = hir_def::Name::new(&facet.name);
                             self.refine_constant_candidates(

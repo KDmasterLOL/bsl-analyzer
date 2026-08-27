@@ -51,6 +51,7 @@ pub use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 pub use conditional_tree::{ConditionalData, ConditionalIdx, ConditionalKind, ConditionalTree};
 pub use configs::{
     ApplicationModuleKind, BodySearch, CommonModuleBodies, CommonModuleBody, ConfigsDatabase,
+    MdoModuleRole,
 };
 pub use item_tree::ItemTree;
 pub use module_index::{

@@ -804,8 +804,6 @@ mod tests {
         retry.stop();
     }
 
-    /// A lost lease PAUSES the driver (no disarm), and a returned lease resumes it: the
-    /// newer daemon exits, the older one re-claims, and the pending signals get their pass.
     #[test]
     fn temporary_lock_refusal_remains_retryable() {
         let dir = tempdir().unwrap();

@@ -254,7 +254,14 @@ struct WorkspaceRootsTransitionStaging {
     cleanup: HashSet<FileKey>,
     obsolete_baseline: HashSet<FileKey>,
     upserts: Vec<WorkspaceTransitionFile>,
-    next_cache: WorkspaceOverlayCache,
+    /// The arguments of the in-place overlay transition, not a rebuilt overlay. Staging must not
+    /// hold the engine lock while it scans, and a cache cloned before that scan is a photograph
+    /// of a state the commit no longer finds: installing it would erase every mark, entry and
+    /// hiding the window admitted. Carrying the arguments instead lets the commit apply the
+    /// transition to whatever the live cache has become, so concurrent work is merged rather
+    /// than overwritten — and no comparison has to enumerate what "concurrent work" can be.
+    unread_present: HashSet<FileKey>,
+    overlay_files: Vec<crate::workspace_overlay::WorkspaceTransitionOverlayFile>,
     next_index: VectorIndex,
     embedding_generation: i64,
     removed: usize,
@@ -615,43 +622,60 @@ impl SearchEngine {
             ) -> ControlFlow<(), Result<(), SearchError>>,
         ) -> FenceOutcome<Result<(), SearchError>>,
     {
-        // Opening stays inside the fence so a refused boot leaves no artifact behind. Retry the
-        // same bootstrap races as `Store::open`: two processes may create this derived cache.
-        let mut store = None;
+        // Opening stays inside the fence so a refused boot leaves no artifact behind: an
+        // unadmitted daemon must not create this derived cache. The WAIT does not stay inside
+        // it. Two processes may bootstrap the same database, and losing that race costs tens of
+        // seconds; holding the fence across the wait would pin the interprocess lock and the
+        // lease's own lifecycle mutex for all of it — exactly what splitting work into short
+        // admissions exists to prevent, and enough to stall a shutdown or a peer's claim. So
+        // every attempt is its own admission and the backoff runs with the fence released; the
+        // half-open connection is dropped between attempts rather than carried across a window
+        // in which this daemon does not own the workspace.
+        enum OpenAttempt {
+            Opened,
+            Retry(SearchError),
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        match Self::fenced_checkpointed_value(apply, |checkpoint| loop {
-            if store.is_none() {
-                match Store::prepare_open(db_path) {
-                    Ok(opened) => store = Some(opened),
-                    Err(error)
-                        if crate::store::sqlite_bootstrap_retryable(&error)
-                            && std::time::Instant::now() < deadline => {}
-                    Err(error) => return ControlFlow::Continue(Err(error)),
-                }
-            }
-            if let Some(opened) = store.as_ref() {
-                match opened.finish_open_checkpointed(checkpoint) {
-                    Ok(ControlFlow::Continue(())) => return ControlFlow::Continue(Ok(())),
-                    Ok(ControlFlow::Break(())) => return ControlFlow::Break(()),
-                    Err(error)
-                        if crate::store::sqlite_bootstrap_retryable(&error)
-                            && std::time::Instant::now() < deadline =>
-                    {
-                        store = None;
+        let mut store: Option<Store> = None;
+        loop {
+            let attempt = Self::fenced_checkpointed_value(&mut *apply, |checkpoint| {
+                let opened = match Store::prepare_open_with_busy_timeout(
+                    db_path,
+                    crate::store::FENCED_OPEN_BUSY_TIMEOUT,
+                ) {
+                    Ok(opened) => opened,
+                    Err(error) if crate::store::sqlite_bootstrap_retryable(&error) => {
+                        return ControlFlow::Continue(Ok(OpenAttempt::Retry(error)))
                     }
                     Err(error) => return ControlFlow::Continue(Err(error)),
+                };
+                match opened.finish_open_checkpointed(checkpoint) {
+                    Ok(ControlFlow::Continue(())) => {
+                        store = Some(opened);
+                        ControlFlow::Continue(Ok(OpenAttempt::Opened))
+                    }
+                    Ok(ControlFlow::Break(())) => ControlFlow::Break(()),
+                    Err(error) if crate::store::sqlite_bootstrap_retryable(&error) => {
+                        ControlFlow::Continue(Ok(OpenAttempt::Retry(error)))
+                    }
+                    Err(error) => ControlFlow::Continue(Err(error)),
                 }
+            })?;
+            match attempt {
+                FenceOutcome::Applied(OpenAttempt::Opened) => {
+                    let opened = store.take().expect("an admitted store open produces the store");
+                    opened.restore_operational_busy_timeout()?;
+                    return Ok(FenceOutcome::Applied(opened));
+                }
+                FenceOutcome::Applied(OpenAttempt::Retry(error)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(error);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                FenceOutcome::TransientRefusal => return Ok(FenceOutcome::TransientRefusal),
+                FenceOutcome::Terminal => return Ok(FenceOutcome::Terminal),
             }
-            if checkpoint().is_break() {
-                return ControlFlow::Break(());
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        })? {
-            FenceOutcome::Applied(()) => {
-                Ok(FenceOutcome::Applied(store.expect("an admitted store open produces the store")))
-            }
-            FenceOutcome::TransientRefusal => Ok(FenceOutcome::TransientRefusal),
-            FenceOutcome::Terminal => Ok(FenceOutcome::Terminal),
         }
     }
 
@@ -2592,11 +2616,10 @@ impl SearchEngine {
         if cache.transition_epoch() != plan.overlay_epoch {
             return Ok(None);
         }
-        let mut next_cache = cache.clone();
+        let mut known = carriers.all_keys();
+        known.extend(cache.root_keyed_keys());
         drop(cache);
 
-        let mut known = carriers.all_keys();
-        known.extend(next_cache.root_keyed_keys());
         let changed_ids = plan.old_roots.changed_root_ids(&plan.next_roots);
         let readable_keys: HashSet<FileKey> =
             plan.files.iter().map(|file| file.key.clone()).collect();
@@ -2670,13 +2693,6 @@ impl SearchEngine {
             Vec::new()
         };
 
-        next_cache.transition_roots(
-            &changed_ids,
-            &cleanup,
-            &obsolete_baseline,
-            &unread_keys,
-            overlay_files,
-        );
         let pending_collection_embeddings = !plan.serves_external_baseline
             && self.embedder.is_some()
             && upserts.iter().any(|file| !file.chunks.is_empty());
@@ -2706,7 +2722,8 @@ impl SearchEngine {
             cleanup,
             obsolete_baseline,
             upserts,
-            next_cache,
+            unread_present: unread_keys,
+            overlay_files,
             next_index,
             embedding_generation,
             removed: obsolete.len(),
@@ -2783,7 +2800,17 @@ impl SearchEngine {
         }
         let staging =
             validated.staging.take().expect("staging checked immediately before the transaction");
-        *cache = staging.next_cache;
+        // Applied to the LIVE cache, never installed over it: whatever the window between
+        // staging and this commit admitted — a point mark, a settled refresh, a whole overlay
+        // publication — is still there and keeps its meaning. The transition changes only the
+        // keys its own root change is about.
+        cache.transition_roots(
+            &staging.changed_root_ids,
+            &staging.cleanup,
+            &staging.obsolete_baseline,
+            &staging.unread_present,
+            staging.overlay_files,
+        );
         self.index = staging.next_index;
         self.workspace_roots = Some(plan.next_roots.clone());
         self.workspace_roots_epoch += 1;
@@ -8703,6 +8730,271 @@ mod tests {
         assert_eq!(engine.vector_count(), vectors_before);
         assert_eq!(engine.file_count().unwrap(), 1, "the inserted extension row was rolled back");
         assert!(engine.text_search("Расширение", 10, Some("code")).unwrap().is_empty());
+    }
+
+    /// The erased operation an `apply` receives. Named because the nested `dyn FnMut` is
+    /// past the inline-complexity limit, and an `allow` would only silence the measure.
+    type FencedOperation<'a> = &'a mut dyn FnMut(
+        &mut dyn FnMut() -> ControlFlow<()>,
+    ) -> ControlFlow<(), Result<(), SearchError>>;
+
+    /// The short budget belongs to the OPEN, not to the store the open returns. That store is
+    /// the daemon's for the rest of its life and shares its database with the embedding pass,
+    /// which holds the WAL writer far longer than an admission may wait — a live write left on
+    /// the admission budget would start failing where it used to wait and succeed.
+    ///
+    /// The refusal on the short budget, measured in the same held window, is the control: it
+    /// proves the peer's lock really does block writes and that 100 ms really is too little, so
+    /// the engine's success below is a property of its budget and not of an idle database.
+    #[test]
+    fn a_fenced_open_leaves_the_engine_on_the_operational_budget() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("live.db");
+        let root = dir.path().join("cf");
+        fs::create_dir_all(root.join("CommonModules/А/Ext")).unwrap();
+        fs::write(
+            root.join("CommonModules/А/Ext/Module.bsl"),
+            "Процедура А() Экспорт\nКонецПроцедуры\n",
+        )
+        .unwrap();
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+
+        let holder_path = db_path.clone();
+        let (locked, wait_for_lock) = std::sync::mpsc::channel();
+        let (control_done, wait_for_control) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&holder_path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            // Held until the control has run — otherwise a release that slipped in first would
+            // let the control succeed and the test would pass on an idle database.
+            wait_for_control.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        wait_for_lock.recv().unwrap();
+
+        let impatient = rusqlite::Connection::open(&db_path).unwrap();
+        impatient.busy_timeout(crate::store::FENCED_OPEN_BUSY_TIMEOUT).unwrap();
+        assert!(
+            impatient.execute_batch("BEGIN IMMEDIATE").is_err(),
+            "control: the peer's write lock must actually refuse the admission budget"
+        );
+        control_done.send(()).unwrap();
+
+        let indexed = engine.index_directory_fts(&root);
+        holder.join().unwrap();
+        assert!(
+            indexed.is_ok(),
+            "a live write waits the peer out on the operational budget: {indexed:?}"
+        );
+    }
+
+    /// The budget an admission may spend waiting on SQLite is the point of the split. Under the
+    /// fence a wait is an interprocess lock and the lease's lifecycle mutex held for its whole
+    /// length, so a peer's write transaction must be waited out ACROSS admissions, never inside
+    /// one. Whether it was is a COUNT, not a duration: the peer holds until the open comes back
+    /// for a second admission, so an open that waited inside the first one never arrives and the
+    /// count stays at one. Nothing here compares wall-clock readings, which on a loaded machine
+    /// measure the scheduler as much as the code.
+    ///
+    /// The peer is pre-created and already migrated so the contention is the writer reservation
+    /// `migrate_structural_schema` takes on every open — a `journal_mode` switch is refused
+    /// outright instead of waited out, which would measure the retry rather than the wait.
+    #[test]
+    fn a_contended_fenced_open_never_spans_the_contention_in_one_admission() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("contended.db");
+        drop(crate::store::Store::open(&db_path).unwrap());
+
+        let admissions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = std::sync::Arc::clone(&admissions);
+        let holder_path = db_path.clone();
+        let (locked, wait_for_lock) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(&holder_path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_millis(0)).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            locked.send(()).unwrap();
+            // Held until the open has been admitted twice, so the release is caused by the
+            // behaviour under test rather than by a clock. The deadline only keeps a failing
+            // build from hanging: an open that never comes back releases on it and fails below.
+            let give_up = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while observed.load(std::sync::atomic::Ordering::SeqCst) < 2
+                && std::time::Instant::now() < give_up
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        wait_for_lock.recv().unwrap();
+
+        let opened = {
+            let mut apply = |operation: FencedOperation<'_>| {
+                admissions.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let mut checkpoint = || ControlFlow::Continue(());
+                match operation(&mut checkpoint) {
+                    ControlFlow::Continue(value) => FenceOutcome::Applied(value),
+                    ControlFlow::Break(()) => FenceOutcome::Terminal,
+                }
+            };
+            SearchEngine::open_store_fenced(&db_path, &mut apply).unwrap()
+        };
+        holder.join().unwrap();
+
+        assert!(
+            matches!(opened, FenceOutcome::Applied(_)),
+            "the open still succeeds once the peer commits"
+        );
+        assert!(
+            admissions.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the peer was waited out inside a single admission: it took {} of them",
+            admissions.load(std::sync::atomic::Ordering::SeqCst)
+        );
+    }
+
+    /// Losing the bootstrap race must cost admissions, not one long-held admission. The fence
+    /// carries both the interprocess lock and the lease's lifecycle mutex, so a retry loop that
+    /// slept inside a single admission would stall shutdown and every peer claim for the whole
+    /// backoff. Counting admissions is what tells the two apart: waiting inside the fence shows
+    /// up as one, waiting outside it as one per attempt.
+    ///
+    /// The second half is the control. Without it the assertion would also hold for a fence that
+    /// refused to admit anything at all, and for an open that never retried.
+    #[test]
+    fn each_bootstrap_retry_is_its_own_admission() {
+        fn count_admissions(db_path: &Path, forced_retries: u32) -> (usize, bool) {
+            crate::store::FORCE_BOOTSTRAP_RETRIES.with(|left| left.set(forced_retries));
+            let mut admissions = 0usize;
+            let opened = {
+                let mut apply = |operation: FencedOperation<'_>| {
+                    admissions += 1;
+                    let mut checkpoint = || ControlFlow::Continue(());
+                    match operation(&mut checkpoint) {
+                        ControlFlow::Continue(result) => FenceOutcome::Applied(result),
+                        ControlFlow::Break(()) => FenceOutcome::Terminal,
+                    }
+                };
+                SearchEngine::open_store_fenced(db_path, &mut apply).unwrap()
+            };
+            crate::store::FORCE_BOOTSTRAP_RETRIES.with(|left| left.set(0));
+            (admissions, matches!(opened, FenceOutcome::Applied(_)))
+        }
+
+        let dir = tempdir().unwrap();
+
+        let (admissions, opened) = count_admissions(&dir.path().join("raced.db"), 2);
+        assert!(opened, "the open still succeeds once the race is over");
+        assert_eq!(
+            admissions, 3,
+            "two lost races and the winning open are three admissions, not one held across both \
+             backoffs"
+        );
+
+        let (admissions, opened) = count_admissions(&dir.path().join("clean.db"), 0);
+        assert!(opened, "an unraced open succeeds");
+        assert_eq!(admissions, 1, "an unraced open costs exactly one admission");
+    }
+
+    /// Staging releases the engine lock so its scan does not hold the lease, so the commit runs
+    /// against a cache other threads have been free to change. The transition must MERGE into
+    /// what it finds, never install a picture taken before the window — and the class of things
+    /// the window can admit is open, so the test names two members that fail differently: a
+    /// point mark, which lives in the dirty map, and a settled overlay entry, which lives in
+    /// `entries` and answers searches. A commit that replaced the cache wholesale would lose
+    /// each of them, and a guard that only compared dirty marks would still lose the second.
+    ///
+    /// The transition itself applying is the control: an assertion about what SURVIVES a
+    /// commit is satisfied trivially by a commit that never happens.
+    #[test]
+    fn work_admitted_in_the_commit_window_survives_the_root_transition() {
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().join("ws");
+        let configuration = workspace.join("cf");
+        let extension = workspace.join("cfe/one");
+        write_transition_module(&configuration, "Конфигурация");
+        let extension_file = extension.join("CommonModules/Один/Ext/Module.bsl");
+        fs::create_dir_all(extension_file.parent().unwrap()).unwrap();
+        fs::write(extension_file, "Процедура Расширение() Экспорт\nКонецПроцедуры\n").unwrap();
+
+        let mut engine = SearchEngine::fts_only(&dir.path().join("search.db")).unwrap();
+        let initial = crate::WorkspaceRoots::build(&workspace, &configuration, &[]).0;
+        engine.initialize_workspace_roots(initial).unwrap();
+        engine.index_directory_fts(&configuration).unwrap();
+        // The overlay is inert until initialized, and a settled entry is the point of the second
+        // half of this test.
+        engine.initialize_workspace_overlay_clean().unwrap();
+
+        let next = crate::WorkspaceRoots::build(
+            &workspace,
+            &configuration,
+            std::slice::from_ref(&extension),
+        )
+        .0;
+        let validated = engine
+            .workspace_roots_transition_seed(next)
+            .unwrap()
+            .plan()
+            .unwrap()
+            .revalidate()
+            .unwrap()
+            .unwrap();
+        let mut staged =
+            engine.stage_validated_workspace_roots_transition(validated).unwrap().unwrap();
+
+        // The window. Both edits are to the CONFIGURATION root, which this transition does not
+        // touch: it only adds an extension root.
+        let settled = configuration.join("Улаженный.bsl");
+        fs::write(&settled, "Процедура Улажена()\nКонецПроцедуры\n").unwrap();
+        let settled_key = FileKey::configuration("Улаженный.bsl");
+        assert!(engine.mark_workspace_path_dirty(&settled).unwrap());
+        let text: Arc<str> = Arc::from(fs::read_to_string(&settled).unwrap());
+        let root = parser::parse(&text).syntax_node();
+        engine
+            .reindex_dirty_from_snapshots(&HashMap::from([(
+                settled_key.clone(),
+                crate::ports::ModuleSnapshot { text, root },
+            )]))
+            .unwrap();
+        assert_eq!(
+            engine.text_search("Улажена", 10, Some("code")).unwrap().len(),
+            1,
+            "the settled entry answers before the commit"
+        );
+
+        // Marked AFTER the settle: a refresh reads every dirty path it finds, not only the ones
+        // it was handed snapshots for, so a mark made earlier would be settled by the call above
+        // and the first half of this test would prove nothing.
+        let marked = configuration.join("Помеченный.bsl");
+        fs::write(&marked, "Процедура Помечена()\nКонецПроцедуры\n").unwrap();
+        assert!(engine.mark_workspace_path_dirty(&marked).unwrap());
+        let marked_key = FileKey::configuration("Помеченный.bsl");
+
+        let mut permit = || ControlFlow::Continue(());
+        let outcome = engine.apply_staged_workspace_roots_transition(&mut staged, &mut permit);
+        assert!(
+            matches!(
+                outcome,
+                ControlFlow::Continue(Ok(super::WorkspaceRootsTransitionOutcome::Applied { .. }))
+            ),
+            "the transition still commits: {outcome:?}"
+        );
+        assert_eq!(
+            engine.workspace_roots().map(|roots| roots.ids().count()),
+            Some(2),
+            "the control: the extension root really was installed"
+        );
+
+        assert!(
+            engine.workspace_overlay_dirty_paths().unwrap().contains(&marked_key),
+            "a mark admitted after staging survives the commit"
+        );
+        assert_eq!(
+            engine.text_search("Улажена", 10, Some("code")).unwrap().len(),
+            1,
+            "an overlay entry settled after staging survives the commit"
+        );
     }
 
     #[test]

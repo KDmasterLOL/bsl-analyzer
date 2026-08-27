@@ -3,8 +3,8 @@ use std::sync::Arc;
 use base_db::SourceRootId;
 use bsl_metadata::MdoType;
 use hir::{
-    extract_change_and_validate, interception_applicable, interceptor_target, signature_mismatch,
-    InterceptionKind, ManagerType, MethodSymbol, ModuleId, Name, VariableSymbol,
+    extract_change_and_validate, interception_effective, interceptor_target, InterceptionKind,
+    ManagerType, MethodSymbol, ModuleId, Name, VariableSymbol,
 };
 use stdx::case::CaseExt;
 use vfs::FileId;
@@ -173,11 +173,7 @@ pub fn effective_module_exports_query(
                 let applicable = base_tree
                     .as_ref()
                     .and_then(|symbols| symbols.find_method(&target))
-                    .filter(|base| base.is_export)
-                    .is_some_and(|base| {
-                        interception_applicable(interception.kind, base)
-                            && signature_mismatch(interception.kind, method, base).is_none()
-                    });
+                    .is_some_and(|base| interception_effective(interception.kind, method, base));
                 if applicable {
                     let (composition, replaces_effective) = match interception.kind {
                         InterceptionKind::Around => (ExportComposition::Instead, true),

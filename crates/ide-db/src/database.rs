@@ -681,6 +681,20 @@ impl RootDatabaseImpl {
 
     pub fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)> {
         let file_path = vfs_helpers::get_file_path(self, file_id)?;
+        self.config_root_rank_for_path(&file_path)
+    }
+
+    /// The same ranking, addressed by PATH.
+    ///
+    /// A caller that already holds the path must not go back through the file id:
+    /// resolving a path from an id needs the global file→root mapping, which
+    /// PANICS for a file the database was never told about — and the graph builder
+    /// runs against per-batch databases that legitimately know only their own
+    /// slice. See `CommonModuleCandidates::reflagged` for the same asymmetry.
+    pub fn config_root_rank_for_path(
+        &self,
+        file_path: &std::path::Path,
+    ) -> Option<(usize, Option<String>)> {
         let snapshot = self.workspace_configs_snapshot();
         snapshot
             .topological_order
@@ -1973,6 +1987,73 @@ impl RootDatabaseImpl {
     /// sees the merged surface. The scoped counterpart of the former all-config
     /// `find_common_module_files_anywhere`: body ids come straight from the substrate
     /// when bootstrapped, otherwise from a scoped root-relative URI scan.
+    /// Bodies of a metadata object's module that `file_id` may resolve against,
+    /// ordered by config-root rank so the base declaration wins.
+    ///
+    /// The path-derived index answers by PATH order and knows nothing of root
+    /// topology, so on its own it hands a caller the body of an extension the
+    /// caller never declared a dependency on. Filtering happens here rather than
+    /// in `hir-def` because the ranks live here.
+    ///
+    /// `None` — the file has no configured visibility at all, and the caller keeps
+    /// the path index. `Some(empty)` — no VISIBLE root holds such a body, which is
+    /// a real absence; see the trait doc for why this differs from the common
+    /// module.
+    pub fn resolve_mdo_module_files_for_file(
+        &self,
+        file_id: FileId,
+        role: hir::MdoModuleRole,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<hir::CommonModuleBodies> {
+        let visible_ranks = self.visible_config_root_ranks(file_id)?;
+
+        let source_root_id = self.file_source_root_input(file_id).source_root_id(self);
+        let index = <Self as hir::DefDatabase>::module_index(self, source_root_id);
+        let name = hir::Name::new(name);
+
+        let candidates: Vec<FileId> = match role {
+            hir::MdoModuleRole::Manager => hir::ManagerType::from_mdo_type(mdo_type)
+                .map(|manager_type| index.manager_candidates(manager_type, &name).to_vec())
+                .unwrap_or_default(),
+            hir::MdoModuleRole::Object => index.object_module_candidates(mdo_type, &name).to_vec(),
+            hir::MdoModuleRole::RecordSet => index.record_set_candidates(mdo_type, &name).to_vec(),
+        };
+
+        // Paths come from the source root's own file set, never from the global
+        // file→root mapping: that mapping panics for a file the database has not
+        // been told about, and the graph builder resolves against per-batch
+        // databases holding only their own slice.
+        let source_root = self.source_root_input(source_root_id).root(self);
+        let file_set = source_root.file_set();
+        let rank_of = |file: FileId| -> Option<usize> {
+            let path = file_set.path_for_file(&file)?.as_path().to_path_buf();
+            self.config_root_rank_for_path(&path).map(|(rank, _)| rank)
+        };
+
+        // Only a body whose root is KNOWN and not visible is dropped. A body that
+        // sits outside every configured root has no rank, and topology says
+        // nothing about it — the path index hands it over today, and removing it
+        // here would be a second, unasked-for change of behaviour.
+        // `effective_module_exports_query` drops those instead, and can afford to:
+        // it composes a surface, while this decides an answer.
+        let mut files: Vec<(FileId, usize)> = candidates
+            .into_iter()
+            .filter_map(|file| match rank_of(file) {
+                Some(rank) if !visible_ranks.contains(&rank) => None,
+                Some(rank) => Some((file, rank)),
+                None => Some((file, usize::MAX)),
+            })
+            .collect();
+        files.sort_by_key(|&(_, rank)| rank);
+
+        let mut out = hir::CommonModuleBodies::default();
+        for (file, _) in files {
+            out.push(file, self.file_is_unread(file));
+        }
+        Some(out)
+    }
+
     pub fn resolve_common_module_files_for_file(
         &self,
         file_id: FileId,
@@ -2545,6 +2626,16 @@ impl hir::ConfigsDatabase for RootDatabaseImpl {
         name: &str,
     ) -> Option<Arc<bsl_metadata::CommonModule>> {
         RootDatabaseImpl::resolve_common_module_for_file(self, file_id, name)
+    }
+
+    fn resolve_mdo_module_file_candidates(
+        &self,
+        file_id: FileId,
+        role: hir::MdoModuleRole,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<hir::CommonModuleBodies> {
+        self.resolve_mdo_module_files_for_file(file_id, role, mdo_type, name)
     }
 
     fn resolve_common_module_file_candidates(

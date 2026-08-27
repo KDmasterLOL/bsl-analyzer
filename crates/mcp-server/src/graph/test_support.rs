@@ -6,6 +6,7 @@ use crate::cache::graph_db_path;
 use crate::graph_db::build_graph_database;
 
 use super::build::GRAPH_BUILD_BATCH;
+use super::state::lock_recover;
 use super::{GraphState, GraphStatus};
 
 pub(super) fn write(root: &Path, rel: &str, text: &str) {
@@ -52,15 +53,76 @@ pub(crate) fn sample_workspace(root: &Path) {
     write_common_module(root, "Сервер", true, "&НаСервере\nФункция Считать() Экспорт КонецФункции");
 }
 
-pub(crate) fn wait_ready(graph: &GraphState) {
-    for _ in 0..1000 {
-        match graph.status() {
-            GraphStatus::Ready { .. } => return,
-            GraphStatus::Failed(msg) => panic!("graph load failed: {msg}"),
-            _ => std::thread::sleep(Duration::from_millis(10)),
+/// How often a bounded wait re-reads the state it is waiting on.
+pub(crate) const WAIT_POLL: Duration = Duration::from_millis(10);
+/// The default ceiling for a bounded wait on graph state.
+pub(crate) const WAIT_CEILING: Duration = Duration::from_secs(30);
+
+/// Everything a timed-out wait needs to say to be diagnosable: which condition it
+/// waited on is the caller's half, the observed state is this one.
+pub(super) fn graph_state_summary(graph: &GraphState) -> String {
+    let inner = lock_recover(&graph.inner);
+    let published = inner.published.as_ref().map(|published| {
+        format!(
+            "generation {}, reload {}, stale {}, force_stale {}",
+            published.generation,
+            published.reload.label(),
+            published.stale,
+            published.force_stale
+        )
+    });
+    format!(
+        "status {:?}; published: {}; project_reload_epoch {}, completed {}",
+        inner.status,
+        published.as_deref().unwrap_or("none"),
+        graph.project_reload_epoch(),
+        graph.completed_project_reload_epoch.load(std::sync::atomic::Ordering::SeqCst),
+    )
+}
+
+/// Poll until `condition` holds, and on exhausting the ceiling fail with the state
+/// actually observed instead of a bare "it did not happen".
+///
+/// Every bounded wait on graph state goes through here. A wait that reports only its
+/// own name leaves a CI failure with nothing to diagnose — which is how the flake this
+/// hardening came from arrived: a bare left/right, and no way to tell a slow machine
+/// from a torn publication.
+#[track_caller]
+pub(crate) fn wait_until(graph: &GraphState, what: &str, condition: impl FnMut() -> bool) {
+    wait_until_within(graph, WAIT_CEILING, what, condition);
+}
+
+/// [`wait_until`] with an explicit ceiling, for waits that legitimately need a
+/// different one. The ceiling is a property of the wait, never of the assertion.
+#[track_caller]
+pub(crate) fn wait_until_within(
+    graph: &GraphState,
+    ceiling: Duration,
+    what: &str,
+    mut condition: impl FnMut() -> bool,
+) {
+    let deadline = std::time::Instant::now() + ceiling;
+    loop {
+        if condition() {
+            return;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after {ceiling:?} waiting for {what}; {}",
+            graph_state_summary(graph)
+        );
+        std::thread::sleep(WAIT_POLL);
     }
-    panic!("graph did not become ready");
+}
+
+pub(crate) fn wait_ready(graph: &GraphState) {
+    wait_until(graph, "the graph to become ready", || match graph.status() {
+        GraphStatus::Ready { .. } => true,
+        GraphStatus::Failed(msg) => {
+            panic!("graph load failed: {msg}; {}", graph_state_summary(graph))
+        }
+        _ => false,
+    });
 }
 
 /// A workspace with two declared extensions; `depends_on` toggles the one

@@ -100,3 +100,4 @@ reqwest = { version = "0.13", default-features = false, features = [
     "json",
     "rustls",
 ] }
+jsonschema = { version = "0.51.0", default-features = false }

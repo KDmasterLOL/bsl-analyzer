@@ -109,6 +109,118 @@ MCP error с `reasonCode`; `list_platform` и `syntax_help` читают вст�
 `unknown_scope` стоит особняком: это не род сущности, а род незнания — символ разрешён, но
 где искать ссылки, не знает никто.
 
+Разрешённый ответ. `limit` режет показ, а не счёт: `total` считает все вхождения, и
+пофайловая гистограмма покрывает их все — по ней и обходят остаток вместо курсора.
+
+```json tool=references
+{"schema_version":"1","outcome":"resolved",
+ "symbol":"ПервыйОбщийМодуль.НеУстаревшаяФункция",
+ "anchor":{"mode":"symbol","graph_id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция"},
+ "references":[
+   {"kind":"call",
+    "location":{"root_id":"","path":"CommonModules/Второй/Ext/Module.bsl",
+                "range":{"start_line":1,"start_character":22,
+                         "end_line":1,"end_character":41},
+                "enclosing_range":{"start_line":0,"start_character":0,
+                                   "end_line":2,"end_character":14},
+                "position_encoding":"utf-16","schema_version":"1"}},
+   {"kind":"call",
+    "location":{"root_id":"","path":"CommonModules/Первый/Ext/Module.bsl",
+                "range":{"start_line":1,"start_character":22,
+                         "end_line":1,"end_character":41},
+                "enclosing_range":{"start_line":0,"start_character":0,
+                                   "end_line":2,"end_character":14},
+                "position_encoding":"utf-16","schema_version":"1"}}],
+ "total":6,"total_is_lower_bound":false,"narrowing_comparable":true,"files_scanned":5,
+ "files":[{"count":3,"location":{"root_id":"","path":"CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
+                                 "position_encoding":"utf-16","schema_version":"1"}},
+          {"count":1,"location":{"root_id":"","path":"CommonModules/Второй/Ext/Module.bsl",
+                                 "position_encoding":"utf-16","schema_version":"1"}},
+          {"count":1,"location":{"root_id":"","path":"CommonModules/Первый/Ext/Module.bsl",
+                                 "position_encoding":"utf-16","schema_version":"1"}},
+          {"count":1,"location":{"root_id":"","path":"CommonModules/Третий/Ext/Module.bsl",
+                                 "position_encoding":"utf-16","schema_version":"1"}}],
+ "histogram_truncated":false,
+ "freshness":{"source":"resident","revision":1,"topology_fingerprint":"ffb47e6394bb435d",
+              "stale":false,
+              "completeness":{"status":"partial",
+                              "reasons":[{"code":"result_cap",
+                                          "detail":"more references than `limit`; narrow with `area_root_id`/`area_path_prefix`/`kinds`, or walk `files`"}]}}}
+```
+
+Имя разрешилось, но перебора для него не существует. Списка нет вовсе — не пустой список:
+
+```json tool=references
+{"schema_version":"1","outcome":"unsupported_symbol",
+ "symbol":"Справочник.Справочник1",
+ "anchor":{"mode":"symbol"},
+ "unsupported":{"category":"metadata_object",
+                "reason":"this symbol has no reference walk; an empty list would be indistinguishable from a proven zero"},
+ "freshness":{"source":"resident","revision":1,"topology_fingerprint":"ffb47e6394bb435d",
+              "stale":false,"completeness":{"status":"complete","reasons":[]}}}
+```
+
+Имени отвечает несколько объявлений — ссылки не считаются вовсе, а `resolution_hint`
+называет ось, которая разделяет именно эти кандидаты. Ответ словаря имён живёт под своим
+ключом: его `total` считает кандидатов, а не вхождения. Здесь же видно и цену холодного
+графа — он назван в `lookup.providers` состоянием `not_ready`, а не умолчанием:
+
+```json tool=references
+{"schema_version":"1","outcome":"ambiguous",
+ "symbol":"НеУстаревшаяФункция",
+ "anchor":{"mode":"symbol"},
+ "resolution_hint":"pass one `lookup.candidates[].address.symbol` back as `symbol`",
+ "lookup":{"candidates":[
+             {"display":"НеУстаревшаяФункция","category":"module_method","match":"exact",
+              "provider":"module_members",
+              "address":{"symbol":"ПервыйОбщийМодуль.НеУстаревшаяФункция",
+                         "location":{"root_id":"","path":"CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
+                                     "range":{"start_line":70,"start_character":8,
+                                              "end_line":70,"end_character":27},
+                                     "enclosing_range":{"start_line":70,"start_character":0,
+                                                        "end_line":72,"end_character":12},
+                                     "position_encoding":"utf-16","schema_version":"1"}}}],
+           "total":2,"total_exact":true,"truncated":true,
+           "providers":[{"provider":"module_index","state":"answered"},
+                        {"provider":"metadata_listing","state":"answered"},
+                        {"provider":"platform","state":"answered"},
+                        {"provider":"module_members","state":"answered"},
+                        {"provider":"graph","state":"not_ready"}]},
+ "freshness":{"source":"name-dictionary","revision":null,"topology_fingerprint":null,
+              "stale":null,
+              "completeness":{"status":"partial",
+                              "reasons":[{"code":"index_building",
+                                          "detail":"some name sources could not be consulted (graph: not_ready)"},
+                                         {"code":"output_budget",
+                                          "detail":"candidate list trimmed to fit `max_output_tokens`"}]}}}
+```
+
+Неполнота названа, а не спрятана в правдоподобное число. Перебор упёрся в `max_files`,
+поэтому `total` — нижняя оценка, `narrowing_comparable` снят, и сравнивать этот ответ с
+более узким нельзя: они считали разные множества файлов.
+
+```json tool=references
+{"schema_version":"1","outcome":"resolved",
+ "symbol":"ПервыйОбщийМодуль.НеУстаревшаяФункция",
+ "anchor":{"mode":"symbol","graph_id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция"},
+ "references":[{"kind":"call",
+                "location":{"root_id":"","path":"CommonModules/Второй/Ext/Module.bsl",
+                            "range":{"start_line":1,"start_character":22,
+                                     "end_line":1,"end_character":41},
+                            "enclosing_range":{"start_line":0,"start_character":0,
+                                               "end_line":2,"end_character":14},
+                            "position_encoding":"utf-16","schema_version":"1"}}],
+ "total":1,"total_is_lower_bound":true,"narrowing_comparable":false,"files_scanned":1,
+ "files":[{"count":1,"location":{"root_id":"","path":"CommonModules/Второй/Ext/Module.bsl",
+                                 "position_encoding":"utf-16","schema_version":"1"}}],
+ "histogram_truncated":false,
+ "freshness":{"source":"resident","revision":1,"topology_fingerprint":"7f631d36d1b00207",
+              "stale":false,
+              "completeness":{"status":"partial",
+                              "reasons":[{"code":"result_cap",
+                                          "detail":"the walk stopped at `max_files`, so `total` is a lower bound; raise `max_files` or narrow the area before the walk"}]}}}
+```
+
 **Якорь называет себя в каждом ответе.** Блок `anchor` несёт `mode` — закрытый словарь
 `symbol` | `position` | `line_content`, — и `line`, строку, на которой якорь в итоге встал,
 когда он вообще где-то встал: у `position` всегда, у `line_content` — когда цитата выделила
@@ -216,6 +328,38 @@ MCP error с `reasonCode`; `list_platform` и `syntax_help` читают вст�
 Свежесть называет того, чьи данные СОСТАВЛЯЮТ тело: список ссылок и разрешённый символ —
 `resident` с непустыми `revision` и `topology_fingerprint`, даже когда якорь нашёл
 словарь имён; тело из кандидатов словаря — `name-dictionary` с `null`-идентичностью.
+
+## Видимость расширений: что символ вообще может увидеть
+
+Ответ о символе зависит от того, ОТКУДА спрашивают. Файл расширения `E` видит базовую
+конфигурацию, транзитивные зависимости `E`, объявленные через `dependsOn`, и само `E`.
+Обратной видимости нет: зависимость `A → B` не делает `A` видимым из `B`, независимые
+расширения не видят друг друга вовсе, а файл базовой конфигурации не видит ни одного
+расширения — метод, добавленный расширением, из кода базы недоступен, потому что
+расширение может быть отключено в любой момент.
+
+Из этого следуют две вещи, которые видно в ответах:
+
+- **Позиционный вход уважает видимость, поиск по имени — нет.** `symbol_info` и
+  `references`, получив `path` + `line` + `column`, отвечают о том, что видит ИМЕННО ЭТОТ
+  файл: вызов общего модуля независимого расширения оттуда не разрешается и приходит
+  `not_found`. Тот же символ, спрошенный квалифицированным именем, находится — запрос по
+  имени задан о рабочей области целиком и вызывающего не имеет. Это не расхождение
+  инструментов, а разные вопросы; выбирать вход стоит по тому, какой из них вы задаёте.
+- **Приоритет при поиске имени** — сначала само расширение, затем ближайшая зависимость,
+  затем база. Оверлеи метаданных накладываются в обратном порядке (база → зависимости →
+  своё расширение), поэтому унаследованные реквизиты сохраняются.
+
+Зависимости объявляются в `bsl-analyzer.toml` структурированной записью расширения
+(`dependsOn = ["Имя"]`); граф проверяется при загрузке проекта — неизвестные имена,
+самоссылки и циклы отклоняются до анализа. Подробности синтаксиса — в
+`docs/configuration/PROJECT_CONFIGURATION.md`.
+
+**У правила есть известное исключение, и оно не покрыто.** Перебор ссылок на метод
+менеджерского модуля и модуля объекта сегодня засчитывает вхождения из расширения, которое
+объявления не видит: эти два маршрута проверяют видимость объекта метаданных, а тело модуля
+берут из индекса, выведенного из путей и топологии не знающего. Для метода общего модуля
+правило соблюдается. Модуль набора записей не проверен вовсе. Держатель — github#103.
 
 ## Бюджет вывода: `max_output_tokens`
 
@@ -336,29 +480,68 @@ config reload.
 
 Разрешённая карточка:
 
-```json
+```json tool=symbol_info
 {"schema_version":"1","status":"ok",
- "symbol":"РаботаСЗаказами.СоздатьЗаказ",
+ "symbol":"ПервыйОбщийМодуль.НеУстаревшаяФункция",
  "kind":"function",
- "container":{"kind":"ОбщийМодуль","name":"РаботаСЗаказами","context":"Сервер"},
- "signature":"Функция СоздатьЗаказ(Клиент, Товары, Знач Дата = Неопределено) Экспорт",
- "doc":"Создаёт заказ клиента по списку товаров.",
- "return_type":"ДокументСсылка.ЗаказКлиента",
- "definition":{"path":"CommonModules/РаботаСЗаказами/Ext/Module.bsl","line":120,
-               "snippet":"Функция СоздатьЗаказ(Клиент, Товары, Знач Дата = Неопределено) Экспорт"},
- "usages":{"count":17,
-           "top_modules":[{"module":"ПродажиСервер","count":5},
-                          {"module":"ОбработкаЗаказов","count":3}],
-           "graph_id":"method/common/РаботаСЗаказами/СоздатьЗаказ"}}
+ "container":{"kind":"ОбщийМодуль","name":"ПервыйОбщийМодуль","context":"Сервер"},
+ "signature":"Функция НеУстаревшаяФункция() Экспорт",
+ "return_type":"Неизвестно",
+ "graph_id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция",
+ "definition":{"path":"/ws/CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl","line":71,
+               "snippet":"Функция НеУстаревшаяФункция() Экспорт"},
+ "definitions":[{"role":"base",
+                 "location":{"root_id":"","path":"CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
+                             "range":{"start_line":70,"start_character":8,
+                                      "end_line":70,"end_character":27},
+                             "enclosing_range":{"start_line":70,"start_character":0,
+                                                "end_line":72,"end_character":12},
+                             "module":{"kind":"ОбщийМодуль","name":"ПервыйОбщийМодуль"},
+                             "position_encoding":"utf-16","schema_version":"1"}}],
+ "usages":{"count":2,
+           "top_modules":[{"module":"ОбщийМодуль.ПервыйОбщийМодуль","count":1}],
+           "graph_id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция"},
+ "freshness":{"source":"resident","revision":1,"topology_fingerprint":"40ae488c03dfecc5",
+              "stale":false,"completeness":{"status":"complete","reasons":[]}}}
 ```
 
 Неточное имя — не ошибка, а список кандидатов:
 
-```json
-{"resolved":false,"symbol":"СоздатьЗаказ",
- "candidates":[{"id":"method/common/РаботаСЗаказами/СоздатьЗаказ","kind":"method","match":"name"}],
- "total":1,"truncated":false,
- "hint":"no exact resident match; open a candidate id in `graph`, or refine to a qualified BSL name for `symbol_info`"}
+```json tool=symbol_info
+{"schema_version":"1","status":"ambiguous","resolved":false,
+ "symbol":"НеУстаревшаяФункция",
+ "candidates":[
+   {"display":"НеУстаревшаяФункция","category":"module_method","match":"exact",
+    "provider":"module_members",
+    "id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция",
+    "address":{"symbol":"ПервыйОбщийМодуль.НеУстаревшаяФункция",
+               "graph_id":"method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция",
+               "location":{"root_id":"","path":"CommonModules/ПервыйОбщийМодуль/Ext/Module.bsl",
+                           "range":{"start_line":70,"start_character":8,
+                                    "end_line":70,"end_character":27},
+                           "enclosing_range":{"start_line":70,"start_character":0,
+                                              "end_line":72,"end_character":12},
+                           "position_encoding":"utf-16","schema_version":"1"}}},
+   {"display":"НеУстаревшаяФункция","category":"module_method","match":"exact",
+    "provider":"module_members",
+    "id":"method/manager/InformationRegister/РегистрСведений1/НеУстаревшаяФункция",
+    "address":{"symbol":"РегистрСведений.РегистрСведений1.НеУстаревшаяФункция",
+               "graph_id":"method/manager/InformationRegister/РегистрСведений1/НеУстаревшаяФункция",
+               "location":{"root_id":"","path":"InformationRegisters/РегистрСведений1/Ext/ManagerModule.bsl",
+                           "range":{"start_line":10,"start_character":8,
+                                    "end_line":10,"end_character":27},
+                           "enclosing_range":{"start_line":10,"start_character":0,
+                                              "end_line":12,"end_character":12},
+                           "position_encoding":"utf-16","schema_version":"1"}}}],
+ "total":2,"total_exact":true,"truncated":false,
+ "providers":[{"provider":"module_index","state":"answered"},
+              {"provider":"metadata_listing","state":"answered"},
+              {"provider":"platform","state":"answered"},
+              {"provider":"module_members","state":"answered"},
+              {"provider":"graph","state":"answered"}],
+ "hint":"no exact resident match; feed a candidate's `address.symbol` back to `symbol_info`, open its `address.graph_id` in `graph`, or read its `address.syntax_help` in `syntax_help`",
+ "freshness":{"source":"resident","revision":1,"topology_fingerprint":"40ae488c03dfecc5",
+              "stale":false,"completeness":{"status":"complete","reasons":[]}}}
 ```
 
 Правила чтения:
@@ -370,9 +553,19 @@ config reload.
   открыть кандидата в `graph`, либо уточнить имя.
 - **`match`** — чем совпало: `exact`, `case_insensitive`, `name` (совпал последний сегмент)
   или `substring`.
-- **`definition.line` — 1-based**, тогда как `line` на входе 0-based. Асимметрия историческая,
-  учитывать при подстановке значения обратно. Диапазона у места определения нет — только
-  строка объявления и её текст в `snippet`.
+- **`definitions[]` — все места объявления, а не одно.** Метод, на который расширение
+  наложило перехватчик, объявлен больше одного раза, и карточка, печатающая одно место,
+  говорит клиенту, что исполняется базовое тело: для `&Вместо` это ложь, для `&Перед` и
+  `&После` — половина правды. Каждое место называет свою роль — `base` | `instead` |
+  `before` | `after`, — и `source_extension` там, где место пришло из расширения. Базовое
+  объявление стоит в списке первым и остаётся в нём при любом числе перехватчиков. Место
+  адресуется парой `(root_id, path)` из `location`: именно её принимают `outline` и
+  `diagnostics file`.
+- **`definition` — то же место в старом виде, и адресом оно не служит.** `path` в нём —
+  АБСОЛЮТНЫЙ путь файла на машине сервера, а не относительный путь под корнем; `line` —
+  1-based, тогда как `line` на входе 0-based; диапазона нет вовсе — только строка объявления
+  и её текст в `snippet`. Поле оставлено для существующих клиентов; всё, что подставляется
+  обратно в инструменты, берётся из `definitions[].location`.
 - **`usages` — сводка, а не список ссылок.** `count` — полный фан-ин по графу, а `top_modules`
   агрегируются по ограниченной выборке вызывающих; расхождение помечается
   `top_modules_sampled: true`. Полный обход — `graph action=callers` по возвращённому
@@ -410,7 +603,7 @@ config reload.
 холодной рабочей области ровно так же, как на прогретой, и конверта `loading` у него нет
 ни в одной ветке.
 
-```json
+```json tool=outline
 {"schema_version":"1",
  "mode":"full",
  "location":{"root_id":"","path":"CommonModules/РаботаСЗаказами/Ext/Module.bsl",
@@ -475,7 +668,7 @@ config reload.
 член находится вообще без индексов, объект конфигурации и общий модуль — как только готов
 резидент. Поэтому `resolve` отвечает и на несобранном графе, а не конвертом `loading`.
 
-```json
+```json tool=graph
 {"query":"Значение",
  "candidates":[
    {"display":"ЗначениеРеквизитаОбъекта","category":"module_method","match":"substring",
@@ -589,7 +782,7 @@ config reload.
 Список находок приходит дважды: текстом — как его читает человек — и тем же составом в
 `structuredContent`. Машинный потребитель читает поля, а не разбирает колонки:
 
-```json
+```json tool=search
 {"action":"search_code","schema_version":"4",
  "hits":[{"rank":1,"modality":"L","root_id":"","path":"CommonModules/Утилиты/Ext/Module.bsl",
           "line_start":181,"line_end":201,"symbol":"ПроверитьИНН","kind":"procedure",
@@ -780,7 +973,7 @@ curl http://localhost/base/hs/bsl-analyzer/version
 
 Ожидаемый ответ:
 
-```json
+```json tool=none
 {"version":"1.1.0"}
 ```
 

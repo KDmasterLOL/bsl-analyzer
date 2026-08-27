@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use mcp_server::{serve_stream, McpProfile, McpServer, SharedState};
+use mcp_server::{serve_stream, McpProfile, McpServer, SharedState, ToolGate};
 use rmcp::model::CallToolRequestParams;
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
@@ -230,4 +230,208 @@ async fn the_resident_and_the_graph_name_the_same_topology() {
     // freshness it is holding.
     assert_eq!(card["freshness"]["source"], "resident");
     assert_eq!(overview["freshness"]["source"], "graph");
+}
+
+/// The module both roots spell the same way. Two roots holding one relative path is the
+/// shape the pair exists for: a key that forgets its root still lands on a real file here,
+/// so a wrong answer arrives looking exactly like a right one.
+const SHARED_MODULE_REL: &str = "CommonModules/Общий/Ext/Module.bsl";
+const CONFIGURATION_SYMBOL: &str = "ФункцияКонфигурации";
+const EXTENSION_SYMBOL: &str = "ФункцияРасширения";
+
+/// A method the fixture's configuration declares, in a module only the configuration holds.
+const STAND_METHOD: &str = "ПервыйОбщийМодуль.НеУстаревшаяФункция";
+
+/// A configuration lists its common modules by name, and a module missing from that list is
+/// invisible to the metadata however real its files are. Writing the descriptor without this
+/// leaves the stand asking about a name nothing declares.
+fn register_common_module(root: &Path, name: &str) {
+    let configuration = root.join("Configuration.xml");
+    let text = std::fs::read_to_string(&configuration).expect("read Configuration.xml");
+    let anchor = "<CommonModule>";
+    let at = text.find(anchor).expect("the fixture lists common modules");
+    let mut listed = text.clone();
+    listed.insert_str(at, &format!("<CommonModule>{name}</CommonModule>\n\t\t\t"));
+    std::fs::write(&configuration, listed).expect("register the module");
+}
+
+fn write_common_module(root: &Path, name: &str, body: &str) {
+    register_common_module(root, name);
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<CommonModule uuid="00000000-0000-0000-0000-0000000000{id:02}">
+		<Properties>
+			<Name>{name}</Name>
+			<Global>false</Global>
+			<ClientManagedApplication>false</ClientManagedApplication>
+			<Server>true</Server>
+			<ExternalConnection>false</ExternalConnection>
+			<ClientOrdinaryApplication>false</ClientOrdinaryApplication>
+			<ServerCall>false</ServerCall>
+			<Privileged>false</Privileged>
+			<ReturnValuesReuse>DontUse</ReturnValuesReuse>
+		</Properties>
+	</CommonModule>
+</MetaDataObject>"#,
+        id = name.len(),
+    );
+    std::fs::create_dir_all(root.join("CommonModules")).expect("mkdir CommonModules");
+    std::fs::write(root.join(format!("CommonModules/{name}.xml")), xml).expect("write descriptor");
+    let dir = root.join("CommonModules").join(name).join("Ext");
+    std::fs::create_dir_all(&dir).expect("mkdir module");
+    std::fs::write(dir.join("Module.bsl"), body).expect("write module");
+}
+
+/// The configuration and an extension declared beside it, both holding a module at
+/// [`SHARED_MODULE_REL`].
+///
+/// Load-bearing parts of the shape:
+///
+/// - the extension lives OUTSIDE the workspace directory, because a root that canonically
+///   lies inside the configuration is rejected rather than registered, and a stand built
+///   that way would measure the rejection;
+/// - the two modules differ in text and declare differently named functions, so an answer
+///   derived from either file can be told from the other one;
+/// - both call the same configuration method, so the reference walk has one declaration and
+///   two occurrences whose paths collide.
+fn stage_two_roots_sharing_a_path() -> (TempDir, TempDir) {
+    let ws = stage_workspace();
+    let ext = TempDir::new().expect("scratch extension");
+    // A declared extension is recognised by its `Configuration.xml`; without one the
+    // topology refuses the declaration outright.
+    std::fs::copy(ws.path().join("Configuration.xml"), ext.path().join("Configuration.xml"))
+        .expect("the extension needs a configuration file to be one");
+
+    write_common_module(
+        ws.path(),
+        "Общий",
+        &format!(
+            "&НаСервере\nФункция {CONFIGURATION_SYMBOL}() Экспорт\n    \
+             Возврат ПервыйОбщийМодуль.НеУстаревшаяФункция();\nКонецФункции\n"
+        ),
+    );
+    write_common_module(
+        ext.path(),
+        "Общий",
+        &format!(
+            "&НаСервере\nФункция {EXTENSION_SYMBOL}() Экспорт\n    \
+             Возврат ПервыйОбщийМодуль.НеУстаревшаяФункция();\n    \
+             // Отличающийся текст: одинаковые байты сделали бы два файла неразличимыми\n\
+             КонецФункции\n"
+        ),
+    );
+
+    let path = ext.path();
+    std::fs::write(
+        ws.path().join("bsl-analyzer.toml"),
+        format!("[source]\nroot = \".\"\nextensions = [{{ name = \"расш\", path = {path:?} }}]\n"),
+    )
+    .expect("declare the extension");
+    (ws, ext)
+}
+
+/// A workspace server with the opt-in `references` tool enabled, as `--enable-tool` does.
+async fn client_with_references(root: &Path) -> Client {
+    let state = SharedState::workspace(root.to_path_buf()).expect("valid workspace project");
+    let gate = ToolGate::for_launch(McpProfile::Workspace, &["references".to_owned()]);
+    let server = McpServer::with_gate(McpProfile::Workspace, state, &gate);
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    tokio::spawn(serve_stream(server, server_io));
+    ().serve(client_io).await.expect("session initialized")
+}
+
+/// One relative path in two roots, carried across three tools.
+///
+/// Each tool already separates the roots inside its own suite. What none of them can show
+/// is whether a pair one tool publishes still names the right file when another tool is
+/// asked to serve it. Here both roots spell the same relative path, so a key that drops its
+/// root does not fail loudly — it answers from the namesake, which is why the two modules
+/// are given different text: identical bytes would make the wrong answer indistinguishable
+/// from the right one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_relative_path_in_two_roots_addresses_two_files() {
+    let (ws, _ext) = stage_two_roots_sharing_a_path();
+    let client = client_with_references(ws.path()).await;
+
+    // The declaration under test lives in the configuration alone, at a path no other root
+    // spells. Its own place is the first pair this gate carries across tools.
+    //
+    // Its module is deliberately NOT one of the two namesake modules: a common module
+    // present in both roots is an extension OVERRIDING it, and which of the two member sets
+    // a card then shows is a merge question, not a root-separation one. Asking it here would
+    // make this gate flake on a semantics it does not test.
+    let card = poll(&client, "symbol_info", args(&[("symbol", Value::from(STAND_METHOD))])).await;
+    assert_eq!(card["status"], "ok", "the stand must load before it can prove anything: {card}");
+    let declaration = card["definitions"]
+        .as_array()
+        .and_then(|d| d.first())
+        .and_then(|d| d.get("location"))
+        .unwrap_or_else(|| panic!("the method card carries a location: {card}"));
+    let declaration_root = declaration["root_id"].as_str().expect("root_id is a string").to_owned();
+    let declaration_path = declaration["path"].as_str().expect("path is a string").to_owned();
+    assert_eq!(declaration_root, "", "the declaration is the configuration's: {card}");
+    assert_ne!(
+        declaration_path, SHARED_MODULE_REL,
+        "the declaration must sit OUTSIDE the shared path, or a key that drops its root \
+         would still land on the right file and this gate would pass while blind",
+    );
+
+    // The reference walk sees the same collision: two occurrences of one declaration, in
+    // two files whose relative paths are equal.
+    let walk = poll(&client, "references", args(&[("symbol", Value::from(STAND_METHOD))])).await;
+    assert_eq!(walk["outcome"], "resolved", "{walk}");
+    let shared_buckets: Vec<String> = walk["files"]
+        .as_array()
+        .expect("a per-file histogram")
+        .iter()
+        .filter(|bucket| bucket["location"]["path"] == SHARED_MODULE_REL)
+        .map(|bucket| bucket["location"]["root_id"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        shared_buckets.len(),
+        2,
+        "both namesake modules call the declaration, so the histogram holds two buckets \
+         for one path: {walk}",
+    );
+    assert_ne!(shared_buckets[0], shared_buckets[1], "the two buckets name two roots: {walk}");
+
+    // Each pair, handed to a third tool, is served by the root that named it. The handles
+    // must differ: one relative path answered twice with one handle is the namesake being
+    // served for both, which is the failure this whole stand exists to catch.
+    let serve = |root_id: String, rel: String| {
+        let client = &client;
+        async move {
+            let answer = poll(
+                client,
+                "diagnostics",
+                args(&[
+                    ("action", Value::from("file")),
+                    ("root_id", Value::from(root_id)),
+                    ("path", Value::from(rel)),
+                ]),
+            )
+            .await;
+            let result = &answer["result"];
+            assert!(result.get("error").is_none(), "a published pair must be servable: {answer}");
+            result["result_id"].as_str().expect("a result handle").to_owned()
+        }
+    };
+    let served_configuration = serve(shared_buckets[0].clone(), SHARED_MODULE_REL.to_owned()).await;
+    let served_extension = serve(shared_buckets[1].clone(), SHARED_MODULE_REL.to_owned()).await;
+    assert_ne!(
+        served_configuration, served_extension,
+        "one path, two roots, two files — one handle for both means the root was dropped \
+         from the key and the namesake was served",
+    );
+
+    // The pair `symbol_info` published is servable too, and names a third file: the gate
+    // covers both producers of places, not the histogram alone.
+    let served_declaration = serve(declaration_root, declaration_path).await;
+    assert!(
+        served_declaration != served_configuration && served_declaration != served_extension,
+        "the declaration is its own file: {served_declaration}",
+    );
+
+    client.cancel().await.ok();
 }

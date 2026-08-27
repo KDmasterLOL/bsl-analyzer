@@ -172,11 +172,12 @@ pub use hir_def::extension_merge::{
     extract_change_and_validate, pair_base_module_path, unquote_bsl_string, Origin, Segment,
 };
 pub use hir_def::weaving::{
-    interception_applicable, interceptor_target, signature_mismatch, Interception,
-    InterceptionKind, SignatureMismatch, WeavingModuleId,
+    interception_applicable, interception_effective, interceptor_target, signature_mismatch,
+    Interception, InterceptionKind, SignatureMismatch, WeavingModuleId,
 };
 pub use hir_def::{
     ApplicationModuleKind, BodySearch, CommonModuleBodies, CommonModuleBody, ConfigsDatabase,
+    MdoModuleRole,
 };
 pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
 pub use hir_ty::call_resolution::{

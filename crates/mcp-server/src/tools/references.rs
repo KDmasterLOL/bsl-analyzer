@@ -21,6 +21,8 @@ use ide::{
 };
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::diagnostics_state::DiagnosticsResident;
@@ -116,6 +118,7 @@ pub(crate) fn answer(
     db: &ide::RootDatabaseImpl,
     params: &Params<'_>,
     max_output_tokens: usize,
+    external: &[&dyn ide::ExternalNameSource],
 ) -> Result<Answer, McpError> {
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES).min(MAX_MAX_FILES);
@@ -156,9 +159,10 @@ pub(crate) fn answer(
         max_files,
     };
 
-    let result = ide::find_references_by_name(db, &request);
+    let result = ide::find_references_by_name(db, &request, external);
     Ok(render(
         db,
+        resident.workspace_root(),
         resident.workspace_roots(),
         &result,
         params,
@@ -387,6 +391,10 @@ fn outcome_str(outcome: &ReferencesOutcome) -> &'static str {
 )]
 fn render(
     db: &ide::RootDatabaseImpl,
+    // The root the graph was built against, so a form handler's path-fallback id is encoded
+    // byte-identically to the way the graph builder encoded it — and identically to the way
+    // `symbol_info` encodes it for the same method.
+    workspace_root: &std::path::Path,
     roots: &WorkspaceRoots,
     result: &ReferencesResult,
     params: &Params<'_>,
@@ -409,7 +417,20 @@ fn render(
     if let Some(symbol) = params.symbol.map(str::trim).filter(|s| !s.is_empty()) {
         body.insert("symbol".into(), json!(symbol));
     }
-    body.insert("anchor".into(), anchor_value(anchor, result));
+    let mut anchor_block = anchor_value(anchor, result);
+    // The graph id of the ANCHOR, one per answer — not one per occurrence: the occurrences
+    // are places in files, while the id names the node they all refer to. Present only when
+    // the anchor settled on a single declaration the graph's grammar can address; a name that
+    // stayed ambiguous has no one node to name, and a variable is not a node at all.
+    if let [declaration] = result.declarations.as_slice() {
+        if let Some(graph_id) = ide::graph_id_of_declaration(db, declaration, Some(workspace_root))
+        {
+            if let Some(block) = anchor_block.as_object_mut() {
+                block.insert("graph_id".into(), json!(graph_id));
+            }
+        }
+    }
+    body.insert("anchor".into(), anchor_block);
     if let Some(area) = &area {
         body.insert(
             "area".into(),
@@ -582,13 +603,7 @@ fn render(
                             Some(roots),
                             &mut entry,
                         );
-                        entry.insert(
-                            "kind".into(),
-                            json!(match declaration.kind {
-                                ide::DeclarationKind::Method => "method",
-                                ide::DeclarationKind::Variable => "variable",
-                            }),
-                        );
+                        entry.insert("kind".into(), json!(declaration.kind.symbol_kind()));
                         Value::Object(entry)
                     })
                     .collect();
@@ -1126,14 +1141,101 @@ fn hit_value(place: &ide::ResolvedPlace, roots: &WorkspaceRoots, hit: &Reference
 /// The default budget, so the tool and its schema quote one number.
 pub(crate) const DEFAULT_BUDGET: usize = DEFAULT_OUTPUT_BUDGET_TOKENS;
 
-/// The published shape of this tool's `structuredContent`.
+/// One occurrence: where it is, what it is, and — with `include_preview` — the line it sits
+/// on.
 ///
-/// A schema and nothing else: the body is assembled as a `Value` because a place
-/// and a freshness envelope are serialized by the location contract alone, and
-/// re-declaring their shape here would be a second spelling to keep in agreement
-/// with the first. What this type does declare is which keys this tool serves and
-/// which of them are always there.
-#[derive(schemars::JsonSchema)]
+/// Typed, while `anchor`, `area`, `files[]`, `declarations[]`, `unsupported` and `lookup`
+/// beside it stay `Value`. The reason is not that a place matters more: it is that a place
+/// is the block a consumer ADDRESSES with — feed `root_id` and `path` back and you get the
+/// file — so a renamed key inside it turns a working address into a plausible wrong one. The
+/// blocks left untyped are read, not fed back. Their keys are unvalidated, and a gate that
+/// reads this type must say so rather than let "not checked" pass for "checked".
+#[derive(Deserialize, JsonSchema, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code, reason = "schema-only shape published by tools/list")]
+pub(crate) struct ReferenceEntry {
+    /// Where the occurrence is, under the location contract.
+    location: Option<crate::tools::location::WireLocation>,
+    /// Why there is no place, when there is none: a code from the location contract's own
+    /// vocabulary. Never both this and `location`, and never neither.
+    location_unavailable: Option<String>,
+    /// What the occurrence is: `declaration` | `call` | `write` | `read`.
+    kind: String,
+    /// `include_preview` only: the source line, masked and capped.
+    snippet: Option<String>,
+    /// The UTF-16 column the snippet starts at, so `location.range` indexes into it.
+    snippet_start_character: Option<u32>,
+    /// The line was windowed around the occurrence rather than shown from its head.
+    snippet_truncated: Option<bool>,
+    /// A literal in the statement was masked, after which the columns no longer index the
+    /// snippet byte for byte.
+    snippet_redacted: Option<bool>,
+}
+
+/// What the tool serves: an answer, or the envelope that says the resident is not ready.
+///
+/// A union, not one flat object with optional fields. The two shapes are different facts:
+/// an answer names an `outcome` and stamps `freshness`, while an envelope has neither —
+/// there is no answer yet to be fresh or stale about. Publishing the envelope through the
+/// answer's own type would mean either inventing those two values or making them optional
+/// for real answers too, and a consumer could no longer tell "no occurrences" from "not
+/// looked yet".
+#[derive(Deserialize, JsonSchema, Serialize)]
+#[serde(untagged)]
+#[schemars(transform = crate::tools::symbol_info::union_as_one_of)]
+#[allow(
+    dead_code,
+    clippy::large_enum_variant,
+    reason = "schema-only union published by tools/list is never instantiated"
+)]
+pub(crate) enum ReferencesOutput {
+    Answer(ReferencesResponse),
+    Loading(ReferencesLoading),
+}
+
+/// The resident is still building, so there is no answer yet — only the lifecycle snapshot
+/// a poller needs to tell progress from a stall.
+#[derive(Deserialize, JsonSchema, Serialize)]
+#[allow(dead_code, reason = "schema-only shape published by tools/list")]
+pub(crate) struct ReferencesLoading {
+    /// Version of this response shape. Always `"1"`.
+    schema_version: LoadingSchemaVersion,
+    /// Always `loading`: how a consumer tells this envelope from an answer.
+    status: LoadingStatus,
+    /// A human sentence beside the machine fields; never the thing to match on.
+    detail: String,
+    /// Resident lifecycle state: `disabled | idle | loading | ready | failed`.
+    state: String,
+    /// Which build generation this snapshot is from.
+    generation: u64,
+    /// How long the current build has been running.
+    elapsed_ms: Option<u64>,
+    /// Why the build failed, when it did.
+    error: Option<String>,
+}
+
+crate::wire_enum!(LoadingSchemaVersion { V1 => "1" });
+crate::wire_enum!(LoadingStatus { Loading => "loading" });
+
+/// The published schema: the union, not the answer alone.
+pub(crate) fn references_output_schema(
+) -> std::sync::Arc<serde_json::Map<String, serde_json::Value>> {
+    let mut schema = (*rmcp::handler::server::tool::schema_for_type::<ReferencesOutput>()).clone();
+    crate::contract::ensure_object_root(&mut schema);
+    std::sync::Arc::new(schema)
+}
+
+/// The envelope itself, carrying the version its schema publishes.
+pub(crate) fn loading(report: &crate::diagnostics_state::StatusReport) -> CallToolResult {
+    let mut body = crate::tools::resident::loading_body(
+        report,
+        "резидентная база ссылок ещё строится, повторите запрос через несколько секунд",
+    );
+    body["schema_version"] = json!("1");
+    structured(body)
+}
+
+#[derive(Deserialize, JsonSchema, Serialize)]
 #[allow(
     dead_code,
     reason = "the type exists to publish `outputSchema`; the body it describes is built as a \
@@ -1175,7 +1277,7 @@ pub(crate) struct ReferencesResponse {
     /// `snippet` and the `snippet_start_character` it begins at, plus `snippet_truncated`
     /// when the line was windowed and `snippet_redacted` when a literal was masked — after
     /// which the columns no longer index the snippet byte for byte.
-    references: Option<Vec<Value>>,
+    references: Option<Vec<ReferenceEntry>>,
     /// `resolved` only: how many occurrences passed the area and kind filters,
     /// counted before `limit`.
     total: Option<usize>,
@@ -1209,10 +1311,10 @@ pub(crate) struct ReferencesResponse {
     /// `ambiguous`/`not_found` by name: the name dictionary's answer —
     /// `candidates`, its own `total`/`total_exact`/`truncated` over THEM, and the
     /// `providers` it could and could not consult. Nested because its `total`
-    /// counts candidates while this tool's counts occurrences. The anchor is
-    /// looked for in the resident's own sources, so `providers` names those; the
-    /// call graph is not among them, and `symbol_info` is where a graph-known name
-    /// is resolved.
+    /// counts candidates while this tool's counts occurrences. The call graph is
+    /// among the sources the anchor is looked for in, so a name only it holds can
+    /// be anchored on here, and its state travels in `providers` rather than being
+    /// reported as never consulted.
     lookup: Option<Value>,
     /// Who answered, at which revision and topology, and whether the answer is whole.
     freshness: Value,
@@ -1221,6 +1323,90 @@ pub(crate) struct ReferencesResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn building_report() -> crate::diagnostics_state::StatusReport {
+        crate::diagnostics_state::StatusReport {
+            state: "loading",
+            generation: 3,
+            files: None,
+            unread_files: None,
+            reload: "none",
+            elapsed_ms: Some(1_200),
+            error: None,
+            watch: None,
+        }
+    }
+
+    /// Every body this tool serves — at any outcome AND at any resident state — parses into
+    /// the type it publishes, and the envelope parses into a branch of its OWN.
+    ///
+    /// The second half is what keeps the first honest. The cheap way to make a "still
+    /// building" body parse is to bolt `schema_version`, `outcome` and a `freshness` onto the
+    /// answer's flat shape; then the envelope validates while claiming an outcome nothing
+    /// produced and a freshness for an answer that does not exist. This gate reads which
+    /// branch matched, so that shortcut fails here instead of reaching a client.
+    #[test]
+    fn a_building_envelope_parses_as_an_envelope_and_not_as_an_answer() {
+        let report = building_report();
+        let served = loading(&report);
+        let body = served.structured_content.expect("the envelope is structured content");
+
+        let parsed = serde_json::from_value::<ReferencesOutput>(body.clone()).unwrap_or_else(|e| {
+            panic!("the envelope must parse into the published type: {e}: {body}")
+        });
+        assert!(
+            matches!(parsed, ReferencesOutput::Loading(_)),
+            "the envelope is its own branch, not an answer wearing default values: {body}",
+        );
+
+        // The rejected shortcut, spelled out: the same envelope with the answer's required
+        // keys bolted on. It must NOT read as an envelope any more.
+        let mut disguised = body.clone();
+        disguised["schema_version"] = json!("1");
+        disguised["outcome"] = json!("not_found");
+        disguised["freshness"] = json!({
+            "source": "resident",
+            "revision": 0,
+            "topology_fingerprint": "0000000000000000",
+            "stale": false,
+            "completeness": {"status": "complete", "reasons": []},
+        });
+        let parsed = serde_json::from_value::<ReferencesOutput>(disguised.clone())
+            .expect("the disguised body still parses — that is the point");
+        assert!(
+            matches!(parsed, ReferencesOutput::Answer(_)),
+            "a body carrying an outcome and a freshness is an ANSWER by shape; if it still \
+             reads as an envelope, the two are indistinguishable and the union proves nothing",
+        );
+    }
+
+    /// The kinds this tool publishes are spelled the way `symbol_info` spells them.
+    ///
+    /// Two tools describing the same declaration must not teach a consumer two vocabularies:
+    /// a client switching on `kind` cannot tell a word it has never seen from one that
+    /// quietly changed spelling. The gate is set membership against the card's own list, so
+    /// a kind added here without a place in that list fails, and so does a spelling that
+    /// drifts on either side.
+    #[test]
+    fn every_published_declaration_kind_is_a_kind_the_card_publishes() {
+        for kind in [ide::DeclarationKind::Method, ide::DeclarationKind::Variable] {
+            let published = kind.symbol_kind();
+            assert!(
+                ide::SYMBOL_KINDS.contains(&published),
+                "`{published}` is not among the kinds `symbol_info` serves ({:?}) — one of \
+                 the two vocabularies moved without the other",
+                ide::SYMBOL_KINDS,
+            );
+        }
+
+        // Control: a spelling the card does not serve must fail this membership, or the
+        // assertion above would hold for any string at all.
+        assert!(
+            !ide::SYMBOL_KINDS.contains(&"variable"),
+            "the card calls a module-level variable `module variable`; if a bare `variable` \
+             is also served, this gate can no longer catch the two spellings drifting apart",
+        );
+    }
 
     /// The per-file histogram is the one part of rendering that runs without a salsa
     /// query: a bucket names only its file, so `resolve_file_range` returns before it
@@ -1257,7 +1443,7 @@ mod tests {
             include_declaration: true,
             max_files: DEFAULT_MAX_FILES,
         };
-        let result = ide::find_references_by_name(&db, &request);
+        let result = ide::find_references_by_name(&db, &request, &[]);
         assert!(!result.per_file.is_empty(), "the stand must produce a bucket to render");
         let params = Params {
             symbol: Some("Продажи.Расчёт"),
@@ -1279,7 +1465,18 @@ mod tests {
 
         salsa::Database::cancellation_token(&db).cancel();
         let caught = salsa::Cancelled::catch(AssertUnwindSafe(|| {
-            render(&db, &roots, &result, &params, &anchor, None, 0, DEFAULT_BUDGET, 0)
+            render(
+                &db,
+                std::path::Path::new("/ws"),
+                &roots,
+                &result,
+                &params,
+                &anchor,
+                None,
+                0,
+                DEFAULT_BUDGET,
+                0,
+            )
         }));
         assert!(
             matches!(caught, Err(salsa::Cancelled::Local)),
@@ -1646,7 +1843,7 @@ mod tests {
             include_declaration: true,
             max_files: DEFAULT_MAX_FILES,
         };
-        let result = ide::find_references_by_name(&db, &request);
+        let result = ide::find_references_by_name(&db, &request, &[]);
         let params = Params {
             symbol: Some("Продажи.Расчёт"),
             anchor_root_id: None,
@@ -1665,16 +1862,36 @@ mod tests {
         };
 
         let anchor = ide::ReferenceAnchor::Name("Продажи.Расчёт".to_owned());
-        let read_whole =
-            render(&db, &roots, &result, &params, &anchor, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 0);
+        let read_whole = render(
+            &db,
+            std::path::Path::new("/ws"),
+            &roots,
+            &result,
+            &params,
+            &anchor,
+            None,
+            DEFAULT_LIMIT,
+            DEFAULT_BUDGET,
+            0,
+        );
         assert!(
             read_whole.completeness.is_complete(),
             "control: nothing was held out of service: {:?}",
             read_whole.completeness.to_value(),
         );
 
-        let with_a_hole =
-            render(&db, &roots, &result, &params, &anchor, None, DEFAULT_LIMIT, DEFAULT_BUDGET, 1);
+        let with_a_hole = render(
+            &db,
+            std::path::Path::new("/ws"),
+            &roots,
+            &result,
+            &params,
+            &anchor,
+            None,
+            DEFAULT_LIMIT,
+            DEFAULT_BUDGET,
+            1,
+        );
         let reasons = with_a_hole.completeness.to_value();
         assert!(
             reasons["reasons"]

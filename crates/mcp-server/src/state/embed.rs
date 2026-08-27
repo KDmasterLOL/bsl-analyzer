@@ -790,9 +790,11 @@ impl SharedState {
     /// against a graph that predates its `.xml` change. Opens the just-published graph
     /// database for the render; when the graph is unavailable nothing is cleared and the
     /// marks persist for the next publish. Never touches the resident mutex.
-    /// Returns whether a topology refresh the signal requested was actually handled
-    /// (vacuously true when none was requested) — the graph re-raises the request on
-    /// its next publish when this reports `false`.
+    /// Returns whether the render actually ran to completion. The caller turns that into its
+    /// own obligation: a requested topology refresh is re-raised for the next publish, and a
+    /// leftover-marks pickup keeps its captured bound. Reporting a skip as done would discharge
+    /// an obligation nothing has met, so every path answers for what was DONE — never for what
+    /// was asked.
     #[cfg(test)]
     fn refresh_search_contexts_after_graph(
         engine: &SharedSearchEngine,
@@ -841,20 +843,20 @@ impl SharedState {
         // Fast-path skip (an optimization, not correctness): a follow-up reload is already
         // catching up, so let ITS publish re-render against the fresher graph. Correctness
         // does not depend on this — the `build_start_seq` bound below already prevents
-        // clearing a mark against a graph that predates its drift. A requested topology
-        // refresh is reported unhandled so the graph re-raises it on the next publish.
+        // clearing a mark against a graph that predates its drift. Nothing was rendered, so
+        // the caller keeps whatever obligation it was discharging.
         if drift_pending {
             tracing::debug!(
                 "graph drift still pending; deferring search context refresh to the next publish"
             );
-            return !topology_changed;
+            return false;
         }
         let graph_path = cache.graph_db_path();
         let graph_db = match crate::graph_query::GraphDb::open(&graph_path) {
             Ok(db) => db,
             Err(e) => {
                 tracing::debug!("graph unavailable for search context refresh: {e}");
-                return !topology_changed;
+                return false;
             }
         };
         // The file we just opened is not necessarily the build that fired this hook: a
@@ -869,7 +871,7 @@ impl SharedState {
                     published_topology = topology,
                     "graph database on disk is not the published build; skipping context refresh"
                 );
-                return !topology_changed;
+                return false;
             }
         }
         let provider = crate::graph_query::GraphDbContextProvider::new(graph_db);
@@ -904,7 +906,7 @@ impl SharedState {
             Ok(result) => result,
             Err(error) => {
                 tracing::warn!("could not refresh search graph contexts: {error}");
-                return !topology_changed;
+                return false;
             }
         };
         if stats.paths_marked > 0 {
@@ -935,7 +937,7 @@ impl SharedState {
                 publish_retry_budget,
             );
         }
-        topology_handled || !topology_changed
+        topology_handled
     }
 
     /// After a context refresh NULLed live embeddings, re-embed the pending chunks through the
@@ -1255,6 +1257,39 @@ mod tests {
             .expect("graph database carries its freshness token")
             .1
             .topology
+    }
+
+    /// The publish hook the leftover-pickup tests drive: the real context refresh over a shared
+    /// engine, reporting back the outcome the graph uses to decide whether the obligation was
+    /// discharged. Every completed fire appends the bound it ran with to `fire_bounds`, so a test
+    /// waits for the fire it needs instead of for a wall clock.
+    fn leftover_test_hook(
+        engine_arc: &super::SharedSearchEngine,
+        workspace: &std::path::Path,
+        fire_bounds: &Arc<Mutex<Vec<i64>>>,
+    ) -> Arc<
+        dyn Fn(crate::graph::GraphPublishSignal) -> crate::graph::GraphPublishOutcome + Send + Sync,
+    > {
+        let engine_arc = Arc::clone(engine_arc);
+        let workspace = workspace.to_path_buf();
+        let fire_bounds = Arc::clone(fire_bounds);
+        let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+            let bound = signal.build_start_seq;
+            let handled = SharedState::refresh_search_contexts_after_graph(
+                &engine_arc,
+                &workspace,
+                &semantic_runtime,
+                &index_progress,
+                &embed_flight,
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+                signal,
+            );
+            fire_bounds.lock().unwrap().push(bound);
+            crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
+        })
     }
 
     fn write_root_layout(workspace: &std::path::Path, include_extension: bool) {
@@ -2517,6 +2552,13 @@ mod tests {
     /// newer mark stamped after the capture must still survive. Reverting the deferred fire in
     /// `notify_published` to a live `current_mark_seq()` read (which on this unwired graph is `0`)
     /// makes the deferred consume clear nothing, so the leftover-consumed assertion fails.
+    ///
+    /// One publish fires the hook TWICE, and the marks may only be read once both are done: the
+    /// build's own fire carries the unwired `0` bound and clears nothing, and the leftover consume
+    /// that follows is the one that clears. Waiting for a fire COUNT of one would read the store
+    /// while the publish is still between the two, which is a state no caller ever observes. The
+    /// bounds each fire ran with are recorded and asserted, so the wait cannot be satisfied by two
+    /// fires of the wrong kind.
     #[test]
     fn a_newer_mark_survives_the_deferred_leftover_pickup() {
         use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
@@ -2569,15 +2611,18 @@ mod tests {
         let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
         let index_progress = bsl_search::IndexProgress::new();
         let embed_flight = super::EmbedFlight::new();
-        let fired = Arc::new(AtomicUsize::new(0));
+        // The bound each completed hook fire ran with, in order — the wait condition and the
+        // identity of the two fires in one.
+        let fire_bounds: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
         let hook = {
             let engine_arc = Arc::clone(&engine_arc);
             let workspace = workspace.clone();
             let semantic_runtime = Arc::clone(&semantic_runtime);
             let index_progress = Arc::clone(&index_progress);
             let embed_flight = Arc::clone(&embed_flight);
-            let fired = Arc::clone(&fired);
+            let fire_bounds = Arc::clone(&fire_bounds);
             Arc::new(move |signal: crate::graph::GraphPublishSignal| {
+                let bound = signal.build_start_seq;
                 let handled = SharedState::refresh_search_contexts_after_graph(
                     &engine_arc,
                     &workspace,
@@ -2587,7 +2632,7 @@ mod tests {
                     &crate::workspace_lease::WorkspaceLease::unmanaged(),
                     signal,
                 );
-                fired.fetch_add(1, Ordering::SeqCst);
+                fire_bounds.lock().unwrap().push(bound);
                 crate::graph::GraphPublishOutcome { topology_handled: handled, roots_handled: true }
             })
                 as Arc<
@@ -2604,10 +2649,15 @@ mod tests {
         graph.consume_leftover_marks(leftover_bound);
         graph.ensure_loading();
         let deadline = Instant::now() + Duration::from_secs(30);
-        while fired.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        while fire_bounds.lock().unwrap().len() < 2 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(fired.load(Ordering::SeqCst) >= 1, "the build published and fired the hook");
+        assert_eq!(
+            *fire_bounds.lock().unwrap(),
+            vec![0, leftover_bound],
+            "the publish fired the build's own unwired consume, then the leftover one with the \
+             stored bound",
+        );
 
         let guard = engine_arc.lock().unwrap();
         let dirty = guard.as_ref().unwrap().context_dirty_paths("code").unwrap();
@@ -2618,6 +2668,278 @@ mod tests {
         assert!(
             dirty.contains(&bsl_search::FileKey::configuration(newer_rel)),
             "the newer mark (stamped after the captured bound) survives the deferred pickup",
+        );
+    }
+
+    /// A context refresh that skipped its work must report itself unhandled. Its caller uses
+    /// the answer to decide whether an obligation was discharged, and the leftover-marks pickup
+    /// asks with no topology refresh requested — so an answer derived from what was REQUESTED
+    /// rather than from what was DONE tells that caller its work is finished when nothing ran.
+    /// Deriving the early returns from `topology_changed` again makes the skip below report
+    /// success and the first assertion fails.
+    #[test]
+    fn a_context_refresh_that_could_not_run_reports_itself_unhandled() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let semantic_runtime = Arc::new(Mutex::new(crate::state::SemanticRuntimeStatus::Ready));
+        let index_progress = bsl_search::IndexProgress::new();
+        let embed_flight = super::EmbedFlight::new();
+        let refresh = |topology: u64| {
+            SharedState::refresh_search_contexts_after_graph(
+                &engine_arc,
+                &workspace,
+                &semantic_runtime,
+                &index_progress,
+                &embed_flight,
+                &crate::workspace_lease::WorkspaceLease::unmanaged(),
+                crate::graph::GraphPublishSignal {
+                    drift_pending: false,
+                    build_start_seq: i64::MAX,
+                    topology_changed: false,
+                    topology,
+                    roots_refresh_requested: false,
+                    workspace_roots: None,
+                },
+            )
+        };
+
+        // No graph has been built, so the database the render reads is not on disk and the
+        // refresh can only skip.
+        assert!(
+            !crate::cache::graph_db_path(&workspace).exists(),
+            "the graph database is absent, so the refresh has nothing to render from",
+        );
+        assert!(!refresh(0), "a refresh that could not open the graph reports itself unhandled");
+
+        // The control: the SAME call over a graph that is there does run and reports handled,
+        // so the assertion above is about the skip and not about a call that can never say yes.
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone());
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+            if Instant::now() > deadline {
+                panic!("graph did not build: {:?}", graph.status());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(refresh(built_graph_topology(&workspace)), "a refresh that ran reports handled");
+    }
+
+    /// A leftover pickup that could not run must KEEP its obligation. The pickup discharges it
+    /// with a `swap`, so a skip that reports success drops it: the marks stay in the persisted
+    /// table with nothing left to clear them, and on a quiet workspace no later build comes to
+    /// pick them up — those files serve a stale graph context until the daemon restarts.
+    /// Deriving the refresh's early returns from `topology_changed` again makes the skip report
+    /// success and the obligation vanishes.
+    #[test]
+    fn a_leftover_pickup_that_could_not_run_keeps_its_obligation() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let leftover_bound = engine.mark_seq_handle().load(Ordering::SeqCst);
+        assert!(leftover_bound != 0, "the seeded mark gives the pickup a non-empty bound");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let fire_bounds: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone())
+            .with_publish_hook(leftover_test_hook(&engine_arc, &workspace, &fire_bounds));
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+            if Instant::now() > deadline {
+                panic!("graph did not build: {:?}", graph.status());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        // Take the rendered-from database away, so the pickup below can only skip. The graph
+        // stays `Ready`, so the pickup does fire — it just cannot do anything.
+        let graph_db = crate::cache::graph_db_path(&workspace);
+        fs::rename(&graph_db, graph_db.with_extension("db.taken")).unwrap();
+
+        graph.consume_leftover_marks(leftover_bound);
+        assert!(
+            graph.leftover_consume_pending(),
+            "a pickup that could not run leaves the obligation armed for the next publish",
+        );
+    }
+
+    /// The obligation a skipped pickup kept is what actually clears the marks later: the next
+    /// publish re-runs the consume with the STORED bound. The graph here is never wired to the
+    /// mark-seq source, so its own publish captures the unwired `0` bound and clears nothing —
+    /// the kept obligation is the only thing that can clear the leftover mark, and the assertion
+    /// cannot pass through the ordinary path by accident.
+    #[test]
+    fn a_kept_leftover_obligation_is_discharged_by_the_next_publish() {
+        use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
+        use std::sync::atomic::Ordering;
+        use std::time::{Duration, Instant};
+
+        let dir = tempdir().unwrap();
+        let workspace = dir.path().to_path_buf();
+        write_common_module(&workspace, "Сервер", "Функция Считать() Экспорт КонецФункции");
+        let module_rel = "CommonModules/Сервер/Ext/Module.bsl";
+
+        let db_path = workspace.join("search.db");
+        {
+            let mut store = Store::open(&db_path).unwrap();
+            store
+                .reindex_file_with_context(
+                    bsl_search::CONFIGURATION_ROOT_ID,
+                    module_rel,
+                    b"h1",
+                    &[Chunk {
+                        kind: ChunkKind::Function,
+                        name: "Считать".to_owned(),
+                        is_export: true,
+                        annotations: vec![],
+                        line_start: 0,
+                        line_end: 1,
+                        text: "Функция Считать() Экспорт КонецФункции".to_owned(),
+                    }],
+                    None,
+                    Some(&[Some("СТАРЫЙ контекст".to_owned())]),
+                )
+                .unwrap();
+            store
+                .mark_context_dirty("code", bsl_search::CONFIGURATION_ROOT_ID, module_rel)
+                .unwrap();
+        }
+        let mut engine = SearchEngine::fts_only(&db_path).unwrap();
+        engine.set_workspace_root(&workspace);
+        engine.enable_workspace_watcher_mode();
+        let leftover_bound = engine.mark_seq_handle().load(Ordering::SeqCst);
+        assert!(leftover_bound != 0, "the seeded mark gives the pickup a non-empty bound");
+        let engine_arc: super::SharedSearchEngine = Arc::new(Mutex::new(Some(engine)));
+
+        let fire_bounds: Arc<Mutex<Vec<i64>>> = Arc::new(Mutex::new(Vec::new()));
+        let graph = crate::graph::GraphState::for_workspace(workspace.clone())
+            .with_publish_hook(leftover_test_hook(&engine_arc, &workspace, &fire_bounds));
+        graph.ensure_loading();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
+            if Instant::now() > deadline {
+                panic!("graph did not build: {:?}", graph.status());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let graph_db = crate::cache::graph_db_path(&workspace);
+        let taken = graph_db.with_extension("db.taken");
+        fs::rename(&graph_db, &taken).unwrap();
+        graph.consume_leftover_marks(leftover_bound);
+        fs::rename(&taken, &graph_db).unwrap();
+        assert!(
+            graph.leftover_consume_pending(),
+            "the skipped pickup kept an obligation to discharge"
+        );
+        // The skipped pickup fired the hook too, with this very bound. Only fires AFTER this
+        // point can be the publish's, so the wait below must not count what already happened.
+        let fires_before_publish = fire_bounds.lock().unwrap().len();
+
+        // A `Ready` graph claims a reload only for a drift it can see on disk. Without one the
+        // nudge is a no-op and this test would wait on a publish that never comes — passing or
+        // failing on how the machine was loaded rather than on the obligation.
+        write_common_module(&workspace, "Клиент", "Функция Прочесть() Экспорт КонецФункции");
+        assert!(
+            matches!(graph.nudge_rebuild(), crate::graph::NudgeOutcome::ReloadClaimed),
+            "the drift claims the reload whose publish discharges the obligation",
+        );
+
+        // Wait for the leftover fire ITSELF: its stored bound tells it apart from the build's
+        // own fire, which runs the unwired `0` and clears nothing.
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let discharged = |bounds: &Arc<Mutex<Vec<i64>>>| {
+            bounds.lock().unwrap()[fires_before_publish..].contains(&leftover_bound)
+        };
+        while !discharged(&fire_bounds) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            discharged(&fire_bounds),
+            "the publish re-ran the consume with the stored bound; fires so far: {:?}",
+            fire_bounds.lock().unwrap(),
+        );
+        assert!(
+            !engine_arc
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .context_dirty_paths("code")
+                .unwrap()
+                .contains(&bsl_search::FileKey::configuration(module_rel)),
+            "the discharged obligation cleared the leftover mark",
         );
     }
 

@@ -290,7 +290,9 @@ mod tests {
                 max_files: None,
                 include_preview: None,
             };
-            crate::tools::references::answer(resident, db.database(), &params, 6000).is_ok()
+            // No external sources: this probe measures how long the resident is held, and a
+            // graph source would add its own work to the very interval being timed.
+            crate::tools::references::answer(resident, db.database(), &params, 6000, &[]).is_ok()
         })
     }
 

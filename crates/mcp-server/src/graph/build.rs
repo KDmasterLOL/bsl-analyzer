@@ -138,6 +138,8 @@ impl GraphState {
                 search_roots: built.search_roots.clone(),
             },
             GraphStatus::Ready { files: built.files },
+            // The fused build runs at boot, ahead of any forced-reload request.
+            None,
         ))?;
         *lock_recover(&self.scan) = None;
         self.ensure_hub_roots(&built.scan_roots, built.fp_pre.topology);
@@ -323,12 +325,19 @@ impl GraphState {
                         search_roots: search_roots.clone(),
                     },
                     GraphStatus::Ready { files },
+                    // The only path that runs under a forced reload. The epoch was
+                    // captured before the build, so a request arriving mid-build stays
+                    // outstanding and claims its own follow-up reload.
+                    Some(project_reload_epoch),
                 )) {
                     self.record_load_failure(is_reload, error);
                     return;
                 }
+                #[cfg(test)]
+                if let Some(hook) = &self.publish_window_hook {
+                    hook();
+                }
                 self.ensure_hub_roots(&scan_roots, fp_pre.topology);
-                self.complete_project_reload_through(project_reload_epoch);
                 self.notify_published(build_start_seq, topology_changed);
                 tracing::info!(files, generation, is_reload, "graph database build complete");
             }
@@ -525,6 +534,8 @@ impl GraphState {
                         search_roots: project.search_roots.clone(),
                     },
                     GraphStatus::Ready { files },
+                    // An incremental reload never runs under a forced reload.
+                    None,
                 )) {
                     return match error.reason {
                         LoadFailureReason::TransientRefusal | LoadFailureReason::Terminal => {
@@ -610,6 +621,9 @@ impl GraphState {
                 search_roots: project.search_roots.clone(),
             },
             GraphStatus::Ready { files },
+            // Serving a cached build discharges no forced reload: it publishes the
+            // state already on disk, not a rebuild of the newly declared configuration.
+            None,
         )) {
             return PublishAttemptOutcome::Refused(error);
         }
@@ -695,6 +709,9 @@ impl GraphState {
                 search_roots: None,
             },
             GraphStatus::Ready { files },
+            // A placeholder publication; the catch-up build it spawns carries whatever
+            // obligation is outstanding.
+            None,
         )) {
             return PublishAttemptOutcome::Refused(error);
         }
@@ -1131,8 +1148,8 @@ mod tests {
     use super::super::scan::{scan_file_stats, scan_stats_over_roots, FileStat, WorkspaceDiff};
     use super::super::snapshot::fold_fingerprint_entries;
     use super::super::test_support::{
-        meta_string, sample_workspace, seed_cache, wait_ready, write, write_common_module,
-        write_extension_config, write_extension_workspace,
+        meta_string, sample_workspace, seed_cache, wait_ready, wait_until, wait_until_within,
+        write, write_common_module, write_extension_config, write_extension_workspace,
     };
     use super::*;
     use crate::graph_db::{build_graph_database, update_graph_database_bodies};
@@ -1427,6 +1444,7 @@ mod tests {
                 search_roots: built.search_roots,
             },
             GraphStatus::Ready { files: built.files },
+            None,
         );
         assert_eq!(fresh_install, LeaseOutcome::Applied(Err(SnapshotInstallError::Changed)));
         assert!(fresh.snapshot().is_none(), "fresh publish never becomes ready");
@@ -1758,13 +1776,12 @@ mod tests {
             graph.freshness(&snap).reload == "running"
         };
         assert!(claimed, "recovery must schedule the clean rebuild the marker was waiting for");
-        for _ in 0..300 {
-            if meta_string(&graph_db_path(root), "force_stale") == "0" {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the recovery rebuild never published a clean snapshot");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(3),
+            "the recovery rebuild to publish a snapshot no longer marked force_stale",
+            || meta_string(&graph_db_path(root), "force_stale") == "0",
+        );
     }
 
     /// The positive control for the verdict wiring: a healthy tree publishes clean.
@@ -2043,14 +2060,12 @@ mod tests {
         );
 
         // The catch-up publishes past the cached revision and rewrites the file.
-        for _ in 0..500 {
-            if graph.snapshot().map(|s| s.generation) == Some(8) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let snap = graph.snapshot().expect("ready graph snapshots");
-        assert_eq!(snap.generation, 8, "the catch-up reload published past the cache");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(5),
+            "the catch-up reload to publish past the cached revision",
+            || graph.snapshot().map(|s| s.generation) == Some(8),
+        );
         assert_ne!(meta_string(&graph_db_path(root), "built_at"), "cached-build-sentinel");
     }
 
@@ -3500,15 +3515,10 @@ mod tests {
         graph.ensure_loading();
         wait_ready(&graph);
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while std::time::Instant::now() < deadline
-            && !requested.load(std::sync::atomic::Ordering::SeqCst)
-        {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            requested.load(std::sync::atomic::Ordering::SeqCst),
-            "the catch-up publish after a topology-only warm start must request the refresh",
+        wait_until(
+            &graph,
+            "the catch-up publish after a topology-only warm start to request the refresh",
+            || requested.load(std::sync::atomic::Ordering::SeqCst),
         );
     }
 
@@ -5365,16 +5375,13 @@ mod tests {
         assert!(drifted.stale, "removal drifts the workspace");
 
         // The caller-delta reload publishes generation 2 with the method gone.
-        let mut settled = None;
-        for _ in 0..200 {
-            let snap = graph.snapshot().expect("snapshot");
-            if snap.generation == 2 {
-                settled = Some(snap);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let snap2 = settled.expect("reload published generation 2");
+        wait_until_within(
+            &graph,
+            Duration::from_secs(2),
+            "the caller-delta reload to publish generation 2",
+            || graph.snapshot().is_some_and(|snap| snap.generation == 2),
+        );
+        let snap2 = graph.snapshot().expect("the caller-delta reload published");
         assert!(
             snap2
                 .graph

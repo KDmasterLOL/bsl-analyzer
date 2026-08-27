@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<InformationRegister uuid="ec000003-0004-0000-0000-000000000003">
+		<Properties>
+			<Name>ЦеныТоваров</Name>
+			<Synonym/>
+			<Comment/>
+		</Properties>
+		<ChildObjects>
+			<Resource uuid="ec000003-0005-0000-0000-000000000003">
+				<Properties>
+					<Name>Цена</Name>
+					<Synonym/>
+					<Comment/>
+					<Type>
+						<v8:Type>xs:decimal</v8:Type>
+					</Type>
+				</Properties>
+			</Resource>
+		</ChildObjects>
+	</InformationRegister>
+</MetaDataObject>

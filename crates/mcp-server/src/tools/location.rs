@@ -465,6 +465,83 @@ mod tests {
     /// the SAME string as the SQLite one for the byte-identity gates to keep comparing like
     /// with like — and it sits below this crate, so it cannot import the enum. That makes
     /// the two spellings a pair that can drift silently; this is the test that they cannot.
+    /// Every key [`Location::to_value`] writes is a key [`WireLocation`] declares, and every
+    /// key it declares as required is one the writer always writes.
+    ///
+    /// The published schema is a SECOND spelling of the block, and a second spelling drifts.
+    /// This holds them together in both directions: `deny_unknown_fields` fails on a key the
+    /// writer gained and the type did not, a missing required field fails on one the writer
+    /// dropped, and the explicit key list below fails on an optional key that quietly left —
+    /// the one case neither serde rule can see.
+    #[test]
+    fn wire_location_matches_what_the_contract_serializes() {
+        let full = Location {
+            root_id: "ext-a".to_string(),
+            path: "CommonModules/Общий/Ext/Module.bsl".to_string(),
+            range: Some(PositionRange {
+                start_line: 4,
+                start_character: 8,
+                end_line: 4,
+                end_character: 15,
+            }),
+            enclosing_range: Some(PositionRange {
+                start_line: 3,
+                start_character: 0,
+                end_line: 6,
+                end_character: 12,
+            }),
+            module: Some(ModuleRef {
+                kind: "ОбщийМодуль".to_string(), name: "Общий".to_string()
+            }),
+        };
+        let written = full.to_value();
+        let mut keys: Vec<&str> = written
+            .as_object()
+            .expect("a location is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "enclosing_range",
+                "module",
+                "path",
+                "position_encoding",
+                "range",
+                "root_id",
+                "schema_version",
+            ],
+            "the block gained or lost a key: {written}"
+        );
+        let parsed: WireLocation =
+            serde_json::from_value(written.clone()).unwrap_or_else(|error| {
+                panic!(
+                    "the published type must accept what the contract writes: {error}: {written}"
+                )
+            });
+        assert_eq!(parsed.position_encoding, POSITION_ENCODING);
+        assert_eq!(parsed.schema_version, LOCATION_SCHEMA_VERSION);
+
+        // A place that knows only its file: the optional halves are absent, not zeroed, and
+        // the published type has to accept that shape too — it is what a baseline hit looks
+        // like.
+        let bare = Location {
+            root_id: String::new(),
+            path: "Configuration.xml".to_string(),
+            range: None,
+            enclosing_range: None,
+            module: None,
+        };
+        let written = bare.to_value();
+        let parsed: WireLocation =
+            serde_json::from_value(written.clone()).unwrap_or_else(|error| {
+                panic!("a file-only place is a location too: {error}: {written}")
+            });
+        assert!(parsed.range.is_none() && parsed.enclosing_range.is_none());
+    }
+
     #[test]
     fn the_reasons_ide_spells_itself_match_this_vocabulary() {
         assert_eq!(LocationUnavailable::NoSourceLocation.code(), ide::NO_SOURCE_LOCATION);
@@ -655,4 +732,49 @@ mod tests {
         assert_eq!(value["topology_fingerprint"], "0a1b2c3d4e5f6071");
         assert_eq!(value["stale"], false);
     }
+}
+
+/// The published shape of a location block, for the tools that declare their output schema.
+///
+/// A second spelling of what [`Location::to_value`] writes, and the danger in that is
+/// exactly the drift it exists to catch: a schema that agreed with the writer only on the
+/// day it was written would validate a document example against a shape nothing serves.
+/// [`wire_location_matches_what_the_contract_serializes`] holds the two together — the
+/// writer's own output has to parse into this type with no key left over and none missing,
+/// so a renamed or added key fails here rather than in a client.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireLocation {
+    /// Which root the `path` is relative to. Empty string for the configuration root.
+    pub root_id: String,
+    /// Path relative to ITS OWN root, `/`-separated.
+    pub path: String,
+    /// The symbol's own span, absent when the answer only knows the file.
+    pub range: Option<WirePositionRange>,
+    /// The whole node the symbol belongs to, absent for the same reason.
+    pub enclosing_range: Option<WirePositionRange>,
+    /// The module this place belongs to, when the producer holds both halves.
+    pub module: Option<WireModuleRef>,
+    /// The unit `range` characters are counted in. Always `"utf-16"`.
+    pub position_encoding: String,
+    /// Version of the location block itself. Always `"1"`.
+    pub schema_version: String,
+}
+
+/// A span inside a file: 0-based, end-exclusive, characters in UTF-16 code units.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WirePositionRange {
+    pub start_line: u32,
+    pub start_character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+}
+
+/// The module a place belongs to.
+#[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WireModuleRef {
+    pub kind: String,
+    pub name: String,
 }

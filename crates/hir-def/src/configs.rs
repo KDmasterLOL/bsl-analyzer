@@ -51,6 +51,18 @@ pub struct CommonModuleBody {
     pub unread: bool,
 }
 
+/// Which module of a metadata object a body lookup is about.
+///
+/// The common module is deliberately absent: it has a metadata listing that knows
+/// its body URIs, and its own lookup on `ConfigsDatabase`. These three are found
+/// only through the path-derived index, which is what makes them share a route.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MdoModuleRole {
+    Manager,
+    Object,
+    RecordSet,
+}
+
 /// What a walk over a module's bodies found — the only shape in which an answer about
 /// a common module may be phrased, because it keeps "not there" apart from "could not
 /// look".
@@ -290,6 +302,36 @@ pub trait ConfigsDatabase: DefDatabase {
         name: &str,
     ) -> Option<CommonModuleBodies> {
         let _ = (file_id, name);
+        None
+    }
+
+    /// Bodies of a metadata object's module, visible to `file_id`, base first.
+    ///
+    /// The visibility question this answers is NOT the one `mdo_visible` answers.
+    /// That one asks whether the caller can see the OBJECT, and a catalog adopted
+    /// by the base configuration is visible to every extension. This one asks
+    /// whose BODY may answer, and a body living in a root the caller does not
+    /// depend on may not — which is the whole defect this exists to close.
+    ///
+    /// `None` means the provider has no visibility-scoped lookup — the caller
+    /// falls back to the path-derived module index and behaves as it did before.
+    ///
+    /// An empty `Some` is a genuine "no visible root holds such a body", and the
+    /// caller must report it as absent. This is the OPPOSITE of
+    /// [`ConfigsDatabase::resolve_common_module_file_candidates`], where an empty
+    /// `Some` means the configs know the module but no body file mapped and the
+    /// caller degrades to the path index. The two differ because the substrates
+    /// differ: the common module has a listing that can disagree with the file
+    /// set, these three have only the path index — degrading here would hand back
+    /// exactly the invisible body the filter just removed.
+    fn resolve_mdo_module_file_candidates(
+        &self,
+        file_id: FileId,
+        role: MdoModuleRole,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<CommonModuleBodies> {
+        let _ = (file_id, role, mdo_type, name);
         None
     }
 

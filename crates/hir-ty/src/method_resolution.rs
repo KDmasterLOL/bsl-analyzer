@@ -227,6 +227,134 @@ pub fn resolve_aliased_manager_call(
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
+/// Which module answered a call on a typed receiver.
+///
+/// Carried out of [`resolve_user_call`] because inference names the receiver
+/// differently per route in its not-exported diagnostic: the object route reports
+/// the COERCED receiver, the other two the one as written. The two spellings only
+/// diverge on `ЭтотОбъект`/`ЭтотМенеджер`. Navigation ignores this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserCallRoute {
+    ObjectModule,
+    RecordSetModule,
+    ManagerModule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserCall {
+    pub route: UserCallRoute,
+    pub resolution: MethodResolution,
+    /// The metadata object whose module answered, as the receiver type spelled
+    /// it. Inference falls back to it when the receiver has no display name.
+    pub mdo_name: Name,
+}
+
+/// The verdict of the user-method cascade. `NotUserMethod` and `BodyUnread` both
+/// mean "ask the platform surface next"; they differ in whether a body that
+/// nobody read could have answered, which only inference records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserCallTarget {
+    Method(UserCall),
+    BodyUnread,
+    NotUserMethod,
+}
+
+/// Resolve a call on a typed receiver against the USER methods of the module the
+/// receiver denotes — object module, record-set module, or manager module.
+///
+/// This is the single owner of two rules that used to live in inference alone,
+/// and that every other consumer of the same question had to reproduce:
+///
+/// - the receiver is COERCED first, so `ЭтотОбъект` and `ЭтотМенеджер` reach the
+///   same modules as a variable holding the object would;
+/// - a user method is looked for BEFORE the platform surface, so a user method
+///   spelled like a platform one (`Записать` on a catalog object, `НайтиПоКоду`
+///   on its manager) is the one the call names.
+///
+/// Deliberately pure: no diagnostics, no interning of expression types, no
+/// recording of call-argument bindings. Those belong to inference, which has the
+/// expression ids this function is not given — and which would emit them twice if
+/// a second caller could trigger them.
+///
+/// The platform surface is NOT consulted here. Resolving it needs a
+/// [`crate::method_lookup::RefineCtx`] built from a body, which navigation has in
+/// a different form; each caller keeps that step.
+pub fn resolve_user_call(
+    db: &dyn HirDatabase,
+    receiver_ty: TypeId,
+    method_name: &Name,
+    resolver: &Resolver,
+) -> UserCallTarget {
+    use bsl_types::kind::TypeKind;
+
+    let coerced =
+        crate::this_object::coerce_to_metadata_ref_id(db, receiver_ty).unwrap_or(receiver_ty);
+
+    // A body nobody read cannot answer, but it also cannot be reported as absent:
+    // the route that hit it stays a "maybe" while the remaining routes are tried.
+    let mut unread = false;
+
+    let mut consider = |result: Result<MethodResolution, UnresolvedMethodKind>,
+                        route: UserCallRoute,
+                        origin: &str|
+     -> Option<(UserCallRoute, MethodResolution)> {
+        match result {
+            Ok(resolution) => Some((route, resolution)),
+            Err(UnresolvedMethodKind::MethodNotFound) => None,
+            Err(UnresolvedMethodKind::BodyUnread) => {
+                unread = true;
+                None
+            }
+            Err(
+                kind @ (UnresolvedMethodKind::MethodNotExport
+                | UnresolvedMethodKind::ReceiverNotResolved
+                | UnresolvedMethodKind::ReceiverNameAbsent),
+            ) => {
+                unreachable!("{origin} returned unexpected kind: {kind:?}")
+            }
+        }
+    };
+
+    match db.lookup_type(coerced) {
+        TypeKind::MetadataRef(facet) => {
+            let mdo_name = Name::new(&facet.name);
+            // The two kind mappers accept disjoint sets of `MetadataKind`, so the
+            // order between these two decides nothing.
+            if let Some((route, resolution)) = consider(
+                resolve_object_module_call(db, facet.kind, &mdo_name, method_name, resolver),
+                UserCallRoute::ObjectModule,
+                "resolve_object_module_call",
+            ) {
+                return UserCallTarget::Method(UserCall { route, resolution, mdo_name });
+            }
+            if let Some((route, resolution)) = consider(
+                resolve_record_set_module_call(db, facet.kind, &mdo_name, method_name, resolver),
+                UserCallRoute::RecordSetModule,
+                "resolve_record_set_module_call",
+            ) {
+                return UserCallTarget::Method(UserCall { route, resolution, mdo_name });
+            }
+        }
+        TypeKind::ObjectManager(facet) => {
+            let mdo_name = Name::new(&facet.name);
+            if let Some((route, resolution)) = consider(
+                resolve_aliased_manager_call(db, facet.mdo, &mdo_name, method_name, resolver),
+                UserCallRoute::ManagerModule,
+                "resolve_aliased_manager_call",
+            ) {
+                return UserCallTarget::Method(UserCall { route, resolution, mdo_name });
+            }
+        }
+        _ => {}
+    }
+
+    if unread {
+        UserCallTarget::BodyUnread
+    } else {
+        UserCallTarget::NotUserMethod
+    }
+}
+
 pub(crate) fn materialise_signature(
     db: &dyn TypeKernelDb,
     method_symbol: &MethodSymbol,

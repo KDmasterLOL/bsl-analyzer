@@ -158,6 +158,7 @@ struct MemberSignatureOutput {
     presentation: String,
 }
 
+#[macro_export]
 macro_rules! wire_enum {
     ($name:ident { $($variant:ident => $wire:literal),+ $(,)? }) => {
         #[derive(Deserialize, JsonSchema, Serialize)]
@@ -223,7 +224,7 @@ fn overlapping_union(schema: &mut schemars::Schema) {
     crate::contract::ensure_object_root(object);
 }
 
-fn union_as_one_of(schema: &mut schemars::Schema) {
+pub(crate) fn union_as_one_of(schema: &mut schemars::Schema) {
     let object = schema.ensure_object();
     if let Some(branches) = object.remove("anyOf") {
         object.insert("oneOf".to_string(), branches);
@@ -414,6 +415,14 @@ pub(crate) fn render_card(
     let mut degraded = card.semantics_unavailable;
     let mut indexing = false;
 
+    // The node's durable id, published whether or not the graph is up. It is derived from the
+    // declaration, so it is knowable while the graph still indexes — and `references` prints
+    // the same id for the same anchor. Serving it only beside `usages` made the two tools
+    // disagree on a cold graph: one named the node, the other did not.
+    if let Some(graph_id) = card.graph_id.as_deref() {
+        body["graph_id"] = json!(graph_id);
+    }
+
     if !card.semantics_unavailable {
         match (card.graph_id.as_deref(), graph) {
             (Some(graph_id), Some(graph)) => match usages(graph, graph_id, top_modules) {
@@ -499,10 +508,24 @@ impl ResidentStamp<'_> {
 /// (platform members, metadata objects): an empty list says "no definition site", where an
 /// invented location would say something false.
 fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Value> {
-    let Some(def) = &card.definition else {
-        return Vec::new();
-    };
+    card.definitions.iter().map(|site| definition_site_value(card, site, stamp)).collect()
+}
+
+/// One declaration site: where it is, and the part it plays for the requested name.
+///
+/// The part matters as much as the place. An extension weaving `&Вместо` onto a method means
+/// the base body no longer runs on its own, and a list of bare locations cannot say that.
+fn definition_site_value(
+    card: &SymbolInfoCard,
+    site: &ide::SymbolDefinitionSite,
+    stamp: &ResidentStamp<'_>,
+) -> Value {
+    let def = &site.definition;
     let mut entry = Map::new();
+    entry.insert("role".into(), json!(site.role.as_str()));
+    if let Some(extension) = &site.source_extension {
+        entry.insert("source_extension".into(), json!(extension));
+    }
 
     match (&def.path, stamp.roots) {
         (Some(path), Some(roots)) => match Location::from_path(roots, Path::new(path)) {
@@ -536,7 +559,7 @@ fn definitions_value(card: &SymbolInfoCard, stamp: &ResidentStamp<'_>) -> Vec<Va
     // No snippet here on purpose: the card already carries it in `definition`, and a second
     // copy would double the very payload the budget just trimmed. The location says WHERE;
     // the text stays where it was.
-    vec![Value::Object(entry)]
+    Value::Object(entry)
 }
 
 /// The owning module, when the card already holds both halves — never parsed back out of a
@@ -808,6 +831,23 @@ mod tests {
     }
 
     fn method_card() -> SymbolInfoCard {
+        let definition = SymbolDefinition {
+            path: Some("/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl".to_string()),
+            line: 3,
+            snippet: Some("Функция Сложить(А, Б) Экспорт".to_string()),
+            name_range: Some(LineColRange {
+                start_line: 2,
+                start_character: 8,
+                end_line: 2,
+                end_character: 15,
+            }),
+            enclosing_range: Some(LineColRange {
+                start_line: 2,
+                start_character: 0,
+                end_line: 6,
+                end_character: 15,
+            }),
+        };
         SymbolInfoCard {
             symbol: "МойМодуль.Сложить".to_string(),
             kind: "function",
@@ -819,23 +859,12 @@ mod tests {
             signature: Some("Функция Сложить(А, Б) Экспорт".to_string()),
             doc: Some("Складывает".to_string()),
             return_type: Some("Число".to_string()),
-            definition: Some(SymbolDefinition {
-                path: Some("/ws/src/cf/CommonModules/МойМодуль/Ext/Module.bsl".to_string()),
-                line: 3,
-                snippet: Some("Функция Сложить(А, Б) Экспорт".to_string()),
-                name_range: Some(LineColRange {
-                    start_line: 2,
-                    start_character: 8,
-                    end_line: 2,
-                    end_character: 15,
-                }),
-                enclosing_range: Some(LineColRange {
-                    start_line: 2,
-                    start_character: 0,
-                    end_line: 6,
-                    end_character: 15,
-                }),
-            }),
+            definition: Some(definition.clone()),
+            definitions: vec![ide::SymbolDefinitionSite {
+                definition,
+                role: ide::DefinitionRole::Base,
+                source_extension: None,
+            }],
             members: Vec::new(),
             graph_id: Some("method/common/МойМодуль/Сложить".to_string()),
             semantics_unavailable: false,

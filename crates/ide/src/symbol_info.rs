@@ -241,6 +241,73 @@ struct DefinitionRanges {
     enclosing: Option<TextRange>,
 }
 
+/// Every value `SymbolInfoCard::kind` is ever served with.
+///
+/// One list, because the kind of a symbol is published by more than one tool and a second
+/// spelling of the same idea is a vocabulary that drifts silently: a consumer switching on
+/// `kind` cannot tell a value it has never seen from one that quietly changed spelling. Any
+/// tool that publishes a kind of its own projects into THIS list (see
+/// [`DeclarationKind::symbol_kind`]) rather than inventing a parallel one.
+pub const SYMBOL_KINDS: &[&str] = &[
+    "attribute",
+    "common module",
+    "field",
+    "form",
+    "form attribute",
+    "form item",
+    "function",
+    "local variable",
+    "manager module",
+    "member candidates",
+    "metadata object",
+    "method",
+    "module",
+    "module variable",
+    "parameter",
+    "platform function",
+    "platform procedure",
+    "procedure",
+    "tabular section",
+    "unresolved",
+];
+
+/// What a declaration site plays for the requested name.
+///
+/// A configuration extension may weave onto a method instead of replacing its file, so one
+/// name can have several declarations at once. Naming the part each one plays is what lets a
+/// client tell "this is the body that runs" from "this runs around it".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefinitionRole {
+    /// The declaration the configuration itself carries, or the only one there is.
+    Base,
+    /// `&Вместо` — replaces the base body, which then runs only via `ПродолжитьВызов`.
+    Instead,
+    /// `&Перед` — runs before the base body.
+    Before,
+    /// `&После` — runs after the base body.
+    After,
+}
+
+impl DefinitionRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Instead => "instead",
+            Self::Before => "before",
+            Self::After => "after",
+        }
+    }
+}
+
+/// One declaration of the requested name, and the part it plays.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolDefinitionSite {
+    pub definition: SymbolDefinition,
+    pub role: DefinitionRole,
+    /// The extension that carries this site, `None` for the configuration's own.
+    pub source_extension: Option<String>,
+}
+
 /// The consolidated semantic card for one symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymbolInfoCard {
@@ -256,6 +323,9 @@ pub struct SymbolInfoCard {
     /// Declared/inferred return type (methods) or the attribute's type (attribute cards).
     pub return_type: Option<String>,
     pub definition: Option<SymbolDefinition>,
+    /// Every declaration of this name with the part it plays: the base one, then any
+    /// interceptors an extension weaves onto it. Empty where the card has no source at all.
+    pub definitions: Vec<SymbolDefinitionSite>,
     /// Aggregate members for a whole-object card (empty otherwise).
     pub members: Vec<SymbolMember>,
     /// The durable call-graph id for this symbol, when it is a method that the graph can address.
@@ -268,6 +338,29 @@ pub struct SymbolInfoCard {
 }
 
 impl SymbolInfoCard {
+    /// Record the declaration the resolver picked. The deprecated `definition` field keeps
+    /// naming this same site, so its 1-based values never move when interceptor sites are
+    /// appended beside it.
+    ///
+    /// `source_extension` is the label of the root the declaration lives in, and it is asked
+    /// for here rather than assumed absent: an extension may DECLARE a method the base
+    /// configuration never had, and that site is a `base` — the only one there is — while
+    /// still coming from an extension. The field follows the root, not the role.
+    fn set_base_definition(
+        &mut self,
+        definition: Option<SymbolDefinition>,
+        source_extension: Option<String>,
+    ) {
+        if let Some(site) = definition.clone() {
+            self.definitions.push(SymbolDefinitionSite {
+                definition: site,
+                role: DefinitionRole::Base,
+                source_extension,
+            });
+        }
+        self.definition = definition;
+    }
+
     fn empty(symbol: String, kind: &'static str) -> Self {
         Self {
             symbol,
@@ -277,6 +370,7 @@ impl SymbolInfoCard {
             doc: None,
             return_type: None,
             definition: None,
+            definitions: Vec::new(),
             members: Vec::new(),
             graph_id: None,
             semantics_unavailable: false,
@@ -337,7 +431,11 @@ fn resolve_single(
     req: &SymbolInfoRequest,
 ) -> Option<SymbolInfoCard> {
     let module_index = db.module_index(CONFIG_SOURCE_ROOT);
-    if let Some(file_id) = module_index.resolve_common_module(&Name::new(name)) {
+    // The body ranked FIRST by config root, not the one the path-derived index happened to
+    // answer with. A whole-module card names a place like any other card, and taking it from
+    // an earlier-sorting extension makes the card say the module is declared by the extension
+    // — root_id and `source_extension` both.
+    if let Some(file_id) = ranked_module_body(db, &module_index, &Name::new(name)) {
         let display =
             module_index.canonical_common_module_name(&Name::new(name)).unwrap_or(name).to_string();
         let mut card = SymbolInfoCard::empty(symbol.to_string(), "common module");
@@ -348,12 +446,15 @@ fn resolve_single(
         });
         // A module card is anchored at the file start: the module has no declaration
         // node of its own, so there is no range to publish.
-        card.definition = def_from_file_line(
-            db,
-            file_id,
-            syntax::TextSize::from(0u32),
-            DefinitionRanges::default(),
-            req.sections.definition,
+        card.set_base_definition(
+            def_from_file_line(
+                db,
+                file_id,
+                syntax::TextSize::from(0u32),
+                DefinitionRanges::default(),
+                req.sections.definition,
+            ),
+            root_label(db, file_id),
         );
         return Some(card);
     }
@@ -383,10 +484,17 @@ fn resolve_pair(
             CalleeKind::CommonModuleMethod { module: Name::new(&display), method: Name::new(b) };
         if let Some(sigs) = build_signature(db, module_file, &callee) {
             if let Some(sig) = sigs.first() {
+                // The execution context comes from the body that DECLARES the method, not
+                // from whichever body the path-derived index happened to answer with. The
+                // two differ exactly when an extension's path sorts first, and a card that
+                // takes the definition from one body and the context from another describes
+                // an environment the published declaration does not run in.
+                let declaring_file =
+                    sig.method_id.map(|id| id.module.file_id).unwrap_or(module_file);
                 let container = SymbolContainer {
                     kind: "ОбщийМодуль".to_string(),
                     name: display,
-                    context: module_context(db, ModuleId::new(module_file)),
+                    context: module_context(db, ModuleId::new(declaring_file)),
                 };
                 return Some(card_from_method_sig(db, symbol, sig, Some(container), req));
             }
@@ -936,19 +1044,27 @@ fn resolve_triple(
     let method = Name::new(c);
 
     // Object / record-set module method → routed through LocalMethod on the def module.
-    for module_file in [
-        module_index.resolve_object_module(mdo_type, &object),
-        module_index.resolve_record_set_module(mdo_type, &object),
-    ]
-    .into_iter()
-    .flatten()
-    {
+    //
+    // Ranked by config root, not taken from the path-derived winner: an extension adopts the
+    // base module's relative path, and when its directory sorts first the index answers with
+    // the extension body — where a base-only method is simply absent, so the card reports the
+    // method as not existing at all. The same rule already governs common modules; a module
+    // of another kind is no less a module.
+    for module_file in declaring_bodies(
+        db,
+        [
+            module_index.object_module_candidates(mdo_type, &object),
+            module_index.record_set_candidates(mdo_type, &object),
+        ]
+        .concat(),
+        &method,
+    ) {
         let module_id = ModuleId::new(module_file);
         let callee = CalleeKind::LocalMethod { module_id, method: method.clone() };
         if let Some(sigs) = build_signature(db, module_file, &callee) {
             if let Some(sig) = sigs.first() {
                 if !sig.is_export {
-                    return None;
+                    continue;
                 }
                 let container = SymbolContainer {
                     kind: mdo_type.russian_name().to_string(),
@@ -961,14 +1077,19 @@ fn resolve_triple(
     }
 
     // Manager module method (`Справочники.Товары.СоздатьЭлемент` style overrides).
-    let callee = CalleeKind::ManagerModuleMethod {
-        mdo_type,
-        object: object.clone(),
-        method: method.clone(),
-    };
-    if let Some(module_file) =
-        module_index.resolve_manager(ManagerType::from_mdo_type(mdo_type)?, &object)
-    {
+    // Routed through `LocalMethod` on the body this function chose, exactly like the object
+    // module above. `ManagerModuleMethod` looks the module up by name again, and that lookup
+    // is the path-order one — the ranking computed here would be thrown away, leaving the base
+    // declaration invisible behind an earlier-sorting extension.
+    for module_file in declaring_bodies(
+        db,
+        module_index.manager_candidates(ManagerType::from_mdo_type(mdo_type)?, &object).to_vec(),
+        &method,
+    ) {
+        let callee = CalleeKind::LocalMethod {
+            module_id: ModuleId::new(module_file),
+            method: method.clone(),
+        };
         if let Some(sigs) = build_signature(db, module_file, &callee) {
             if let Some(sig) = sigs.first() {
                 let container = SymbolContainer {
@@ -1209,25 +1330,51 @@ fn resolve_position(
         }
     }
 
-    if req.sections.definition {
-        if let (Some(module), Some(range)) = (def.module(db), def.source_range(db)) {
-            card.definition = def_from_file_line(
+    // Outside the section filter, exactly where the named path puts it: the node id is a
+    // property of the symbol, and `card_from_method_sig` publishes it whatever sections were
+    // asked for. Computing it under `definition` would make a narrowed `include` decide
+    // whether two tools name the same node.
+    if let (Definition::Method(_), Some(module)) = (&def, def.module(db)) {
+        if let Some(name) = def.name(db) {
+            card.graph_id = crate::graph::graph_id_of_method(
                 db,
                 module.file_id,
-                range.start(),
-                DefinitionRanges { name: def.name_range(db), enclosing: Some(range) },
-                true,
+                name.as_str(),
+                req.workspace_root.as_deref(),
             );
+        }
+    }
+
+    if req.sections.definition {
+        if let (Some(module), Some(range)) = (def.module(db), def.source_range(db)) {
+            card.set_base_definition(
+                def_from_file_line(
+                    db,
+                    module.file_id,
+                    range.start(),
+                    DefinitionRanges { name: def.name_range(db), enclosing: Some(range) },
+                    true,
+                ),
+                root_label(db, module.file_id),
+            );
+            // The same method, reached by position instead of by name, is the same method:
+            // without this the card a client gets depends on how it addressed the symbol.
+            if let Some(name) = def.name(db) {
+                card.definitions.extend(weaving_sites(db, &name, module.file_id));
+            }
         } else {
             // Locals and parameters have no method-level source range, but their POSITION is
             // known — it is how the caller reached them. Publishing a location without ranges
             // here would mean "somewhere in this file" while the legacy `line` names the line.
-            card.definition = def_from_file_line(
-                db,
-                pos.file_id,
-                offset,
-                DefinitionRanges { name: Some(token.text_range()), enclosing: None },
-                true,
+            card.set_base_definition(
+                def_from_file_line(
+                    db,
+                    pos.file_id,
+                    offset,
+                    DefinitionRanges { name: Some(token.text_range()), enclosing: None },
+                    true,
+                ),
+                root_label(db, pos.file_id),
             );
         }
     }
@@ -1268,7 +1415,7 @@ fn card_from_method_sig(
     let mut card = SymbolInfoCard::empty(symbol.to_string(), kind);
     card.container = container;
     card.signature = Some(signature_string(sig));
-    card.graph_id = method_graph_id(db, sig);
+    card.graph_id = method_graph_id(db, sig, req.workspace_root.as_deref());
 
     if req.sections.doc {
         card.doc = sig.purpose.clone().or_else(|| sig.description.clone());
@@ -1278,7 +1425,20 @@ fn card_from_method_sig(
     }
     if req.sections.definition {
         if let Some(method_id) = sig.method_id {
-            card.definition = def_for_method(db, method_id);
+            card.set_base_definition(
+                def_for_method(db, method_id),
+                root_label(db, method_id.module.file_id),
+            );
+            // Collected here rather than in each resolver branch: a common module, an object
+            // module, a manager and a record set all arrive at this one function, and a
+            // collector wired into one branch answers the other three with the base site
+            // alone. `sig.name_russian` is the DECLARED spelling, which is what an
+            // interceptor's annotation names.
+            card.definitions.extend(weaving_sites(
+                db,
+                &Name::new(&sig.name_russian),
+                method_id.module.file_id,
+            ));
         }
     }
     card
@@ -1289,10 +1449,18 @@ fn card_from_method_sig(
 /// usages by id instead of round-tripping the qualified name through the graph's fuzzy
 /// resolver (which does not match a dotted `Module.Method` against a `method/.../...` id).
 /// `None` when the method has no addressable module (platform members, file-layout modules).
-fn method_graph_id(db: &RootDatabaseImpl, sig: &SymbolSignature) -> Option<String> {
+fn method_graph_id(
+    db: &RootDatabaseImpl,
+    sig: &SymbolSignature,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<String> {
     let method_id = sig.method_id?;
-    let path = file_path(db, method_id.module.file_id)?;
-    crate::graph::method_id_for_path(&path, &sig.name_russian)
+    crate::graph::graph_id_of_method(
+        db,
+        method_id.module.file_id,
+        &sig.name_russian,
+        workspace_root,
+    )
 }
 
 fn card_from_platform_sig(
@@ -1390,6 +1558,130 @@ fn execution_context_label(ctx: ExecutionContext) -> &'static str {
     }
 }
 
+/// Bodies that DECLARE `method`, lowest config-root rank first.
+///
+/// The path-derived index cannot rank roots, so a caller that must not lose the base
+/// declaration orders the candidates itself. Bodies that do not declare the method at all are
+/// dropped: an extension body sharing the module's path is not an answer about a method it
+/// never had.
+fn declaring_bodies(db: &RootDatabaseImpl, candidates: Vec<FileId>, method: &Name) -> Vec<FileId> {
+    let mut bodies = candidates;
+    bodies.sort_by_key(|&file| {
+        db.config_root_rank_and_label(file).map(|(rank, _)| rank).unwrap_or(usize::MAX)
+    });
+    // Exported, not merely declared. A private method of the base body is not an answer about
+    // a name asked from outside, and keeping it here would let it stand in front of an
+    // EXPORTED body of the same method in an extension — the caller then reports the method as
+    // absent while a usable one exists one root away.
+    bodies.retain(|&file| {
+        db.symbol_tree(ModuleId::new(file))
+            .find_method(method)
+            .is_some_and(|symbol| symbol.is_export)
+    });
+    bodies
+}
+
+/// The body of a common module whose config root ranks lowest.
+///
+/// Falls back to the path-derived answer when the candidate list is empty, so a module the
+/// index knows only through the single-answer map is still found.
+fn ranked_module_body(
+    db: &RootDatabaseImpl,
+    module_index: &hir::ModuleIndex,
+    name: &Name,
+) -> Option<vfs::FileId> {
+    let mut bodies = module_index.common_module_candidates(name).to_vec();
+    if bodies.is_empty() {
+        bodies.extend(module_index.resolve_common_module(name));
+    }
+    bodies.sort_by_key(|&file| {
+        db.config_root_rank_and_label(file).map(|(rank, _)| rank).unwrap_or(usize::MAX)
+    });
+    bodies.first().copied()
+}
+
+/// The label of the root a file lives in, or `None` for the configuration itself.
+fn root_label(db: &RootDatabaseImpl, file: FileId) -> Option<String> {
+    db.config_root_rank_and_label(file).and_then(|(_, label)| label)
+}
+
+/// Every interceptor an extension weaves onto `method` of a common module.
+///
+/// Ordered by config-root rank, so a client reads the sites in the order their roots stack
+/// rather than in whatever order the paths happened to sort. The base declaration is not
+/// among them — it is the site the card already carries.
+fn weaving_sites(
+    db: &RootDatabaseImpl,
+    method: &Name,
+    base_file: FileId,
+) -> Vec<SymbolDefinitionSite> {
+    let module_index = db.module_index(CONFIG_SOURCE_ROOT);
+    // Asked of the file, not of the module's kind. Weaving happens between two BODIES of one
+    // module, and an extension can weave onto an object module or a manager exactly as it
+    // weaves onto a common one — a collector that knows only common modules answers a card
+    // for a catalog's `ПриЗаписи` with the base body alone and calls that the whole truth.
+    let mut bodies = module_index.sibling_bodies(base_file);
+    bodies.sort_by_key(|&file| {
+        db.config_root_rank_and_label(file).map(|(rank, _)| rank).unwrap_or(usize::MAX)
+    });
+
+    // The base method itself, so an annotation that cannot apply to it is not published as
+    // though it ran. 1C does not allow `&Перед` / `&После` on an extended FUNCTION, and the
+    // effective-exports calculation drops such an interceptor; a card that keeps it tells a
+    // client that code runs around this function when none does.
+    //
+    // A signature MISMATCH is deliberately not filtered here. That one is a mistake in the
+    // configuration rather than an inapplicable annotation, and a card that shows the site is
+    // more useful than one that silently omits it.
+    let base_symbols = db.symbol_tree(ModuleId::new(base_file));
+    let base_symbol = base_symbols.find_method(method);
+
+    let mut sites = Vec::new();
+    for file in bodies {
+        let parse = db.parse(file);
+        let symbols = db.symbol_tree(ModuleId::new(file));
+        let label = db.config_root_rank_and_label(file).and_then(|(_, label)| label);
+        for candidate in symbols.methods() {
+            let Some(node) = candidate.syntax_node(&parse) else {
+                continue;
+            };
+            let Some(interception) = hir::interceptor_target(&node) else {
+                continue;
+            };
+            if !name_eq(&interception.target, method.as_str()) {
+                continue;
+            }
+            // The one predicate the effective-exports calculation uses, not a subset of it:
+            // an interceptor that does not run is not a place where anything happens, and a
+            // card publishing it says code runs around this method when none does.
+            if let Some(base) = base_symbol {
+                if !hir::interception_effective(interception.kind, candidate, base) {
+                    continue;
+                }
+            }
+            let role = match interception.kind {
+                hir::InterceptionKind::Around => DefinitionRole::Instead,
+                hir::InterceptionKind::Before => DefinitionRole::Before,
+                hir::InterceptionKind::After => DefinitionRole::After,
+            };
+            let Some(definition) = def_from_file_line(
+                db,
+                file,
+                candidate.source_range.start(),
+                DefinitionRanges {
+                    name: Some(candidate.name_range),
+                    enclosing: Some(candidate.source_range),
+                },
+                true,
+            ) else {
+                continue;
+            };
+            sites.push(SymbolDefinitionSite { definition, role, source_extension: label.clone() });
+        }
+    }
+    sites
+}
+
 fn def_for_method(db: &RootDatabaseImpl, method_id: MethodId) -> Option<SymbolDefinition> {
     let def = Definition::Method(method_id);
     let enclosing = def.source_range(db)?;
@@ -1429,7 +1721,7 @@ fn def_from_file_line(
     })
 }
 
-fn file_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
+pub(crate) fn file_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
     let source_root = db.source_root_input(CONFIG_SOURCE_ROOT).root(db);
     let vfs_path = source_root.file_set().path_for_file(&file_id)?;
     Some(vfs_path.as_path().to_str()?.replace('\\', "/"))

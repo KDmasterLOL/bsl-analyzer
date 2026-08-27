@@ -2253,6 +2253,28 @@ pub fn method_graph_id(
     Some(format!("method/file/{rel}::{method_name}"))
 }
 
+/// The durable graph id of a method declared in `file`, for every caller that holds a file
+/// and a name.
+///
+/// One computation, deliberately. There used to be three — a card by name, a card by
+/// position, and a reference anchor — and only the first of them minted the
+/// `method/file/<rel>::<name>` fallback, so a form event handler had an id when asked for by
+/// name and none when reached by position. An id that appears and disappears with the way a
+/// client spelled its request is worse than none: it makes two tools disagree about a symbol
+/// they both resolved.
+pub fn graph_id_of_method(
+    db: &crate::RootDatabaseImpl,
+    file: vfs::FileId,
+    method_name: &str,
+    workspace_root: Option<&Path>,
+) -> Option<String> {
+    // The file's OWN root, not the source root assumed by name: a body may be registered
+    // under a root other than the configuration's, and asking the wrong root yields no path
+    // at all — which would silently drop the id instead of encoding it.
+    let path = crate::name_lookup::workspace_path(db, file)?;
+    method_graph_id(&path, method_name, workspace_root)
+}
+
 /// The durable `module/<scope>` id that owns a `method/<scope>/<name>` (or
 /// `method/file/<rel>::<name>`) id. The inverse of [`method_id_range`]'s lower bound:
 /// it strips the trailing method segment, keeping the same `::`/`/` member grammar.

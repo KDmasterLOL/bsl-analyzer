@@ -1,5 +1,5 @@
 use hir::{
-    normalize_match_name, normalize_usage_name, Name, ReferenceScope, SemanticSymbol,
+    normalize_match_name, normalize_usage_name, Definition, Name, ReferenceScope, SemanticSymbol,
     SemanticSymbolKey, Semantics,
 };
 use ide_db::base_db::{RootQueryDb, SourceDatabase};
@@ -10,7 +10,8 @@ use syntax::{SyntaxKind, TextRange, TextSize};
 use vfs::FileId;
 
 use crate::declarations::{
-    classify_unreferenceable, resolve_declarations, Declaration, UnsupportedCategory,
+    classify_unreferenceable, resolve_declarations, Declaration, DeclarationKind,
+    UnsupportedCategory,
 };
 use crate::name_lookup::{lookup_names, NameLookupResult, NameMatchTier, NameQuery};
 use crate::reference_kind::{classify_reference_token, ReferenceKind};
@@ -338,11 +339,19 @@ impl ReferencesResult {
 }
 
 /// Find every reference to the symbol the request anchors on.
-pub fn find_references_by_name(db: &RootDatabaseImpl, req: &ReferencesRequest) -> ReferencesResult {
+/// `external` are the name sources beyond the resident's own tables — the call graph among
+/// them. They take part in ANCHORING: a name only the graph knows can be anchored on, and a
+/// source's state is what `providers` reports, so passing none leaves every external source
+/// reported as never consulted.
+pub fn find_references_by_name(
+    db: &RootDatabaseImpl,
+    req: &ReferencesRequest,
+    external: &[&dyn crate::name_lookup::ExternalNameSource],
+) -> ReferencesResult {
     let _span = tracing::info_span!("find_references_by_name").entered();
 
     match &req.anchor {
-        ReferenceAnchor::Name(name) => resolve_by_name(db, name, req),
+        ReferenceAnchor::Name(name) => resolve_by_name(db, name, req, external),
         ReferenceAnchor::Position { file_id, line, column } => {
             resolve_by_position(db, *file_id, *line, *column, req)
         }
@@ -356,7 +365,12 @@ pub fn find_references_by_name(db: &RootDatabaseImpl, req: &ReferencesRequest) -
 /// name is matched against declarations; the name dictionary compares the whole
 /// needle with a short member name and would score `Продажи.Расчёт` against
 /// `Расчёт` at no tier at all.
-fn resolve_by_name(db: &RootDatabaseImpl, name: &str, req: &ReferencesRequest) -> ReferencesResult {
+fn resolve_by_name(
+    db: &RootDatabaseImpl,
+    name: &str,
+    req: &ReferencesRequest,
+    external: &[&dyn crate::name_lookup::ExternalNameSource],
+) -> ReferencesResult {
     let mut declarations = resolve_declarations(db, name);
     if let Some(files) = &req.anchor_files {
         declarations.retain(|decl| files.contains(&decl.file_id));
@@ -381,7 +395,7 @@ fn resolve_by_name(db: &RootDatabaseImpl, name: &str, req: &ReferencesRequest) -
             result
         }
         0 => {
-            let dictionary = resolve_by_dictionary(db, name, req);
+            let dictionary = resolve_by_dictionary(db, name, req, external);
             // The dictionary is holding a declaration this name can be walked from, so
             // the string is not "something no walk enumerates" however the card surface
             // reads it. Asking the card first is what made a module's own `Сообщить` a
@@ -422,9 +436,10 @@ fn resolve_by_dictionary(
     db: &RootDatabaseImpl,
     name: &str,
     req: &ReferencesRequest,
+    external: &[&dyn crate::name_lookup::ExternalNameSource],
 ) -> DictionaryAnswer {
     let query = NameQuery::new(name, ANCHOR_CANDIDATE_LIMIT);
-    let lookup = lookup_names(db, &query, &[]);
+    let lookup = lookup_names(db, &query, external);
 
     let exact: Vec<&crate::name_lookup::NameCandidate> = lookup
         .candidates
@@ -878,7 +893,7 @@ fn collect_references(
         body_source: BodySource::Resident,
         hits,
         per_file,
-        declarations: Vec::new(),
+        declarations: declaration_of(db, symbol),
         candidates: None,
         files_scanned: scanned.len(),
         files_capped,
@@ -886,6 +901,37 @@ fn collect_references(
         anchor_line: None,
         anchor_sites: Vec::new(),
     }
+}
+
+/// The declaration the anchored symbol was declared at, as a one-element list.
+///
+/// An anchor by NAME resolves declarations of its own and overwrites this. An anchor by
+/// position or by quoted line never did, and the answer then carried no declaration at all —
+/// so the graph id, which is derived from one, was missing for exactly the same method that
+/// carries it when addressed by name. The id is a property of the symbol, not of how a
+/// caller spelled its way to it.
+fn declaration_of(db: &RootDatabaseImpl, symbol: &hir::SemanticSymbol) -> Vec<Declaration> {
+    // Taken from `definition`, not from `declaration`: the latter is filled for locals and
+    // implicit locals only, and a method — the very thing the graph addresses — never carries
+    // one. Reading it there returns an empty list for exactly the symbols this exists for.
+    let Some(definition) = symbol.definition.as_ref() else {
+        return Vec::new();
+    };
+    let kind = match definition {
+        Definition::Method(_) => DeclarationKind::Method,
+        Definition::Variable(_) => DeclarationKind::Variable,
+        _ => return Vec::new(),
+    };
+    let (Some(module), Some(name_range)) = (definition.module(db), definition.name_range(db))
+    else {
+        return Vec::new();
+    };
+    vec![Declaration {
+        file_id: module.file_id,
+        name_range,
+        enclosing_range: definition.source_range(db),
+        kind,
+    }]
 }
 
 #[cfg(test)]

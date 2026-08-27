@@ -34,17 +34,28 @@ pub(super) fn build(
     let docs = db.method_docs(method_symbol.id);
     let docs_ref = docs.as_deref();
 
-    let (kind, params, returns) = match item {
+    // Declared spelling, not the requested one — see the note in `common_module`.
+    let (kind, params, returns, declared_name) = match item {
         ModItem::Procedure(idx) => {
             let proc = item_tree.procedure(*idx);
-            (MethodKind::Procedure, build_user_params(&proc.params, docs_ref), Vec::new())
+            (
+                MethodKind::Procedure,
+                build_user_params(&proc.params, docs_ref),
+                Vec::new(),
+                proc.name.as_str().to_string(),
+            )
         }
         ModItem::Function(idx) => {
             let func = item_tree.function(*idx);
             let returns = docs_ref
                 .map(|d| d.returned_value.iter().map(user_type_to_ref).collect())
                 .unwrap_or_default();
-            (MethodKind::Function, build_user_params(&func.params, docs_ref), returns)
+            (
+                MethodKind::Function,
+                build_user_params(&func.params, docs_ref),
+                returns,
+                func.name.as_str().to_string(),
+            )
         }
         ModItem::Variable(_) => return None,
     };
@@ -54,7 +65,7 @@ pub(super) fn build(
     Some(vec![SymbolSignature {
         candidate_ordinal: Some(0),
         kind,
-        name_russian: SmolStr::new(method.as_str()),
+        name_russian: SmolStr::new(&declared_name),
         name_english: None,
         qualifier: Some(SmolStr::from(qualifier)),
         prefix: None,

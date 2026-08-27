@@ -2595,3 +2595,231 @@ async fn a_cancelled_call_publishes_an_error_and_no_body() {
         "the control must publish the body the cancelled call withheld: {answered}"
     );
 }
+
+/// The call graph is one of the sources the anchor is looked for in, and `providers` says so.
+///
+/// A source that is never passed is reported as `not_asked`, which reads as "we chose not to
+/// ask" — indistinguishable from "there is no graph here". Once the graph anchors names of
+/// its own, its real state has to travel with the answer, or a consumer cannot tell a name
+/// the graph does not hold from one it could not be asked about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_answer_names_the_graph_among_the_sources_it_consulted() {
+    let ws = stage_workspace();
+    let client = client_with_references(ws.path()).await;
+
+    let answer = references(&client, &[("symbol", Value::from("Добавить"))]).await;
+    let providers = answer["lookup"]["providers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a name-dictionary envelope shows its providers: {answer}"));
+    let graph = providers
+        .iter()
+        .find(|report| report["provider"] == "graph")
+        .unwrap_or_else(|| panic!("the graph must be among the named sources: {answer}"));
+
+    // Which state it is in depends on whether the graph finished building in this run; what
+    // must never happen is the answer claiming the graph was not consulted at all.
+    assert_ne!(
+        graph["state"], "not_asked",
+        "the graph is passed as an anchor source now, so `not_asked` would be untrue: {answer}",
+    );
+
+    // Control in the same answer: a source that genuinely is not consulted here still reads
+    // as such, so the assertion above is about the graph and not about every provider having
+    // been quietly relabelled.
+    assert!(
+        providers.iter().any(|report| report["state"] != "not_asked"),
+        "at least one source answered, or the envelope proves nothing: {answer}",
+    );
+
+    client.cancel().await.ok();
+}
+
+/// The anchor carries the graph's id for the node it settled on — the SAME id `symbol_info`
+/// prints for that symbol.
+///
+/// Two tools naming one node with two ids is worse than neither naming it: a client that
+/// carries the id from one call into the other silently addresses nothing. The id is encoded
+/// from the declaration, not asked of the graph, precisely so the two agree whatever the
+/// build state is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_anchor_carries_the_same_graph_id_symbol_info_prints() {
+    let ws = stage_workspace();
+    let client = client_with_references(ws.path()).await;
+
+    let walk = references(&client, &[("symbol", Value::from(STAND_METHOD))]).await;
+    assert_eq!(walk["outcome"], "resolved", "{walk}");
+    let from_walk = walk["anchor"]["graph_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a resolved method anchor names its graph node: {walk}"));
+
+    let card = poll(&client, "symbol_info", args(&[("symbol", Value::from(STAND_METHOD))])).await;
+    let from_card =
+        card["graph_id"].as_str().unwrap_or_else(|| panic!("the card names the same node: {card}"));
+    assert_eq!(
+        from_walk, from_card,
+        "one node, one id — a client carrying it between the two tools must land somewhere",
+    );
+
+    // The same symbol, spelled the way BSL lets it be spelled. Names here are matched without
+    // regard to case, so a request may differ from the source by case alone and still resolve
+    // — and an id built from the REQUEST then differs from one built from the DECLARATION.
+    // Asking only in the declaration's own spelling cannot tell the two apart, which is why
+    // this half of the gate exists: both tools have to answer with the declared spelling.
+    let odd_case = STAND_METHOD.to_lowercase();
+    assert_ne!(odd_case, STAND_METHOD, "the second spelling must differ, or this proves nothing");
+
+    let walk = references(&client, &[("symbol", Value::from(odd_case.clone()))]).await;
+    assert_eq!(walk["outcome"], "resolved", "case-insensitive resolution is the premise: {walk}");
+    let card = poll(&client, "symbol_info", args(&[("symbol", Value::from(odd_case))])).await;
+    assert_eq!(
+        walk["anchor"]["graph_id"], card["graph_id"],
+        "asked in another case, the two tools still name ONE node: {walk} / {card}",
+    );
+    assert_eq!(
+        card["graph_id"], from_card,
+        "and it is the node's own id, spelled as declared — not as asked for: {card}",
+    );
+
+    client.cancel().await.ok();
+}
+
+/// A positional anchor names the same graph node a named anchor does.
+///
+/// The id is a property of the symbol, not of the sentence a caller used to reach it. Before
+/// this, an anchor by position carried no declaration at all, so the id — which is derived
+/// from one — silently vanished for exactly the method that carries it when named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_positional_anchor_names_the_same_node_as_a_named_one() {
+    let ws = stage_workspace();
+    let client = client_with_references(ws.path()).await;
+
+    let named = references(&client, &[("symbol", Value::from(STAND_METHOD))]).await;
+    let expected = named["anchor"]["graph_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the named anchor names its node: {named}"))
+        .to_owned();
+
+    // Reached through one of its own occurrences, so the stand cannot drift apart from the
+    // coordinates: they come out of the answer above.
+    let place = named["references"]
+        .as_array()
+        .expect("the list")
+        .iter()
+        .map(|entry| &entry["location"])
+        .next()
+        .expect("at least one occurrence")
+        .clone();
+
+    let positional = references(
+        &client,
+        &[
+            ("root_id", place["root_id"].clone()),
+            ("path", place["path"].clone()),
+            ("line", place["range"]["start_line"].clone()),
+            ("column", place["range"]["start_character"].clone()),
+        ],
+    )
+    .await;
+    assert_eq!(positional["outcome"], "resolved", "{positional}");
+    assert_eq!(positional["anchor"]["mode"], "position", "{positional}");
+    assert_eq!(
+        positional["anchor"]["graph_id"], expected,
+        "the same method, reached by position, names the same node: {positional}",
+    );
+
+    client.cancel().await.ok();
+}
+
+/// A name that is not a method gets NO key, rather than an empty one.
+///
+/// The graph's grammar addresses methods; a module variable is not a node in it. An empty
+/// string would be an id a client can carry to `graph` and get nothing for, which is exactly
+/// the failure an absent key makes impossible.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_variable_anchor_carries_no_graph_id_at_all() {
+    let ws = stage_workspace();
+    write_module(
+        ws.path(),
+        "СоСостоянием",
+        "Перем Счётчик Экспорт;
+
+Процедура Считать() Экспорт
+    Счётчик = 1;
+КонецПроцедуры
+",
+    );
+    let client = client_with_references(ws.path()).await;
+
+    let walk = references(&client, &[("symbol", Value::from("СоСостоянием.Счётчик"))]).await;
+    let anchor = &walk["anchor"];
+    assert!(
+        anchor.get("graph_id").is_none(),
+        "a variable has no node in the graph, so the key must be absent, not empty: {walk}",
+    );
+
+    // Control in the same stand: a method of the very same shape DOES carry one, so the
+    // assertion above is about what the anchor is and not about the key never being served.
+    let method = references(&client, &[("symbol", Value::from("СоСостоянием.Считать"))]).await;
+    assert!(
+        method["anchor"]["graph_id"].is_string(),
+        "the method anchor must carry a key, or the check above proves nothing: {method}",
+    );
+
+    client.cancel().await.ok();
+}
+
+/// One form event handler, three ways to reach it, one graph id.
+///
+/// A form module has no module-keyed scope, so its handler is addressed by the graph's
+/// path-fallback id. Only the named card minted that fallback: the positional card and the
+/// reference anchor computed a module-keyed id and got nothing back — so a handler that is
+/// perfectly addressable had an id or not depending on how the client asked. The id is a
+/// property of the symbol; this gate holds the three paths to one answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_form_handler_has_one_id_however_it_is_reached() {
+    let ws = stage_workspace();
+    let client = client_with_references(ws.path()).await;
+
+    let symbol = "Документ.Документ1.Форма.ФормаДокумента.ПриЗаписиНаСервере";
+    let named = poll(&client, "symbol_info", args(&[("symbol", Value::from(symbol))])).await;
+    assert_eq!(named["status"], "ok", "the named card resolves the handler: {named}");
+    let expected = named["graph_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a form handler is addressable by the path fallback: {named}"))
+        .to_owned();
+    assert!(
+        expected.starts_with("method/file/"),
+        "and it is the fallback form, which is the whole point of this gate: {expected}",
+    );
+
+    let place = named["definitions"][0]["location"].clone();
+    let positional_args = args(&[
+        ("root_id", place["root_id"].clone()),
+        ("path", place["path"].clone()),
+        ("line", place["range"]["start_line"].clone()),
+        ("column", place["range"]["start_character"].clone()),
+    ]);
+
+    let positional = poll(&client, "symbol_info", positional_args.clone()).await;
+    assert_eq!(
+        positional["graph_id"], expected,
+        "the positional card names the same node: {positional}",
+    );
+
+    let anchored = references(
+        &client,
+        &[
+            ("root_id", place["root_id"].clone()),
+            ("path", place["path"].clone()),
+            ("line", place["range"]["start_line"].clone()),
+            ("column", place["range"]["start_character"].clone()),
+        ],
+    )
+    .await;
+    assert_eq!(
+        anchored["anchor"]["graph_id"], expected,
+        "and so does the reference anchor: {anchored}",
+    );
+
+    client.cancel().await.ok();
+}

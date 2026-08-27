@@ -361,7 +361,7 @@ pub fn qualified_method_symbol(
 /// metadata root, not among the `.bsl` sources — looking it up in the source
 /// root returns nothing and the object arrives with `source_path_unavailable`
 /// on exactly the category this search was extended to find.
-fn workspace_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
+pub(crate) fn workspace_path(db: &RootDatabaseImpl, file_id: FileId) -> Option<String> {
     let source_root_id = db.file_source_root_input(file_id).source_root_id(db);
     let source_root = db.source_root_input(source_root_id).root(db);
     let vfs_path = source_root.file_set().path_for_file(&file_id)?;

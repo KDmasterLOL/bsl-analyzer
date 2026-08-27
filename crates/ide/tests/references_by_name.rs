@@ -46,7 +46,7 @@ fn request(anchor: ReferenceAnchor) -> ReferencesRequest {
 }
 
 fn by_name(db: &RootDatabaseImpl, name: &str) -> ide::ReferencesResult {
-    find_references_by_name(db, &request(ReferenceAnchor::Name(name.to_string())))
+    find_references_by_name(db, &request(ReferenceAnchor::Name(name.to_string())), &[])
 }
 
 fn dictionary_candidates(db: &RootDatabaseImpl, name: &str) -> usize {
@@ -169,6 +169,7 @@ fn same_named_common_modules_are_ambiguous_until_the_anchor_is_narrowed() {
             anchor_files: Some(FxHashSet::from_iter([files[1]])),
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(narrowed.outcome, ReferencesOutcome::Resolved);
     assert!(narrowed.hits.iter().all(|hit| hit.file_id == files[1]));
@@ -193,6 +194,7 @@ fn short_name_ambiguity_is_visible_and_resolvable() {
             anchor_files: Some(FxHashSet::from_iter([files[0]])),
             ..request(ReferenceAnchor::Name("Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(narrowed.outcome, ReferencesOutcome::Resolved);
     assert!(narrowed.hits.iter().all(|hit| hit.file_id == files[0]));
@@ -239,6 +241,7 @@ fn a_method_without_references_is_resolved_and_empty() {
             include_declaration: false,
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
 
     assert_eq!(result.outcome, ReferencesOutcome::Resolved);
@@ -258,6 +261,7 @@ fn a_position_that_names_nothing_is_not_found() {
     let on_comment = find_references_by_name(
         &db,
         &request(ReferenceAnchor::Position { file_id: files[0], line: 0, column: 3 }),
+        &[],
     );
     assert_eq!(on_comment.outcome, ReferencesOutcome::NotFound);
 
@@ -267,6 +271,7 @@ fn a_position_that_names_nothing_is_not_found() {
             include_declaration: false,
             ..request(ReferenceAnchor::Position { file_id: files[0], line: 1, column: 10 })
         },
+        &[],
     );
     assert_eq!(on_name.outcome, ReferencesOutcome::Resolved);
     assert!(on_name.hits.is_empty());
@@ -282,6 +287,7 @@ fn a_position_on_a_platform_member_is_unsupported() {
     let result = find_references_by_name(
         &db,
         &request(ReferenceAnchor::Position { file_id: files[0], line: 1, column: 4 }),
+        &[],
     );
 
     assert!(
@@ -312,6 +318,7 @@ fn area_narrows_the_answer_and_the_total() {
             area: ReferenceArea { files: Some(FxHashSet::from_iter([files[2]])) },
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(narrowed.outcome, ReferencesOutcome::Resolved);
     assert_eq!(narrowed.hits.len(), 1);
@@ -335,6 +342,7 @@ fn a_truncated_walk_is_declared() {
             max_files: 1,
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
     assert!(capped.files_capped, "one file out of three walked");
     assert_eq!(capped.files_scanned, 1);
@@ -360,6 +368,7 @@ fn kinds_and_include_declaration_filter_independently() {
             kinds: Some(vec![ReferenceKind::Call]),
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(calls_only.hits.len(), 1);
     assert!(calls_only.hits.iter().all(|hit| hit.kind == ReferenceKind::Call));
@@ -370,6 +379,7 @@ fn kinds_and_include_declaration_filter_independently() {
             include_declaration: false,
             ..request(ReferenceAnchor::Name("Продажи.Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(without_declaration.hits.len(), 1);
     assert!(without_declaration.hits.iter().all(|hit| hit.kind != ReferenceKind::Declaration));
@@ -518,6 +528,7 @@ fn narrowing_the_anchor_does_not_turn_unsupported_into_missing() {
             anchor_files: Some(FxHashSet::from_iter(files.iter().copied())),
             ..request(ReferenceAnchor::Name("Добавить".to_string()))
         },
+        &[],
     );
     assert!(
         matches!(narrowed.outcome, ReferencesOutcome::UnsupportedSymbol { .. }),
@@ -543,6 +554,7 @@ fn narrowing_past_every_declaration_is_missing_and_not_unsupported() {
             anchor_files: Some(FxHashSet::from_iter([files[0]])),
             ..request(ReferenceAnchor::Name("Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(control.outcome, ReferencesOutcome::Resolved, "control: the declaration is here");
 
@@ -552,6 +564,7 @@ fn narrowing_past_every_declaration_is_missing_and_not_unsupported() {
             anchor_files: Some(FxHashSet::from_iter([files[1]])),
             ..request(ReferenceAnchor::Name("Расчёт".to_string()))
         },
+        &[],
     );
     assert_eq!(
         elsewhere.outcome,
@@ -579,6 +592,7 @@ fn a_method_sharing_a_platform_name_is_missing_when_the_file_set_excludes_it() {
             anchor_files: Some(FxHashSet::from_iter([files[0]])),
             ..request(ReferenceAnchor::Name("Добавить".to_string()))
         },
+        &[],
     );
     assert_eq!(
         control.outcome,
@@ -592,6 +606,7 @@ fn a_method_sharing_a_platform_name_is_missing_when_the_file_set_excludes_it() {
             anchor_files: Some(FxHashSet::from_iter([files[1]])),
             ..request(ReferenceAnchor::Name("Добавить".to_string()))
         },
+        &[],
     );
     assert_eq!(
         elsewhere.outcome,
@@ -683,6 +698,427 @@ fn references_follow_the_declared_dependency_matrix() {
     assert!(
         !files.contains(&independent),
         "an extension that cannot see the declaration calls something else: {files:?}",
+    );
+}
+
+/// The same visibility rule on a MANAGER module, not a common one.
+///
+/// The gate above proves the rule for one class of names. `dependsOn` is not a property of
+/// common modules, so a rule proven on them alone is proven for a quarter of the surface —
+/// and the resolver reaches a manager module by a different route. The control is the same
+/// as above and in the same input: the extension that DECLARES the dependency must
+/// contribute its call, or an always-empty walk would pass.
+#[test]
+fn manager_module_references_follow_the_declared_dependency_matrix() {
+    let mut db = RootDatabaseImpl::new();
+    let unit = FileId(0);
+    let tests = FileId(1);
+    let independent = FileId(2);
+    let unit_xml = FileId(3);
+    let base_xml = FileId(4);
+
+    let manager_path = |root: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join("Catalogs/Товары/Ext/ManagerModule.bsl")
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let module_path = |root: &str, module: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join(format!("CommonModules/{module}/Ext/Module.bsl"))
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let mut file_set = FileSet::default();
+    file_set.insert(unit, manager_path("yaxunit"));
+    file_set.insert(tests, module_path("tests_ext", "МодульТестов"));
+    file_set.insert(independent, module_path("independent", "МодульНезависимый"));
+    file_set.insert(
+        unit_xml,
+        VfsPath::new(cfe_root("yaxunit").join("Catalogs/Товары.xml").to_string_lossy().to_string()),
+    );
+    file_set.insert(
+        base_xml,
+        VfsPath::new(cfe_root("base").join("Catalogs/Товары.xml").to_string_lossy().to_string()),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+
+    let caller =
+        "Процедура Прогон() Экспорт\n    Справочники.Товары.ПодготовитьДанные();\nКонецПроцедуры\n";
+    for (file_id, text) in [
+        (unit, "Процедура ПодготовитьДанные() Экспорт\nКонецПроцедуры\n"),
+        (tests, caller),
+        (independent, caller),
+    ] {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, text);
+    }
+    for xml in [unit_xml, base_xml] {
+        db.set_file_source_root(xml, SourceRootId(0));
+        let path = if xml == unit_xml { cfe_root("yaxunit") } else { cfe_root("base") };
+        let text = std::fs::read_to_string(path.join("Catalogs/Товары.xml"))
+            .expect("фикстура справочника");
+        db.set_file_text(xml, &text);
+    }
+
+    let paths = vec![
+        (None, cfe_root("base")),
+        (Some("yaxunit".to_string()), cfe_root("yaxunit")),
+        (Some("tests".to_string()), cfe_root("tests_ext")),
+        (Some("independent".to_string()), cfe_root("independent")),
+    ];
+    let canonical_paths =
+        paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        paths,
+        canonical_paths,
+        closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
+        topological_order: vec![0, 1, 2, 3],
+        fingerprint: None,
+    });
+
+    let result = by_name(&db, "Справочник.Товары.ПодготовитьДанные");
+    assert_eq!(result.outcome, ReferencesOutcome::Resolved, "{:?}", result.outcome);
+    let files: Vec<FileId> = result.hits.iter().map(|hit| hit.file_id).collect();
+    assert!(files.contains(&unit), "the declaration itself: {files:?}");
+    assert!(
+        files.contains(&tests),
+        "the extension that declares the dependency must contribute its call: {files:?}",
+    );
+    assert!(
+        !files.contains(&independent),
+        "an extension that cannot see the declaration calls something else: {files:?}",
+    );
+}
+
+/// The same rule on an OBJECT module — the third of the four classes with a reference walk.
+#[test]
+fn object_module_references_follow_the_declared_dependency_matrix() {
+    let mut db = RootDatabaseImpl::new();
+    let unit = FileId(0);
+    let tests = FileId(1);
+    let independent = FileId(2);
+    let unit_xml = FileId(3);
+    let base_xml = FileId(4);
+
+    let object_path = |root: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join("Catalogs/Товары/Ext/ObjectModule.bsl")
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let module_path = |root: &str, module: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join(format!("CommonModules/{module}/Ext/Module.bsl"))
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let mut file_set = FileSet::default();
+    file_set.insert(unit, object_path("yaxunit"));
+    file_set.insert(tests, module_path("tests_ext", "МодульТестов"));
+    file_set.insert(independent, module_path("independent", "МодульНезависимый"));
+    file_set.insert(
+        unit_xml,
+        VfsPath::new(cfe_root("yaxunit").join("Catalogs/Товары.xml").to_string_lossy().to_string()),
+    );
+    file_set.insert(
+        base_xml,
+        VfsPath::new(cfe_root("base").join("Catalogs/Товары.xml").to_string_lossy().to_string()),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+
+    let caller = "Процедура Прогон() Экспорт\n    Объект = Справочники.Товары.СоздатьЭлемент();\n    Объект.ПодготовитьОбъект();\nКонецПроцедуры\n";
+    for (file_id, text) in [
+        (unit, "Процедура ПодготовитьОбъект() Экспорт\nКонецПроцедуры\n"),
+        (tests, caller),
+        (independent, caller),
+    ] {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, text);
+    }
+    for (xml, root) in [(unit_xml, "yaxunit"), (base_xml, "base")] {
+        db.set_file_source_root(xml, SourceRootId(0));
+        let text = std::fs::read_to_string(cfe_root(root).join("Catalogs/Товары.xml"))
+            .expect("фикстура справочника");
+        db.set_file_text(xml, &text);
+    }
+
+    let paths = vec![
+        (None, cfe_root("base")),
+        (Some("yaxunit".to_string()), cfe_root("yaxunit")),
+        (Some("tests".to_string()), cfe_root("tests_ext")),
+        (Some("independent".to_string()), cfe_root("independent")),
+    ];
+    let canonical_paths =
+        paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        paths,
+        canonical_paths,
+        closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
+        topological_order: vec![0, 1, 2, 3],
+        fingerprint: None,
+    });
+
+    let result = by_name(&db, "Справочник.Товары.ПодготовитьОбъект");
+    assert_eq!(result.outcome, ReferencesOutcome::Resolved, "{:?}", result.outcome);
+    let files: Vec<FileId> = result.hits.iter().map(|hit| hit.file_id).collect();
+    assert!(files.contains(&unit), "the declaration itself: {files:?}");
+    assert!(
+        files.contains(&tests),
+        "the extension that declares the dependency must contribute its call: {files:?}",
+    );
+    assert!(
+        !files.contains(&independent),
+        "an extension that cannot see the declaration calls something else: {files:?}",
+    );
+}
+
+/// The same rule on a RECORD-SET module — the fourth and last class of names with a
+/// reference walk, and the one the issue had no gate for at all because the fixture
+/// held no registers. The control is the same as the other three: the extension that
+/// DECLARES the dependency must contribute its call, or an always-empty walk passes.
+#[test]
+fn record_set_module_references_follow_the_declared_dependency_matrix() {
+    let mut db = RootDatabaseImpl::new();
+    let unit = FileId(0);
+    let tests = FileId(1);
+    let independent = FileId(2);
+    let unit_xml = FileId(3);
+    let base_xml = FileId(4);
+
+    let record_set_path = |root: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join("InformationRegisters/ЦеныТоваров/Ext/RecordSetModule.bsl")
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let module_path = |root: &str, module: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join(format!("CommonModules/{module}/Ext/Module.bsl"))
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let mut file_set = FileSet::default();
+    file_set.insert(unit, record_set_path("yaxunit"));
+    file_set.insert(tests, module_path("tests_ext", "МодульТестов"));
+    file_set.insert(independent, module_path("independent", "МодульНезависимый"));
+    file_set.insert(
+        unit_xml,
+        VfsPath::new(
+            cfe_root("yaxunit")
+                .join("InformationRegisters/ЦеныТоваров.xml")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    );
+    file_set.insert(
+        base_xml,
+        VfsPath::new(
+            cfe_root("base")
+                .join("InformationRegisters/ЦеныТоваров.xml")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+
+    let caller = "Процедура Прогон() Экспорт\n    Набор =                   РегистрыСведений.ЦеныТоваров.СоздатьНаборЗаписей();\n                      Набор.ПодготовитьНабор();\nКонецПроцедуры\n";
+    for (file_id, text) in [
+        (unit, "Процедура ПодготовитьНабор() Экспорт\nКонецПроцедуры\n"),
+        (tests, caller),
+        (independent, caller),
+    ] {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, text);
+    }
+    for (xml, root) in [(unit_xml, "yaxunit"), (base_xml, "base")] {
+        db.set_file_source_root(xml, SourceRootId(0));
+        let text =
+            std::fs::read_to_string(cfe_root(root).join("InformationRegisters/ЦеныТоваров.xml"))
+                .expect("фикстура регистра");
+        db.set_file_text(xml, &text);
+    }
+
+    let paths = vec![
+        (None, cfe_root("base")),
+        (Some("yaxunit".to_string()), cfe_root("yaxunit")),
+        (Some("tests".to_string()), cfe_root("tests_ext")),
+        (Some("independent".to_string()), cfe_root("independent")),
+    ];
+    let canonical_paths =
+        paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        paths,
+        canonical_paths,
+        closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
+        topological_order: vec![0, 1, 2, 3],
+        fingerprint: None,
+    });
+
+    let result = by_name(&db, "РегистрСведений.ЦеныТоваров.ПодготовитьНабор");
+    assert_eq!(result.outcome, ReferencesOutcome::Resolved, "{:?}", result.outcome);
+    let files: Vec<FileId> = result.hits.iter().map(|hit| hit.file_id).collect();
+    assert!(files.contains(&unit), "the declaration itself: {files:?}");
+    assert!(
+        files.contains(&tests),
+        "the extension that declares the dependency must contribute its call: {files:?}",
+    );
+    assert!(
+        !files.contains(&independent),
+        "an extension that cannot see the declaration calls something else: {files:?}",
+    );
+}
+
+/// The input on which PATH order and ROOT topology disagree.
+///
+/// `adopter` sorts before `base`, so the path-derived index — which sorts by path and
+/// keeps the first — answers with the extension's body and loses the base
+/// declaration. Root topology says the opposite: the base declaration wins. Every
+/// other gate in this file uses roots whose alphabetical order already agrees with
+/// their rank, so none of them can tell the two orders apart.
+fn adopter_first_input() -> (RootDatabaseImpl, FileId, FileId, FileId) {
+    let mut db = RootDatabaseImpl::new();
+    let adopter_manager = FileId(0);
+    let base_manager = FileId(1);
+    let caller = FileId(2);
+    let adopter_xml = FileId(3);
+    let base_xml = FileId(4);
+
+    let manager_path = |root: &str| {
+        VfsPath::new(
+            cfe_root(root)
+                .join("Catalogs/Товары/Ext/ManagerModule.bsl")
+                .to_string_lossy()
+                .to_string(),
+        )
+    };
+    let mut file_set = FileSet::default();
+    file_set.insert(adopter_manager, manager_path("adopter"));
+    file_set.insert(base_manager, manager_path("base"));
+    file_set.insert(
+        caller,
+        VfsPath::new(
+            cfe_root("adopter")
+                .join("CommonModules/МодульАдоптера/Ext/Module.bsl")
+                .to_string_lossy()
+                .to_string(),
+        ),
+    );
+    for (id, root) in [(adopter_xml, "adopter"), (base_xml, "base")] {
+        file_set.insert(
+            id,
+            VfsPath::new(cfe_root(root).join("Catalogs/Товары.xml").to_string_lossy().to_string()),
+        );
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+
+    for (file_id, text) in [
+        (adopter_manager, "Процедура ПодготовитьДанные() Экспорт\nКонецПроцедуры\n"),
+        (base_manager, "Процедура ПодготовитьДанные() Экспорт\nКонецПроцедуры\n"),
+        (
+            caller,
+            "Процедура Прогон() Экспорт\n    Справочники.Товары.ПодготовитьДанные();\nКонецПроцедуры\n",
+        ),
+    ] {
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, text);
+    }
+    for (xml, root) in [(adopter_xml, "adopter"), (base_xml, "base")] {
+        db.set_file_source_root(xml, SourceRootId(0));
+        let text = std::fs::read_to_string(cfe_root(root).join("Catalogs/Товары.xml"))
+            .expect("фикстура справочника");
+        db.set_file_text(xml, &text);
+    }
+
+    let paths = vec![(None, cfe_root("base")), (Some("adopter".to_string()), cfe_root("adopter"))];
+    let canonical_paths =
+        paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
+    db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        paths,
+        canonical_paths,
+        closures: vec![Vec::new(), Vec::new()],
+        topological_order: vec![0, 1],
+        fingerprint: None,
+    });
+
+    (db, base_manager, adopter_manager, caller)
+}
+
+fn references_from(db: &RootDatabaseImpl, name: &str, anchor_file: FileId) -> Vec<FileId> {
+    find_references_by_name(
+        db,
+        &ReferencesRequest {
+            anchor: ReferenceAnchor::Name(name.to_string()),
+            anchor_files: Some(FxHashSet::from_iter([anchor_file])),
+            area: ReferenceArea::default(),
+            kinds: None,
+            include_declaration: true,
+            max_files: MAX_FILES,
+        },
+        &[],
+    )
+    .hits
+    .iter()
+    .map(|hit| hit.file_id)
+    .collect()
+}
+
+/// Gate I2 — the BASE declaration wins even when an extension's directory sorts
+/// before it.
+///
+/// Asserted from both sides, because either half alone passes on a broken build: a
+/// walk that answered nothing would satisfy "the call is not adopter's", and a walk
+/// that answered everything would satisfy "the call is base's".
+#[test]
+fn the_base_declaration_wins_over_an_extension_that_sorts_first_by_path() {
+    let (db, base_manager, adopter_manager, caller) = adopter_first_input();
+
+    let base_hits = references_from(&db, "Справочник.Товары.ПодготовитьДанные", base_manager);
+    assert!(
+        base_hits.contains(&caller),
+        "the call resolves to the BASE declaration, which outranks the earlier path: {base_hits:?}",
+    );
+
+    let adopter_hits = references_from(&db, "Справочник.Товары.ПодготовитьДанные", adopter_manager);
+    assert!(
+        !adopter_hits.contains(&caller),
+        "the extension body sorts first by path but does not win: {adopter_hits:?}",
+    );
+}
+
+/// Gate I3 — an unreadable body of HIGHER priority stops the walk instead of letting
+/// a lower-priority body answer in its place.
+///
+/// The input needs the same inverted path order as I2, and the unreadability on the
+/// opposite side: the base body is the one that outranks, so it is the one whose
+/// unreadability must bar the verdict. Marking the extension unreadable instead would
+/// prove nothing — the base is readable, outranks it, and answers before the walk
+/// ever reaches the extension.
+#[test]
+fn an_unreadable_body_of_higher_priority_bars_a_lower_one_from_answering() {
+    let (mut db, base_manager, adopter_manager, caller) = adopter_first_input();
+
+    // The base body no longer declares the method AND cannot be read: if the barrier
+    // is missing, the walk falls through to the extension and answers with it.
+    db.set_file_text(base_manager, "");
+    db.set_file_unreadable(base_manager);
+
+    let adopter_hits = references_from(&db, "Справочник.Товары.ПодготовитьДанные", adopter_manager);
+    assert!(
+        !adopter_hits.contains(&caller),
+        "an unread body of higher priority bars the lower one from answering: {adopter_hits:?}",
     );
 }
 
@@ -1090,6 +1526,7 @@ fn the_module_priority_does_not_reach_across_roots() {
             anchor_files: Some(FxHashSet::from_iter([files[0]])),
             ..request(ReferenceAnchor::Name("Справочник.Товары.Пересчитать".to_string()))
         },
+        &[],
     );
     assert_eq!(
         narrowed.outcome,
@@ -1182,6 +1619,7 @@ fn by_text(
     find_references_by_name(
         db,
         &request(ReferenceAnchor::Text { file_id, line, column, content: content.to_owned() }),
+        &[],
     )
 }
 
@@ -1216,6 +1654,7 @@ fn a_quote_the_file_does_not_carry_yields_no_references() {
     let positional = find_references_by_name(
         &renamed,
         &request(ReferenceAnchor::Position { file_id: files[0], line: 0, column: 10 }),
+        &[],
     );
     assert_eq!(positional.outcome, ReferencesOutcome::Resolved);
     assert!(

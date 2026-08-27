@@ -36,6 +36,21 @@ pub enum DeclarationKind {
     Variable,
 }
 
+impl DeclarationKind {
+    /// This kind spelled in the vocabulary `symbol_info` publishes.
+    ///
+    /// A declaration list and a symbol card describe the same kinds of thing, so they must
+    /// say it with the same words: `Variable` here is a module-level variable, which the
+    /// card calls `module variable` — spelling it `variable` would publish a value no
+    /// consumer of the card has ever seen.
+    pub fn symbol_kind(self) -> &'static str {
+        match self {
+            Self::Method => "method",
+            Self::Variable => "module variable",
+        }
+    }
+}
+
 /// One declaration site of a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Declaration {
@@ -45,6 +60,29 @@ pub struct Declaration {
     /// The whole declaration.
     pub enclosing_range: Option<TextRange>,
     pub kind: DeclarationKind,
+}
+
+/// The durable call-graph id of a declaration, when the graph's grammar can address it.
+///
+/// Encoded from the declaration's path and name — the same way `symbol_info` encodes it
+/// (`crate::graph::method_id_for_path`) — and deliberately NOT looked up in the graph. The
+/// two tools must print the same id for the same node, and asking the graph would make the
+/// id appear and vanish with the build state while `symbol_info` kept printing it. Whether
+/// the graph currently holds the node is a different fact, and it travels in `providers`.
+///
+/// `None` where the grammar has nothing to address: the graph names methods, so a module
+/// variable never gets an id, and neither does a file whose path yields no module scope.
+pub fn graph_id_of_declaration(
+    db: &crate::RootDatabaseImpl,
+    declaration: &Declaration,
+    workspace_root: Option<&std::path::Path>,
+) -> Option<String> {
+    if declaration.kind != DeclarationKind::Method {
+        return None;
+    }
+    let text = db.file_text(declaration.file_id);
+    let name = text.get(std::ops::Range::<usize>::from(declaration.name_range))?;
+    crate::graph::graph_id_of_method(db, declaration.file_id, name, workspace_root)
 }
 
 /// Every declaration a qualified name of one to three segments resolves to.

@@ -127,6 +127,13 @@ pub(crate) struct GraphState {
     pub(super) snapshot_pool: Arc<Mutex<SnapshotPool>>,
     #[cfg(test)]
     pub(super) background_snapshot_failure: Arc<AtomicU8>,
+    /// Parks the building thread between a publication and the point where the
+    /// force-reload obligation is discharged, so a test can sample what an outside
+    /// observer could see there. Deliberately invoked with `inner` NOT held: a park
+    /// under the lock blocks the observer on that same mutex, so it reads identical
+    /// whether or not publication and discharge are one state — and gates nothing.
+    #[cfg(test)]
+    pub(super) publish_window_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Invoked on this graph's background thread immediately after each publish/adopt,
     /// once the inner lock is released — the moment the graph "has caught up" and a
     /// consumer (search context re-render) may read the fresh graph. Never called on a
@@ -225,6 +232,8 @@ impl GraphState {
             snapshot_pool: Arc::new(Mutex::new(SnapshotPool::default())),
             #[cfg(test)]
             background_snapshot_failure: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            publish_window_hook: None,
             lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             withheld_build: Arc::new(AtomicBool::new(false)),
         }
@@ -311,6 +320,16 @@ impl GraphState {
         hook: Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>,
     ) -> Self {
         self.on_published = Some(hook);
+        self
+    }
+
+    /// Attach the park described by [`Self::publish_window_hook`]: it runs on the
+    /// building thread in the one full-build path, after the snapshot is installed and
+    /// with `inner` released. Unrelated to [`Self::with_publish_hook`] — it takes no
+    /// signal, returns nothing, and fires only there.
+    #[cfg(test)]
+    pub(super) fn with_publish_window_hook(mut self, hook: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.publish_window_hook = Some(hook);
         self
     }
 
@@ -525,6 +544,14 @@ impl GraphState {
         }
     }
 
+    /// Whether a leftover-marks consume is still owed: `consume_leftover_marks` arms the
+    /// obligation and a publish discharges it. Tests outside this module drive the consume
+    /// through the real publish hook and cannot reach the field itself.
+    #[cfg(test)]
+    pub(crate) fn leftover_consume_pending(&self) -> bool {
+        self.leftover_bound.load(Ordering::SeqCst) != 0
+    }
+
     /// Re-run the reload claim for a drift recorded (as a pending nudge) while a build was in
     /// flight. Runs on the publish thread once the graph is `Ready`: claims a reload if disk
     /// drifted past the just-published build; re-arms the pending flag if a reload is somehow
@@ -697,6 +724,7 @@ impl GraphState {
                 search_roots,
             },
             GraphStatus::Ready { files },
+            None,
         );
         assert!(matches!(outcome, crate::workspace_lease::LeaseOutcome::Applied(Ok(()))));
     }
@@ -780,11 +808,10 @@ impl GraphState {
         }
     }
 
-    /// Claim the single background-reload slot iff the workspace drifted on disk since the
-    /// published build and no reload is already `Running`. Returns whether THIS call won
-    /// the claim; a caller arriving while a reload runs (or when nothing drifted) gets
-    /// `false`. Shares the exact single-flight discipline [`Self::freshness`] uses, so a
-    /// nudge and a freshness check cannot both start a reload.
+    /// Whether a forced project reload has been requested and not yet discharged by a
+    /// successful full publication. Discharged inside the publishing critical section
+    /// (see [`GraphState::install_prepared_snapshot`]), so a reader holding `inner`
+    /// never sees a publication whose obligation is still outstanding.
     fn project_reload_pending(&self) -> bool {
         self.project_reload_epoch.load(Ordering::SeqCst)
             > self.completed_project_reload_epoch.load(Ordering::SeqCst)
@@ -798,6 +825,19 @@ impl GraphState {
         self.completed_project_reload_epoch.fetch_max(epoch, Ordering::SeqCst);
     }
 
+    /// Claim the single background-reload slot iff a reload is owed and none is already
+    /// `Running`. Returns whether THIS call won the claim; a caller arriving while a
+    /// reload runs (or when nothing is owed) gets `false`.
+    ///
+    /// A reload is owed on either of two independent grounds, and they are not the same
+    /// question: the workspace drifted on disk since the published build, OR a forced
+    /// project reload is outstanding ([`Self::project_reload_pending`]) — which is how a
+    /// declared-root change gets rebuilt at all, since it moves no canonical input and so
+    /// leaves the fingerprint equal.
+    ///
+    /// [`Self::freshness`] claims the same slot but on the drift ground ALONE; the two
+    /// therefore do not share one predicate. What keeps them single-flight is the
+    /// `Running` check both make under `inner`, not a common notion of "owed".
     fn claim_reload_slot(&self) -> bool {
         // Ahead of the fingerprint walk: a superseded daemon must not even pay for drift
         // detection it is not allowed to act on.
@@ -914,7 +954,7 @@ pub(super) fn lock_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{sample_workspace, wait_ready};
+    use super::super::test_support::{sample_workspace, wait_ready, wait_until, wait_until_within};
     use super::*;
     use std::fs;
     use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -964,7 +1004,12 @@ mod tests {
         let graph = GraphState::for_workspace(root.to_path_buf()).with_lease(lease);
         // A newer daemon generation claims the same workspace.
         let _newer = crate::workspace_lease::WorkspaceLease::claim(root);
-        wait_for(|| !graph.may_build());
+        wait_until_within(
+            &graph,
+            Duration::from_secs(10),
+            "the lease verdict to stop allowing this graph to build",
+            || !graph.may_build(),
+        );
 
         assert!(!graph.try_begin_external_build(), "a superseded graph refuses the fused claim");
 
@@ -1102,7 +1147,12 @@ mod tests {
         let lease = crate::workspace_lease::WorkspaceLease::claim(root);
         let graph = GraphState::for_workspace(root.to_path_buf()).with_lease(lease);
         let newer = crate::workspace_lease::WorkspaceLease::claim(root);
-        wait_for(|| !graph.may_build());
+        wait_until_within(
+            &graph,
+            Duration::from_secs(10),
+            "the lease verdict to stop allowing this graph to build",
+            || !graph.may_build(),
+        );
 
         let owner_graph = GraphState::for_workspace(root.to_path_buf()).with_lease(newer.clone());
         owner_graph.ensure_loading();
@@ -1210,16 +1260,49 @@ mod tests {
         drop(newer);
     }
 
-    /// Poll `condition` until it holds, so a test does not depend on the lease's verdict
-    /// cache expiring or a background thread landing within one fixed sleep.
-    fn wait_for(condition: impl Fn() -> bool) {
-        for _ in 0..200 {
-            if condition() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(50));
+    /// A publish re-arms only the obligation its signal actually carried. The hook reports one
+    /// outcome for the topology refresh whether or not one was requested, so a refusal reported
+    /// for an unrequested refresh must not raise the flag: nothing asked for that work, and a
+    /// flag raised here would make every later publish redo a whole-collection re-render.
+    /// Dropping the `topology &&` guard makes the refusal below arm it.
+    #[test]
+    fn a_refusal_cannot_arm_a_topology_refresh_nobody_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let lease = crate::workspace_lease::WorkspaceLease::claim(&root);
+        let hook = Arc::new(|_signal: GraphPublishSignal| GraphPublishOutcome {
+            topology_handled: false,
+            roots_handled: true,
+        })
+            as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>;
+        let graph = GraphState::for_workspace(root).with_lease(lease).with_publish_hook(hook);
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
         }
-        panic!("condition did not hold within the timeout");
+        graph.pending_topology_refresh.store(false, Ordering::SeqCst);
+
+        graph.notify_published(7, false);
+
+        assert!(
+            !graph.pending_topology_refresh.load(Ordering::SeqCst),
+            "a refusal reported for an unrequested refresh raises no obligation",
+        );
+        // The control: the SAME refusing hook DOES arm the flag when the refresh was requested,
+        // so the assertion above is about the request and not about a flag nothing can set.
+        graph.notify_published(7, true);
+        assert!(
+            graph.pending_topology_refresh.load(Ordering::SeqCst),
+            "a refusal reported for a requested refresh keeps the obligation",
+        );
     }
 
     /// The SqliteLocal boot builds the graph and the search chunks in ONE parse pass, and
@@ -1337,8 +1420,6 @@ mod tests {
     /// hook firing only once and this fails.
     #[test]
     fn a_nudge_recorded_during_a_build_reloads_on_publish() {
-        use std::time::Instant;
-
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         sample_workspace(root);
@@ -1374,13 +1455,10 @@ mod tests {
         // under test decides how many times the hook fires.
         graph.notify_published(i64::MAX, false);
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while fired.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(
-            fired.load(Ordering::SeqCst) >= 2,
-            "the recorded nudge triggered a follow-up reload whose publish fired the hook again",
+        wait_until(
+            &graph,
+            "the recorded nudge to trigger a follow-up reload whose publish fires the hook again",
+            || fired.load(Ordering::SeqCst) >= 2,
         );
     }
 
@@ -1615,20 +1693,339 @@ mod tests {
         );
     }
 
+    /// Two symlinks onto ONE configuration directory, so switching the declared
+    /// `[source] root` between them changes the resolved search root while leaving
+    /// every canonical graph input — and therefore the workspace fingerprint —
+    /// byte-identical. Drift detection cannot see this change; only a forced reload can.
     #[cfg(unix)]
-    #[test]
-    fn forced_project_reload_bypasses_an_equal_graph_fingerprint() {
+    fn forced_reload_workspace(root: &Path) {
         use std::os::unix::fs::symlink;
 
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
         let configuration = root.join("cf");
         fs::create_dir_all(&configuration).unwrap();
         fs::write(configuration.join("Configuration.xml"), "<Configuration/>").unwrap();
         sample_workspace(&configuration);
         symlink(&configuration, root.join("alias-a")).unwrap();
         symlink(&configuration, root.join("alias-b")).unwrap();
-        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-a\"\n").unwrap();
+        declare_source_root(root, "alias-a");
+    }
+
+    #[cfg(unix)]
+    fn declare_source_root(root: &Path, alias: &str) {
+        fs::write(root.join("bsl-analyzer.toml"), format!("[source]\nroot = \"{alias}\"\n"))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    fn published_generation(graph: &GraphState) -> u64 {
+        lock_recover(&graph.inner).published.as_ref().expect("a ready graph published").generation
+    }
+
+    /// The wait a forced-reload test performs. The publication under test is complete
+    /// only when a newer generation is published AND the force obligation that
+    /// triggered it is discharged: a predicate naming just the generation names a
+    /// PRECURSOR of the checked quantity, so a test waiting on it samples the graph
+    /// before the value it asserts on exists.
+    #[cfg(unix)]
+    fn forced_reload_published(graph: &GraphState, since_generation: u64) -> bool {
+        let inner = lock_recover(&graph.inner);
+        inner.published.as_ref().is_some_and(|published| {
+            published.generation > since_generation
+                && published.reload == ReloadState::Idle
+                && !graph.project_reload_pending()
+        })
+    }
+
+    /// Only a publication that actually installed discharges the force obligation. A
+    /// refused install must leave it outstanding, so the forced reload is retried
+    /// rather than dropped: discharging on the attempt would lose the caller's request
+    /// silently, and the workspace would keep serving the configuration it was told to
+    /// stop serving.
+    ///
+    /// The refusal half is a regression guard — today's code returns before the
+    /// discharge — so the successful half runs in the same test as its positive
+    /// control: without it the guard would pass against a build that discharges nothing
+    /// at all.
+    #[cfg(unix)]
+    #[test]
+    fn only_an_installed_publication_discharges_the_force_obligation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        forced_reload_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf());
+        graph.ensure_loading();
+        wait_ready(&graph);
+
+        declare_source_root(root, "alias-b");
+        graph.project_reload_epoch.fetch_add(1, Ordering::SeqCst);
+        super::super::snapshot::refuse_snapshot_install_for_test();
+        graph.run_load(true);
+        assert!(
+            graph.project_reload_pending(),
+            "a refused install must leave the forced reload outstanding: epoch {} completed {}",
+            graph.project_reload_epoch.load(Ordering::SeqCst),
+            graph.completed_project_reload_epoch.load(Ordering::SeqCst)
+        );
+
+        graph.run_load(true);
+        assert!(
+            !graph.project_reload_pending(),
+            "the retry installed and must discharge it: epoch {} completed {}",
+            graph.project_reload_epoch.load(Ordering::SeqCst),
+            graph.completed_project_reload_epoch.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A wait that exhausts its ceiling must hand the reader the state it actually
+    /// observed. The flake this hardening came from reported a bare left/right and
+    /// nothing else, which is why it could not be diagnosed from the CI log at all.
+    ///
+    /// This gates the shared helper every in-class wait routes through. It does NOT
+    /// gate that a newly written wait uses the helper: that is what the census in the
+    /// change's own procedure is for, and a text scan over Rust source is not a gate
+    /// this repository trusts.
+    #[test]
+    fn a_wait_that_times_out_reports_the_state_it_observed() {
+        let graph = GraphState::disabled();
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 4 };
+            inner.published = Some(Published {
+                generation: 7,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: true,
+                search_roots: None,
+            });
+        }
+        graph.project_reload_epoch.store(3, Ordering::SeqCst);
+        graph.completed_project_reload_epoch.store(1, Ordering::SeqCst);
+
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            wait_until_within(
+                &graph,
+                Duration::from_millis(0),
+                "a condition that never holds",
+                || false,
+            );
+        }))
+        .expect_err("a wait whose condition never holds must fail");
+        let reported = failure
+            .downcast_ref::<String>()
+            .expect("the wait fails with a formatted message")
+            .clone();
+
+        for named in [
+            "a condition that never holds",
+            "Ready",
+            "generation 7",
+            "reload none",
+            "force_stale true",
+            "project_reload_epoch 3",
+            "completed 1",
+        ] {
+            assert!(
+                reported.contains(named),
+                "a timed-out wait must name {named:?}; it reported {reported:?}"
+            );
+        }
+    }
+
+    /// Wait for the forced reload to publish AND discharge its obligation. Waiting on
+    /// the generation alone returns on a precursor, so every assertion after it races
+    /// the value it reads.
+    #[cfg(unix)]
+    fn wait_for_forced_reload(graph: &GraphState, since_generation: u64) {
+        super::super::test_support::wait_until(
+            graph,
+            "the forced reload to publish and discharge its force obligation",
+            || forced_reload_published(graph, since_generation),
+        );
+    }
+
+    /// A rendezvous with the building thread parked in the window between a
+    /// publication and the discharge of its force obligation.
+    ///
+    /// The park happens with `inner` released, which is the whole point: a park taken
+    /// under the lock would block the observer on the same mutex and so read identical
+    /// against a coherent publication and against a torn one.
+    #[cfg(unix)]
+    struct PublishWindow {
+        armed: Arc<AtomicBool>,
+        entered: std::sync::mpsc::Receiver<()>,
+        release_tx: std::sync::mpsc::Sender<()>,
+        hook: Arc<dyn Fn() + Send + Sync>,
+    }
+
+    #[cfg(unix)]
+    impl PublishWindow {
+        fn new() -> Self {
+            let armed = Arc::new(AtomicBool::new(false));
+            let (entered_tx, entered) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let release_rx = Arc::new(Mutex::new(release_rx));
+            let hook = {
+                let armed = Arc::clone(&armed);
+                Arc::new(move || {
+                    if armed.swap(false, Ordering::SeqCst) {
+                        entered_tx.send(()).expect("the test outlives the parked build");
+                        lock_recover(&release_rx)
+                            .recv_timeout(Duration::from_secs(30))
+                            .expect("the test released the parked build");
+                    }
+                }) as Arc<dyn Fn() + Send + Sync>
+            };
+            Self { armed, entered, release_tx, hook }
+        }
+
+        /// Arm the NEXT publication only; the initial load must run through unparked.
+        fn arm(&self) {
+            self.armed.store(true, Ordering::SeqCst);
+        }
+
+        /// Fails instead of hanging when the reload never reaches the window.
+        fn wait_entered(&self) {
+            self.entered
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the forced reload reached the publish window");
+        }
+
+        fn release(&self) {
+            let _ = self.release_tx.send(());
+        }
+    }
+
+    /// Bring a workspace to Ready with the forced-reload fixture, then declare the
+    /// other alias and arm the window, leaving the caller holding a parked build.
+    #[cfg(unix)]
+    fn park_a_forced_reload(root: &Path, window: &PublishWindow) -> (GraphState, u64) {
+        forced_reload_workspace(root);
+        let graph = GraphState::for_workspace(root.to_path_buf())
+            .with_publish_window_hook(Arc::clone(&window.hook));
+        graph.ensure_loading();
+        wait_ready(&graph);
+        let generation = published_generation(&graph);
+
+        declare_source_root(root, "alias-b");
+        assert_eq!(
+            super::super::scan::workspace_fingerprint(root),
+            lock_recover(&graph.inner).published.as_ref().unwrap().fingerprint,
+            "the fixture must change only the declared alias, never a canonical input"
+        );
+        window.arm();
+        assert_eq!(
+            graph.nudge_project_reload(),
+            NudgeOutcome::ReloadClaimed,
+            "a declared-root change claims a forced reload"
+        );
+        window.wait_entered();
+        (graph, generation)
+    }
+
+    /// An outside observer must never catch a published generation whose force
+    /// obligation is still outstanding: discharging it after the publication leaves a
+    /// window in which the graph reads "reloaded, and still owing a reload".
+    #[cfg(unix)]
+    #[test]
+    fn a_publication_and_its_force_obligation_are_one_state_to_an_outside_observer() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let window = PublishWindow::new();
+        let (graph, generation) = park_a_forced_reload(root, &window);
+
+        let torn = {
+            let inner = lock_recover(&graph.inner);
+            let published = inner.published.as_ref().expect("the parked build published");
+            (published.generation > generation && published.reload == ReloadState::Idle)
+                .then(|| (published.generation, graph.project_reload_pending()))
+        };
+        window.release();
+
+        assert_eq!(
+            torn.map(|(_, pending)| pending),
+            Some(false),
+            "the parked build published generation {:?}, but its force obligation was still \
+             outstanding: epoch {} completed {}",
+            torn.map(|(generation, _)| generation),
+            graph.project_reload_epoch.load(Ordering::SeqCst),
+            graph.completed_project_reload_epoch.load(Ordering::SeqCst),
+        );
+    }
+
+    /// The same window is reachable by `claim_reload_slot`, which reads the force
+    /// obligation under `inner`: catching the publication before the obligation is
+    /// discharged makes it claim a SECOND full rebuild of what was just published.
+    /// On a large configuration that is minutes of work for no change.
+    #[cfg(unix)]
+    #[test]
+    fn a_successful_forced_reload_does_not_claim_a_second_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let window = PublishWindow::new();
+        let (graph, generation) = park_a_forced_reload(root, &window);
+
+        let in_window = graph.nudge_rebuild();
+        window.release();
+
+        wait_for_forced_reload(&graph, generation);
+        // A claim spawns its rebuild off-thread; let it publish before counting.
+        if in_window == NudgeOutcome::ReloadClaimed {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+
+        assert_eq!(
+            in_window,
+            NudgeOutcome::NoOp,
+            "nothing drifted and the forced reload had published, yet a rebuild was claimed"
+        );
+        assert_eq!(
+            published_generation(&graph),
+            generation + 1,
+            "the forced reload published exactly once"
+        );
+    }
+
+    /// The wait predicate must name the quantity the test asserts on. Naming only the
+    /// generation makes the wait return on a precursor, and every assertion after it
+    /// races the value it reads.
+    #[cfg(unix)]
+    #[test]
+    fn the_forced_reload_wait_names_the_epoch_and_not_just_the_generation() {
+        let graph = GraphState::disabled();
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 2,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+        graph.project_reload_epoch.store(1, Ordering::SeqCst);
+
+        assert!(
+            !forced_reload_published(&graph, 1),
+            "a newer generation whose force obligation is still outstanding is not the \
+             publication this wait is for"
+        );
+
+        graph.completed_project_reload_epoch.store(1, Ordering::SeqCst);
+        assert!(
+            forced_reload_published(&graph, 1),
+            "a newer generation with the obligation discharged IS that publication"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forced_project_reload_bypasses_an_equal_graph_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        forced_reload_workspace(root);
 
         let graph = GraphState::for_workspace(root.to_path_buf());
         graph.ensure_loading();
@@ -1639,33 +2036,38 @@ mod tests {
             (published.generation, published.fingerprint)
         };
 
-        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"alias-b\"\n").unwrap();
+        declare_source_root(root, "alias-b");
         assert_eq!(
             super::super::scan::workspace_fingerprint(root),
             before_fp,
             "declared alias changed but canonical graph inputs did not"
         );
-        assert_eq!(graph.nudge_rebuild(), NudgeOutcome::NoOp);
-        assert_eq!(graph.nudge_project_reload(), NudgeOutcome::ReloadClaimed);
+        assert_eq!(
+            graph.nudge_rebuild(),
+            NudgeOutcome::NoOp,
+            "an equal fingerprint gives drift detection nothing to claim on: force_stale {}",
+            lock_recover(&graph.inner).published.as_ref().unwrap().force_stale
+        );
+        assert_eq!(
+            graph.nudge_project_reload(),
+            NudgeOutcome::ReloadClaimed,
+            "a declared-root change claims a reload the fingerprint cannot: epoch {}",
+            graph.project_reload_epoch.load(Ordering::SeqCst)
+        );
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let done = {
-                let inner = lock_recover(&graph.inner);
-                inner.published.as_ref().is_some_and(|published| {
-                    published.generation > generation && published.reload == ReloadState::Idle
-                })
-            };
-            if done {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "forced reload did not publish");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        wait_for_forced_reload(&graph, generation);
 
         let inner = lock_recover(&graph.inner);
-        let roots = inner.published.as_ref().unwrap().search_roots.as_ref().unwrap();
-        assert!(roots.configuration().unwrap().ends_with("alias-b"));
+        let published = inner.published.as_ref().expect("the forced reload published");
+        let roots = published
+            .search_roots
+            .as_ref()
+            .expect("a full publication carries the roots it resolved");
+        assert!(
+            roots.configuration().is_some_and(|path| path.ends_with("alias-b")),
+            "the reload resolved the newly declared alias, got {:?}",
+            roots.configuration()
+        );
         assert_eq!(
             graph.completed_project_reload_epoch.load(Ordering::SeqCst),
             graph.project_reload_epoch.load(Ordering::SeqCst),

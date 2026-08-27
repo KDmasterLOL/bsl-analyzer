@@ -2933,6 +2933,91 @@ fn test_workspace_call_graph_query_ref_links_method_to_mdo() {
 /// actually reach every resolution arm. Coverage is asserted explicitly (below)
 /// so the equality is not silently vacuous.
 #[test]
+fn an_unread_manager_module_still_yields_a_platform_manager_edge() {
+    use bsl_metadata::MdoType;
+    use hir::call_graph::{EdgeProvenance, ResolvedTarget};
+    use hir::graph_index::{resolve_module_summary_via_index, GraphIndex};
+    use hir::ConfigsDatabase;
+
+    // A manager call has an answer that does not depend on any body: the platform
+    // manager member. So an unreadable manager module must leave that reading
+    // intact — `to_mdo()` with `Inferred` — instead of erasing the edge into
+    // `Unresolved` the way the qualified-module route does, because THAT route has
+    // no body-independent answer to fall back on.
+    //
+    // Asserted on the INDEX-backed projection, and this is not a detail: the Salsa
+    // fold maps EVERY resolution error to `to_mdo()`, unread included, so it holds
+    // this invariant no matter what the index path does. A gate reading the Salsa
+    // summary is green while the two paths disagree — which is exactly what the
+    // first version of this test did.
+    //
+    // Not observable through the reference walk either, which reports files and not
+    // provenance: a build that answered `Unresolved` here passes every gate in
+    // `references_by_name`.
+    let files: &[(&str, &str)] = &[
+        (
+            "/src/CommonModules/Вызывающий/Ext/Module.bsl",
+            "Процедура Прогон() Экспорт\n\
+             Справочники.Контрагенты.НайтиПоИНН();\n\
+             КонецПроцедуры",
+        ),
+        (
+            "/src/Catalogs/Контрагенты/Ext/ManagerModule.bsl",
+            "Функция НайтиПоИНН() Экспорт КонецФункции",
+        ),
+    ];
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    for (i, (path, _)) in files.iter().enumerate() {
+        file_set.insert(FileId(i as u32), VfsPath::new(*path));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for (i, (_, text)) in files.iter().enumerate() {
+        let fid = FileId(i as u32);
+        db.set_file_source_root(fid, SourceRootId(0));
+        db.set_file_text(fid, text);
+    }
+
+    let caller = ModuleId::new(FileId(0));
+    let modules = vec![caller, ModuleId::new(FileId(1))];
+    let shape = |summary: &hir::ResolvedModuleSummary| {
+        summary.edges.iter().map(|e| (e.target.clone(), e.provenance)).collect::<Vec<_>>()
+    };
+
+    // Control: while the manager body IS readable, the call resolves to its method.
+    // Without this half every assertion below passes on a build that never resolves
+    // manager calls at all.
+    let readable = resolve_module_summary_via_index(&db, caller, &GraphIndex::build(&db, &modules));
+    assert!(
+        readable.edges.iter().any(|e| e.provenance == EdgeProvenance::Resolved
+            && matches!(e.target, ResolvedTarget::Method(_))),
+        "control: a readable manager module resolves the call to its method: {:?}",
+        shape(&readable),
+    );
+
+    db.set_file_unreadable(FileId(1));
+
+    let summary = resolve_module_summary_via_index(&db, caller, &GraphIndex::build(&db, &modules));
+    assert!(
+        summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Inferred
+            && matches!(&e.target, ResolvedTarget::Mdo { mdo_type, .. } if *mdo_type == MdoType::Catalog)),
+        "an unread manager module keeps the platform reading: {:?}",
+        shape(&summary),
+    );
+    assert!(
+        !summary.edges.iter().any(|e| e.provenance == EdgeProvenance::Unresolved),
+        "the edge must not be erased into Unresolved: {:?}",
+        shape(&summary),
+    );
+    assert_eq!(
+        shape(&summary),
+        shape(&db.resolved_module_summary(caller)),
+        "the index projection and the Salsa fold must agree on an unread manager module",
+    );
+}
+
+#[test]
 fn workspace_call_graph_via_index_matches_salsa_fold() {
     use bsl_metadata::MdoType;
     use hir::call_graph::{EdgeKind, EdgeProvenance, ResolvedTarget};

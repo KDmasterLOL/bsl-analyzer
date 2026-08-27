@@ -1,5 +1,6 @@
 use crate::define_metadata;
 use crate::metadata::*;
+use crate::utils::platform_event_handlers as peh;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
 use hir::AnnotationKind;
 use ide_db::TextRange;
@@ -149,6 +150,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
+    let owner = peh::ModuleOwner {
+        module_type: metadata.module_type,
+        mdo_type: metadata.mdo.as_ref().map(|mdo| mdo.mdo_type),
+    };
+
     for (_, proc) in item_tree.procedures() {
         if let Some(diag) = check_method_unused(
             &proc.name,
@@ -157,7 +163,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &proc.annotations,
             &attachable_prefixes,
             &called_methods,
-            metadata.module_type,
+            owner,
             code,
             ctx,
         ) {
@@ -173,7 +179,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             &func.annotations,
             &attachable_prefixes,
             &called_methods,
-            metadata.module_type,
+            owner,
             code,
             ctx,
         ) {
@@ -192,7 +198,7 @@ fn check_method_unused(
     annotations: &[hir::Annotation],
     attachable_prefixes: &[String],
     called_methods: &FxHashSet<String>,
-    module_type: bsl_metadata::ModuleType,
+    owner: peh::ModuleOwner,
     code: DiagnosticCode,
     ctx: &DiagnosticsContext,
 ) -> Option<Diagnostic> {
@@ -210,7 +216,7 @@ fn check_method_unused(
         return None;
     }
 
-    if is_handler_method(&name_lower, module_type) {
+    if is_handler_method(&name_lower, owner) {
         return None;
     }
 
@@ -244,15 +250,18 @@ fn is_attachable_method(name_lower: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|prefix| name_lower.starts_with(prefix))
 }
 
-fn is_handler_method(name_lower: &str, module_type: bsl_metadata::ModuleType) -> bool {
-    use crate::utils::platform_event_handlers as peh;
+fn is_handler_method(name_lower: &str, owner: peh::ModuleOwner) -> bool {
     use bsl_metadata::ModuleType;
 
     if peh::is_platform_event_handler(name_lower) {
         return true;
     }
 
-    match module_type {
+    if peh::is_report_object_module_event_handler(name_lower, owner) {
+        return true;
+    }
+
+    match owner.module_type {
         ModuleType::ManagedApplicationModule => {
             peh::is_managed_application_module_event_handler(name_lower)
         }
@@ -492,6 +501,41 @@ mod tests {
         crate::test_utils::assert_diagnostic_range(code, unused_diags[0], 1, 10, 24);
         crate::test_utils::assert_diagnostic_range(code, unused_diags[1], 60, 10, 40);
         crate::test_utils::assert_diagnostic_range(code, unused_diags[2], 63, 10, 39);
+    }
+
+    #[test]
+    fn test_report_compose_result_not_flagged_in_object_module() {
+        use crate::test_utils::{
+            check_metadata_diagnostic_with_config, make_non_common_module_metadata,
+        };
+
+        let code = r#"Процедура ПриКомпоновкеРезультата(ДокументРезультат, ДанныеРасшифровки, СтандартнаяОбработка)
+    ДокументРезультат.Очистить();
+КонецПроцедуры
+
+Процедура НикемНеВызывается()
+    Возврат;
+КонецПроцедуры"#;
+
+        let mut config = DiagnosticsConfig::default();
+        let mut params = serde_json::Map::new();
+        params.insert("checkObjectModule".to_string(), serde_json::Value::Bool(true));
+        config
+            .parameters
+            .insert(DiagnosticCode::UnusedLocalMethod, serde_json::Value::Object(params));
+
+        let mut metadata = make_non_common_module_metadata(bsl_metadata::ModuleType::ObjectModule);
+        metadata.mdo = Some(std::sync::Arc::new(bsl_metadata::MetadataObject::new(
+            bsl_metadata::MdoType::Report,
+            "ИсторияРеквизитов",
+        )));
+        let diagnostics =
+            check_metadata_diagnostic_with_config(metadata, code, config, |_meta, ctx| {
+                super::check(ctx)
+            });
+        let messages: Vec<_> = diagnostics.iter().map(|d| d.message.as_str()).collect();
+
+        assert_eq!(messages, vec!["Неиспользуемый локальный метод \"НикемНеВызывается\""]);
     }
 
     #[test]

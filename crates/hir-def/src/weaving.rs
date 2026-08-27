@@ -127,6 +127,23 @@ pub fn signature_mismatch(
     None
 }
 
+/// Whether an interception actually RUNS: the one predicate, so nobody spells it twice.
+///
+/// Three conditions, and each of them alone is enough to make the interceptor dead code: the
+/// target must be exported (an extension cannot weave onto a private method), the annotation
+/// must be applicable to it, and the signatures must agree. Anything reporting interceptors
+/// to a user — effective exports, a symbol card — answers this question, and answering it
+/// with a subset publishes a handler that never executes as though it did.
+pub fn interception_effective(
+    kind: InterceptionKind,
+    interceptor: &MethodSymbol,
+    base: &MethodSymbol,
+) -> bool {
+    base.is_export
+        && interception_applicable(kind, base)
+        && signature_mismatch(kind, interceptor, base).is_none()
+}
+
 /// Whether a weaving interception of `kind` may target `base` at all. 1C allows an extended
 /// *function* to be extended only with `&Вместо` (`&Перед` / `&После` are unavailable for
 /// functions); every interception of a *procedure* is allowed. Returns `false` only for the
