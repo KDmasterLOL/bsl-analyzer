@@ -1028,6 +1028,15 @@ mod vfs_race_tests {
 
         state.set_workspace_root(root.to_path_buf()).expect("initial load");
         let first = configs_rx.try_recv().expect("the initial load emits a loader config");
+        let env_path = root.join(".env");
+        assert!(
+            first.load.iter().any(|entry| match entry {
+                loader::Entry::Files(files) =>
+                    files.iter().any(|path| path.as_path() == env_path.as_path()),
+                _ => false,
+            }),
+            "project-local .env must stay watched even before it exists"
+        );
         let ext_str = ext.to_string_lossy().into_owned();
         assert!(
             !includes(&first).iter().any(|p| p.contains(&ext_str)),

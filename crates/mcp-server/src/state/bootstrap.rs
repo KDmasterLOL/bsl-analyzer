@@ -212,8 +212,7 @@ impl SharedState {
         cache: crate::cache::WorkspaceCacheLayout,
     ) -> Result<Self, project_model::ProjectError> {
         let project = crate::project::at(&source_dir)?;
-        let config_path = project.source_path();
-        let source_root = config_path.to_path_buf();
+        let source_root = project.configuration_path().map(Path::to_path_buf);
 
         // Claimed before any background pass starts, so the graph's very first build already
         // knows whether this daemon owns the workspace's derived caches or is the superseded
@@ -365,7 +364,7 @@ impl SharedState {
         let reference_search = ReferenceSearchState::new(Some(&source_dir));
         Ok(Self {
             workspace_root: Some(source_dir),
-            source_root: Some(source_root),
+            source_root,
             onec_client: None,
             onec_connections: Default::default(),
             debug_session: Arc::new(Mutex::new(None)),
@@ -2604,6 +2603,37 @@ mod tests {
         assert!(state.engine.lock().unwrap().is_none());
         state.shutdown();
     }
+    #[test]
+    fn extension_only_workspace_does_not_expose_workspace_as_configuration_root() {
+        let dir = tempdir().unwrap();
+        let ws = dir.path();
+        let extension = ws.join("Расширения").join("Feature");
+        fs::create_dir_all(&extension).unwrap();
+        fs::write(
+            extension.join("Configuration.xml"),
+            "<Properties><ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose></Properties>",
+        )
+        .unwrap();
+        fs::write(
+            ws.join("bsl-analyzer.toml"),
+            "[source]\nextensions = [\"Расширения/Feature\"]\n",
+        )
+        .unwrap();
+
+        let project = crate::project::at(ws).expect("valid extension-only project");
+        assert!(project.configuration_path().is_none());
+        let (roots, rejected) = crate::project::workspace_roots(&project);
+        assert!(rejected.is_empty());
+        assert!(roots.configuration().is_none());
+
+        let state = SharedState::workspace(ws.to_path_buf()).expect("extension-only workspace");
+        assert!(
+            state.source_root().is_none(),
+            "workspace directory must not become a synthetic base configuration"
+        );
+        state.shutdown();
+    }
+
     /// `metadata form` in a nested layout — config root `<ws>/src/cf`, workspace root one
     /// level up — resolves object form directories relative to the CONFIG root. That root
     /// is `SharedState::source_root()`, which must survive the `MetadataCache` retirement:

@@ -162,6 +162,7 @@ fn analyze(source_dir: &Path, flags: &[&str]) -> Run {
         .arg(source_dir)
         .args(flags)
         .args(["--format", "jsonl"])
+        .env_remove("ONEC_CONFIGURATIONS_ROOT")
         .output()
         .expect("failed to run the analyzer");
     // Checked for every run, including the ones inspected only through stderr:
@@ -196,6 +197,56 @@ fn workspace() -> tempfile::TempDir {
 
 fn path(root: &Path, rel: &str) -> PathBuf {
     root.join(rel)
+}
+
+#[test]
+fn shared_configuration_dependency_resolves_from_project_dotenv() {
+    let dir = workspace();
+    let project = dir.path().join("project");
+    let shared = dir.path().join("configurations");
+    std::fs::create_dir_all(&project).unwrap();
+
+    write_configuration(
+        &shared,
+        "UT11/11.5.22.129",
+        "ОсновнаяКонфигурация",
+        MAIN_MODULE,
+        "Функция Экспортируемая() Экспорт\n\tВозврат 1;\nКонецФункции\n",
+        false,
+    );
+    write_configuration(
+        &project,
+        "Расширения/EXT",
+        "Расширение",
+        EXT_MODULE,
+        &format!(
+            "Процедура Вызвать() Экспорт\n\t{MAIN_MODULE}.Экспортируемая();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
+        true,
+    );
+    std::fs::write(
+        project.join("bsl-analyzer.toml"),
+        r#"[source]
+extensions = ["Расширения/EXT"]
+
+[source.configuration]
+id = "UT11"
+version = "11.5.22.129"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        project.join(".env"),
+        format!("ONEC_CONFIGURATIONS_ROOT={}\n", shared.display()),
+    )
+    .unwrap();
+
+    let run = analyze(&project, &[]);
+    assert_eq!(
+        run.unresolved_modules(EXT_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "the shared configuration must provide the base module context"
+    );
 }
 
 #[test]

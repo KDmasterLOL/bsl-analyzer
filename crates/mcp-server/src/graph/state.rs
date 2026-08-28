@@ -289,7 +289,7 @@ impl GraphState {
         if !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| project_model::CONFIG_FILE_NAMES.contains(&name))
+            .is_some_and(|name| project_model::PROJECT_INPUT_FILE_NAMES.contains(&name))
         {
             return false;
         }

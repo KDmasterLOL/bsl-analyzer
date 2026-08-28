@@ -281,11 +281,11 @@ impl SharedState {
         self.workspace_root.as_ref()
     }
 
-    /// The configuration root (`Configuration.xml`-bearing directory, e.g. `src/cf`), under
-    /// which metadata object directories live. Falls back to `workspace_root` when no nested
-    /// configuration root was discovered (a flat layout where the two coincide).
+    /// The real configuration root (`Configuration.xml`-bearing directory), when this
+    /// project has one. Extension-only projects deliberately return `None`; the workspace
+    /// directory is not a synthetic base configuration.
     pub fn source_root(&self) -> Option<&PathBuf> {
-        self.source_root.as_ref().or(self.workspace_root.as_ref())
+        self.source_root.as_ref()
     }
 
     pub fn debug_session(&self) -> &Arc<Mutex<Option<bsl_debug::session::DebugSession>>> {
