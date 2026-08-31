@@ -1,8 +1,11 @@
+use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+pub const SHARED_CONFIGURATIONS_ROOT_ENV: &str = "ONEC_CONFIGURATIONS_ROOT";
 
 mod diagnostics_baseline_fs;
 pub use diagnostics_baseline_fs::ManagedBaselineDirectory;
@@ -245,7 +248,7 @@ impl Project {
         config: ProjectConfig,
     ) -> Result<Self, ProjectError> {
         let root = root.into();
-        let source_path = Self::discover_source_path(&root, &config);
+        let source_path = Self::discover_source_path(&root, &config)?;
         let specs = Self::resolve_extension_specs(&root, &config)?;
         let base_path = source_path.as_deref().unwrap_or(&root);
         let canonical_base =
@@ -268,13 +271,28 @@ impl Project {
     /// project root) excludes vendored/build copies like `.build/vendor` that would
     /// otherwise be analyzed as a duplicate configuration.
     pub fn source_roots(&self) -> Vec<PathBuf> {
-        let mut roots = vec![self.source_path().to_path_buf()];
+        let mut roots = Vec::new();
+        if let Some(source_path) = self.configuration_path() {
+            roots.push(source_path.to_path_buf());
+        }
         roots.extend(self.extension_paths.iter().map(|(_, path)| path.clone()));
+        if roots.is_empty() {
+            roots.push(self.root.clone());
+        }
         roots
     }
 
     pub fn configuration_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
+    }
+
+    /// Base root used by semantic/search compatibility layers. A real configured
+    /// configuration always wins. Projects with extensions but no base have no
+    /// semantic base at all. Only a legacy/generic project with neither a base nor
+    /// extensions treats the workspace root as its anonymous source root.
+    pub fn semantic_base_path(&self) -> Option<&Path> {
+        self.configuration_path()
+            .or_else(|| self.extension_paths.is_empty().then_some(self.root.as_path()))
     }
 
     pub fn diagnostics_baseline(
@@ -593,36 +611,45 @@ impl Project {
         }))
     }
 
-    fn discover_source_path(root: &Path, config: &ProjectConfig) -> Option<PathBuf> {
-        if let Some(ref config_root) = config.configuration_root {
-            let path = root.join(config_root);
+    fn discover_source_path(
+        root: &Path,
+        config: &ProjectConfig,
+    ) -> Result<Option<PathBuf>, ConfigLoadError> {
+        if config.configuration_root.is_some() || config.configuration_dependency.is_some() {
+            let path = config
+                .resolve_configuration_path(root)?
+                .expect("configured source resolves to a path");
             if configuration_xml_in(&path).is_some() {
-                tracing::info!(?path, "found configuration from configurationRoot setting");
-                return Some(path);
-            } else {
-                tracing::warn!(
-                    config_root,
-                    ?path,
-                    "configurationRoot specified but Configuration.xml not found"
-                );
+                tracing::info!(?path, "found explicitly configured 1C configuration");
+                return Ok(Some(path));
             }
+            if config.configuration_dependency.is_some() {
+                return Err(config.config_error(format!(
+                    "shared configuration {} does not contain {}",
+                    path.display(),
+                    bsl_conventions::ConventionalName::ConfigurationXml.canonical()
+                )));
+            }
+            tracing::warn!(?path, "configuration root specified but Configuration.xml not found");
         }
 
         if let Some(path) = search_configuration_xml(root, 2) {
             tracing::info!(?path, "found Configuration.xml by search");
-            return Some(path);
+            return Ok(Some(path));
         }
 
         for pattern in &["src/cf", "Configuration"] {
             let path = root.join(pattern);
-            if configuration_xml_in(&path).is_some() {
+            if configuration_xml_in(&path).is_some()
+                && configuration_kind(&path) != ConfigurationKind::Extension
+            {
                 tracing::info!(?path, pattern, "found configuration using common pattern");
-                return Some(path);
+                return Ok(Some(path));
             }
         }
 
-        tracing::debug!(?root, "no 1C configuration found, will use project root");
-        None
+        tracing::debug!(?root, "no 1C configuration found");
+        Ok(None)
     }
 
     pub fn extension_paths(&self) -> &[(String, PathBuf)] {
@@ -771,7 +798,7 @@ impl Project {
     /// that exists wins, contributing each of its immediate child directories as a
     /// candidate (later validated for `Configuration.xml`).
     fn auto_discover_extensions(root: &Path) -> Vec<PathBuf> {
-        for parent in ["src/cfe", "cfe"] {
+        for parent in ["src/cfe", "cfe", "Расширения"] {
             if root.join(parent).is_dir() {
                 let found = expand_extension_glob(root, &format!("{parent}/*"));
                 tracing::info!(parent, count = found.len(), "auto-discovered extension candidates");
@@ -1049,6 +1076,98 @@ fn wildcard_matches(pattern: &str, name: &str) -> bool {
     p == pat.len()
 }
 
+fn validate_configuration_component(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed != value
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || value.contains(':')
+    {
+        return Err("must be one safe directory name without path separators".to_owned());
+    }
+    Ok(())
+}
+
+fn dotenv_value(path: &Path, requested: &str) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    for (index, raw_line) in text.lines().enumerate() {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("export ") {
+            line = rest.trim_start();
+        }
+        let Some((key, raw_value)) = line.split_once('=') else {
+            return Err(format!(
+                "invalid line {} in {}: expected KEY=VALUE",
+                index + 1,
+                path.display()
+            ));
+        };
+        if key.trim() != requested {
+            continue;
+        }
+        return parse_dotenv_value(raw_value.trim(), path, index + 1).map(Some);
+    }
+    Ok(None)
+}
+
+fn parse_dotenv_value(value: &str, path: &Path, line: usize) -> Result<String, String> {
+    if let Some(quoted) = value.strip_prefix('\'') {
+        let Some(end) = quoted.find('\'') else {
+            return Err(format!("unclosed single quote in {}:{line}", path.display()));
+        };
+        let tail = quoted[end + 1..].trim();
+        if !tail.is_empty() && !tail.starts_with('#') {
+            return Err(format!("unexpected trailing content in {}:{line}", path.display()));
+        }
+        return Ok(quoted[..end].to_owned());
+    }
+    if let Some(quoted) = value.strip_prefix('"') {
+        let mut result = String::new();
+        let mut escaped = false;
+        let mut closed_at = None;
+        for (offset, ch) in quoted.char_indices() {
+            if escaped {
+                result.push(match ch {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '"' => '"',
+                    '\\' => '\\',
+                    other => other,
+                });
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                closed_at = Some(offset);
+                break;
+            } else {
+                result.push(ch);
+            }
+        }
+        let Some(end) = closed_at else {
+            return Err(format!("unclosed double quote in {}:{line}", path.display()));
+        };
+        let tail = quoted[end + '"'.len_utf8()..].trim();
+        if !tail.is_empty() && !tail.starts_with('#') {
+            return Err(format!("unexpected trailing content in {}:{line}", path.display()));
+        }
+        return Ok(result);
+    }
+    let unquoted = value.find(" #").map(|index| &value[..index]).unwrap_or(value).trim_end();
+    Ok(unquoted.to_owned())
+}
+
 fn search_configuration_xml(root: &Path, max_depth: usize) -> Option<PathBuf> {
     search_configuration_xml_recursive(root, max_depth, 0)
 }
@@ -1062,7 +1181,9 @@ fn search_configuration_xml_recursive(
         return None;
     }
 
-    if configuration_xml_in(dir).is_some() {
+    if configuration_xml_in(dir).is_some()
+        && configuration_kind(dir) != ConfigurationKind::Extension
+    {
         return Some(dir.to_path_buf());
     }
 
@@ -1220,7 +1341,7 @@ pub fn standalone_extension_notice(source_path: &Path) -> Option<String> {
         format!(
             "{} is a configuration extension analyzed without its main configuration. \
              Calls into the main configuration will be reported as unresolved. \
-             Point --configuration-root at the main configuration, or declare it in [source].root.",
+             Point --configuration-root at the main configuration, declare it in [source].root, or use [source.configuration] with a shared configuration id/version.",
             source_path.display()
         )
     })
@@ -1276,6 +1397,7 @@ impl SourceSetOverride {
     pub fn apply_to(&self, config: &mut ProjectConfig) {
         if let Some(ref root) = self.configuration_root {
             config.configuration_root = Some(root.clone());
+            config.configuration_dependency = None;
         }
         if let Some(ref extensions) = self.extensions {
             config.extensions = Some(extensions.clone());
@@ -1367,6 +1489,14 @@ impl<'de> Deserialize<'de> for ExtensionDecl {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ConfigurationDependency {
+    pub id: String,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectConfig {
@@ -1385,6 +1515,9 @@ pub struct ProjectConfig {
 
     #[serde(default)]
     pub configuration_root: Option<String>,
+
+    #[serde(default, rename = "configuration")]
+    pub configuration_dependency: Option<ConfigurationDependency>,
 
     #[serde(default, alias = "target_platform_version")]
     pub target_platform_version: Option<String>,
@@ -1437,6 +1570,9 @@ pub struct AnalysisConfig {
 /// set as "the config", so a change to any of them re-derives the project.
 pub const CONFIG_FILE_NAMES: [&str; 3] =
     ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"];
+pub const PROJECT_ENV_FILE_NAME: &str = ".env";
+pub const PROJECT_INPUT_FILE_NAMES: [&str; 4] =
+    ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json", PROJECT_ENV_FILE_NAME];
 
 impl ProjectConfig {
     /// Loads the project config from the conventional file names under `root`.
@@ -1475,6 +1611,7 @@ impl ProjectConfig {
                 toml::from_str::<TomlConfig>(&content).map_err(|e| err(e.to_string()))?;
             let mut config = ProjectConfig::from(toml_config);
             config.config_file_path = Some(path.to_path_buf());
+            config.validate_configuration_source()?;
             tracing::info!(
                 path = %path.display(),
                 diagnostics_has_content = !config.diagnostics.is_empty(),
@@ -1485,12 +1622,80 @@ impl ProjectConfig {
             let mut config: ProjectConfig =
                 serde_json::from_str(&content).map_err(|e| err(e.to_string()))?;
             config.config_file_path = Some(path.to_path_buf());
+            config.validate_configuration_source()?;
             Ok(config)
         }
     }
 
     pub fn config_file_path(&self) -> Option<&Path> {
         self.config_file_path.as_deref()
+    }
+
+    fn config_error(&self, message: String) -> ConfigLoadError {
+        ConfigLoadError {
+            path: self
+                .config_file_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(CONFIG_FILE_NAMES[0])),
+            message,
+        }
+    }
+
+    fn validate_configuration_source(&self) -> Result<(), ConfigLoadError> {
+        if self.configuration_root.is_some() && self.configuration_dependency.is_some() {
+            return Err(
+                self.config_error("[source] cannot define both root and configuration".to_owned())
+            );
+        }
+        if let Some(configuration) = self.configuration_dependency.as_ref() {
+            validate_configuration_component(&configuration.id).map_err(|message| {
+                self.config_error(format!("source.configuration.id {message}"))
+            })?;
+            if let Some(version) = configuration.version.as_deref() {
+                validate_configuration_component(version).map_err(|message| {
+                    self.config_error(format!("source.configuration.version {message}"))
+                })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resolve_configuration_path(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<PathBuf>, ConfigLoadError> {
+        self.validate_configuration_source()?;
+        if let Some(root) = self.configuration_root.as_deref() {
+            return Ok(Some(project_root.join(root)));
+        }
+        let Some(configuration) = self.configuration_dependency.as_ref() else {
+            return Ok(None);
+        };
+        let env_file = self
+            .config_file_path
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(project_root)
+            .join(".env");
+        let shared_root = match env::var_os(SHARED_CONFIGURATIONS_ROOT_ENV) {
+            Some(value) if !value.is_empty() => PathBuf::from(value),
+            _ => dotenv_value(&env_file, SHARED_CONFIGURATIONS_ROOT_ENV)
+                .map_err(|message| self.config_error(message))?
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+                .ok_or_else(|| {
+                    self.config_error(format!(
+                        "source.configuration.id={:?} requires {SHARED_CONFIGURATIONS_ROOT_ENV}; set it in the process environment or {}",
+                        configuration.id,
+                        env_file.display()
+                    ))
+                })?,
+        };
+        let mut resolved = shared_root.join(&configuration.id);
+        if let Some(version) = configuration.version.as_deref() {
+            resolved.push(version);
+        }
+        Ok(Some(resolved))
     }
 
     pub fn diagnostics_baseline_path(&self, project_root: &Path) -> Option<PathBuf> {
@@ -1512,12 +1717,17 @@ impl ProjectConfig {
         self.configuration_root.as_ref().map(|root| project_root.join(root))
     }
 
-    pub fn load_metadata(&self, workspace_root: &Path) -> Option<bsl_metadata::Configuration> {
-        let cfg_path = self.configuration_path(workspace_root)?;
+    pub fn load_metadata(
+        &self,
+        workspace_root: &Path,
+    ) -> Result<Option<bsl_metadata::Configuration>, ConfigLoadError> {
+        let Some(cfg_path) = self.resolve_configuration_path(workspace_root)? else {
+            return Ok(None);
+        };
 
         if !cfg_path.exists() {
             tracing::warn!(path = ?cfg_path, "Configuration root not found");
-            return None;
+            return Ok(None);
         }
 
         tracing::info!(path = ?cfg_path, "Loading 1C metadata");
@@ -1531,11 +1741,11 @@ impl ProjectConfig {
                     common_modules = config.common_modules().len(),
                     "1C metadata loaded"
                 );
-                Some(config)
+                Ok(Some(config))
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to load 1C metadata");
-                None
+                Ok(None)
             }
         }
     }
@@ -2151,6 +2361,8 @@ struct TomlSourceConfig {
     #[serde(default)]
     root: Option<String>,
     #[serde(default)]
+    configuration: Option<ConfigurationDependency>,
+    #[serde(default)]
     extensions: Option<Vec<ExtensionDecl>>,
 }
 
@@ -2216,6 +2428,7 @@ impl From<TomlConfig> for ProjectConfig {
             code_lens: toml.code_lens,
             formatting: toml.formatting,
             configuration_root: toml.source.root,
+            configuration_dependency: toml.source.configuration,
             target_platform_version: toml.target_platform_version,
             language: None,
             extensions: toml.source.extensions,
@@ -3372,6 +3585,39 @@ extensions = [{ name = "T" }]
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
+    }
+
+    #[test]
+    fn extensions_auto_discovery_supports_russian_container() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_extension(root, "Расширения/FeatureA");
+        touch_extension(root, "Расширения/FeatureB");
+
+        let resolved = Project::resolve_extensions(root, &ProjectConfig::default()).unwrap();
+        let names: Vec<&str> = resolved.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["FeatureA", "FeatureB"]);
+    }
+
+    #[test]
+    fn extension_only_russian_layout_is_not_misidentified_as_base_configuration() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let extension = root.join("Расширения/Feature");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(
+            extension.join("Configuration.xml"),
+            "<Properties><ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose></Properties>",
+        )
+        .unwrap();
+        let config = ProjectConfig {
+            extensions: Some(vec!["Расширения/Feature".into()]),
+            ..Default::default()
+        };
+
+        let project = Project::with_config(root, config).unwrap();
+        assert!(project.configuration_path().is_none());
+        assert_eq!(project.source_roots(), vec![extension]);
     }
 
     #[test]

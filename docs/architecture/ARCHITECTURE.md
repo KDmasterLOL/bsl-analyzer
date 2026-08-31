@@ -252,7 +252,7 @@ Cancellation-карты (`diagnostics_tokens`, `preload_tokens`,
 
 Основной формат конфигурации — `bsl-analyzer.toml`. Его загружает
 `project-model`, а затем нормализованные настройки передаются в диагностики,
-форматирование, code lens, поиск и разрешение source roots / extensions.
+форматирование, code lens, поиск и разрешение source roots / extensions. `project-model` также владеет разрешением optional shared base configuration из `[source.configuration]` через `ONEC_CONFIGURATIONS_ROOT`; project-local `.env` является наблюдаемым входом проекта, чтобы LSP/MCP перестраивали модель после изменения machine-local пути.
 
 Если TOML-файл отсутствует, проект всё ещё умеет читать legacy-файлы
 `.bsl-analyzer.json` и `.bsl-language-server.json`, но в новых проектах они

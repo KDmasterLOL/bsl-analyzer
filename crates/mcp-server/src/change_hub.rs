@@ -800,7 +800,7 @@ impl Scope {
         let named_like_a_config = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n));
+            .is_some_and(|n| project_model::PROJECT_INPUT_FILE_NAMES.contains(&n));
         if !named_like_a_config {
             return false;
         }

@@ -80,8 +80,11 @@ pub(super) fn build_workspace_code(
     let mut engine = SearchEngine::fts_only(&db_path)?;
     let extensions: Vec<std::path::PathBuf> =
         project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-    let (roots, rejected) =
-        bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+    let (roots, rejected) = bsl_search::WorkspaceRoots::build_optional(
+        &project.root,
+        project.semantic_base_path(),
+        &extensions,
+    );
     ensure_every_declared_root_is_accounted_for(&rejected)?;
     // The REGISTERED roots, which is also what the daemon's own walk covers. Not the declared
     // list: a rejected root adds no file to it, since `InsideConfiguration` means the
@@ -171,8 +174,11 @@ mod tests {
         let project = project_at(root);
         let extensions: Vec<std::path::PathBuf> =
             project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-        let (roots, _) =
-            bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions);
+        let (roots, _) = bsl_search::WorkspaceRoots::build_optional(
+            &project.root,
+            project.semantic_base_path(),
+            &extensions,
+        );
         let declared: Vec<std::path::PathBuf> =
             roots.entries().map(|(_, path)| path.to_path_buf()).collect();
         project_model::SourceSet::scan(&declared)

@@ -76,7 +76,11 @@ pub fn workspace_roots(
 ) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
     let extensions: Vec<std::path::PathBuf> =
         project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-    bsl_search::WorkspaceRoots::build(&project.root, project.source_path(), &extensions)
+    bsl_search::WorkspaceRoots::build_optional(
+        &project.root,
+        project.semantic_base_path(),
+        &extensions,
+    )
 }
 
 /// Name every root that did not make it into the table, with its reason: a silently dropped

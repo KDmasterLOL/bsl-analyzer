@@ -124,11 +124,9 @@ impl GlobalState {
     fn configure_loader(&mut self) {
         let (Some(root), Some(project)) = (&self.workspace_root, &self.project) else { return };
         self.vfs_progress_config_version += 1;
-        let mut config_files: Vec<_> = project_model::CONFIG_FILE_NAMES
+        let mut config_files: Vec<_> = project_model::PROJECT_INPUT_FILE_NAMES
             .iter()
-            .map(|name| root.join(name))
-            .filter(|path| path.exists())
-            .map(paths::AbsPathBuf::assert_utf8)
+            .map(|name| paths::AbsPathBuf::assert_utf8(root.join(name)))
             .collect();
         config_files.sort();
         config_files.dedup();
@@ -147,10 +145,10 @@ impl GlobalState {
         baseline_files.sort();
         baseline_files.dedup();
 
-        let mut include = vec![paths::AbsPathBuf::assert_utf8(project.source_path().to_path_buf())];
+        let include =
+            project.source_roots().into_iter().map(paths::AbsPathBuf::assert_utf8).collect();
         for (name, path) in project.extension_paths() {
             tracing::info!(name, path = %path.display(), "adding extension to VFS scan");
-            include.push(paths::AbsPathBuf::assert_utf8(path.clone()));
         }
         let mut load = vec![loader::Entry::Directories(loader::Directories {
             extensions: project_model::SOURCE_EXTENSIONS.iter().map(|s| (*s).to_string()).collect(),

@@ -164,7 +164,12 @@ bsl-analyzer mcp install \
 
 ```toml
 [source]
-root = "src/cf"
+extensions = ["Расширения/ОсновноеРасширение"]
+
+# Optional shared base configuration (not stored in this repository):
+[source.configuration]
+id = "UT11"
+version = "11.5.22.129"
 
 [diagnostics]
 ordinaryAppSupport = false
@@ -177,6 +182,8 @@ BadWords = true
 [diagnostics.parameters.CyclomaticComplexity]
 complexityThreshold = 20
 ```
+
+Для `[source.configuration]` путь к общему хранилищу задаётся через `ONEC_CONFIGURATIONS_ROOT`: process environment имеет приоритет, затем используется `.env` рядом с `bsl-analyzer.toml`. Если базовая конфигурация проекту не нужна, секцию можно не задавать.
 
 Общая структура файла описана в `docs/configuration/PROJECT_CONFIGURATION.md`,
 а параметры диагностических правил — в `docs/configuration/DIAGNOSTICS.md`.

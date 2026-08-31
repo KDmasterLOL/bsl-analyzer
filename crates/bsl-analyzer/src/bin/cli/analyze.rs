@@ -379,8 +379,8 @@ fn analyze_salsa(
     let author_filter =
         build_author_filter(&source_dir, &ignored_authors, &proj_config.analysis.ignored_authors)?;
 
-    let _metadata = proj_config.load_metadata(&source_dir);
-    let configuration_path = proj_config.configuration_path(&source_dir);
+    let _metadata = proj_config.load_metadata(&source_dir)?;
+    let configuration_path = proj_config.resolve_configuration_path(&source_dir)?;
 
     // Scope the file walk to the configuration source root (+ extension roots)
     // instead of the raw `-s` dir, so vendored/build copies such as

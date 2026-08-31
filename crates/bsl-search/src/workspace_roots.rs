@@ -115,37 +115,51 @@ impl WorkspaceRoots {
         configuration: &Path,
         extensions: &[PathBuf],
     ) -> (Self, Vec<RejectedRoot>) {
+        Self::build_optional(workspace_root, Some(configuration), extensions)
+    }
+
+    /// Build a root table for a project whose base configuration is optional.
+    /// Extension-only projects register only extension roots; no synthetic
+    /// configuration root is introduced.
+    pub fn build_optional(
+        workspace_root: &Path,
+        configuration: Option<&Path>,
+        extensions: &[PathBuf],
+    ) -> (Self, Vec<RejectedRoot>) {
         let workspace_canonical = canonicalize(workspace_root);
-        let configuration_canonical = canonicalize(configuration);
-        let mut roots = vec![Root {
-            id: CONFIGURATION_ROOT_ID.to_owned(),
-            declared: configuration.to_path_buf(),
-            canonical: configuration_canonical.clone(),
-        }];
+        let configuration_canonical = configuration.map(canonicalize);
+        let mut roots = Vec::new();
+        if let (Some(configuration), Some(canonical)) =
+            (configuration, configuration_canonical.as_ref())
+        {
+            roots.push(Root {
+                id: CONFIGURATION_ROOT_ID.to_owned(),
+                declared: configuration.to_path_buf(),
+                canonical: canonical.clone(),
+            });
+        }
         let mut rejected = Vec::new();
 
         for extension in extensions {
             let canonical = canonicalize(extension);
-            // Equal canonical paths are the same root, so the configuration —
-            // which owns the rows already — keeps it. Being *inside* it is the
-            // rejected case; containing it is not, and is handled by the
-            // longest-prefix rule at lookup time.
-            if canonical == configuration_canonical
-                || starts_at(&canonical, &configuration_canonical)
+            if let (Some(configuration), Some(configuration_canonical)) =
+                (configuration, configuration_canonical.as_ref())
             {
-                rejected.push(RejectedRoot {
-                    path: extension.clone(),
-                    reason: Rejection::InsideConfiguration { root: configuration.to_path_buf() },
-                });
-                continue;
+                if canonical == *configuration_canonical
+                    || starts_at(&canonical, configuration_canonical)
+                {
+                    rejected.push(RejectedRoot {
+                        path: extension.clone(),
+                        reason: Rejection::InsideConfiguration {
+                            root: configuration.to_path_buf(),
+                        },
+                    });
+                    continue;
+                }
             }
-            // A root already registered under another spelling is one root.
             if roots.iter().any(|root| root.canonical == canonical) {
                 continue;
             }
-            // The identifier is the key space of every stored row, so two roots
-            // sharing one would make the second silently overwrite the first —
-            // and `resolve` would hand back the wrong directory for both.
             let id = root_id_for(&workspace_canonical, &canonical, extension);
             if roots.iter().any(|root| root.id == id) {
                 rejected.push(RejectedRoot {
@@ -406,6 +420,28 @@ mod tests {
     }
 
     const MODULE: &str = "CommonModules/М/Ext/Module.bsl";
+
+    #[test]
+    fn optional_roots_do_not_invent_a_configuration_for_extension_only_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["Расширения/FeatureA", "Расширения/FeatureB"]);
+        let (roots, rejected) =
+            WorkspaceRoots::build_optional(dir.path(), None, &[made[0].clone(), made[1].clone()]);
+
+        assert!(rejected.is_empty());
+        assert!(roots.configuration().is_none(), "workspace root is not a synthetic configuration");
+        let entries: Vec<_> =
+            roots.entries().map(|(id, path)| (id.to_owned(), path.to_path_buf())).collect();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            owner(&roots, &made[0].join(MODULE)),
+            Some(FileKey::new("Расширения/FeatureA", MODULE))
+        );
+        assert_eq!(
+            owner(&roots, &made[1].join(MODULE)),
+            Some(FileKey::new("Расширения/FeatureB", MODULE))
+        );
+    }
 
     #[test]
     fn each_root_keeps_its_own_copy_of_the_same_relative_path() {

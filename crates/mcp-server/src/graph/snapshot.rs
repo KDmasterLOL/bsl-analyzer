@@ -756,7 +756,7 @@ fn entry_is_config_file(entry: &ChangeEntry) -> bool {
     let is_config = |path: &Path| {
         path.file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| project_model::CONFIG_FILE_NAMES.contains(&n))
+            .is_some_and(|n| project_model::PROJECT_INPUT_FILE_NAMES.contains(&n))
     };
     is_config(&entry.canonical) || is_config(&entry.raw)
 }

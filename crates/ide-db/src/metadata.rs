@@ -384,25 +384,33 @@ impl WorkspaceConfigsSnapshot {
         Self { paths, canonical_paths, closures, topological_order, fingerprint: None }
     }
 
-    /// The full shape from a validated project: base first, then extensions in
-    /// declaration order, each carrying its ordered transitive dependency
-    /// chain and the topology fingerprint.
+    /// The full shape from a validated project. A configured base occupies the
+    /// first slot; extension-only projects contain only extension slots. Each
+    /// extension carries its ordered transitive dependency chain and the topology
+    /// fingerprint.
     pub fn from_project(project: &project_model::Project) -> Self {
         let topology = project.extension_topology();
-        let base = project.source_path().to_path_buf();
-        let canonical_base = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
-        let mut paths: Vec<(Option<String>, PathBuf)> = vec![(None, base)];
-        let mut canonical_paths = vec![canonical_base];
-        let mut closures: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut paths: Vec<(Option<String>, PathBuf)> = Vec::new();
+        let mut canonical_paths = Vec::new();
+        let mut closures: Vec<Vec<usize>> = Vec::new();
+        let base = project.semantic_base_path();
+        let offset = usize::from(base.is_some());
+        if let Some(base) = base {
+            let base = base.to_path_buf();
+            let canonical_base = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+            paths.push((None, base));
+            canonical_paths.push(canonical_base);
+            closures.push(Vec::new());
+        }
         for node in topology.nodes() {
             paths.push((Some(node.name().to_string()), node.path().to_path_buf()));
             canonical_paths.push(node.canonical_path().to_path_buf());
-            // Topology node indices are 0-based over extensions; snapshot slot 0
-            // is the base root, so every index shifts by one.
-            closures.push(node.closure().iter().map(|id| id.index() + 1).collect());
+            closures.push(node.closure().iter().map(|id| id.index() + offset).collect());
         }
-        let topological_order = std::iter::once(0)
-            .chain(topology.topological_order().iter().map(|id| id.index() + 1))
+        let topological_order = base
+            .map(|_| 0)
+            .into_iter()
+            .chain(topology.topological_order().iter().map(|id| id.index() + offset))
             .collect();
         Self {
             paths,
@@ -2140,6 +2148,33 @@ pub(crate) fn find_integration_service_by_path(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extension_only_project_snapshot_has_no_synthetic_base_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let extension = dir.path().join("Расширения/Feature");
+        std::fs::create_dir_all(&extension).unwrap();
+        std::fs::write(
+            extension.join("Configuration.xml"),
+            "<Properties><ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose></Properties>",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            "[source]\nextensions = [\"Расширения/Feature\"]\n",
+        )
+        .unwrap();
+
+        let project = project_model::Project::new(dir.path()).unwrap();
+        assert!(project.configuration_path().is_none());
+        let snapshot = super::WorkspaceConfigsSnapshot::from_project(&project);
+
+        assert_eq!(snapshot.paths.len(), 1);
+        assert!(snapshot.paths.iter().all(|(label, _)| label.is_some()));
+        assert_eq!(snapshot.paths[0].0.as_deref(), Some("Feature"));
+        assert_eq!(snapshot.topological_order, vec![0]);
+        assert_eq!(snapshot.closures, vec![Vec::<usize>::new()]);
+    }
+
     /// Таблица по словарю: для каждого конвенционного имени файла модуля
     /// верхнерегистровый путь классифицируется как канонический близнец.
     /// Полнота пар сверяется с перечислением словаря, а не с памятью.
