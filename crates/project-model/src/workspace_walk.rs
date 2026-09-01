@@ -14,6 +14,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::file_role::{file_role, FileRole};
+use crate::path_scope::PathScope;
 
 /// One file the walk reached, in both spellings it can be named by.
 #[derive(Debug, Clone)]
@@ -75,15 +76,16 @@ impl WalkOutcome {
 /// Walk every root, yielding each source or metadata file once per way the walk reached
 /// it.
 pub fn walk_workspace_roots(roots: &[PathBuf]) -> WalkOutcome {
+    let scope = PathScope::new(roots, &[]);
     let mut outcome = WalkOutcome::default();
     for root in roots {
-        walk_one_root(root, &mut outcome);
+        walk_one_root(root, &scope, &mut outcome);
     }
     outcome
 }
 
-fn walk_one_root(root: &Path, outcome: &mut WalkOutcome) {
-    walk_tree(root, root, outcome);
+fn walk_one_root(root: &Path, scope: &PathScope, outcome: &mut WalkOutcome) {
+    walk_tree(root, root, scope, outcome);
 }
 
 /// Walk the tree at `start`, attributing every file to `root`. The two differ when a
@@ -93,9 +95,18 @@ fn walk_one_root(root: &Path, outcome: &mut WalkOutcome) {
 /// Siblings are visited in name order, so the sequence of files is a property of the
 /// tree, not of the file system's directory-entry order — callers assign ids by this
 /// sequence and compare it across scans.
-pub(crate) fn walk_tree(start: &Path, root: &Path, outcome: &mut WalkOutcome) {
+pub(crate) fn walk_tree(start: &Path, root: &Path, scope: &PathScope, outcome: &mut WalkOutcome) {
     let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for entry in walkdir::WalkDir::new(start).follow_links(true).sort_by_file_name() {
+    // `filter_entry` rather than a check inside the loop: skipping a directory here
+    // means the walk never descends into it, so an excluded subtree costs nothing at
+    // all. Filtering entries instead would still pay for the whole tree and only drop
+    // its files. Non-directories pass through — they are decided by `process_file_entry`.
+    let walk = walkdir::WalkDir::new(start)
+        .follow_links(true)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| !entry.file_type().is_dir() || !scope.is_hole(entry.path()));
+    for entry in walk {
         match entry {
             Ok(entry) => process_file_entry(&entry, root, &mut dir_cache, outcome),
             Err(e) => classify_walk_error(&e, outcome),
@@ -830,6 +841,172 @@ mod tests {
         let outcome = walk(dir.path());
 
         assert_eq!(outcome.files[0].metadata.len(), 17);
+    }
+
+    /// A caller-stated exclusion narrows the walk; a NAME never does. The two live side
+    /// by side on purpose: `no_directory_is_excluded_from_the_walk` below keeps the
+    /// policy, this keeps the mechanism.
+    #[test]
+    fn a_stated_exclusion_is_not_descended_into() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join(".build/vendor/CommonModules/X/Ext/Module.bsl"), "");
+        write(&dir.path().join("CommonModules/Y/Ext/Module.bsl"), "");
+        // A sibling whose name merely begins the same way: the match is on whole
+        // components, and a string prefix would swallow this one too.
+        write(&dir.path().join(".buildfoo/M.bsl"), "");
+
+        let mut outcome = WalkOutcome::default();
+        let scope = PathScope::new(&[dir.path().to_path_buf()], &[dir.path().join(".build")]);
+        walk_one_root(dir.path(), &scope, &mut outcome);
+
+        let names: Vec<String> =
+            outcome.files.iter().map(|f| f.walked.display().to_string()).collect();
+        assert_eq!(names.len(), 2, "walked: {names:?}");
+        assert!(names.iter().all(|n| !n.contains("/.build/")), "walked: {names:?}");
+        assert!(names.iter().any(|n| n.contains(".buildfoo")), "walked: {names:?}");
+    }
+
+    /// A root inside a hole wins over it — and only for itself.
+    ///
+    /// Two properties in one, because a coarser rule satisfies the first and fails the
+    /// second: dropping the whole hole also keeps the walk non-empty, and re-opens every
+    /// other subtree of the cache to every scan from then on. The file watcher decides
+    /// the same pair of inputs the same way; the two must agree, or a file ends up
+    /// walked but unwatched.
+    #[test]
+    fn a_root_inside_a_hole_wins_only_for_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join(".build/newext/CommonModules/E/Ext/Module.bsl"), "");
+        write(&dir.path().join(".build/vendor/CommonModules/V/Ext/Module.bsl"), "");
+        write(&dir.path().join("CommonModules/W/Ext/Module.bsl"), "");
+
+        let roots = vec![dir.path().to_path_buf(), dir.path().join(".build/newext")];
+        let scope = PathScope::new(&roots, &[dir.path().join(".build")]);
+
+        let mut outcome = WalkOutcome::default();
+        for root in &roots {
+            walk_one_root(root, &scope, &mut outcome);
+        }
+        let names: Vec<String> =
+            outcome.files.iter().map(|f| f.walked.display().to_string()).collect();
+
+        assert!(names.iter().any(|n| n.contains("/W/")), "the workspace module: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains("/E/")),
+            "the declared root under the hole: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("/V/")),
+            "the rest of the hole was re-opened: {names:?}"
+        );
+    }
+
+    /// A hole that swallows a root must never empty the walk.
+    ///
+    /// An empty outcome has `unreadable == 0`, so `SourceSet::clean` reports a complete
+    /// view of the tree — and a reconcile over that deletes every stored row. The
+    /// assertion is on the OUTCOME, because that is the value the destructive path reads.
+    #[test]
+    fn a_hole_covering_a_root_cannot_empty_the_walk() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&dir.path().join("CommonModules/W/Ext/Module.bsl"), "");
+        let root = dir.path().to_path_buf();
+
+        for hole in [root.clone(), dir.path().parent().unwrap().to_path_buf()] {
+            let scope = PathScope::new(std::slice::from_ref(&root), std::slice::from_ref(&hole));
+            let mut outcome = WalkOutcome::default();
+            walk_one_root(&root, &scope, &mut outcome);
+            assert_eq!(
+                outcome.files.len(),
+                1,
+                "the walk went empty under a hole covering its own root ({})",
+                hole.display()
+            );
+            assert_eq!(outcome.unreadable, 0, "an empty walk would also look complete");
+        }
+    }
+
+    /// A scan root can carry `..` all the way here: `discover_source_path` builds it as
+    /// `root.join(config_root)` and never resolves the result, so `walkdir` hands the
+    /// hole test entries spelled `<ws>/../elsewhere/sources/...`. A hole named
+    /// absolutely matches none of those, and a lexical test alone silently walks the
+    /// cache back in as sources.
+    #[test]
+    fn a_hole_under_a_root_reached_through_dot_dot_is_still_skipped() {
+        let outer = tempfile::tempdir().unwrap();
+        let sources = outer.path().join("elsewhere").join("sources");
+        fs::create_dir_all(outer.path().join("ws")).unwrap();
+        write(&sources.join("CommonModules/W/Ext/Module.bsl"), "");
+        write(&sources.join(".build/CommonModules/V/Ext/Module.bsl"), "");
+
+        let root = outer.path().join("ws").join("..").join("elsewhere").join("sources");
+        let scope = PathScope::new(std::slice::from_ref(&root), &[sources.join(".build")]);
+
+        let mut outcome = WalkOutcome::default();
+        walk_one_root(&root, &scope, &mut outcome);
+
+        let names: Vec<String> =
+            outcome.files.iter().map(|f| f.walked.display().to_string()).collect();
+        assert!(names.iter().any(|n| n.contains("/W/")), "the sources were not walked: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.contains("/V/")),
+            "the cache was walked back in as sources: {names:?}"
+        );
+    }
+
+    /// Skipping holes must stay free per entry: the decision is lexical, so it costs no
+    /// system call however large the tree is.
+    ///
+    /// The observable is the count of canonicalisations against the shape of the tree,
+    /// not against a walk without holes. That comparison looks like the natural one and
+    /// is vacuous: a walk without holes visits exactly the skipped subtree more, so a
+    /// per-entry cost lands in BOTH arms and the difference stays constant under every
+    /// implementation. What does distinguish them is the rule the walk already obeys —
+    /// one canonicalisation per directory holding files, from the per-directory cache in
+    /// `canonical_path`. A cost paid per visited ENTRY breaks that equality; the two
+    /// tree sizes are here so the assertion is that rule and not a remembered number.
+    ///
+    /// What it cannot catch: a bare `std::fs::canonicalize` written into the predicate
+    /// without counting itself. Nothing observable sees that one — what holds it off is
+    /// there being a single implementation of the hole rule to review at all.
+    #[test]
+    fn skipping_a_hole_costs_no_canonicalisation_per_entry() {
+        let measure = |directories: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            for i in 0..directories {
+                write(&dir.path().join(format!("d{i}/M.bsl")), "");
+            }
+            for i in 0..4 {
+                write(&dir.path().join(format!(".build/c{i}/M.bsl")), "");
+            }
+            let root = dir.path().to_path_buf();
+            let walk_with = |holes: &[PathBuf]| {
+                let scope = PathScope::new(std::slice::from_ref(&root), holes);
+                let mut outcome = WalkOutcome::default();
+                walk_one_root(&root, &scope, &mut outcome);
+                outcome
+            };
+            let open = walk_with(&[]);
+            let holed = walk_with(&[root.join(".build")]);
+            assert_eq!(open.files.len(), directories + 4, "the open walk missed files");
+            assert_eq!(holed.files.len(), directories, "the holed walk missed files");
+            // The open walk pins the rule the holed one is then measured against: the
+            // count follows the directories that hold files, nothing else.
+            assert_eq!(
+                open.canonicalizations,
+                directories + 4,
+                "the walk stopped costing one canonicalisation per directory"
+            );
+            holed.canonicalizations
+        };
+
+        for directories in [8, 32] {
+            assert_eq!(
+                measure(directories),
+                directories,
+                "skipping a hole cost more than the directories the walk kept"
+            );
+        }
     }
 
     #[test]

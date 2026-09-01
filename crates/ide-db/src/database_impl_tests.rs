@@ -1065,6 +1065,196 @@ fn resolve_role_for_file_uses_bootstrapped_listing() {
     std::fs::remove_dir_all(&root).ok();
 }
 
+/// Along a dependency chain the extension that OWNS the file wins: a borrowed
+/// object declared in both the dependency and the borrower must resolve to the
+/// borrower's. The chain is stored dependencies-first, so reading it forward hands
+/// back the dependency — silently, and differently from the whole-config path the
+/// CLI takes on the same tree. Names are listed once, not once per listing.
+#[test]
+fn a_chain_resolves_the_owning_extension_first_and_lists_each_name_once() {
+    use crate::metadata::{RoleEntry, WorkspaceConfigsSnapshot};
+
+    const DEP_UUID: &str = "00000000-0000-0000-0000-0000000000aa";
+    const OWN_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
+
+    fn role_xml(uuid: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="{uuid}">
+        <Properties><Name>РольОбщая</Name><Synonym/><Comment/></Properties>
+    </Role>
+</MetaDataObject>"#
+        )
+    }
+
+    let base = std::env::temp_dir().join(format!(
+        "bsl_chain_precedence_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let dep_root = base.join("A");
+    let own_root = base.join("B");
+    std::fs::create_dir_all(dep_root.join("Roles")).unwrap();
+    std::fs::create_dir_all(own_root.join("Roles")).unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let dep_role = FileId(0);
+    let own_role = FileId(1);
+    let consumer = FileId(2);
+    let mut file_set = FileSet::new();
+    file_set.insert(
+        dep_role,
+        VfsPath::new(dep_root.join("Roles/РольОбщая.xml").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        own_role,
+        VfsPath::new(own_root.join("Roles/РольОбщая.xml").to_string_lossy().as_ref()),
+    );
+    file_set
+        .insert(consumer, VfsPath::new(own_root.join("Consumer.bsl").to_string_lossy().as_ref()));
+    db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+    for file in [dep_role, own_role, consumer] {
+        db.set_file_source_root(file, SourceRootId(1));
+    }
+    db.set_file_text(dep_role, &role_xml(DEP_UUID));
+    db.set_file_text(own_role, &role_xml(OWN_UUID));
+    db.set_file_text(consumer, "Процедура Т() КонецПроцедуры");
+
+    // Slot 0 is the dependency, slot 1 the borrower whose closure names it. No base
+    // slot: this is the extension-only shape, where the chain is all there is.
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        paths: vec![
+            (Some("A".to_owned()), dep_root.clone()),
+            (Some("B".to_owned()), own_root.clone()),
+        ],
+        canonical_paths: vec![dep_root.clone(), own_root.clone()],
+        closures: vec![Vec::new(), vec![0]],
+        topological_order: vec![0, 1],
+        fingerprint: None,
+    });
+    for (root, file) in [(&dep_root, dep_role), (&own_root, own_role)] {
+        db.set_metadata_listing(
+            &root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: vec![RoleEntry {
+                    name: "РольОбщая".to_string(), main: file, rights: None
+                }],
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: Vec::new(),
+            },
+        );
+    }
+
+    let resolved = db.resolve_role_for_file(consumer, "РольОбщая").expect("the role resolves");
+    assert_eq!(
+        resolved.uuid().to_string(),
+        OWN_UUID,
+        "the borrower's own declaration wins over the dependency's"
+    );
+    assert_eq!(
+        db.role_names_for_file(consumer),
+        vec!["РольОбщая".to_string()],
+        "and the shared name is listed once, not once per listing"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// An extension-only project has no base root at all, so a substrate reader that
+/// insists on the base answers "not found" for objects the extension plainly
+/// declares. The per-file lookup must serve such a project from its chain, exactly
+/// as it serves a based project from its base.
+#[test]
+fn per_file_lookups_serve_an_extension_only_project_from_its_chain() {
+    use crate::metadata::RoleEntry;
+
+    fn role_xml(name: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" version="2.10">
+    <Role uuid="00000000-0000-0000-0000-000000000083">
+        <Properties><Name>{name}</Name><Synonym/><Comment/></Properties>
+    </Role>
+</MetaDataObject>"#
+        )
+    }
+
+    // `label` is what makes this an extension root rather than a base one; the rest
+    // of the stand is identical, so the label is the only variable under test.
+    let resolve_with = |label: Option<String>| -> Option<String> {
+        let root = std::env::temp_dir().join(format!(
+            "bsl_extension_only_lookup_{}_{:?}",
+            std::process::id(),
+            label
+        ));
+        let role_path = root.join("Roles/РольРасширения.xml");
+        std::fs::create_dir_all(role_path.parent().unwrap()).unwrap();
+
+        let mut db = RootDatabaseImpl::new();
+        let role_main = FileId(0);
+        let consumer_file = FileId(1);
+        let mut file_set = FileSet::new();
+        file_set.insert(role_main, VfsPath::new(role_path.to_string_lossy().as_ref()));
+        file_set.insert(
+            consumer_file,
+            VfsPath::new(root.join("Consumer.bsl").to_string_lossy().as_ref()),
+        );
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(file_set));
+        db.set_file_source_root(role_main, SourceRootId(1));
+        db.set_file_source_root(consumer_file, SourceRootId(1));
+        db.set_file_text(role_main, &role_xml("РольРасширения"));
+        db.set_file_text(consumer_file, "Процедура Т() КонецПроцедуры");
+
+        db.set_all_config_paths(vec![(label, root.clone())]);
+        db.set_metadata_listing(
+            &root.to_string_lossy(),
+            MetadataListingData {
+                entries: Vec::new(),
+                defined_types: Vec::new(),
+                common_modules: Vec::new(),
+                event_subscriptions: Vec::new(),
+                scheduled_jobs: Vec::new(),
+                roles: vec![RoleEntry {
+                    name: "РольРасширения".to_string(),
+                    main: role_main,
+                    rights: None,
+                }],
+                http_services: Vec::new(),
+                web_services: Vec::new(),
+                integration_services: Vec::new(),
+                subsystems: Vec::new(),
+            },
+        );
+
+        let resolved =
+            db.resolve_role_for_file(consumer_file, "РольРасширения").map(|r| r.name().to_string());
+        let listed = db.role_names_for_file(consumer_file);
+        std::fs::remove_dir_all(&root).ok();
+        assert_eq!(
+            listed.contains(&"РольРасширения".to_string()),
+            resolved.is_some(),
+            "resolving a name and listing it must agree"
+        );
+        resolved
+    };
+
+    // The control: with a base root the object resolves, as it always did.
+    assert_eq!(resolve_with(None).as_deref(), Some("РольРасширения"), "based project");
+    assert_eq!(
+        resolve_with(Some("Feature".to_owned())).as_deref(),
+        Some("РольРасширения"),
+        "an extension-only project resolves its own objects too"
+    );
+}
+
 #[test]
 fn role_links_to_object_rights_and_rls_condition_object_from_listed_substrate() {
     use crate::metadata::RoleEntry;

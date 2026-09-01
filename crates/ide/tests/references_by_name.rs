@@ -385,6 +385,52 @@ fn kinds_and_include_declaration_filter_independently() {
     assert!(without_declaration.hits.iter().all(|hit| hit.kind != ReferenceKind::Declaration));
 }
 
+// --- an implicit local is one variable ---------------------------------------------------
+
+const IMPLICIT_LOCAL_MODULE: &str = "/ws/src/cf/CommonModules/Первый/Ext/Module.bsl";
+
+const REASSIGNED: &str = r#"
+Процедура Тест() Экспорт
+    Набор = 1;
+    Сообщить(Набор);
+    Набор = 2;
+    Сообщить(Набор);
+КонецПроцедуры
+"#;
+
+/// A text anchor certifies its coordinates by quoting what the caller read, and the
+/// quote is matched everywhere it stands in the file. A quote holding occurrences on
+/// both sides of a reassignment therefore names one variable twice — and an identity
+/// split into slices reports that as an ambiguity between two places.
+///
+/// The quote is `(Набор)` and not the whole line: a whole line carries `Сообщить` too,
+/// and that third candidate keeps the answer ambiguous for a reason that has nothing to
+/// do with the variable. A quote unique to one line — `Набор = 2;` — is no gate either:
+/// it resolves today and would resolve after, only with a different total.
+#[test]
+fn a_quote_spanning_a_reassignment_names_one_variable() {
+    let (db, files) = db_with(&[(IMPLICIT_LOCAL_MODULE, REASSIGNED)]);
+
+    let result = find_references_by_name(
+        &db,
+        &request(ReferenceAnchor::Text {
+            file_id: files[0],
+            line: None,
+            column: None,
+            content: "(Набор)".to_string(),
+        }),
+        &[],
+    );
+
+    assert!(
+        matches!(result.outcome, ReferencesOutcome::Resolved),
+        "the quote names one variable, not several places to choose between: {:?}, sites {:?}",
+        result.outcome,
+        result.anchor_sites.len(),
+    );
+    assert_eq!(result.hits.len(), 4, "every occurrence of the variable: {:?}", result.hits);
+}
+
 // --- metadata substrate -----------------------------------------------------------------
 
 fn designer_fixture_path() -> PathBuf {
@@ -435,6 +481,90 @@ fn db_with_catalog() -> RootDatabaseImpl {
         },
     );
     db
+}
+
+/// The type an occurrence carries is a property of the program point, and it stays one
+/// when the variable's identity stops depending on the write: navigating to the TYPE of
+/// a read lands on whatever the last preceding write produced.
+///
+/// `type_definition` is the only surface that reads `SemanticSymbol::ty` for an implicit
+/// local, and it answers `None` for `Число` and `Строка` — so the gate needs two writes of
+/// two METADATA types. Wiring: config paths alone are not enough; navigation to XML goes
+/// through the metadata listing, so both objects are put in the VFS and registered.
+///
+/// Regression gate: green before and after the identity change, red under a mutant that
+/// freezes the symbol type to the first write's.
+#[test]
+fn the_type_of_an_implicit_local_follows_the_occurrence() {
+    let module = FileId(0);
+    let catalog_xml = FileId(1);
+    let document_xml = FileId(2);
+    let designer = designer_fixture_path();
+
+    let mut db = RootDatabaseImpl::new();
+    let mut file_set = FileSet::new();
+    file_set.insert(module, VfsPath::new(IMPLICIT_LOCAL_MODULE));
+    file_set.insert(catalog_xml, VfsPath::from(designer.join("Catalogs/Справочник1.xml")));
+    file_set.insert(document_xml, VfsPath::from(designer.join("Documents/Документ1.xml")));
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for file in [module, catalog_xml, document_xml] {
+        db.set_file_source_root(file, SourceRootId(0));
+    }
+
+    const TWO_METADATA_WRITES: &str = r#"
+Процедура Тест() Экспорт
+    Набор = Справочники.Справочник1.СоздатьЭлемент();
+    Сообщить(Набор);
+    Набор = Документы.Документ1.СоздатьДокумент();
+    Сообщить(Набор);
+КонецПроцедуры
+"#;
+    db.set_file_text(module, TWO_METADATA_WRITES);
+    db.set_file_text(catalog_xml, CATALOG_XML);
+    db.set_file_text(document_xml, DOCUMENT_XML);
+    db.set_all_config_paths(vec![(None, designer.clone())]);
+    db.set_metadata_listing(
+        &designer.to_string_lossy(),
+        MetadataListingData {
+            entries: vec![
+                MdoEntry {
+                    kind: bsl_metadata::MdoType::Catalog,
+                    name: "Справочник1".to_string(),
+                    main: catalog_xml,
+                    predefined: None,
+                },
+                MdoEntry {
+                    kind: bsl_metadata::MdoType::Document,
+                    name: "Документ1".to_string(),
+                    main: document_xml,
+                    predefined: None,
+                },
+            ],
+            ..MetadataListingData::default()
+        },
+    );
+
+    let reads: Vec<usize> = {
+        let mut found = Vec::new();
+        let mut from = 0usize;
+        while let Some(at) = TWO_METADATA_WRITES[from..].find("Сообщить(Набор)") {
+            found.push(from + at + "Сообщить(".len());
+            from += at + "Сообщить(Набор)".len();
+        }
+        found
+    };
+    assert_eq!(reads.len(), 2, "the input must carry one read after each write");
+
+    let analysis = ide::Analysis::from_database(db);
+    let target_of = |offset: usize| {
+        analysis
+            .type_definition(module, u32::try_from(offset).unwrap())
+            .unwrap_or_else(|| panic!("no type target for the read at {offset}"))
+            .file_id
+    };
+
+    assert_eq!(target_of(reads[0]), catalog_xml, "the read after the first write");
+    assert_eq!(target_of(reads[1]), document_xml, "the read after the second write");
 }
 
 /// Gate Q1 (metadata half) and gate O (first input) — a metadata object is

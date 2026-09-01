@@ -1,6 +1,6 @@
 use crate::tools::response::text_within_budget;
 use bsl_debug::session::{DebugConfig, DebugSession};
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 use std::sync::{Arc, Mutex};
@@ -100,7 +100,7 @@ pub fn debug_disconnect(
     let session =
         guard.take().ok_or_else(|| McpError::invalid_params("No active debug session", None))?;
     let _ = session.disconnect();
-    Ok(CallToolResult::success(vec![Content::text("Debug session disconnected")]))
+    Ok(CallToolResult::success(vec![ContentBlock::text("Debug session disconnected")]))
 }
 
 pub fn debug_set_breakpoint(
@@ -134,7 +134,7 @@ pub fn debug_set_breakpoint(
     } else {
         format!("Breakpoint set: {module}:{line}")
     };
-    Ok(CallToolResult::success(vec![Content::text(msg)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(msg)]))
 }
 
 pub fn debug_remove_breakpoint(
@@ -149,11 +149,11 @@ pub fn debug_remove_breakpoint(
         .remove_breakpoint(module, line)
         .map_err(|e| McpError::internal_error(format!("Failed to remove breakpoint: {e}"), None))?;
     if removed {
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Breakpoint removed: {module}:{line}"
         ))]))
     } else {
-        Ok(CallToolResult::success(vec![Content::text(format!(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format!(
             "Breakpoint not found: {module}:{line}"
         ))]))
     }
@@ -168,7 +168,7 @@ pub fn debug_continue(
     session
         .continue_execution()
         .map_err(|e| McpError::internal_error(format!("Failed to continue: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text("Execution continued")]))
+    Ok(CallToolResult::success(vec![ContentBlock::text("Execution continued")]))
 }
 
 pub fn debug_step(
@@ -192,7 +192,7 @@ pub fn debug_step(
     session
         .step(step_action)
         .map_err(|e| McpError::internal_error(format!("Failed to step: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(format!("Step {action}"))]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(format!("Step {action}"))]))
 }
 
 pub fn debug_wait_stop(
@@ -229,9 +229,9 @@ pub fn debug_wait_stop(
             }
             Ok(text_within_budget(out, max_output_tokens, STACK_NOTE))
         }
-        None => {
-            Ok(CallToolResult::success(vec![Content::text("Timeout — no stop event received")]))
-        }
+        None => Ok(CallToolResult::success(vec![ContentBlock::text(
+            "Timeout — no stop event received",
+        )])),
     }
 }
 
@@ -259,13 +259,13 @@ pub fn debug_stack_trace(
                 if !stop.stack.is_empty() {
                     stop.stack.clone()
                 } else {
-                    return Ok(CallToolResult::success(vec![Content::text(format!(
+                    return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                         "Call stack is empty.\nDiag: {err_info}, stopped_target={has_stopped}, \
                          last_stop={has_last_stop}, last_stop_stack={last_stop_stack_len}"
                     ))]));
                 }
             } else {
-                return Ok(CallToolResult::success(vec![Content::text(format!(
+                return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
                     "Call stack is empty.\nDiag: {err_info}, stopped_target={has_stopped}, \
                      last_stop={has_last_stop}"
                 ))]));
@@ -293,7 +293,7 @@ pub fn debug_locals(
         .locals(level)
         .map_err(|e| McpError::internal_error(format!("Failed to get locals: {e}"), None))?;
     if vars.is_empty() {
-        return Ok(CallToolResult::success(vec![Content::text("No local variables")]));
+        return Ok(CallToolResult::success(vec![ContentBlock::text("No local variables")]));
     }
     let mut out = format!("# Local Variables (stack level {})\n\n", level);
     let _ = writeln!(out, "| Name | Type | Value |");
@@ -318,7 +318,7 @@ pub fn debug_eval(
     let result = session
         .eval(expression, level)
         .map_err(|e| McpError::internal_error(format!("Failed to evaluate: {e}"), None))?;
-    Ok(CallToolResult::success(vec![Content::text(format_eval(
+    Ok(CallToolResult::success(vec![ContentBlock::text(format_eval(
         expression,
         &result.value,
         &result.type_name,

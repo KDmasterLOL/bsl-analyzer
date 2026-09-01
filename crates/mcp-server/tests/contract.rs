@@ -22,8 +22,11 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
     let info = client.peer_info().expect("server info after initialize");
     assert!(info.capabilities.resources.is_some(), "resources capability not advertised");
     // A consumer reads `serverInfo` to learn which analyzer build it is talking to, so it
-    // must name the analyzer rather than the transport library underneath it.
-    assert_eq!(info.server_info.name, "bsl-analyzer");
+    // must name the analyzer rather than the transport library underneath it. The field is
+    // optional on a negotiated peer because discovery responses need not carry it; an
+    // absent identity is as much a contract break here as a wrong one.
+    let server_info = info.server_info.as_ref().expect("server identity after initialize");
+    assert_eq!(server_info.name, "bsl-analyzer");
 
     let listed = client.list_resources(None).await.expect("resources/list");
     assert!(
@@ -97,7 +100,7 @@ async fn contract_is_discoverable_and_readable_over_a_session() {
     assert_eq!(body["kind"], "type");
     assert_eq!(body["name"], "Массив");
     assert!(
-        result.content.first().and_then(|content| content.raw.as_text()).is_some(),
+        result.content.first().and_then(|content| content.as_text()).is_some(),
         "legacy text content remains available"
     );
 
@@ -216,15 +219,38 @@ async fn assert_required_params_are_enforced(server: McpServer, profile_key: &st
         let call = client.call_tool(
             CallToolRequestParams::new(probe.tool.clone()).with_arguments(probe.arguments.clone()),
         );
-        let err = call.await.expect_err(&format!(
-            "{}/{} accepted a call without the required '{}': {:?}",
-            probe.tool, probe.action, probe.omitted, probe.arguments
-        ));
+        // A rejection reaches the caller in one of two shapes. Our own guards raise a
+        // JSON-RPC error; a parameter that serde rejects before the tool body runs comes
+        // back as a result flagged `isError`, carrying the same reason as text. Accepting
+        // only the first shape would make this gate pass vacuously on every tool whose
+        // required parameter is enforced by deserialization rather than by a hand-written
+        // check.
+        let rejection = match call.await {
+            Err(err) => err.to_string(),
+            Ok(result) => {
+                assert_eq!(
+                    result.is_error,
+                    Some(true),
+                    "{}/{} accepted a call without the required '{}': {:?}",
+                    probe.tool,
+                    probe.action,
+                    probe.omitted,
+                    probe.arguments
+                );
+                result
+                    .content
+                    .iter()
+                    .filter_map(|block| block.as_text())
+                    .map(|text| text.text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        };
         let explicit = format!("'{}' is required", probe.omitted);
         let serde = format!("missing field `{}`", probe.omitted);
         assert!(
-            err.to_string().contains(&explicit) || err.to_string().contains(&serde),
-            "{}/{} rejected a call missing '{}' for another reason: {err}",
+            rejection.contains(&explicit) || rejection.contains(&serde),
+            "{}/{} rejected a call missing '{}' for another reason: {rejection}",
             probe.tool,
             probe.action,
             probe.omitted
@@ -337,7 +363,7 @@ async fn budgeted_platform_list(server: McpServer) -> (Value, String) {
         .await
         .expect("list_platform call");
     let body = result.structured_content.expect("list_platform structuredContent");
-    let text = result.content[0].raw.as_text().expect("list_platform text mirror").text.clone();
+    let text = result.content[0].as_text().expect("list_platform text mirror").text.clone();
     client.cancel().await.expect("session closed");
     (body, text)
 }

@@ -481,6 +481,32 @@ pub enum GraphNode {
     },
 }
 
+/// Where in the caller's text an edge's call sits, as the build found it.
+///
+/// Three states, not an `Option<TextRange>`: a consumer asking a graph edge for its place
+/// gets one of two different absences, and collapsing them would teach it to stop expecting
+/// a span that a later build can supply. Which state an edge carries is decided by the pass
+/// that produced it, never by its [`EdgeKind`] — the kind of a call read out of a body is
+/// reassigned during resolution, so classifying by kind would call a recorded span absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallSite {
+    /// Read out of a body, span kept.
+    Recorded(TextRange),
+    /// The edge stands for something written in code whose span this build does not keep.
+    NotRecorded,
+    /// Derived from metadata rather than from code: there is no span to keep.
+    Structural,
+}
+
+/// The location contract's code for an edge that stands for no call in code at all.
+/// Spelled here as a literal rather than imported from the serving layer, which sits far
+/// above this crate; the serving layer asserts the two agree.
+pub const NO_CALL_SITE: &str = "no_call_site";
+
+/// The location contract's code for an edge that DOES stand for something written in code,
+/// whose span this build does not keep.
+pub const CALL_SITE_NOT_RECORDED: &str = "call_site_not_recorded";
+
 /// A resolved call edge between two workspace graph nodes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCallEdge {
@@ -488,6 +514,9 @@ pub struct WorkspaceCallEdge {
     pub to: GraphNode,
     pub kind: EdgeKind,
     pub provenance: EdgeProvenance,
+    /// Where the call is written, carried to the artefact so a served edge can name its
+    /// place without re-lowering the caller's module.
+    pub call_site: CallSite,
     /// A client-capable caller invoking a server-only callee — a client→server
     /// roundtrip. Dispatch comes from the module's execution context (common
     /// modules) or per-method `&НаКлиенте`/`&НаСервере` annotations (form/command
@@ -2244,6 +2273,7 @@ EndProcedure
             to: mdo,
             kind: EdgeKind::ManagerAccess,
             provenance: EdgeProvenance::Inferred,
+            call_site: CallSite::Recorded(TextRange::new(0.into(), 8.into())),
             crosses_client_to_server: false,
         });
 

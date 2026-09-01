@@ -163,6 +163,41 @@ impl ResidentSession {
         self.diag.force_rescan();
     }
 
+    /// Read once, and read again behind a forced re-scan when the first answer is a miss
+    /// the caller would act on as final.
+    ///
+    /// A miss is not always the truth: the resident can simply be behind the disk, by two
+    /// routes that share this one answer. The throttled drift scan serves a stat universe
+    /// up to its window old, so an object written inside that window is not there yet. And
+    /// a healthy change hub reports only what the watch reaches, which is not the whole
+    /// tree: a scan root deeper than a direct child of the workspace root leaves the
+    /// directories above it watched by nobody, and a root appearing there raises no event
+    /// at all. Walking the disk once more answers both.
+    ///
+    /// Exactly one retry, and its outcome is the answer: a second miss is the truth, and a
+    /// loop of genuinely absent lookups must not walk the tree per attempt (the storm guard
+    /// bounds the rate, this bounds the count). Cancellation is observed BEFORE the forced
+    /// scan rather than only inside the retry, because that scan walks the tree — the most
+    /// expensive thing to do for a caller that has already gone.
+    ///
+    /// WHICH answers qualify belongs to the tool: only it knows what its own miss looks
+    /// like.
+    pub(crate) fn read_retrying_a_stale_miss<T>(
+        &self,
+        read: impl Fn() -> ResidentOutcome<T>,
+        is_stale_miss: impl Fn(&T) -> bool,
+    ) -> ResidentOutcome<T> {
+        let outcome = read();
+        let ResidentOutcome::Ready(answer, _) = &outcome else {
+            return outcome;
+        };
+        if !is_stale_miss(answer) || self.is_cancelled() {
+            return outcome;
+        }
+        self.force_rescan();
+        read()
+    }
+
     /// The lifecycle report, for rendering a `loading` envelope.
     pub(crate) fn status_report(&self) -> super::types::StatusReport {
         self.diag.status_report()
@@ -225,7 +260,13 @@ mod tests {
     use super::*;
     use crate::diagnostics_state::test_support::{write, write_common_module};
     use crate::walk_probe::{await_walk_start, entered, install, reset, WALK_GATE};
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::time::{Duration, Instant};
+
+    /// Two answers a fabricated read can give the retry policy. Any two distinct values
+    /// would do: the policy judges by the predicate it is handed, not by the type.
+    const MISS: u8 = 0;
+    const HIT: u8 = 1;
 
     /// Callers of one popular name. Measured, not assigned: on this stand an
     /// uncancelled walk takes ~3.5 s in a debug build (200 callers took 0.35 s — far too
@@ -598,5 +639,153 @@ mod tests {
             ),
             "a panic must never be dressed up as a cancellation"
         );
+    }
+
+    /// A freshness verdict for a fabricated outcome. Its values are never read by the
+    /// retry policy — it decides on the ANSWER — so any consistent set will do.
+    fn fresh() -> super::super::types::Freshness {
+        super::super::types::Freshness { revision: 1, stale: false, reload: "idle", topology: 7 }
+    }
+
+    fn bare_session(root: &std::path::Path) -> (DiagnosticsState, ResidentSession) {
+        let state = DiagnosticsState::for_workspace(root.to_path_buf());
+        let session =
+            ResidentSession { diag: state.clone(), cancel: Arc::new(RequestCancel::default()) };
+        (state, session)
+    }
+
+    /// A miss the tool calls stale earns exactly one forced re-scan and exactly one more
+    /// read. Two retries would let a loop of genuinely absent lookups walk the tree once
+    /// per attempt; none would leave the caller a final-looking miss the disk contradicts.
+    #[test]
+    fn a_warranted_miss_forces_one_rescan_and_reads_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session) = bare_session(dir.path());
+        let reads = AtomicUsize::new(0);
+
+        let outcome = session.read_retrying_a_stale_miss(
+            || {
+                reads.fetch_add(1, AtomicOrdering::SeqCst);
+                ResidentOutcome::Ready(MISS, fresh())
+            },
+            |answer| *answer == MISS,
+        );
+
+        assert!(matches!(outcome, ResidentOutcome::Ready(..)), "a Ready outcome stays Ready");
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 2, "one first read and one retry, no more");
+        assert_eq!(state.forced_rescans(), 1, "the hatch is consulted exactly once");
+    }
+
+    /// The answer is the SECOND read. Both reads here are misses by the predicate but
+    /// carry different values, because a node that threw the retry away and returned the
+    /// first outcome would satisfy every count the previous test makes.
+    #[test]
+    fn an_answer_after_a_forced_retry_is_the_second_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_state, session) = bare_session(dir.path());
+        let reads = AtomicUsize::new(0);
+
+        let outcome = session.read_retrying_a_stale_miss(
+            || {
+                let nth = reads.fetch_add(1, AtomicOrdering::SeqCst);
+                ResidentOutcome::Ready(nth, fresh())
+            },
+            |_| true,
+        );
+
+        match outcome {
+            ResidentOutcome::Ready(nth, _) => {
+                assert_eq!(nth, 1, "the retry's outcome is the answer, not the first read's")
+            }
+            _ => panic!("a Ready outcome stays Ready"),
+        }
+    }
+
+    /// An answer the tool does not call a miss is returned as it is: the hatch is not
+    /// consulted, and the tree is not walked for an answer nobody doubted.
+    #[test]
+    fn an_answer_the_predicate_declines_is_returned_without_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session) = bare_session(dir.path());
+        let reads = AtomicUsize::new(0);
+
+        let outcome = session.read_retrying_a_stale_miss(
+            || {
+                reads.fetch_add(1, AtomicOrdering::SeqCst);
+                ResidentOutcome::Ready(HIT, fresh())
+            },
+            |answer| *answer == MISS,
+        );
+
+        assert!(matches!(outcome, ResidentOutcome::Ready(..)));
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "no retry for an answer that resolved");
+        assert_eq!(state.forced_rescans(), 0, "and no consultation of the hatch");
+    }
+
+    /// An outcome that is not `Ready` carries no answer to judge: a resident that is
+    /// loading, disabled or failed is not a resident that fell behind the disk, and a
+    /// re-scan cannot turn any of the three into a hit.
+    #[test]
+    fn an_outcome_that_is_not_ready_is_returned_without_a_rescan() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, session) = bare_session(dir.path());
+
+        for (name, make) in [
+            ("loading", (|| ResidentOutcome::<u8>::Loading) as fn() -> ResidentOutcome<u8>),
+            ("disabled", || ResidentOutcome::<u8>::Disabled),
+            ("failed", || ResidentOutcome::<u8>::Failed("build refused".to_owned())),
+        ] {
+            let before = state.forced_rescans();
+            let reads = AtomicUsize::new(0);
+
+            let outcome = session.read_retrying_a_stale_miss(
+                || {
+                    reads.fetch_add(1, AtomicOrdering::SeqCst);
+                    make()
+                },
+                |_| true,
+            );
+
+            assert!(!matches!(outcome, ResidentOutcome::Ready(..)), "{name} stays what it is");
+            assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "{name} is not read twice");
+            assert_eq!(state.forced_rescans(), before, "{name} consults no hatch");
+        }
+    }
+
+    /// A cancel that arrives during the first read stops the forced re-scan too: that scan
+    /// walks the tree, and walking it for a caller who has gone is the most expensive thing
+    /// this path can do for nobody. The positive control is the same stand without the
+    /// cancel, so a policy that never retried at all could not pass both halves.
+    #[test]
+    fn a_cancel_arriving_before_the_retry_cancels_the_rescan_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = DiagnosticsState::for_workspace(dir.path().to_path_buf());
+
+        let cancel = Arc::new(RequestCancel::default());
+        let cancelled = ResidentSession { diag: state.clone(), cancel: Arc::clone(&cancel) };
+        let reads = AtomicUsize::new(0);
+        let _ = cancelled.read_retrying_a_stale_miss(
+            || {
+                reads.fetch_add(1, AtomicOrdering::SeqCst);
+                cancel.cancel_all();
+                ResidentOutcome::Ready(MISS, fresh())
+            },
+            |answer| *answer == MISS,
+        );
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 1, "a cancelled call is not read twice");
+        assert_eq!(state.forced_rescans(), 0, "and asks for no walk");
+
+        let live =
+            ResidentSession { diag: state.clone(), cancel: Arc::new(RequestCancel::default()) };
+        let reads = AtomicUsize::new(0);
+        let _ = live.read_retrying_a_stale_miss(
+            || {
+                reads.fetch_add(1, AtomicOrdering::SeqCst);
+                ResidentOutcome::Ready(MISS, fresh())
+            },
+            |answer| *answer == MISS,
+        );
+        assert_eq!(reads.load(AtomicOrdering::SeqCst), 2, "control: an uncancelled call retries");
+        assert_eq!(state.forced_rescans(), 1, "control: and consults the hatch once");
     }
 }

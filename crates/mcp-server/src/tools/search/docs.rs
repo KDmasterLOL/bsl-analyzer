@@ -192,7 +192,7 @@ mod tests {
             find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
                 .unwrap();
 
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         assert!(text.starts_with("#1 ["), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
@@ -293,7 +293,7 @@ mod tests {
         let building =
             find_docs(&Arc::new(Mutex::new(None)), None, None, "Массив", 10, usize::MAX).unwrap();
         assert_eq!(
-            building.content[0].raw.as_text().expect("text").text,
+            building.content[0].as_text().expect("text").text,
             "Search index is being built, please try again in a moment.",
         );
         let building_body = building.structured_content.as_ref().expect("structured envelope");
@@ -303,7 +303,7 @@ mod tests {
         let empty =
             find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
                 .unwrap();
-        assert_eq!(empty.content[0].raw.as_text().expect("text").text, "No results found.");
+        assert_eq!(empty.content[0].as_text().expect("text").text, "No results found.");
         // An empty index and an empty result set must not look alike to a machine consumer.
         assert_eq!(
             empty.structured_content.as_ref().expect("structured envelope")["hits"],

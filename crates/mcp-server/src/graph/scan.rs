@@ -79,10 +79,21 @@ pub(crate) fn scan_file_stats(workspace_root: &Path) -> Vec<FileStat> {
 /// One call is one traversal (parallel across top-level directories inside
 /// [`SourceSet::scan`]). An operation with several passes over the same universe
 /// must take ONE `SourceSet` and project it instead of calling this per pass.
+/// Test-side wrapper: production always states its exclusions, so the form that
+/// narrows by nothing is not reachable there by construction.
+#[cfg(test)]
 pub(crate) fn scan_stats_over_roots(
     roots: &[PathBuf],
 ) -> (Vec<FileStat>, super::universe::ScanVerdict) {
-    let set = SourceSet::scan(roots);
+    scan_stats_over_roots_excluding(roots, &[])
+}
+
+/// [`scan_stats_over_roots`] without descending into `excluded`.
+pub(crate) fn scan_stats_over_roots_excluding(
+    roots: &[PathBuf],
+    excluded: &[PathBuf],
+) -> (Vec<FileStat>, super::universe::ScanVerdict) {
+    let set = SourceSet::scan_excluding(roots, excluded);
     (super::universe::file_stats_from(&set), super::universe::ScanVerdict::of(&set))
 }
 
@@ -144,7 +155,10 @@ pub(crate) fn graph_file_matches_live_topology(workspace_root: &Path, graph: &Gr
     let Ok((_, fingerprint, _)) = graph.freshness_token() else {
         return false;
     };
-    fingerprint.topology == topology_u64(&super::ProjectSnapshot::load(workspace_root).configs)
+    // Configs only, no walk (see this function's doc): the exclusion set cannot
+    // influence a topology fingerprint.
+    fingerprint.topology
+        == topology_u64(&super::ProjectSnapshot::load_excluding(workspace_root, &[]).configs)
 }
 
 /// The BLAKE3-based 64-bit fold shared by every consumer that reduces the

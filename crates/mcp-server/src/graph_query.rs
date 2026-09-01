@@ -62,6 +62,45 @@ fn slice_in(text: &str, start: u32, end: u32) -> Option<String> {
     text.get(start as usize..end as usize).map(|s| s.replace("\r\n", "\n"))
 }
 
+/// Whether `haystack` names `needle` as a WHOLE identifier rather than merely containing it.
+/// Both are expected lowercased; case folding never turns a letter into a separator, so the
+/// boundary test is the same on either casing.
+///
+/// A substring test would confirm a whole class of drifted spans instead of catching them:
+/// `Считать` sits inside `СчитатьИное`, so a span that slid onto a call to a DIFFERENT method
+/// whose name merely contains the old one would certify itself, and the place would cut
+/// someone else's call. The node place compares its name slice for EQUALITY; a call
+/// expression carries more than the name, so the closest available analogue is an occurrence
+/// with no identifier character on either side of it.
+fn names_whole(haystack: &str, needle: &str) -> bool {
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    haystack.match_indices(needle).any(|(at, _)| {
+        let before = haystack[..at].chars().next_back();
+        let after = haystack[at + needle.len()..].chars().next();
+        !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+    })
+}
+
+/// Whether the stored declaration span still ends where a declaration ends.
+///
+/// A name check alone does not license the enclosing range: an edit INSIDE the body leaves
+/// the name where it was and still moves `src_end`, so a span built from it would end at the
+/// wrong bytes — plausible, and wrong exactly where a consumer cuts text. A declaration ends
+/// with its closing keyword, so that is what the stored end must land on.
+///
+/// Shared by the node place and the call-site place: both publish the same method's
+/// enclosing range, and one of them trusting the offsets the other rejected would put two
+/// answers about one declaration in one response.
+fn declaration_end_confirmed(text: &str, src_start: u32, src_end: u32) -> bool {
+    text.get(src_start as usize..src_end as usize)
+        .map(|slice| slice.trim_end().to_lowercase())
+        .is_some_and(|slice| {
+            ["конецпроцедуры", "конецфункции", "endprocedure", "endfunction"]
+                .iter()
+                .any(|keyword| slice.ends_with(keyword))
+        })
+}
+
 /// One node's file text, read AT THE POINT OF USE and at most once.
 ///
 /// Which consumer needs the bytes is decided by that consumer: the place needs them only
@@ -706,6 +745,10 @@ impl GraphDb {
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            // A fan-in tally counts calling modules; it never shows an edge, so asking where
+            // the calls are written would read up to 200 files for nothing.
+            call_sites: false,
+            max_call_sites: 0,
         };
         let mut by_module: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
@@ -858,18 +901,7 @@ impl GraphDb {
             return Ok(location.to_value());
         }
 
-        // The name alone is not enough. An edit INSIDE the body leaves the name where it
-        // was and still moves `src_end`, so a range built from it would end at the wrong
-        // bytes — plausible, and wrong exactly where a consumer cuts text. A declaration
-        // ends with its closing keyword, so that is what the stored end must land on.
-        let declared_end = text
-            .get(src_start as usize..src_end as usize)
-            .map(|slice| slice.trim_end().to_lowercase())
-            .is_some_and(|slice| {
-                ["конецпроцедуры", "конецфункции", "endprocedure", "endfunction"]
-                    .iter()
-                    .any(|keyword| slice.ends_with(keyword))
-            });
+        let declared_end = declaration_end_confirmed(text, src_start, src_end);
 
         let index = line_index::LineIndex::new(text);
         let name = index
@@ -886,6 +918,114 @@ impl GraphDb {
             .map(loc::PositionRange::from);
 
         Ok(location.with_range(name).with_enclosing_range(enclosing).to_value())
+    }
+
+    /// Build the places for the rows one served edge was grouped from.
+    ///
+    /// Returns either every place or none: a site that fails verification takes the whole
+    /// list with it. A list shortened by a dropped site would be indistinguishable from one
+    /// shortened by the cap, and only the second is something `call_sites_truncated` may
+    /// claim — so the honest answer for a file that no longer confirms its offsets is that
+    /// this edge has no place, named as such.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the inputs are the row set and the four things a place is built from; \
+                  bundling them into a struct would name the same list twice"
+    )]
+    fn call_site_places(
+        &self,
+        rows: &[&StoredEdge],
+        roots: Option<&bsl_search::WorkspaceRoots>,
+        from: Option<&StoredNode>,
+        to_name: Option<&str>,
+        texts: &mut AnswerTexts,
+        max_sites: usize,
+    ) -> CallSitePlaces {
+        let mut spans: Vec<(u32, u32)> = rows
+            .iter()
+            .filter_map(|row| row.call_start.zip(row.call_end))
+            .filter(|(start, end)| start < end)
+            .collect();
+
+        if spans.is_empty() {
+            // Which absence it is was decided by the pass that wrote the rows; "not recorded"
+            // wins a mixed group, because it is the one a later build can turn into a place.
+            let absent = rows
+                .iter()
+                .filter_map(|row| row.call_absent.as_deref())
+                .find(|code| *code == ide::CALL_SITE_NOT_RECORDED)
+                .or_else(|| rows.iter().filter_map(|row| row.call_absent.as_deref()).next())
+                .unwrap_or(ide::NO_CALL_SITE);
+            return CallSitePlaces::unavailable(absence_code(absent));
+        }
+
+        // One order, decided here and not by the store: the rows come back in whatever order
+        // the index walks them, and two answers about one edge must not disagree about which
+        // call comes first.
+        spans.sort_unstable();
+        spans.dedup();
+        let total = spans.len();
+
+        let Some(roots) = roots else {
+            return CallSitePlaces::unavailable(loc::LocationUnavailable::RootsUnavailable.code());
+        };
+        let (Some(from), Some(file)) = (from, from.and_then(|n| n.file.as_deref())) else {
+            return CallSitePlaces::unavailable(
+                loc::LocationUnavailable::SourcePathUnavailable.code(),
+            );
+        };
+        let location = match loc::Location::from_path(roots, std::path::Path::new(file)) {
+            Ok(location) => location,
+            Err(reason) => return CallSitePlaces::unavailable(reason.code()),
+        };
+        let Some(text) = texts.get(file) else {
+            // The offsets describe a file we cannot read now, so nothing confirms them.
+            return CallSitePlaces::unavailable(ide::SOURCE_DRIFTED);
+        };
+
+        // Offsets come from the artefact, the text from disk NOW. The one thing a call site
+        // can be checked against is the name it calls: BSL is case-insensitive, and a handler
+        // named in a string literal sits inside the same expression. An unnameable target
+        // leaves nothing to check against, which is not the same as checking and passing.
+        let confirmed = to_name.is_some_and(|name| {
+            let needle = name.to_lowercase();
+            !needle.is_empty()
+                && spans.iter().all(|(start, end)| {
+                    text.get(*start as usize..*end as usize)
+                        .is_some_and(|slice| names_whole(&slice.to_lowercase(), &needle))
+                })
+        });
+        if !confirmed {
+            return CallSitePlaces::unavailable(ide::SOURCE_DRIFTED);
+        }
+
+        let index = line_index::LineIndex::new(text);
+        let enclosing = from
+            .src_start
+            .zip(from.src_end)
+            .filter(|(start, end)| declaration_end_confirmed(text, *start, *end))
+            .and_then(|(start, end)| {
+                index.utf16_line_col_range(text, TextRange::new(start.into(), end.into()))
+            })
+            .map(loc::PositionRange::from);
+
+        let places: Vec<serde_json::Value> = spans
+            .iter()
+            .take(max_sites)
+            .map(|(start, end)| {
+                let range = index
+                    .utf16_line_col_range(text, TextRange::new((*start).into(), (*end).into()))
+                    .map(loc::PositionRange::from);
+                location.clone().with_range(range).with_enclosing_range(enclosing).to_value()
+            })
+            .collect();
+
+        CallSitePlaces {
+            truncated: places.len() < total,
+            places: Some(places),
+            total: Some(total),
+            unavailable: None,
+        }
     }
 
     /// Wrap an open connection.
@@ -1004,7 +1144,8 @@ impl GraphDb {
         out: &mut Vec<StoredEdge>,
     ) -> anyhow::Result<()> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT from_id, to_id, kind, provenance, crosses FROM edges WHERE {column} = ?1",
+            "SELECT from_id, to_id, kind, provenance, call_start, call_end, call_absent, crosses \
+             FROM edges WHERE {column} = ?1",
         ))?;
         let rows = stmt.query_map(params![node_id], |r| {
             Ok(StoredEdge {
@@ -1012,7 +1153,10 @@ impl GraphDb {
                 to: r.get(1)?,
                 kind: r.get(2)?,
                 provenance: r.get(3)?,
-                crosses: r.get::<_, i64>(4)? != 0,
+                call_start: r.get(4)?,
+                call_end: r.get(5)?,
+                call_absent: r.get(6)?,
+                crosses: r.get::<_, i64>(7)? != 0,
             })
         })?;
         for row in rows {
@@ -1131,26 +1275,61 @@ impl GraphDb {
             }
         }
 
-        // Keep only edges whose endpoints both survived; dedup by (from, to, kind)
-        // so a `Both` sweep that meets an edge from each end emits it once. An
-        // endpoint equal to the root is omitted (the response carries the root once).
-        let mut seen_edges: std::collections::HashSet<(String, String, String)> =
-            std::collections::HashSet::new();
-        let edges = out_edges
-            .into_iter()
-            .filter(|e| {
-                (e.from == root.id || kept.contains(&e.from))
-                    && (e.to == root.id || kept.contains(&e.to))
-            })
-            .filter(|e| seen_edges.insert((e.from.clone(), e.to.clone(), e.kind.clone())))
-            .map(|e| EdgeRef {
-                kind: edge_kind(&e.kind),
-                provenance: provenance(&e.provenance),
-                crosses_client_to_server: e.crosses,
-                from: (e.from != root.id).then_some(e.from),
-                to: (e.to != root.id).then_some(e.to),
-            })
-            .collect();
+        // Keep only edges whose endpoints both survived; group by (from, to, kind) so a
+        // `Both` sweep that meets an edge from each end emits it once. The store keeps one
+        // row per call site, so grouping is also what gives a served edge every place it has.
+        // An endpoint equal to the root is omitted (the response carries the root once).
+        let mut grouped: std::collections::HashMap<(&str, &str, &str), Vec<&StoredEdge>> =
+            std::collections::HashMap::new();
+        let mut order: Vec<(&str, &str, &str)> = Vec::new();
+        for e in out_edges.iter().filter(|e| {
+            (e.from == root.id || kept.contains(&e.from))
+                && (e.to == root.id || kept.contains(&e.to))
+        }) {
+            let key = (e.from.as_str(), e.to.as_str(), e.kind.as_str());
+            grouped
+                .entry(key)
+                .or_insert_with(|| {
+                    order.push(key);
+                    Vec::new()
+                })
+                .push(e);
+        }
+
+        let mut texts = AnswerTexts::default();
+        let mut edges = Vec::with_capacity(order.len());
+        for key in order {
+            let rows = &grouped[&key];
+            let first = rows[0];
+            let sites = if params.call_sites {
+                let from = self.fetch_node(first.from.as_str())?;
+                // The name the edge calls is the only thing a recorded span can be checked
+                // against, so an endpoint the artefact cannot name leaves the span
+                // unverifiable — never verified-by-default against an empty needle.
+                let to_name = self.fetch_node(first.to.as_str())?.map(|node| node.name);
+                self.call_site_places(
+                    rows,
+                    roots,
+                    from.as_ref(),
+                    to_name.as_deref(),
+                    &mut texts,
+                    params.max_call_sites,
+                )
+            } else {
+                CallSitePlaces { places: None, total: None, truncated: false, unavailable: None }
+            };
+            edges.push(EdgeRef {
+                kind: edge_kind(&first.kind),
+                provenance: provenance(&first.provenance),
+                crosses_client_to_server: first.crosses,
+                from: (first.from != root.id).then(|| first.from.clone()),
+                to: (first.to != root.id).then(|| first.to.clone()),
+                call_sites: sites.places,
+                call_sites_total: sites.total,
+                call_sites_truncated: sites.truncated,
+                call_sites_unavailable: sites.unavailable,
+            });
+        }
 
         let returned = nodes.len();
         let confidence = (!by_provenance.is_empty()).then(|| ide::confidence_label(&by_provenance));
@@ -1387,7 +1566,60 @@ struct StoredEdge {
     to: String,
     kind: String,
     provenance: String,
+    /// The call's byte range in the `from` node's file, when this row records one.
+    call_start: Option<u32>,
+    call_end: Option<u32>,
+    /// The contract code for why there is no range, when there is none.
+    call_absent: Option<String>,
     crosses: bool,
+}
+
+/// What one served edge answers when its caller asked where its call is written.
+struct CallSitePlaces {
+    places: Option<Vec<serde_json::Value>>,
+    total: Option<usize>,
+    truncated: bool,
+    unavailable: Option<&'static str>,
+}
+
+impl CallSitePlaces {
+    fn unavailable(code: &'static str) -> Self {
+        Self { places: None, total: None, truncated: false, unavailable: Some(code) }
+    }
+}
+
+/// Map a stored absence code back to the contract's own `'static` spelling, so nothing but a
+/// vocabulary member ever reaches a consumer. An unrecognised code cannot come from this
+/// binary's projection — the schema version gate rejects an older artefact outright — and the
+/// fallback is the reading that promises less: "not recorded" leaves a later build free to
+/// supply the place, where "no call site" would tell the consumer to stop asking.
+fn absence_code(stored: &str) -> &'static str {
+    loc::LocationUnavailable::ALL
+        .iter()
+        .find(|reason| reason.code() == stored)
+        .map_or(ide::CALL_SITE_NOT_RECORDED, |reason| reason.code())
+}
+
+/// The file texts ONE answer reads, kept for that answer alone.
+///
+/// Distinct from [`NodeText`], which memoizes one node's file: a `callees` answer takes every
+/// call site out of the same file — the traversal root's — and re-reading it once per edge is
+/// the waste this exists to avoid. It lives on the stack of a single `neighbors` call and
+/// dies with it, so nothing is remembered across answers and the offsets are still checked
+/// against bytes read during THIS one. Bounded by construction: an answer only reaches files
+/// of nodes it kept.
+#[derive(Default)]
+struct AnswerTexts {
+    read: std::collections::HashMap<String, Option<String>>,
+}
+
+impl AnswerTexts {
+    fn get(&mut self, file: &str) -> Option<&str> {
+        if !self.read.contains_key(file) {
+            self.read.insert(file.to_string(), std::fs::read_to_string(file).ok());
+        }
+        self.read.get(file).and_then(|text| text.as_deref())
+    }
 }
 
 /// Truncate `src` to at most `max_chars` bytes on a char boundary.
@@ -1496,6 +1728,9 @@ mod tests {
                     to_id: "mdo/Catalog/Товары".to_string(),
                     kind: "read",
                     provenance: "resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
                 // The object contains its own attribute, and the edge points back
@@ -1505,6 +1740,9 @@ mod tests {
                     to_id: "attribute/Catalog/Товары/Код".to_string(),
                     kind: "contains",
                     provenance: "resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
             ])

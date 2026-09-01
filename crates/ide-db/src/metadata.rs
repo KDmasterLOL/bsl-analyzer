@@ -351,7 +351,8 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
 /// fingerprint across fields would let a reload be observed half-applied.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfigsSnapshot {
-    /// Config roots in declaration order; exactly one `None` label (the base).
+    /// Config roots in declaration order. At most one `None` label — the base;
+    /// an extension-only project has none, and every entry is an extension.
     pub paths: Vec<(Option<String>, PathBuf)>,
     /// Canonicalized counterpart of `paths` (same order) — what per-file
     /// longest-prefix matching uses, so a symlinked workspace still matches.
@@ -361,8 +362,9 @@ pub struct WorkspaceConfigsSnapshot {
     /// for independent extensions — which keeps the pre-dependency semantics:
     /// a file sees the base plus its own extension only.
     pub closures: Vec<Vec<usize>>,
-    /// Global root order for whole-workspace composition: base first, then
-    /// extensions in dependencies-before-dependents order. Indices point into
+    /// Global root order for whole-workspace composition: the base first when the
+    /// project has one, then extensions in dependencies-before-dependents order.
+    /// Indices point into
     /// `paths`; unlike `closures`, this is the designer-wide view used when no
     /// file anchors visibility.
     pub topological_order: Vec<usize>,

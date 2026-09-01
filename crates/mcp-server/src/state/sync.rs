@@ -484,8 +484,10 @@ impl SharedState {
     }
 
     fn prepare_search_rewalk(engine: &SharedSearchEngine, plan: &mut SearchDriftPlan) {
-        let Some(declared) = Self::registered_roots(engine) else { return };
-        let set = project_model::SourceSet::scan(&declared);
+        let Some((declared, excluded)) = Self::registered_roots_and_exclusions(engine) else {
+            return;
+        };
+        let set = project_model::SourceSet::scan_excluding(&declared, &excluded);
         let present: std::collections::HashSet<_> = set
             .files
             .iter()
@@ -517,6 +519,30 @@ impl SharedState {
         #[cfg(test)]
         let force_apply_error =
             FORCE_DRIFT_APPLY_ERROR_ENGINE.load(Ordering::SeqCst) == Arc::as_ptr(shared) as usize;
+        // A pass with nothing to apply must not touch the lease. The fence takes the
+        // lock file, re-reads the record and restamps it through `checkpoint`, and all
+        // three land inside the workspace when the cache sits under it — so an empty
+        // pass would publish the very event that woke it and wake itself again.
+        //
+        // The fence is also where a superseded generation learns it lost the caches, so
+        // this moves that discovery from "every wake" to "every wake that has work" — the
+        // right place for it: a pass with nothing to write has nothing to publish over a
+        // new owner, and it goes straight back to sleep.
+        if plan.preparation_error.is_none() && plan.complete() {
+            // Still epoch-checked, because "empty" is itself a verdict of the roots the
+            // plan was prepared against: a file under a root registered since then maps
+            // to no key yet, so the plan comes out empty and must be replanned, not
+            // reported as nothing to do. Reading the epoch takes the engine lock, which
+            // this pass takes anyway — what the early return avoids is the LEASE fence.
+            // Anything other than a confirmed match falls through to the full path, whose
+            // answer for a missing or poisoned engine is already the right one.
+            let current = shared.lock().ok().and_then(|guard| {
+                guard.as_ref().map(bsl_search::SearchEngine::workspace_roots_epoch)
+            });
+            if current == Some(plan.roots_epoch) {
+                return super::WorkspaceSearchApply::Applied(true);
+            }
+        }
         Self::apply_workspace_search_checkpointed(shared, lease, |engine, checkpoint| {
             if engine.workspace_roots_epoch() != plan.roots_epoch {
                 return std::ops::ControlFlow::Continue(Err(bsl_search::SearchError::Index(
@@ -689,11 +715,28 @@ impl SharedState {
     /// walk itself runs with none held. Reading the table rather than a path captured at startup
     /// is what keeps the walk and the store's keys speaking of the same universe: a walk narrower
     /// than the table makes the reconcile below delete the roots it never visited.
+    /// Test-side wrapper: production always states its exclusions, so the form that
+    /// narrows by nothing is not reachable there by construction.
+    #[cfg(test)]
     fn registered_roots(engine: &SharedSearchEngine) -> Option<Vec<PathBuf>> {
+        Self::registered_roots_and_exclusions(engine).map(|(roots, _)| roots)
+    }
+
+    /// The registered roots together with the subtrees a walk of them must skip.
+    ///
+    /// Returned as a pair, and read under the one lock: a caller that fetched the roots
+    /// and the holes separately could pair a fresh root set with a stale hole, and the
+    /// walk would then read the cache of a workspace it no longer serves.
+    fn registered_roots_and_exclusions(
+        engine: &SharedSearchEngine,
+    ) -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
         let guard = engine.lock().ok()?;
         let engine = guard.as_ref()?;
         let roots = engine.workspace_roots()?;
-        Some(roots.entries().map(|(_, declared)| declared.to_path_buf()).collect())
+        Some((
+            roots.entries().map(|(_, declared)| declared.to_path_buf()).collect(),
+            roots.excluded().to_vec(),
+        ))
     }
 
     /// Reconcile the just-indexed workspace store against on-disk truth at BOOT, on the still-owned
@@ -721,7 +764,8 @@ impl SharedState {
         let Some(roots) = engine.workspace_roots() else { return Some(false) };
         let declared: Vec<PathBuf> =
             roots.entries().map(|(_, declared)| declared.to_path_buf()).collect();
-        let set = project_model::SourceSet::scan(&declared);
+        let excluded = roots.excluded().to_vec();
+        let set = project_model::SourceSet::scan_excluding(&declared, &excluded);
         let present: std::collections::HashSet<PathBuf> = set
             .files
             .iter()
@@ -976,6 +1020,48 @@ mod tests {
         assert!(!debt.required(), "a converged full rescan retires the one debt slot");
     }
 
+    /// The idle pass is the hot one: with the cache under the watched tree, every
+    /// lock take and every lease restamp it performs is an event that wakes it again.
+    /// The observable is the lock file, not the lease record — the record carries a
+    /// whole-second stamp, so a rewrite inside the same second leaves it byte-identical
+    /// and an assertion on its contents would hold over a pass that did write.
+    #[test]
+    fn an_empty_drift_plan_never_takes_the_lease_fence() {
+        let dir = tempdir().unwrap();
+        let shared: super::super::SharedSearchEngine = Arc::new(Mutex::new(Some(
+            SearchEngine::fts_only(&dir.path().join("search.db")).unwrap(),
+        )));
+        let lease = crate::workspace_lease::WorkspaceLease::claim(dir.path());
+        let lock = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path()).lease_lock_path();
+        std::fs::remove_file(&lock).unwrap();
+
+        let mut empty = SearchDriftPlan::default();
+        assert!(matches!(
+            SharedState::apply_prepared_search_drift(
+                &shared,
+                &lease,
+                &mut empty,
+                &crate::graph::GraphState::disabled(),
+            ),
+            crate::state::WorkspaceSearchApply::Applied(true)
+        ));
+        assert!(!lock.exists(), "an empty plan took the lease fence");
+
+        // Positive control: a plan with work must still take it, or the assertion
+        // above would hold on an apply that does nothing at all.
+        let mut work = SearchDriftPlan {
+            dirty_keys: vec![bsl_search::FileKey::configuration("src/a.bsl")],
+            ..Default::default()
+        };
+        SharedState::apply_prepared_search_drift(
+            &shared,
+            &lease,
+            &mut work,
+            &crate::graph::GraphState::disabled(),
+        );
+        assert!(lock.exists(), "a plan with work skipped the lease fence");
+    }
+
     #[test]
     fn superseded_daemon_cannot_mutate_shared_search() {
         struct Provider;
@@ -1101,7 +1187,12 @@ mod tests {
 
         let old = crate::workspace_lease::WorkspaceLease::claim(dir.path());
         let _newer = crate::workspace_lease::WorkspaceLease::claim(dir.path());
-        let mut plan = SearchDriftPlan { mark_all_context: true, ..Default::default() };
+        let mut plan = SearchDriftPlan {
+            // Non-empty on purpose: an idle plan never reaches the fence, and this
+            // asserts what the FENCE does when the lease has been taken over.
+            dirty_keys: vec![bsl_search::FileKey::configuration("src/a.bsl")],
+            ..Default::default()
+        };
         assert!(matches!(
             SharedState::apply_prepared_search_drift(
                 &shared,
@@ -1116,7 +1207,10 @@ mod tests {
         let _force_lock = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         super::FORCE_DRIFT_APPLY_ERROR_ENGINE
             .store(Arc::as_ptr(&shared) as usize, std::sync::atomic::Ordering::SeqCst);
-        let mut failing_plan = SearchDriftPlan::default();
+        let mut failing_plan = SearchDriftPlan {
+            dirty_keys: vec![bsl_search::FileKey::configuration("src/a.bsl")],
+            ..Default::default()
+        };
         let failed = SharedState::apply_prepared_search_drift(
             &shared,
             &retry_lease,

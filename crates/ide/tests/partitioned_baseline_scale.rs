@@ -102,10 +102,7 @@ fn loads_and_classifies_1_6m_entries_with_bounded_rss() {
     let object = partition_object_path("main", &key, &hash).unwrap();
     std::fs::rename(&temporary, baseline_root.join(&object)).unwrap();
     let plan = DiagnosticsBaselinePartitionPlan {
-        project_scope: DiagnosticsBaselineProjectScope {
-            source_root: String::new(),
-            extensions: vec![],
-        },
+        project_scope: DiagnosticsBaselineProjectScope { source_root: None, extensions: vec![] },
         project_scope_fingerprint: "a".repeat(64),
         selection_fingerprint: "b".repeat(64),
         partitions: vec![DiagnosticsBaselinePartition { id: "main".to_owned(), key, identity }],

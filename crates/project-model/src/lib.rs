@@ -12,6 +12,7 @@ pub use diagnostics_baseline_fs::ManagedBaselineDirectory;
 
 pub mod extension_topology;
 pub mod file_role;
+pub mod path_scope;
 pub mod source_set;
 pub mod workspace_walk;
 pub use extension_topology::{
@@ -22,6 +23,7 @@ pub use file_role::{
     file_role, is_bsl_source_path, is_common_module_body_path, is_metadata_path,
     is_substrate_listed_body_path, FileRole, METADATA_WATCHED_EXTENSIONS, SOURCE_EXTENSIONS,
 };
+pub use path_scope::{PathScope, Spellings};
 pub use source_set::SourceSet;
 pub use workspace_walk::{
     path_crosses_a_link_cycle, walk_workspace_roots, WalkOutcome, WalkedFile,
@@ -47,7 +49,11 @@ impl std::error::Error for ConfigLoadError {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsBaselineProjectScope {
-    pub source_root: String,
+    /// The base configuration root, relative to the project. `None` for an
+    /// extension-only project, which has no base at all — as opposed to a base
+    /// that happens to sit at the project root. Serialization is unchanged for a
+    /// project that has one, so published baselines keep their fingerprints.
+    pub source_root: Option<String>,
     pub extensions: Vec<DiagnosticsBaselineProjectExtension>,
 }
 
@@ -229,8 +235,17 @@ pub struct Project {
     pub root: PathBuf,
     pub config: ProjectConfig,
     source_path: Option<PathBuf>,
+    /// Set when discovery found `Configuration.xml` where a main configuration is
+    /// expected and it turned out to be an extension. Never a source root.
+    extension_in_config_location: Option<PathBuf>,
     extension_paths: Vec<(String, PathBuf)>,
     topology: ExtensionTopology,
+}
+
+/// What discovery found at the places a main configuration is expected.
+struct DiscoveredSource {
+    configuration: Option<PathBuf>,
+    extension: Option<PathBuf>,
 }
 
 impl Project {
@@ -248,7 +263,10 @@ impl Project {
         config: ProjectConfig,
     ) -> Result<Self, ProjectError> {
         let root = root.into();
-        let source_path = Self::discover_source_path(&root, &config)?;
+        let DiscoveredSource {
+            configuration: source_path,
+            extension: extension_in_config_location,
+        } = Self::discover_source_path(&root, &config)?;
         let specs = Self::resolve_extension_specs(&root, &config)?;
         let base_path = source_path.as_deref().unwrap_or(&root);
         let canonical_base =
@@ -259,7 +277,14 @@ impl Project {
             .iter()
             .map(|node| (node.name().to_string(), node.path().to_path_buf()))
             .collect();
-        Ok(Self { root, config, source_path, extension_paths, topology })
+        Ok(Self {
+            root,
+            config,
+            source_path,
+            extension_in_config_location,
+            extension_paths,
+            topology,
+        })
     }
 
     pub fn source_path(&self) -> &Path {
@@ -286,10 +311,42 @@ impl Project {
         self.source_path.as_deref()
     }
 
-    /// Base root used by semantic/search compatibility layers. A real configured
-    /// configuration always wins. Projects with extensions but no base have no
-    /// semantic base at all. Only a legacy/generic project with neither a base nor
-    /// extensions treats the workspace root as its anonymous source root.
+    /// Advisory for a project that is a configuration extension analyzed without
+    /// the main configuration it extends. In that state its calls into the main
+    /// configuration cannot resolve, so valid code is reported as broken — saying
+    /// so beats letting the findings speak for themselves, because from the outside
+    /// they read as the analyzer being wrong.
+    ///
+    /// The decision belongs to the project, not to a path a caller happens to hold:
+    /// what matters is the directory the analyzer treats as the main configuration,
+    /// and a base-less project reports the workspace root as its source path even
+    /// when its extension roots are the real subject.
+    pub fn standalone_extension_notice(&self) -> Option<String> {
+        // Whatever the analyzer is treating as the main configuration is the subject:
+        // a root pointed at an extension on purpose is just as standalone as one that
+        // has no base at all, and both report the same unresolved calls.
+        let subject = self
+            .configuration_path()
+            .or(self.extension_in_config_location.as_deref())
+            .or_else(|| self.extension_paths.first().map(|(_, path)| path.as_path()))
+            .unwrap_or(&self.root);
+        (configuration_kind(subject) == ConfigurationKind::Extension).then(|| {
+            format!(
+                "{} is a configuration extension analyzed without its main configuration. \
+                 Calls into the main configuration will be reported as unresolved. \
+                 Point --configuration-root at the main configuration, declare it in \
+                 [source].root, or use [source.configuration] with a shared configuration \
+                 id/version.",
+                subject.display()
+            )
+        })
+    }
+
+    /// Base root used by semantic/search compatibility layers. A configured
+    /// configuration always wins. A project with extensions but no base has no
+    /// semantic base at all. Only a project with neither — one that is just a
+    /// directory of sources — treats the workspace root as its anonymous source
+    /// root.
     pub fn semantic_base_path(&self) -> Option<&Path> {
         self.configuration_path()
             .or_else(|| self.extension_paths.is_empty().then_some(self.root.as_path()))
@@ -356,12 +413,18 @@ impl Project {
                 resolve_baseline_directory(&configured_path, &project_root)?
             }
         };
-        let source_root = relative_baseline_path(
-            &canonicalize_baseline_path(self.source_path())?,
-            &project_root,
-        )?;
+        // `semantic_base_path`, not `configuration_path`: a project that is just a
+        // directory of sources has no configuration but is not extension-only. Its
+        // base is the workspace root, which is what published baselines already
+        // record. Only a project WITH extensions and no configuration has no base.
+        let source_root = match self.semantic_base_path() {
+            Some(base) => {
+                Some(relative_baseline_path(&canonicalize_baseline_path(base)?, &project_root)?)
+            }
+            None => None,
+        };
 
-        let mut seen = std::collections::HashSet::from([source_root.clone()]);
+        let mut seen: std::collections::HashSet<String> = source_root.iter().cloned().collect();
         let mut extensions = Vec::with_capacity(self.topology.nodes().len());
         for id in self.topology.topological_order() {
             let node = self.topology.node(*id);
@@ -406,7 +469,14 @@ impl Project {
             }
         }
 
-        let mut canonical_roots = vec![canonicalize_baseline_path(self.source_path())?];
+        // The nesting check takes only a CONFIGURED base — deliberately narrower
+        // than the scope above. An anonymous base at the workspace root contains
+        // every extension by construction, so including it would make each of them
+        // look nested inside the base and reject the whole plan.
+        let mut canonical_roots = match self.configuration_path() {
+            Some(base) => vec![canonicalize_baseline_path(base)?],
+            None => Vec::new(),
+        };
         canonical_roots.extend(
             self.topology
                 .nodes()
@@ -481,14 +551,20 @@ impl Project {
         }
         normalized_groups.sort_by(|left, right| left.0.cmp(&right.0));
 
-        let mut partitions = vec![partition(
-            "main".to_owned(),
-            DiagnosticsBaselinePartitionIdentity::Main { path: resolved.scope.source_root.clone() },
-        )];
-        let mut roots = vec![DiagnosticsBaselineRootOwner {
-            root: resolved.scope.source_root.clone(),
-            partition_id: "main".to_owned(),
-        }];
+        // The base owns a partition only when the project has one. A project without
+        // it must not grow a "main" partition rooted at the workspace directory: that
+        // would claim every file outside an extension for a configuration that does
+        // not exist.
+        let mut partitions = Vec::new();
+        let mut roots = Vec::new();
+        if let Some(base) = resolved.scope.source_root.clone() {
+            partitions.push(partition(
+                "main".to_owned(),
+                DiagnosticsBaselinePartitionIdentity::Main { path: base.clone() },
+            ));
+            roots
+                .push(DiagnosticsBaselineRootOwner { root: base, partition_id: "main".to_owned() });
+        }
 
         for (group_name, members) in &normalized_groups {
             let id = format!("group:{group_name}");
@@ -614,14 +690,20 @@ impl Project {
     fn discover_source_path(
         root: &Path,
         config: &ProjectConfig,
-    ) -> Result<Option<PathBuf>, ConfigLoadError> {
+    ) -> Result<DiscoveredSource, ConfigLoadError> {
+        let found = |path: PathBuf| DiscoveredSource { configuration: Some(path), extension: None };
+        // A directory that carries `Configuration.xml` where a MAIN configuration is
+        // expected, but turned out to be an extension. It is not a base and does not
+        // become a source root, yet it is what makes this project a base-less
+        // extension — which is exactly what the standalone advisory reports.
+        let mut extension = None;
         if config.configuration_root.is_some() || config.configuration_dependency.is_some() {
             let path = config
                 .resolve_configuration_path(root)?
                 .expect("configured source resolves to a path");
             if configuration_xml_in(&path).is_some() {
                 tracing::info!(?path, "found explicitly configured 1C configuration");
-                return Ok(Some(path));
+                return Ok(found(path));
             }
             if config.configuration_dependency.is_some() {
                 return Err(config.config_error(format!(
@@ -633,23 +715,30 @@ impl Project {
             tracing::warn!(?path, "configuration root specified but Configuration.xml not found");
         }
 
-        if let Some(path) = search_configuration_xml(root, 2) {
-            tracing::info!(?path, "found Configuration.xml by search");
-            return Ok(Some(path));
+        match search_configuration(root, 2) {
+            SearchOutcome::Configuration(path) => {
+                tracing::info!(?path, "found Configuration.xml by search");
+                return Ok(found(path));
+            }
+            SearchOutcome::Extension(path) => extension = extension.or(Some(path)),
+            SearchOutcome::None => {}
         }
 
         for pattern in &["src/cf", "Configuration"] {
             let path = root.join(pattern);
-            if configuration_xml_in(&path).is_some()
-                && configuration_kind(&path) != ConfigurationKind::Extension
-            {
-                tracing::info!(?path, pattern, "found configuration using common pattern");
-                return Ok(Some(path));
+            if configuration_xml_in(&path).is_none() {
+                continue;
             }
+            if configuration_kind(&path) == ConfigurationKind::Extension {
+                extension = extension.or(Some(path));
+                continue;
+            }
+            tracing::info!(?path, pattern, "found configuration using common pattern");
+            return Ok(found(path));
         }
 
         tracing::debug!(?root, "no 1C configuration found");
-        Ok(None)
+        Ok(DiscoveredSource { configuration: None, extension })
     }
 
     pub fn extension_paths(&self) -> &[(String, PathBuf)] {
@@ -1097,6 +1186,10 @@ fn dotenv_value(path: &Path, requested: &str) -> Result<Option<String>, String> 
     }
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
+    // Several editors write a BOM in front of a file saved as UTF-8. It is not
+    // whitespace, so it would otherwise glue itself to the first key and hide it —
+    // and the resulting error names a variable the file plainly contains.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
     for (index, raw_line) in text.lines().enumerate() {
         let mut line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -1137,14 +1230,21 @@ fn parse_dotenv_value(value: &str, path: &Path, line: usize) -> Result<String, S
         let mut closed_at = None;
         for (offset, ch) in quoted.char_indices() {
             if escaped {
-                result.push(match ch {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '"' => '"',
-                    '\\' => '\\',
-                    other => other,
-                });
+                match ch {
+                    'n' => result.push('\n'),
+                    'r' => result.push('\r'),
+                    't' => result.push('\t'),
+                    '"' => result.push('"'),
+                    '\\' => result.push('\\'),
+                    // The values here are filesystem paths, and on Windows a
+                    // backslash is an ordinary path separator rather than the start
+                    // of an escape. Swallowing it turns `C:\1C\Store` into
+                    // `C:1CStore` and the project stops loading.
+                    other => {
+                        result.push('\\');
+                        result.push(other);
+                    }
+                }
                 escaped = false;
             } else if ch == '\\' {
                 escaped = true;
@@ -1168,23 +1268,48 @@ fn parse_dotenv_value(value: &str, path: &Path, line: usize) -> Result<String, S
     Ok(unquoted.to_owned())
 }
 
-fn search_configuration_xml(root: &Path, max_depth: usize) -> Option<PathBuf> {
-    search_configuration_xml_recursive(root, max_depth, 0)
+/// What a bounded search for a main configuration turned up.
+enum SearchOutcome {
+    Configuration(PathBuf),
+    /// A `Configuration.xml` was found, but it belongs to an extension. Reported
+    /// rather than dropped: it is not a base, yet it tells the caller the project
+    /// is a base-less extension rather than an ordinary directory of sources.
+    Extension(PathBuf),
+    None,
 }
 
-fn search_configuration_xml_recursive(
+fn search_configuration(root: &Path, max_depth: usize) -> SearchOutcome {
+    let mut extension = None;
+    match search_configuration_recursive(root, max_depth, 0, &mut extension) {
+        Some(path) => SearchOutcome::Configuration(path),
+        None => match extension {
+            Some(path) => SearchOutcome::Extension(path),
+            None => SearchOutcome::None,
+        },
+    }
+}
+
+/// Returns the first main configuration; the first extension the walk meets is
+/// left in `extension` — first in traversal order, which is not necessarily the
+/// shallowest. A configuration always wins over an extension, whatever the visit
+/// order, because the search only stops on a configuration.
+fn search_configuration_recursive(
     dir: &Path,
     max_depth: usize,
     current_depth: usize,
+    extension: &mut Option<PathBuf>,
 ) -> Option<PathBuf> {
     if current_depth > max_depth {
         return None;
     }
 
-    if configuration_xml_in(dir).is_some()
-        && configuration_kind(dir) != ConfigurationKind::Extension
-    {
-        return Some(dir.to_path_buf());
+    if configuration_xml_in(dir).is_some() {
+        if configuration_kind(dir) != ConfigurationKind::Extension {
+            return Some(dir.to_path_buf());
+        }
+        if extension.is_none() {
+            *extension = Some(dir.to_path_buf());
+        }
     }
 
     if current_depth < max_depth {
@@ -1194,10 +1319,11 @@ fn search_configuration_xml_recursive(
                     if file_type.is_dir() {
                         let name = entry.file_name();
                         if !name.to_string_lossy().starts_with('.') {
-                            if let Some(path) = search_configuration_xml_recursive(
+                            if let Some(path) = search_configuration_recursive(
                                 &entry.path(),
                                 max_depth,
                                 current_depth + 1,
+                                extension,
                             ) {
                                 return Some(path);
                             }
@@ -1327,24 +1453,6 @@ fn scan_for_extension_marker(head: &[u8]) -> MarkerScan {
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Advisory for a root that is itself an extension, analyzed without the main
-/// configuration it extends. Returns `None` for anything else.
-///
-/// In that state the extension's calls into the main configuration's exported
-/// common modules cannot resolve, so the analyzer reports valid code as broken.
-/// Saying so beats letting the findings speak for themselves — from the outside
-/// they read as the analyzer being wrong.
-pub fn standalone_extension_notice(source_path: &Path) -> Option<String> {
-    (configuration_kind(source_path) == ConfigurationKind::Extension).then(|| {
-        format!(
-            "{} is a configuration extension analyzed without its main configuration. \
-             Calls into the main configuration will be reported as unresolved. \
-             Point --configuration-root at the main configuration, declare it in [source].root, or use [source.configuration] with a shared configuration id/version.",
-            source_path.display()
-        )
-    })
 }
 
 /// One entry of the `extensions` list: either a bare path string (legacy,
@@ -1566,13 +1674,27 @@ pub struct AnalysisConfig {
 }
 
 /// The conventional project-config file names at a workspace root, in load
-/// precedence order. Watchers and drift fingerprints must treat exactly this
-/// set as "the config", so a change to any of them re-derives the project.
+/// precedence order — the files [`ProjectConfig::load`] reads. This is NOT the
+/// set that decides whether a change re-derives the project: use
+/// [`is_project_input_file_name`] for that.
 pub const CONFIG_FILE_NAMES: [&str; 3] =
     ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"];
 pub const PROJECT_ENV_FILE_NAME: &str = ".env";
+/// Every file at a workspace root the project is derived from: the config files
+/// plus the environment file that carries machine-local values such as the
+/// shared-configuration store root.
 pub const PROJECT_INPUT_FILE_NAMES: [&str; 4] =
     ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json", PROJECT_ENV_FILE_NAME];
+
+/// Whether a file name is one the project is derived from, and therefore whether
+/// a change to it must re-derive the project.
+///
+/// Every host that turns a file event into a project reload asks this, rather
+/// than comparing against its own copy of the names: a second copy is a second
+/// answer, and the one that drifts is silently the one that stops reacting.
+pub fn is_project_input_file_name(name: &str) -> bool {
+    PROJECT_INPUT_FILE_NAMES.contains(&name)
+}
 
 impl ProjectConfig {
     /// Loads the project config from the conventional file names under `root`.
@@ -1691,6 +1813,12 @@ impl ProjectConfig {
                     ))
                 })?,
         };
+        // Anchored to the project exactly like `[source].root` is: an absolute
+        // value passes through `join` untouched, while a relative one — the natural
+        // way to point at a store next to the checkout — stops depending on the
+        // process working directory. Every consumer of a source root demands an
+        // absolute path, and the LSP aborts on anything else.
+        let shared_root = project_root.join(shared_root);
         let mut resolved = shared_root.join(&configuration.id);
         if let Some(version) = configuration.version.as_deref() {
             resolved.push(version);
@@ -2892,15 +3020,19 @@ mod tests {
         DiagnosticsBaselineConfig, DiagnosticsBaselineGroupConfig,
         DiagnosticsBaselinePartitionIdentity, DiagnosticsBaselinePartitionPolicy,
         DiagnosticsBaselineProjectError, DiagnosticsBaselineProjectMode,
-        DiagnosticsBaselineSelection, ExtensionDecl, FeaturesConfig, PostgresAccessMode, Project,
-        ProjectConfig, ProjectDiagnosticsConfig, ProjectError, ResolvePostgresUrlError,
-        SearchBaselineBackend, SearchBaselinePolicyConfig, SearchBaselineSupportState,
-        SearchPostgresConfig, SearchPostgresCredentialHelperConfig, SourceSetOverride,
-        StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
+        DiagnosticsBaselineProjectScope, DiagnosticsBaselineSelection, ExtensionDecl,
+        FeaturesConfig, PostgresAccessMode, Project, ProjectConfig, ProjectDiagnosticsConfig,
+        ProjectError, ResolvePostgresUrlError, SearchBaselineBackend, SearchBaselinePolicyConfig,
+        SearchBaselineSupportState, SearchPostgresConfig, SearchPostgresCredentialHelperConfig,
+        SourceSetOverride, StructuredExtensionDecl, TopologyError, WorkspaceDiagnosticsScope,
     };
     use super::{configuration_kind, ConfigurationKind};
+    use super::{dotenv_value, parse_dotenv_value};
+    use super::{PROJECT_ENV_FILE_NAME, SHARED_CONFIGURATIONS_ROOT_ENV};
     use chrono::{Duration, TimeZone, Utc};
+    use std::env;
     use std::fs;
+    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn helper_program(response: &str, exit_code: i32) -> SearchPostgresCredentialHelperConfig {
@@ -3585,6 +3717,278 @@ extensions = [{ name = "T" }]
 
         let names: Vec<&str> = resolved.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["BMS_RU_UT", "YAxUnit"]);
+    }
+
+    /// Writes a main configuration at `<root>/<rel>`.
+    fn touch_configuration(root: &std::path::Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").unwrap();
+    }
+
+    /// `.env` is machine-local, and a store sitting next to the checkout is the
+    /// natural thing to write there — so a relative value must be anchored to the
+    /// project, exactly like `[source].root` is. Unanchored, it resolves against
+    /// whatever the process cwd happens to be, and every consumer that demands an
+    /// absolute root breaks on it.
+    #[test]
+    fn a_relative_shared_configuration_root_is_anchored_to_the_project() {
+        assert!(
+            env::var_os(SHARED_CONFIGURATIONS_ROOT_ENV).is_none(),
+            "this test measures the .env path; the process environment wins over it, \
+             so {SHARED_CONFIGURATIONS_ROOT_ENV} must be unset to run it"
+        );
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        touch_configuration(root, "configurations/UT11/1.0.0");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        std::fs::write(
+            project_root.join("bsl-analyzer.toml"),
+            "[source.configuration]\nid = \"UT11\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        let resolved = |value: &str| -> PathBuf {
+            std::fs::write(
+                project_root.join(PROJECT_ENV_FILE_NAME),
+                format!("{SHARED_CONFIGURATIONS_ROOT_ENV}={value}\n"),
+            )
+            .unwrap();
+            let project = Project::new(&project_root).expect("the shared configuration resolves");
+            for source_root in project.source_roots() {
+                assert!(
+                    source_root.is_absolute(),
+                    "every root the project hands out must be absolute, got {}",
+                    source_root.display()
+                );
+            }
+            let path = project.configuration_path().expect("a base is configured").to_path_buf();
+            std::fs::canonicalize(&path).unwrap_or(path)
+        };
+
+        let absolute = resolved(&root.join("configurations").to_string_lossy());
+        let relative = resolved("../configurations");
+        assert_eq!(
+            relative, absolute,
+            "a relative store root must name the same directory as the absolute one"
+        );
+    }
+
+    /// A path is not a string literal: in `ONEC_CONFIGURATIONS_ROOT="C:\1C\Store"`
+    /// the backslashes are the path, not escape sequences. Dropping them turns a
+    /// correctly-written Windows `.env` into an unloadable project.
+    #[test]
+    fn a_double_quoted_dotenv_value_keeps_unknown_escapes_intact() {
+        let at = std::path::Path::new(".env");
+        assert_eq!(
+            parse_dotenv_value(r#""D:\onec\configurations""#, at, 1).unwrap(),
+            r"D:\onec\configurations"
+        );
+        // The control: escapes the format does define still mean what they mean,
+        // so this is not "stop interpreting escapes" applied with a hammer.
+        assert_eq!(parse_dotenv_value(r#""a\nb\\c\"d""#, at, 1).unwrap(), "a\nb\\c\"d");
+    }
+
+    /// A BOM is what several Windows editors put in front of a file they save as
+    /// UTF-8. It must not hide the first key — the resulting error names a missing
+    /// variable that is plainly there in the file.
+    #[test]
+    fn a_dotenv_file_is_read_through_a_leading_bom() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join(PROJECT_ENV_FILE_NAME);
+        let line = format!("{SHARED_CONFIGURATIONS_ROOT_ENV}=/opt/configurations\n");
+
+        std::fs::write(&path, &line).unwrap();
+        let plain = dotenv_value(&path, SHARED_CONFIGURATIONS_ROOT_ENV).unwrap();
+        assert_eq!(plain.as_deref(), Some("/opt/configurations"), "control: no BOM, key found");
+
+        std::fs::write(&path, format!("\u{feff}{line}")).unwrap();
+        assert_eq!(
+            dotenv_value(&path, SHARED_CONFIGURATIONS_ROOT_ENV).unwrap(),
+            plain,
+            "a leading BOM must not hide the first key"
+        );
+    }
+
+    /// The advisory exists because an extension analyzed without its main
+    /// configuration reports valid calls as unresolved, and from the outside that
+    /// reads as the analyzer being wrong. It must therefore fire for every shape a
+    /// base-less extension project takes, not only the one where the extension
+    /// happens to sit at the workspace root.
+    #[test]
+    fn a_base_less_extension_project_says_so_whichever_shape_it_takes() {
+        fn extension_at(root: &std::path::Path, rel: &str) {
+            let dir = if rel.is_empty() { root.to_path_buf() } else { root.join(rel) };
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Configuration.xml"),
+                "<Properties><ConfigurationExtensionPurpose>Customization\
+                 </ConfigurationExtensionPurpose></Properties>",
+            )
+            .unwrap();
+        }
+        let notice_for = |build: &dyn Fn(&std::path::Path)| -> Option<String> {
+            let dir = tempdir().unwrap();
+            build(dir.path());
+            Project::new(dir.path()).unwrap().standalone_extension_notice()
+        };
+
+        // The extension is the workspace root itself.
+        assert!(notice_for(&|root| extension_at(root, "")).is_some(), "extension at the root");
+        // The extension was exported into the place a main configuration lives.
+        assert!(
+            notice_for(&|root| extension_at(root, "src/cf")).is_some(),
+            "extension in the conventional configuration directory"
+        );
+        // The extension is declared, which is the shape extension-only projects take.
+        assert!(
+            notice_for(&|root| {
+                extension_at(root, "Расширения/Feature");
+                std::fs::write(
+                    root.join("bsl-analyzer.toml"),
+                    "[source]\nextensions = [\"Расширения/Feature\"]\n",
+                )
+                .unwrap();
+            })
+            .is_some(),
+            "declared extension-only project"
+        );
+
+        // Controls, one per reason the advisory must stay silent. A configured base
+        // is the whole point of the shared-configuration work: it must not warn.
+        assert!(
+            notice_for(&|root| {
+                let cf = root.join("src/cf");
+                std::fs::create_dir_all(&cf).unwrap();
+                std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+                extension_at(root, "src/cfe/A");
+            })
+            .is_none(),
+            "a project with a main configuration stays silent"
+        );
+        assert!(
+            notice_for(&|root| {
+                std::fs::write(root.join("bsl-analyzer.toml"), "[diagnostics]\n").unwrap();
+            })
+            .is_none(),
+            "a project that is not an extension at all stays silent"
+        );
+    }
+
+    /// "No configuration" and "no base" are different projects. A directory of
+    /// sources with no `Configuration.xml` has an anonymous base at the workspace
+    /// root — that is what its published baselines already record — while only a
+    /// project WITH extensions and no configuration has no base at all. Collapsing
+    /// the two leaves the first with an empty plan: no partition owns its files, so
+    /// every published baseline is rejected and a v1 migration produces unowned
+    /// diagnostics.
+    #[test]
+    fn a_plain_directory_of_sources_keeps_its_anonymous_base_partition() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = ProjectConfig {
+            diagnostics: partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(root, config).unwrap();
+        assert!(project.configuration_path().is_none(), "there is no configuration");
+
+        let plan = project
+            .diagnostics_baseline_partition_plan()
+            .expect("the plan is built")
+            .expect("the baseline is partitioned");
+        assert_eq!(
+            plan.project_scope.source_root.as_deref(),
+            Some(""),
+            "the anonymous base keeps the spelling published baselines carry"
+        );
+        assert!(plan.partitions.iter().any(|partition| partition.id == "main"));
+        assert_eq!(
+            plan.owner_for_project_path("Module.bsl"),
+            Some("main"),
+            "and it still owns the project's files"
+        );
+    }
+
+    /// A partitioned baseline over an extension-only project must produce a plan.
+    /// The nesting check exists to catch two roots that contain one another; a base
+    /// the project does not have is not such a root, and letting the project root
+    /// stand in for it makes every extension look nested inside the base.
+    #[test]
+    fn a_partitioned_baseline_plans_an_extension_only_project() {
+        fn extension_at(root: &std::path::Path, rel: &str) {
+            let dir = root.join(rel);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Configuration.xml"),
+                "<Properties><ConfigurationExtensionPurpose>Customization\
+                 </ConfigurationExtensionPurpose></Properties>",
+            )
+            .unwrap();
+        }
+        let plan_for = |with_base: bool| {
+            let dir = tempdir().unwrap();
+            let root = dir.path();
+            extension_at(root, "Расширения/A");
+            extension_at(root, "Расширения/B");
+            let source = if with_base {
+                let cf = root.join("src/cf");
+                std::fs::create_dir_all(&cf).unwrap();
+                std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+                Some("src/cf".to_owned())
+            } else {
+                None
+            };
+            let config = ProjectConfig {
+                configuration_root: source,
+                extensions: Some(vec![
+                    structured("A", "Расширения/A", &[]),
+                    structured("B", "Расширения/B", &[]),
+                ]),
+                diagnostics: partitioned_config("baselines", vec![]),
+                ..Default::default()
+            };
+            Project::with_config(root, config).unwrap().diagnostics_baseline_partition_plan()
+        };
+
+        // The control: with a base the plan is built, as it always was.
+        let with_base = plan_for(true).expect("a base project plans").expect("partitioned");
+        assert!(with_base.partitions.iter().any(|partition| partition.id == "main"));
+
+        let plan = plan_for(false).expect("an extension-only project plans too");
+        let plan = plan.expect("the baseline is partitioned");
+        let ids: Vec<&str> =
+            plan.partitions.iter().map(|partition| partition.id.as_str()).collect();
+        assert!(
+            ids.contains(&"extension:A") && ids.contains(&"extension:B"),
+            "both extensions own a partition: {ids:?}"
+        );
+        // "The plan is built" alone would pass while a base the project does not
+        // have still owns the workspace root and every file outside an extension.
+        assert!(!ids.contains(&"main"), "no base partition without a base: {ids:?}");
+        assert!(
+            !plan.roots.iter().any(|owner| owner.partition_id == "main"),
+            "and no root is owned by one: {:?}",
+            plan.roots
+        );
+        assert!(plan.project_scope.source_root.is_none(), "the scope names no base either");
+    }
+
+    /// The base is optional in the scope, but a project that HAS one must serialize
+    /// exactly as before: the published baselines carry a fingerprint taken over
+    /// this JSON, and a shape change would invalidate every one of them.
+    #[test]
+    fn an_optional_base_does_not_change_how_a_present_one_serializes() {
+        let scope = DiagnosticsBaselineProjectScope {
+            source_root: Some("src/cf".to_owned()),
+            extensions: Vec::new(),
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        assert_eq!(json, r#"{"source_root":"src/cf","extensions":[]}"#);
+        // And a baseline written before the base became optional still loads.
+        let parsed: DiagnosticsBaselineProjectScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, scope);
     }
 
     #[test]
@@ -4718,7 +5122,7 @@ include = ["main", "extension:Sales"]
             .unwrap();
         assert_eq!(resolved.path, dir.path().join("baseline.json"));
         assert_eq!(resolved.project_path, "baseline.json");
-        assert_eq!(resolved.scope.source_root, "src/cf");
+        assert_eq!(resolved.scope.source_root.as_deref(), Some("src/cf"));
         assert_eq!(resolved.scope.extensions[0].name, "vendor");
         assert_eq!(resolved.scope.extensions[0].path, "src/cfe/vendor");
         assert_eq!(resolved.scope.extensions[1].name, "tests");
@@ -4737,7 +5141,7 @@ include = ["main", "extension:Sales"]
                 .unwrap()
                 .unwrap();
             assert_eq!(resolved.path, root.join("baseline.json"));
-            assert_eq!(resolved.scope.source_root, "src/cf");
+            assert_eq!(resolved.scope.source_root.as_deref(), Some("src/cf"));
             return;
         }
 

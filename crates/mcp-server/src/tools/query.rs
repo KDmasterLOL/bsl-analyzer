@@ -79,7 +79,7 @@ fn validate_parameters(
         let known = state
             .workspace_root()
             .and_then(|root| crate::project::at(root).ok())
-            .map(|project| crate::project::workspace_roots(&project).0)
+            .map(|project| crate::project::workspace_roots(&project, &[]).0)
             .is_some_and(|roots| roots.contains_id(root_id));
         if !known {
             return Err(McpError::invalid_params(format!("Неизвестный root_id: {root_id}"), None));
@@ -558,7 +558,7 @@ mod tests {
     use super::*;
 
     fn extract_text(result: &CallToolResult) -> &str {
-        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+        result.content[0].as_text().expect("expected text content").text.as_str()
     }
 
     #[test]

@@ -569,11 +569,21 @@ pub(crate) fn project_module_call_edges(
         // Mdo nodes have no dispatch, so the boundary flag falls out `false`.
         let crosses_client_to_server = dispatch(&from).is_some_and(|d| d.can_run_on_client)
             && dispatch(&to).is_some_and(|d| d.is_server_only());
+        // An empty span is what `extract_from_body` writes when the source map had no range
+        // for the call expression; a real call expression is never empty. Reading the state
+        // off the span itself keeps the classification out of reach of `EdgeKind`, which is
+        // reassigned below this point for manager, notify and idle edges.
+        let call_site = if edge.range.is_empty() {
+            crate::call_graph::CallSite::NotRecorded
+        } else {
+            crate::call_graph::CallSite::Recorded(edge.range)
+        };
         edges.push(WorkspaceCallEdge {
             from,
             to,
             kind: edge.kind,
             provenance: edge.provenance,
+            call_site,
             crosses_client_to_server,
         });
     }
@@ -680,6 +690,10 @@ pub(crate) fn project_collected_query_edges(
                 to: GraphNode::Mdo { mdo_type: *mdo_type, object_name: canon },
                 kind: EdgeKind::QueryRef,
                 provenance: EdgeProvenance::Inferred,
+                // The read is written in a query, and this pass keeps no span for it: the
+                // SDBL facts it folds carry none, and one edge stands for every read of the
+                // object in the module.
+                call_site: crate::call_graph::CallSite::NotRecorded,
                 crosses_client_to_server: false,
             });
         }
@@ -702,6 +716,7 @@ pub(crate) fn project_collected_query_edges(
                 },
                 kind: EdgeKind::QueryRef,
                 provenance: EdgeProvenance::Inferred,
+                call_site: crate::call_graph::CallSite::NotRecorded,
                 crosses_client_to_server: false,
             });
         }

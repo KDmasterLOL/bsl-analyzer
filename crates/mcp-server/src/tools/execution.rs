@@ -1,6 +1,6 @@
 use crate::state::SharedState;
 use crate::tools::response::text_within_budget;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 
 /// Platform output (a run's context block, a syntax-error listing, an evaluated value) has no
@@ -34,7 +34,7 @@ pub async fn check_syntax(
     })?;
 
     if result.valid {
-        Ok(CallToolResult::success(vec![Content::text("✓ Синтаксис корректен")]))
+        Ok(CallToolResult::success(vec![ContentBlock::text("✓ Синтаксис корректен")]))
     } else {
         let error = result.error.unwrap_or_default();
         Ok(text_within_budget(
@@ -122,7 +122,7 @@ pub async fn eval_expression(
             None => "Неопределено".to_string(),
         };
         let type_name = result.type_name.unwrap_or_default();
-        Ok(CallToolResult::success(vec![Content::text(format_eval_result(
+        Ok(CallToolResult::success(vec![ContentBlock::text(format_eval_result(
             &value,
             &type_name,
             max_output_tokens,

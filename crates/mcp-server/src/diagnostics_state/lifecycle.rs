@@ -79,6 +79,12 @@ pub(crate) struct DiagnosticsState {
     /// Guards spawning exactly one idle sweeper for the lifetime of the handle.
     pub(super) sweeper_started: Arc<AtomicBool>,
     pub(super) workspace_root: Option<PathBuf>,
+    /// Subtrees this profile must not read as sources — the server's derived cache.
+    ///
+    /// Held here because the diagnostics passes walk the tree on their own and are the
+    /// two places that have no other way to learn where the cache is. Empty for the
+    /// profiles and tests that own no cache.
+    pub(super) excluded: Vec<PathBuf>,
     pub(super) drift_interval: Duration,
     pub(super) eviction_after: Duration,
     /// The daemon's filesystem change hub, when this profile has one. Drift is served
@@ -110,6 +116,12 @@ pub(crate) struct DiagnosticsState {
     /// tell "asked for and thrown away" from "never asked for".
     #[cfg(test)]
     pub(super) rebuilds_started: Arc<AtomicUsize>,
+    /// Consultations of the stale-miss rescan hatch — the ASK, not its effect. Counting
+    /// the arms instead would make "did this tool consult the hatch" depend on the age of
+    /// the scan cache, because the storm guard declines to arm within its floor: the same
+    /// call would be counted or not according to time.
+    #[cfg(test)]
+    pub(super) forced_rescans: Arc<AtomicUsize>,
     /// One-shot test seam fired between the reconciler's first drain and its scan.
     #[cfg(test)]
     pub(super) reconcile_probe: ReconcileProbe,
@@ -135,8 +147,41 @@ impl DiagnosticsState {
     }
 
     /// A workspace handle that builds its resident db lazily on first use.
+    /// Count the resident as in use without reading it.
+    ///
+    /// Idle eviction measures the time since the last READ, which is the right measure for
+    /// callers that read and leave. A caller waiting for the build to finish is using the
+    /// resident just as much, and has nothing to read yet: without this, the sweeper sees an
+    /// untouched resident, evicts it the moment it is published, and the waiter goes on
+    /// waiting for a build nobody will start again.
+    pub(crate) fn mark_in_use(&self) {
+        *lock_recover(&self.last_access) = Instant::now();
+    }
+
+    /// How long since the resident was last used, for gates whose subject is that measure.
+    #[cfg(test)]
+    pub(crate) fn access_age(&self) -> Duration {
+        lock_recover(&self.last_access).elapsed()
+    }
+
+    /// Publish a build failure without running a build, for tests that need the state a
+    /// failed load leaves behind and cannot provoke one from outside.
+    #[cfg(test)]
+    pub(crate) fn fail_for_test(&self, message: &str) {
+        let mut inner = lock_recover(&self.inner);
+        inner.loading_since = None;
+        inner.status = DiagnosticsStatus::Failed(message.to_owned());
+    }
+
     pub(crate) fn for_workspace(workspace_root: PathBuf) -> Self {
         Self::with_status(DiagnosticsStatus::Idle, Some(workspace_root))
+    }
+
+    /// Take the subtrees this profile must not read as sources (see [`Self::excluded`]).
+    #[must_use]
+    pub(crate) fn with_excluded(mut self, excluded: Vec<PathBuf>) -> Self {
+        self.excluded = excluded;
+        self
     }
 
     fn with_status(status: DiagnosticsStatus, workspace_root: Option<PathBuf>) -> Self {
@@ -157,6 +202,7 @@ impl DiagnosticsState {
             shutdown: Arc::new(AtomicBool::new(false)),
             sweeper_started: Arc::new(AtomicBool::new(false)),
             workspace_root,
+            excluded: Vec::new(),
             drift_interval: DRIFT_CHECK_INTERVAL,
             eviction_after: IDLE_EVICTION,
             change_hub: None,
@@ -169,6 +215,8 @@ impl DiagnosticsState {
             scope_ref_check_at: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             rebuilds_started: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            forced_rescans: Arc::new(AtomicUsize::new(0)),
             #[cfg(test)]
             reconcile_probe: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -460,7 +508,7 @@ impl DiagnosticsState {
         // published resident.
         self.resubscribe_cursor();
         tracing::info!(?root, "diagnostics resident db build started");
-        match Self::catch_build(|| Self::build_resident(&root)) {
+        match Self::catch_build(|| Self::build_resident(&root, &self.excluded)) {
             Ok(built) => {
                 let files = built.resident.file_count();
                 {
@@ -517,7 +565,7 @@ impl DiagnosticsState {
         // Fresh cursor snapshot at rebuild start; events during the rebuild replay onto
         // the new resident, events before it are covered by the rebuild's baseline scan.
         self.resubscribe_cursor();
-        match Self::catch_build(|| Self::build_resident(&root)) {
+        match Self::catch_build(|| Self::build_resident(&root, &self.excluded)) {
             Ok(built) => {
                 // A swap states outright which files exist, so a build that could not read
                 // the whole tree may not perform one: it would retire a serving resident in
@@ -594,7 +642,7 @@ impl DiagnosticsState {
     /// Build a resident db over every workspace `.bsl`, with the same Salsa inputs the
     /// LSP server registers (source root, per-file source root + text, all config
     /// paths). Returns the resident, the per-file drift baseline, and the config fp.
-    fn build_resident(root: &Path) -> anyhow::Result<ResidentBuild> {
+    fn build_resident(root: &Path, excluded: &[PathBuf]) -> anyhow::Result<ResidentBuild> {
         // The config-file stat is captured BEFORE the project load: the published
         // identity must describe the config state the resident was built FROM. A
         // stat taken after the build could pair a mid-build config edit's mtime
@@ -606,17 +654,20 @@ impl DiagnosticsState {
         // this single snapshot, so a reload can never mix two project states.
         let project = crate::project::at(root)
             .map_err(|e| anyhow::anyhow!("invalid project at {}: {e}", root.display()))?;
-        let snapshot = ProjectSnapshot::from_project(&project);
+        let snapshot = ProjectSnapshot::from_project_excluding(&project, excluded);
         // Taken BEFORE the walk, because `WorkspaceRoots::build` canonicalises against the disk
         // rather than reading the already-loaded project: built afterwards, it could describe a
         // retargeted symlink the walk never saw, and then the table and `by_path` would be two
         // snapshots instead of one.
-        let (workspace_roots, _rejected) = crate::project::workspace_roots(&project);
+        let (workspace_roots, _rejected) = crate::project::workspace_roots(&project, excluded);
         // ONE scan serves both the resident's file set and the drift baseline
         // below: two walks here could disagree (a file deleted between them would
         // sit in the resident forever, invisible to every later drift scan,
         // because the baseline never contained it).
-        let universe = crate::graph::universe::ScannedUniverse::scan(&snapshot.scan_roots);
+        let universe = crate::graph::universe::ScannedUniverse::scan_excluding(
+            &snapshot.scan_roots,
+            &snapshot.excluded,
+        );
         let scan_clean = universe.clean();
         let files = &universe.files;
         // `ProjectSnapshot` already registers canonical roots, matching the
@@ -737,7 +788,7 @@ impl DiagnosticsState {
         };
         // A slow build finishing after a newer topology reload must not roll the
         // shared hub back onto its older root set (see the graph-side twin).
-        let live = crate::graph::input::ProjectSnapshot::load(root);
+        let live = crate::graph::input::ProjectSnapshot::load_excluding(root, &self.excluded);
         if crate::graph::scan::topology_u64(&live.configs) != built_topology {
             tracing::info!("skipping hub re-arm: the built snapshot's topology is superseded");
             return;
@@ -800,35 +851,57 @@ impl DiagnosticsState {
                 state.reconcile_tick();
             }
 
-            if !matches!(state.status(), DiagnosticsStatus::Ready { .. }) {
-                continue;
-            }
-            if lock_recover(&state.last_access).elapsed() < state.eviction_after {
-                continue;
-            }
-            let mut inner = lock_recover(&state.inner);
-            // Re-check under the lock: a read between the idle check and the lock bumps
-            // last_access, and a reload may be in flight — never evict either.
-            if lock_recover(&state.last_access).elapsed() < state.eviction_after
-                || !matches!(inner.status, DiagnosticsStatus::Ready { .. })
-                || inner.reload == ReloadState::Running
-            {
-                continue;
-            }
-            inner.resident = None;
-            inner.stats.clear();
-            inner.baseline_epoch += 1;
-            inner.status = DiagnosticsStatus::Idle;
-            // Release the hub cursor while `inner` is still held: `status` reads under the
-            // same lock, so no observer can catch an evicted resident that still pins the
-            // accumulator. Safe in this order because no path holds the cursor and then
-            // asks for `inner` — unlike `scan`, which `throttled_scan` holds across its
-            // own `inner` read and which therefore stays outside.
-            state.drop_cursor();
-            drop(inner);
-            *lock_recover(&state.scan) = None;
-            tracing::info!("diagnostics resident db evicted after idle period");
+            state.evict_if_idle();
         });
+    }
+
+    /// Drop the resident db (→ `Idle`) when it is `Ready` and has gone untouched for
+    /// `eviction_after`. Reports whether the eviction happened.
+    ///
+    /// The sweeper is only the clock above this step: the schedule lives there, the
+    /// decision and the act live here. A test whose subject is the eviction itself
+    /// calls this directly and so does not depend on when the clock gets round to it.
+    pub(super) fn evict_if_idle(&self) -> bool {
+        if !matches!(self.status(), DiagnosticsStatus::Ready { .. }) {
+            return false;
+        }
+        if lock_recover(&self.last_access).elapsed() < self.eviction_after {
+            return false;
+        }
+        let mut inner = lock_recover(&self.inner);
+        // Re-check under the lock: a read between the idle check and the lock bumps
+        // last_access, and a reload may be in flight — never evict either.
+        if lock_recover(&self.last_access).elapsed() < self.eviction_after
+            || !matches!(inner.status, DiagnosticsStatus::Ready { .. })
+            || inner.reload == ReloadState::Running
+        {
+            return false;
+        }
+        inner.resident = None;
+        inner.stats.clear();
+        inner.baseline_epoch += 1;
+        inner.status = DiagnosticsStatus::Idle;
+        // Release the hub cursor while `inner` is still held: `status` reads under the
+        // same lock, so no observer can catch an evicted resident that still pins the
+        // accumulator. Safe in this order because no path holds the cursor and then
+        // asks for `inner` — unlike `scan`, which `throttled_scan` holds across its
+        // own `inner` read and which therefore stays outside.
+        self.drop_cursor();
+        drop(inner);
+        *lock_recover(&self.scan) = None;
+        tracing::info!("diagnostics resident db evicted after idle period");
+        true
+    }
+
+    /// Leave the idle sweeper unstarted, so `ensure_loading` raises no clock.
+    ///
+    /// A test whose subject is the act of eviction does not want the schedule: with a
+    /// sweeper armed before the resident exists, every assertion about the state BEFORE
+    /// eviction races the eviction itself — the resident may vanish between the
+    /// publication of `Ready` and the observation of it.
+    #[cfg(test)]
+    pub(super) fn without_idle_sweeper(&self) {
+        self.sweeper_started.store(true, Ordering::SeqCst);
     }
 }
 
@@ -859,7 +932,7 @@ mod tests {
         sample_workspace(root);
 
         let before = project_model::source_set::scans_performed_on_thread();
-        let built = DiagnosticsState::build_resident(root).expect("resident builds");
+        let built = DiagnosticsState::build_resident(root, &[]).expect("resident builds");
         let walks = project_model::source_set::scans_performed_on_thread() - before;
 
         assert!(walks > 0, "a zero count means the instrumentation broke");

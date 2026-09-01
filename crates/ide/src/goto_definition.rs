@@ -497,6 +497,50 @@ mod tests {
         assert_eq!(&source[range_start..range_end], "НаборЗаписей");
     }
 
+    /// Which assignment an occurrence navigates to is a per-occurrence choice, and it
+    /// stays one: an occurrence goes to the nearest preceding write, not to the first.
+    /// This is deliberately unlike a `Перем`-declared variable, where every occurrence
+    /// goes to the one declaration — navigation is the axis on which the two differ.
+    ///
+    /// Regression gate: green before and after the identity change. It is the gate that
+    /// keeps the reference walk from collapsing navigation along with the key, and it
+    /// needs a body with TWO assignments — with one, "always the first" and "the nearest
+    /// preceding" answer alike and the gate proves nothing.
+    #[test]
+    fn test_goto_definition_implicit_local_takes_the_nearest_preceding_assignment() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 10;
+    Сообщить(НаборЗаписей);
+    НаборЗаписей = 20;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+        "#;
+
+        let (db, file_id) = create_db_with_file(source);
+        let sites: Vec<usize> = {
+            let mut found = Vec::new();
+            let mut from = 0usize;
+            while let Some(at) = source[from..].find("НаборЗаписей") {
+                found.push(from + at);
+                from += at + "НаборЗаписей".len();
+            }
+            found
+        };
+        assert_eq!(sites.len(), 4, "the input must carry two assignments and two reads");
+
+        let expected = [sites[0], sites[0], sites[2], sites[2]];
+        for (occurrence, want) in sites.iter().zip(expected) {
+            let target = goto_definition(&db, file_id, TextSize::from(*occurrence as u32))
+                .expect("an implicit local has a navigation target");
+            assert_eq!(
+                usize::try_from(u32::from(target.range.start())).unwrap(),
+                want,
+                "the occurrence at {occurrence} navigated to the wrong assignment"
+            );
+        }
+    }
+
     #[test]
     fn test_goto_definition_case_insensitive() {
         let source = r#"

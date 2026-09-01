@@ -40,7 +40,7 @@ fn plan(selection: DiagnosticsBaselineSelection) -> DiagnosticsBaselinePartition
     };
     DiagnosticsBaselinePartitionPlan {
         project_scope: DiagnosticsBaselineProjectScope {
-            source_root: String::new(),
+            source_root: None,
             extensions: vec![DiagnosticsBaselineProjectExtension {
                 name: "Ext".to_owned(),
                 path: "ext".to_owned(),

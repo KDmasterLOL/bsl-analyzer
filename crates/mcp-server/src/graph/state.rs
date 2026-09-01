@@ -134,6 +134,16 @@ pub(crate) struct GraphState {
     /// whether or not publication and discharge are one state — and gates nothing.
     #[cfg(test)]
     pub(super) publish_window_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Counts completed passes of [`Self::notify_published`] — every return, including the
+    /// one taken when this daemon no longer owns the caches and no hook runs at all.
+    ///
+    /// `Ready` is a status barrier, never a publish barrier, so a test asserting anything a
+    /// publish pass leaves behind needs a barrier of its own. The publish hook is not always
+    /// one: the pass does further work AFTER its hook returns (the leftover-marks consume in
+    /// the tail), and a test sampling inside that remainder reads a state no real consumer
+    /// observes. This counter is the only observable for "the pass finished".
+    #[cfg(test)]
+    pub(super) publish_passes: Arc<AtomicUsize>,
     /// Invoked on this graph's background thread immediately after each publish/adopt,
     /// once the inner lock is released — the moment the graph "has caught up" and a
     /// consumer (search context re-render) may read the fresh graph. Never called on a
@@ -234,6 +244,8 @@ impl GraphState {
             background_snapshot_failure: Arc::new(AtomicU8::new(0)),
             #[cfg(test)]
             publish_window_hook: None,
+            #[cfg(test)]
+            publish_passes: Arc::new(AtomicUsize::new(0)),
             lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             withheld_build: Arc::new(AtomicBool::new(false)),
         }
@@ -266,6 +278,16 @@ impl GraphState {
         self.lease.is_superseded()
     }
 
+    /// Subtrees every pass driven from this graph must not read as sources.
+    ///
+    /// Derived from the one layout this state was built with, so the walk sees exactly
+    /// the hole the watch does. Empty when this state governs no cache.
+    pub(crate) fn cache_exclusions(&self) -> Vec<std::path::PathBuf> {
+        self.cache()
+            .map(|cache| cache.spellings().iter().map(|path| path.to_path_buf()).collect())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn cache(&self) -> Option<&crate::cache::WorkspaceCacheLayout> {
         self.cache.as_ref()
     }
@@ -289,7 +311,7 @@ impl GraphState {
         if !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| project_model::PROJECT_INPUT_FILE_NAMES.contains(&name))
+            .is_some_and(project_model::is_project_input_file_name)
         {
             return false;
         }
@@ -396,6 +418,16 @@ impl GraphState {
     /// bound is what keeps the consumption correct: only marks at or below it — drifts this
     /// build already reflects — may be cleared.
     pub(super) fn notify_published(&self, build_start_seq: i64, topology_changed: bool) {
+        self.notify_published_pass(build_start_seq, topology_changed);
+        // Counted here rather than at the end of the pass itself: the pass has several
+        // returns, and a barrier that misses one is worse than none — a test would wait on
+        // a count that never arrives.
+        #[cfg(test)]
+        self.publish_passes.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The pass itself; [`Self::notify_published`] wraps it only to count completions.
+    fn notify_published_pass(&self, build_start_seq: i64, topology_changed: bool) {
         if !self.lease.owns_caches_now() {
             return;
         }
@@ -981,12 +1013,10 @@ mod tests {
         };
         let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
         graph.ensure_loading();
-        wait_ready(&graph);
 
-        assert!(
-            fired.load(Ordering::SeqCst) >= 1,
-            "the publish hook must fire once the graph publishes its build",
-        );
+        // Waited on, not read once: `Ready` flips under `inner` and the hook runs after the
+        // lock is released, so a bare read samples a value the build has not produced yet.
+        wait_until(&graph, "the publish hook to fire", || fired.load(Ordering::SeqCst) >= 1);
     }
 
     /// A daemon whose workspace was taken over by a newer generation must not build the
@@ -1634,7 +1664,7 @@ mod tests {
     fn project_config_detection_is_exactly_workspace_root_level() {
         let dir = tempfile::tempdir().unwrap();
         let graph = GraphState::for_workspace(dir.path().to_path_buf());
-        for name in project_model::CONFIG_FILE_NAMES {
+        for name in project_model::PROJECT_INPUT_FILE_NAMES {
             assert!(graph.is_workspace_config_path(&dir.path().join(name)));
             assert!(!graph.is_workspace_config_path(&dir.path().join("nested").join(name)));
         }
@@ -1844,13 +1874,17 @@ mod tests {
         );
     }
 
-    /// A rendezvous with the building thread parked in the window between a
-    /// publication and the discharge of its force obligation.
+    /// A rendezvous with the building thread parked in the window between a publication
+    /// and the post-publication work that follows it — discharging the force obligation,
+    /// re-arming the change hub, and the publish pass itself.
     ///
     /// The park happens with `inner` released, which is the whole point: a park taken
     /// under the lock would block the observer on the same mutex and so read identical
     /// against a coherent publication and against a torn one.
-    #[cfg(unix)]
+    ///
+    /// It parks BEFORE `notify_published`, so it cannot expose anything the pass does
+    /// internally — the leftover-marks tail included. A test needing that window parks in
+    /// the publish hook instead, which the tail calls between its `swap` and `fetch_max`.
     struct PublishWindow {
         armed: Arc<AtomicBool>,
         entered: std::sync::mpsc::Receiver<()>,
@@ -1858,7 +1892,6 @@ mod tests {
         hook: Arc<dyn Fn() + Send + Sync>,
     }
 
-    #[cfg(unix)]
     impl PublishWindow {
         fn new() -> Self {
             let armed = Arc::new(AtomicBool::new(false));
@@ -1879,16 +1912,21 @@ mod tests {
             Self { armed, entered, release_tx, hook }
         }
 
-        /// Arm the NEXT publication only; the initial load must run through unparked.
+        /// Arm the next publication to reach the window — and only that one, since the
+        /// hook disarms itself as it parks.
+        ///
+        /// Which publication that is belongs to the caller: arming after a workspace is
+        /// already `Ready` parks a reload and leaves the initial load unparked, while
+        /// arming before `ensure_loading` parks the initial load itself. Both are used.
         fn arm(&self) {
             self.armed.store(true, Ordering::SeqCst);
         }
 
-        /// Fails instead of hanging when the reload never reaches the window.
+        /// Fails instead of hanging when no publication reaches the window.
         fn wait_entered(&self) {
             self.entered
                 .recv_timeout(Duration::from_secs(30))
-                .expect("the forced reload reached the publish window");
+                .expect("a publication reached the publish window");
         }
 
         fn release(&self) {
@@ -2072,6 +2110,121 @@ mod tests {
             graph.completed_project_reload_epoch.load(Ordering::SeqCst),
             graph.project_reload_epoch.load(Ordering::SeqCst),
             "only the successful full publication clears the force obligation"
+        );
+    }
+
+    /// `wait_ready` returns on a PRECURSOR of anything the publish pass leaves behind, and
+    /// this pins that down without relying on load to widen the gap: the window hook parks
+    /// the building thread between the status flip and the pass, so `Ready` is observable
+    /// while the hook provably has not run. A test reading its counter once here — the shape
+    /// `publish_hook_fires_after_a_build_publishes` used to have — reads zero every time.
+    #[test]
+    fn ready_is_observable_before_the_publish_hook_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let hook = {
+            let fired = Arc::clone(&fired);
+            Arc::new(move |_signal: GraphPublishSignal| {
+                fired.fetch_add(1, Ordering::SeqCst);
+                GraphPublishOutcome::HANDLED
+            }) as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>
+        };
+        let window = PublishWindow::new();
+        let graph = GraphState::for_workspace(root.to_path_buf())
+            .with_publish_hook(hook)
+            .with_publish_window_hook(Arc::clone(&window.hook));
+        window.arm();
+        graph.ensure_loading();
+        window.wait_entered();
+
+        wait_ready(&graph);
+        let parked = fired.load(Ordering::SeqCst);
+        window.release();
+
+        assert_eq!(parked, 0, "the status reached Ready while the publish hook had not run");
+        wait_until(&graph, "the publish hook to fire", || fired.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// The tail of a publish pass takes the leftover bound with a `swap` and only restores it
+    /// after its hook reports the consume unhandled. In between, the obligation READS
+    /// discharged though nothing consumed it — a state no real consumer can act on, because
+    /// no real consumer runs inside the pass.
+    ///
+    /// So a test asserting the obligation must wait for the pass, not for the hook and not
+    /// for `Ready`: both land inside that remainder. The park here is the hook itself, which
+    /// the tail calls between its `swap` and its `fetch_max` — the one window
+    /// `PublishWindow` cannot reach, since it fires before the pass begins.
+    #[test]
+    fn a_leftover_obligation_reads_discharged_inside_the_pass_that_re_arms_it() {
+        const LEFTOVER_BOUND: i64 = 41;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let (entered_tx, entered) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let hook = Arc::new(move |signal: GraphPublishSignal| {
+            // Only the leftover consume carries the stored bound; the build's own fire runs
+            // ahead of the tail and must pass straight through.
+            if signal.build_start_seq == LEFTOVER_BOUND {
+                entered_tx.send(()).expect("the test outlives the parked pass");
+                lock_recover(&release_rx)
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("the test released the parked pass");
+            }
+            // Unhandled: the consume could not run, so the tail must re-arm the obligation.
+            GraphPublishOutcome { topology_handled: false, roots_handled: false }
+        })
+            as Arc<dyn Fn(GraphPublishSignal) -> GraphPublishOutcome + Send + Sync>;
+
+        let graph = GraphState::for_workspace(root.to_path_buf()).with_publish_hook(hook);
+        {
+            let mut inner = lock_recover(&graph.inner);
+            inner.status = GraphStatus::Ready { files: 0 };
+            inner.published = Some(Published {
+                generation: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                stale: false,
+                reload: ReloadState::Idle,
+                force_stale: false,
+                search_roots: None,
+            });
+        }
+        graph.leftover_bound.store(LEFTOVER_BOUND, Ordering::SeqCst);
+
+        let publisher = {
+            let graph = graph.clone();
+            std::thread::spawn(move || graph.notify_published(7, false))
+        };
+        entered
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the pass reached its leftover consume");
+
+        assert!(
+            matches!(graph.status(), GraphStatus::Ready { .. }),
+            "the graph is Ready throughout, so `wait_ready` returns here",
+        );
+        assert!(
+            !graph.leftover_consume_pending(),
+            "inside the pass the obligation reads discharged, which is what a test waiting \
+             on `Ready` or on the hook samples",
+        );
+        assert_eq!(
+            graph.publish_passes.load(Ordering::SeqCst),
+            0,
+            "and the pass counter has not moved, so a wait on it does not return here",
+        );
+
+        release_tx.send(()).expect("the parked pass is still running");
+        publisher.join().expect("the publish pass completed");
+
+        super::super::test_support::wait_publish_pass(&graph, 1);
+        assert!(
+            graph.leftover_consume_pending(),
+            "once the pass finished, the unhandled consume left the obligation armed",
         );
     }
 }

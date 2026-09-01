@@ -1233,35 +1233,191 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_find_implicit_local_references_split_by_inferred_type() {
-        let source = r#"
+    /// Bodies used by the implicit-local identity gates. A variable written twice
+    /// is one variable; the pair differs only in whether the second write changes
+    /// the inferred type, and `DECLARED` is the same body with the declaration a
+    /// BSL author may or may not write.
+    const REASSIGNED_SAME_TYPE: &str = r#"
 Процедура Тест()
     НаборЗаписей = 1;
     Сообщить(НаборЗаписей);
+    НаборЗаписей = 2;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
 
+    const REASSIGNED_OTHER_TYPE: &str = r#"
+Процедура Тест()
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
     НаборЗаписей = "строка";
     Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+
+    const DECLARED_AND_REASSIGNED: &str = r#"
+Процедура Тест()
+    Перем НаборЗаписей;
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+    НаборЗаписей = "строка";
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+
+    fn occurrences(source: &str, name: &str) -> Vec<usize> {
+        let mut found = Vec::new();
+        let mut from = 0usize;
+        while let Some(at) = source[from..].find(name) {
+            found.push(from + at);
+            from += at + name.len();
+        }
+        found
+    }
+
+    fn reference_starts(db: &RootDatabaseImpl, file_id: FileId, offset: usize) -> Vec<u32> {
+        let mut starts: Vec<u32> = find_references(db, file_id, TextSize::from(offset as u32))
+            .iter()
+            .map(|location| location.range.start().into())
+            .collect();
+        starts.sort_unstable();
+        starts
+    }
+
+    /// A variable is one variable however many times it is written: every occurrence
+    /// answers with the same set, and that set is every occurrence.
+    ///
+    /// Fails on an identity keyed by the chosen assignment: each anchor then answers
+    /// with its own half and calls it complete.
+    #[test]
+    fn implicit_local_references_span_every_assignment() {
+        let (db, file_id) = create_db_with_file(REASSIGNED_SAME_TYPE);
+        let sites = occurrences(REASSIGNED_SAME_TYPE, "НаборЗаписей");
+        let expected: Vec<u32> = sites.iter().map(|&at| at as u32).collect();
+        assert_eq!(expected.len(), 4, "the input must carry four occurrences");
+
+        for &at in &sites {
+            assert_eq!(
+                reference_starts(&db, file_id, at),
+                expected,
+                "the anchor at {at} answered with a subset"
+            );
+        }
+    }
+
+    /// The type of a write is a property of a program point, not of the variable's
+    /// identity: reassigning to another type does not make a second variable.
+    ///
+    /// Paired with the same-type body above, which is the input a type-shaped split
+    /// would still pass.
+    #[test]
+    fn implicit_local_references_ignore_the_type_of_the_reassignment() {
+        let (db, file_id) = create_db_with_file(REASSIGNED_OTHER_TYPE);
+        let sites = occurrences(REASSIGNED_OTHER_TYPE, "НаборЗаписей");
+        let expected: Vec<u32> = sites.iter().map(|&at| at as u32).collect();
+        assert_eq!(expected.len(), 4, "the input must carry four occurrences");
+
+        for &at in &sites {
+            assert_eq!(
+                reference_starts(&db, file_id, at),
+                expected,
+                "the anchor at {at} answered with one type's occurrences"
+            );
+        }
+    }
+
+    /// Writing `Перем` changes where the variable is declared, not which occurrences
+    /// belong to it. The declared body is the control: it answers correctly today,
+    /// so a run where only the implicit body fails is the split and nothing else.
+    #[test]
+    fn an_implicit_local_answers_like_a_declared_one() {
+        let (db_implicit, implicit_file) = create_db_with_file(REASSIGNED_OTHER_TYPE);
+        let (db_declared, declared_file) = create_db_with_file(DECLARED_AND_REASSIGNED);
+
+        let implicit_sites = occurrences(REASSIGNED_OTHER_TYPE, "НаборЗаписей");
+        let declared_sites = occurrences(DECLARED_AND_REASSIGNED, "НаборЗаписей");
+        assert_eq!(implicit_sites.len() + 1, declared_sites.len(), "one extra site: `Перем`");
+
+        for &at in &implicit_sites {
+            assert_eq!(
+                reference_starts(&db_implicit, implicit_file, at).len(),
+                implicit_sites.len(),
+                "implicit body: the anchor at {at} lost occurrences"
+            );
+        }
+        for &at in &declared_sites {
+            assert_eq!(
+                reference_starts(&db_declared, declared_file, at).len(),
+                declared_sites.len(),
+                "control: the declared body must already answer in full"
+            );
+        }
+    }
+
+    /// Identity itself, not merely its effect on the walk: the key an occurrence
+    /// resolves to may not depend on which occurrence was asked.
+    #[test]
+    fn implicit_local_identity_does_not_depend_on_the_anchor() {
+        let (db, file_id) = create_db_with_file(REASSIGNED_OTHER_TYPE);
+        let parse = db.parse(file_id);
+        let root = parse.syntax_node();
+        let sema = Semantics::new(&db);
+
+        let keys: Vec<SemanticSymbolKey> = occurrences(REASSIGNED_OTHER_TYPE, "НаборЗаписей")
+            .into_iter()
+            .map(|at| {
+                let token = root
+                    .token_at_offset(TextSize::from(at as u32))
+                    .right_biased()
+                    .expect("a name token stands at every occurrence");
+                sema.symbol_for_token(file_id, &token)
+                    .expect("an implicit local resolves to a symbol")
+                    .key
+            })
+            .collect();
+
+        assert!(
+            keys.windows(2).all(|pair| pair[0] == pair[1]),
+            "occurrences of one variable resolved to different keys: {keys:?}"
+        );
+    }
+
+    /// Spelling is not identity either: BSL folds case, and so must the key.
+    #[test]
+    fn implicit_local_references_fold_the_spelling() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 1;
+    Сообщить(НАБОРЗАПИСЕЙ);
+    наборзаписей = 2;
 КонецПроцедуры
         "#;
 
         let (db, file_id) = create_db_with_file(source);
-        let second_assignment = source.find("НаборЗаписей = \"строка\"").unwrap() as u32;
+        let first = source.find("НаборЗаписей").unwrap();
 
-        let first_offset = TextSize::from(source.find("НаборЗаписей").unwrap() as u32);
-        let first_refs = find_references(&db, file_id, first_offset);
-        assert_eq!(first_refs.len(), 2, "number-typed implicit local should stay separate");
-        assert!(
-            first_refs.iter().all(|loc| u32::from(loc.range.start()) < second_assignment),
-            "string-typed occurrences leaked into number-typed references: {first_refs:?}"
-        );
+        assert_eq!(reference_starts(&db, file_id, first).len(), 3, "spellings of one variable");
+    }
 
-        let second_offset = TextSize::from(second_assignment);
-        let second_refs = find_references(&db, file_id, second_offset);
-        assert_eq!(second_refs.len(), 2, "string-typed implicit local should stay separate");
+    /// The identity that collapses is the implicit one. A name a body declares
+    /// syntactically keeps resolving through its binding — inference records writes
+    /// to some such bindings in the same table as implicit locals, and only the
+    /// binding lookup tells the two apart.
+    #[test]
+    fn a_declared_name_is_not_an_implicit_local() {
+        let (db, file_id) = create_db_with_file(DECLARED_AND_REASSIGNED);
+        let parse = db.parse(file_id);
+        let root = parse.syntax_node();
+        let sema = Semantics::new(&db);
+        let at = DECLARED_AND_REASSIGNED.find("НаборЗаписей").unwrap();
+        let token = root.token_at_offset(TextSize::from(at as u32)).right_biased().unwrap();
+
+        let symbol = sema.symbol_for_token(file_id, &token).expect("a declared local resolves");
+
         assert!(
-            second_refs.iter().all(|loc| u32::from(loc.range.start()) >= second_assignment),
-            "number-typed occurrences leaked into string-typed references: {second_refs:?}"
+            matches!(symbol.key, SemanticSymbolKey::BodyLocal { .. }),
+            "a declared local must stay a body local: {:?}",
+            symbol.key
         );
     }
 

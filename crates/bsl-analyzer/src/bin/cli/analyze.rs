@@ -410,7 +410,7 @@ fn analyze_salsa(
     };
     // Deliberately not gated on `--quiet`: this explains why the findings that
     // follow are wrong, and suppressing it leaves the run looking merely broken.
-    if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+    if let Some(notice) = project.standalone_extension_notice() {
         eprintln!("warning: {notice}");
     }
     let source_roots = project.source_roots();

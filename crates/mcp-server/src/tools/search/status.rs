@@ -852,7 +852,7 @@ mod tests {
         let progress = IndexProgress::new();
         let result = baseline_warming_not_ready(&progress);
         let body = result.structured_content.as_ref().expect("structured not-ready envelope");
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         let mirror: serde_json::Value = serde_json::from_str(text).expect("valid JSON text mirror");
 
         assert_eq!(body["status"], "not_ready");
@@ -977,7 +977,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
 
         assert!(text.contains("Source roots (current search index):"), "{text}");
         assert!(text.contains("(configuration)"), "the configuration is named, not blank: {text}");
@@ -1006,7 +1006,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let building = building.content[0].raw.as_text().expect("text").text.clone();
+        let building = building.content[0].as_text().expect("text").text.clone();
         assert!(building.contains("not published yet"), "{building}");
 
         let reference = search_status(
@@ -1021,7 +1021,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let reference = reference.content[0].raw.as_text().expect("text").text.clone();
+        let reference = reference.content[0].as_text().expect("text").text.clone();
         assert!(
             !reference.contains("Source roots"),
             "a reference index has no source roots to report: {reference}",
@@ -1060,7 +1060,7 @@ mod tests {
         )
         .unwrap();
         holder.join().unwrap();
-        let busy = busy.content[0].raw.as_text().expect("text").text.clone();
+        let busy = busy.content[0].as_text().expect("text").text.clone();
         assert!(busy.contains("not read"), "{busy}");
         assert!(!busy.contains("not published yet"), "a held index is not an unbuilt one: {busy}",);
 
@@ -1081,7 +1081,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let failed = failed.content[0].raw.as_text().expect("text").text.clone();
+        let failed = failed.content[0].as_text().expect("text").text.clone();
         assert!(failed.contains("initialization failed"), "{failed}");
         assert!(
             !failed.contains("not published yet"),
@@ -1118,7 +1118,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("Code lexical source: local sqlite + local overlay"));
         assert!(text.contains("Resolved workspace view: ready"));
         assert!(text.contains("Baseline: snapshot local-workspace-baseline"));
@@ -1158,7 +1158,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("Configured baseline:"));
         assert!(text.contains("Select:   branch main"));
         assert!(text.contains("External baseline: configured"));
@@ -1193,7 +1193,7 @@ mod tests {
         )
         .unwrap();
         assert!(started.elapsed() < Duration::from_millis(500));
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("probing the shared baseline in the background — retry shortly"));
         assert!(text.contains("first background status probe still running"));
         assert!(!text.contains("(published index)"));
@@ -1213,7 +1213,7 @@ mod tests {
             true,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("Configured baseline:"), "{text}");
         assert!(text.contains("Backend:  postgres"), "{text}");
         assert!(text.contains("connecting to the shared baseline"), "{text}");
@@ -1254,7 +1254,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("Docs lexical source: local sqlite"));
         assert!(text.contains("Docs semantic source: not configured (set EMBEDDING_URL)"));
     }
@@ -1292,7 +1292,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("expected text content").text.as_str();
+        let text = result.content[0].as_text().expect("expected text content").text.as_str();
         assert!(text.contains("Search index: ready"));
         assert!(text.contains("overlay syncing") && text.contains("queues behind the sync"));
         assert!(text.contains("Semantic: syncing local overlay embeddings against remote baseline"));
@@ -1323,7 +1323,6 @@ mod tests {
             )
             .unwrap()
             .content[0]
-                .raw
                 .as_text()
                 .expect("text content")
                 .text
@@ -1385,7 +1384,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("text").text.as_str();
+        let text = result.content[0].as_text().expect("text").text.as_str();
         assert!(text.contains("building"));
         assert!(text.contains("Indexing pending: initializing"));
         assert!(!text.contains("Indexing in progress"));
@@ -1430,7 +1429,7 @@ mod tests {
         let elapsed = started.elapsed();
         holder.join().unwrap();
         assert!(elapsed < Duration::from_secs(2));
-        let text = status.content[0].raw.as_text().expect("text content").text.as_str();
+        let text = status.content[0].as_text().expect("text content").text.as_str();
         assert!(text.contains("Configured baseline:"));
         assert!(text.contains("Local index: busy (overlay syncing)"));
         assert!(text.contains("Lexical search: temporarily unavailable"));

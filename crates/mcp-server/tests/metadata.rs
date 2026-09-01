@@ -114,7 +114,7 @@ async fn call(client: &Client, args: &[(&str, Value)]) -> CallToolResult {
 }
 
 fn text_of(result: &CallToolResult) -> &str {
-    result.content[0].raw.as_text().expect("text content").text.as_str()
+    result.content[0].as_text().expect("text content").text.as_str()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

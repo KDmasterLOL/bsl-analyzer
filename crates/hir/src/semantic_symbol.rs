@@ -16,11 +16,20 @@ use syntax::ast::{self, AstNode};
 use syntax::{SyntaxKind, TextRange, TextSize};
 use vfs::FileId;
 
+/// What makes two occurrences the SAME symbol.
+///
+/// A key holds what a symbol IS, never which occurrence was asked about: the reference
+/// walk compares keys, so a field varying per occurrence splits one symbol into as many
+/// as it has spellings of that field, and each half is then reported as a complete answer.
+///
+/// A variable a body never declares is identified exactly like a declared one — by its
+/// owner and its folded name. Which assignment an occurrence reads its declaration and
+/// type from is a per-occurrence choice, and it lives outside the key, on the symbol.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SemanticSymbolKey {
     Definition(Definition),
     BodyLocal { file_id: FileId, owner: DefWithBodyId, name_lower: String },
-    ImplicitLocal { file_id: FileId, owner: DefWithBodyId, name_lower: String, declaration: ExprId },
+    ImplicitLocal { file_id: FileId, owner: DefWithBodyId, name_lower: String },
     TypedMember { file_id: FileId, range: TextRange },
 }
 
@@ -553,7 +562,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         let implicit = routed.implicit_locals().get(&name_lower)?;
         let unknown = self.db().unknown();
         let occurrence_ty = routed.type_id_of_expr(occurrence_expr).unwrap_or(unknown);
-        let (declaration, range, ty) = select_implicit_local_declaration(
+        let (range, ty) = select_implicit_local_declaration(
             source_map,
             implicit,
             token.text_range(),
@@ -561,7 +570,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             unknown,
         )?;
         Some(SemanticSymbol {
-            key: SemanticSymbolKey::ImplicitLocal { file_id, owner, name_lower, declaration },
+            key: SemanticSymbolKey::ImplicitLocal { file_id, owner, name_lower },
             name: implicit.name.clone(),
             kind: SemanticSymbolKind::Variable,
             definition: None,
@@ -697,13 +706,19 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     }
 }
 
+/// Where an occurrence reads its declaration and its type from: the nearest preceding
+/// assignment, preferring one whose type matches the occurrence's own.
+///
+/// This is a projection of the occurrence, not the variable's identity — navigation from a
+/// later read lands on the write that produced what it reads, while the variable those
+/// occurrences belong to stays one.
 fn select_implicit_local_declaration(
     source_map: &hir_def::BodySourceMap,
     implicit: &ImplicitLocalInfo,
     occurrence_range: TextRange,
     occurrence_ty: TypeId,
     unknown: TypeId,
-) -> Option<(ExprId, TextRange, TypeId)> {
+) -> Option<(TextRange, TypeId)> {
     if occurrence_ty != unknown {
         let typed_preceding = implicit
             .assignments
@@ -718,7 +733,7 @@ fn select_implicit_local_declaration(
             .next_back();
 
         if let Some((assignment, range)) = typed_preceding {
-            return Some((assignment.target, range, assignment.ty));
+            return Some((range, assignment.ty));
         }
     }
 
@@ -732,11 +747,11 @@ fn select_implicit_local_declaration(
         .next_back();
 
     if let Some((assignment, range)) = preceding {
-        return Some((assignment.target, range, assignment.ty));
+        return Some((range, assignment.ty));
     }
 
     let range = source_map.expr_range(implicit.first_assignment)?;
-    Some((implicit.first_assignment, range, implicit.ty))
+    Some((range, implicit.ty))
 }
 
 fn symbol_from_definition(

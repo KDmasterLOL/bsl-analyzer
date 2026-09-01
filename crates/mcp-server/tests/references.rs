@@ -666,6 +666,49 @@ async fn the_budget_applies_to_an_answer_that_resolved_nothing() {
     client.cancel().await.ok();
 }
 
+/// A variable a body never declares is still one variable. Every occurrence must answer
+/// with the same complete list — an answer that carries `resolved`, a `total` and
+/// `total_is_lower_bound: false` claims a proven zero for everything it leaves out, so
+/// half the occurrences returned that way is a wrong answer, not a partial one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_implicit_local_answers_the_same_from_every_occurrence() {
+    let ws = stage_fixture();
+    write_module(
+        ws.path(),
+        "Первый",
+        "Процедура Тест() Экспорт\n    \
+         Набор = 1;\n    Сообщить(Набор);\n    Набор = 2;\n    Сообщить(Набор);\n\
+         КонецПроцедуры\n",
+    );
+    let client = client_with_references(ws.path()).await;
+
+    let path = "CommonModules/Первый/Ext/Module.bsl";
+    // The two writes and the two reads, 0-based: the name starts at column 4 on a write
+    // line and at column 13 on a `Сообщить(` line.
+    for (line, column) in [(1, 4), (2, 13), (3, 4), (4, 13)] {
+        let answer = references(
+            &client,
+            &[
+                ("root_id", Value::from("")),
+                ("path", Value::from(path)),
+                ("line", Value::from(line)),
+                ("column", Value::from(column)),
+            ],
+        )
+        .await;
+
+        assert_eq!(answer["outcome"], "resolved", "at {line}:{column}: {answer}");
+        assert_eq!(answer["total"], 4, "at {line}:{column}: {answer}");
+        assert_eq!(answer["total_is_lower_bound"], false, "at {line}:{column}: {answer}");
+        assert_eq!(
+            answer["freshness"]["completeness"]["status"], "complete",
+            "at {line}:{column}: {answer}"
+        );
+    }
+
+    client.cancel().await.ok();
+}
+
 /// A parameter that is validated and then ignored is worse than one that is refused: the
 /// caller learns its root is unknown but never that its narrowing did nothing. The control
 /// is the same positional call without it.
@@ -2457,14 +2500,18 @@ async fn a_line_beginning_inside_a_continued_literal_is_quoted_from_its_start() 
 /// then the gate passes whatever the server does with a cancellation.
 const CANCEL_STAND_CALLERS: usize = 800;
 
-/// A cancelled call publishes an error and no body.
+/// A cancelled call publishes nothing at all.
 ///
 /// Asserted on the FRAMES, because a spec-compliant client cannot see this: rmcp resolves
-/// a cancelled request locally the moment it sends `notifications/cancelled` and drops
-/// whatever the server answers. What the server publishes is still the contract — it is
-/// what a client written differently would read — so the gate speaks the protocol itself.
+/// a cancelled request locally the moment it sends `notifications/cancelled`. What the
+/// server puts on the wire is still the contract — it is what a client written differently
+/// would read — so the gate speaks the protocol itself.
+///
+/// Neither a body nor an error reaches the wire: the transport drops any response whose id
+/// it has already seen cancelled, which is what the specification asks of a receiver. The
+/// caller therefore learns of the cancellation from its own request, never from an answer.
 #[tokio::test]
-async fn a_cancelled_call_publishes_an_error_and_no_body() {
+async fn a_cancelled_call_publishes_nothing() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let dst = stage_fixture();
@@ -2558,23 +2605,9 @@ async fn a_cancelled_call_publishes_an_error_and_no_body() {
     )
     .await;
 
-    let answered = loop {
-        let frame = next_frame(&mut read).await;
-        if frame["id"] == json!(subject) {
-            break frame;
-        }
-    };
-    assert!(
-        answered["result"].is_null(),
-        "a cancelled call published a body; if this stand became fast enough to finish \
-         first, raise CANCEL_STAND_CALLERS rather than relaxing the assertion: {answered}"
-    );
-    assert!(
-        answered["error"]["message"].as_str().is_some_and(|m| m.contains("request cancelled")),
-        "the error must name the cancellation: {answered}"
-    );
-
-    // Positive control on the same wire: uncancelled, the same call publishes a body.
+    // The control is sent straight after the cancellation and travels the same wire, so it
+    // both bounds the wait and proves the silence below is the cancellation's doing rather
+    // than a wedged connection: a broken wire would starve the control too.
     let control = subject + 1;
     send(
         &mut write,
@@ -2584,8 +2617,17 @@ async fn a_cancelled_call_publishes_an_error_and_no_body() {
         }),
     )
     .await;
+
     let answered = loop {
         let frame = next_frame(&mut read).await;
+        assert!(
+            frame["id"] != json!(subject),
+            "a cancelled call published a frame; the transport drops responses for ids it has \
+             already seen cancelled, so anything arriving here means the cancellation never \
+             reached the request. If this stand became fast enough to finish before the \
+             cancellation, raise CANCEL_STAND_CALLERS rather than relaxing the assertion: \
+             {frame}"
+        );
         if frame["id"] == json!(control) {
             break frame;
         }

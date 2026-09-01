@@ -74,6 +74,28 @@ pub fn validate_edge_kinds(kinds: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Default and ceiling for `max_call_sites`. The default is a working number of places for
+/// one edge; the ceiling exists because the places of one edge all live in one file, and a
+/// caller asking for thousands is asking to be served that file a line at a time.
+pub const DEFAULT_CALL_SITE_CAP: usize = 20;
+pub const MAX_CALL_SITE_CAP: usize = 200;
+
+/// Parse the per-edge place cap. Zero is refused rather than taken as "no places": a caller
+/// who asks for call sites and gets an empty list under a silent cap reads it as an edge with
+/// no place, which is a different answer.
+pub fn call_site_cap(requested: Option<usize>) -> Result<usize, String> {
+    match requested {
+        None => Ok(DEFAULT_CALL_SITE_CAP),
+        Some(0) => {
+            Err("max_call_sites must be at least 1; omit `call_sites` to ask for none".to_string())
+        }
+        Some(n) if n > MAX_CALL_SITE_CAP => {
+            Err(format!("max_call_sites {n} exceeds the ceiling of {MAX_CALL_SITE_CAP}"))
+        }
+        Some(n) => Ok(n),
+    }
+}
+
 /// An infrastructure failure (e.g. a SQL read error) surfaced in-band so the agent
 /// sees a structured error rather than a dropped tool call.
 fn internal(e: anyhow::Error) -> Value {
@@ -192,6 +214,37 @@ fn budget_completeness(truncated: bool) -> loc::Completeness {
     )
 }
 
+/// Spend what the bodies left on the places, edge by edge in served order.
+///
+/// Returns whether the budget actually dropped a place — counted from what was kept, not from
+/// the fact that the pass ran. A pass that reports "truncated" for a list it did not shorten
+/// tells a consumer it lost data it still has, and that report is exactly as unfalsifiable as
+/// the loss it claims.
+///
+/// `call_sites_total` is left alone: it counts what the artefact records, before anything is
+/// shown, so a shortened list stays comparable with the whole.
+fn trim_call_sites_to_budget(edges: &mut [ide::EdgeRef], remaining: &mut usize) -> bool {
+    let mut cut = false;
+    for edge in edges {
+        let Some(places) = edge.call_sites.as_mut() else { continue };
+        let mut kept = 0;
+        for place in places.iter() {
+            let cost = serde_json::to_string(place).map(|json| json.len()).unwrap_or(0);
+            if cost > *remaining {
+                break;
+            }
+            *remaining -= cost;
+            kept += 1;
+        }
+        if kept < places.len() {
+            places.truncate(kept);
+            edge.call_sites_truncated = true;
+            cut = true;
+        }
+    }
+    cut
+}
+
 pub fn neighbors(
     graph: &GraphDb,
     params: &NeighborsParams<'_>,
@@ -215,17 +268,35 @@ pub fn neighbors(
                 node.truncated = node_truncated;
                 truncated |= node_truncated;
             }
+            // The per-edge cap has already cut what it was going to cut; read that before the
+            // budget pass, which sets the same flag for a different reason.
+            let capped_sites = result.edges.iter().any(|edge| edge.call_sites_truncated);
+            let budget_cut_sites = trim_call_sites_to_budget(&mut result.edges, &mut remaining);
+
             let mut value = to_value(&result);
             if truncated {
                 value["budget_exhausted"] = json!(true);
             }
             // A centrality-ranked tail drop is a CAP, not a budget cut: raising
-            // `max_output_tokens` alone does not bring the dropped neighbours back.
-            let completeness = budget_completeness(truncated).when(
-                result.dropped_count > 0,
-                loc::ReasonCode::ResultCap,
-                "neighbours dropped by max_nodes; raise it or narrow the direction",
-            );
+            // `max_output_tokens` alone does not bring the dropped neighbours back. The same
+            // split applies to the places of an edge, and for the same reason the two are
+            // named apart.
+            let completeness = budget_completeness(truncated)
+                .when(
+                    result.dropped_count > 0,
+                    loc::ReasonCode::ResultCap,
+                    "neighbours dropped by max_nodes; raise it or narrow the direction",
+                )
+                .when(
+                    capped_sites,
+                    loc::ReasonCode::ResultCap,
+                    "call sites dropped by max_call_sites; raise it",
+                )
+                .when(
+                    budget_cut_sites,
+                    loc::ReasonCode::OutputBudget,
+                    "call sites trimmed to fit max_output_tokens",
+                );
             (value, completeness)
         }
         Ok(Err(err)) => (to_value(&err), loc::Completeness::complete()),
@@ -326,7 +397,7 @@ pub fn loading(detail: Option<&str>) -> CallToolResult {
 /// independent of the on-disk SQLite cache layout in [`crate::graph_db`]).
 fn schema_json() -> Value {
     json!({
-        "schema_version": "32",
+        "schema_version": "33",
         "actions": ["overview", "schema", "status", "node", "source", "neighbors", "callers", "callees", "resolve"],
         "status": "`status` returns the graph lifecycle ({state: disabled|loading|ready|failed, and when ready: files, unread_files, revision, stale, reload}) and kicks the lazy build — poll it instead of reading a flat `loading` envelope from a data action (mirrors `diagnostics status`). `unread_files` counts modules whose bytes could not be read when the artefact was built or last patched: they contributed no nodes and no edges, so the graph is missing them, `stale` is true, and no fingerprint comparison reveals it (stat needs no read permission). A patch never clears an inherited one — only a full rebuild restores the missing rows. `files` here is the module count the artefact COVERS, unread ones included, so `unread_files` is a subset of it — unlike `diagnostics status`, whose `files` counts only what it serves and excludes them; do not apply one arithmetic to both. `superseded: true` (emitted only when it holds) means another daemon generation owns this workspace's derived caches and this server no longer rebuilds. It reports `ready + superseded` and serves data only while one of its own pre-opened SQLite descriptors is available in the pool; otherwise status is `failed + superseded` and every data action returns the same reconnect error, never `loading`. Reconnect to use the current daemon. The static `schema` action remains available without a snapshot.",
         "node_kinds": ["method", "module", "mdo", "attribute", "tabular_section", "form", "form_item", "form_attribute"],
@@ -340,10 +411,28 @@ fn schema_json() -> Value {
         "dispatch": ["client", "server"],
         "neighbors_params": {
             "provenance": "string[] — keep only edges with these provenances (empty = all)",
-            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|register_records|register_record_set|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement+register_records+register_record_set metadata impact on a register before delete/rename"
+            "edge_kinds": "string[] — keep only edges of these kinds (call|manager_creates|manager_access|query_ref|register_movement|register_records|register_record_set|contains|data_binding|notify_ref|idle_handler|event_subscription|subsystem_membership|role_reference); empty = all. Combine with provenance to isolate e.g. only query_ref+register_movement+register_records+register_record_set metadata impact on a register before delete/rename",
+            "call_sites": "bool — ask each edge where its call is written (default false). Off, an edge carries none of the call_site* keys, which is how an edge nobody asked about stays distinguishable from one that has no place",
+            "max_call_sites": format!(
+                "usize — places per edge (default {DEFAULT_CALL_SITE_CAP}, max {MAX_CALL_SITE_CAP}); 0 is refused, omit `call_sites` to ask for none"
+            )
         },
         "neighbors_result": {
             "edges": "edge endpoints equal to the traversal root are omitted: an absent `from`/`to` means the root node (its full ref is carried once in `root`)",
+            "call_sites": format!(
+                "present only when the request asked (`call_sites: true`). An edge then carries \
+                 EITHER `call_sites` — places under the location contract v1, `range` = the \
+                 whole call expression, `enclosing_range` = the calling declaration (absent for \
+                 a call written in a module body, which has no declaration), addressed in the \
+                 `from` node's file — plus `call_sites_total` (places the artefact records, \
+                 counted before any is shown) and `call_sites_truncated` when the cap or the \
+                 output budget shortened the list; OR `call_sites_unavailable`, a machine \
+                 reason from the same closed vocabulary as `location_unavailable`: {}. The list \
+                 is never partial for any other cause: a recorded span the file no longer \
+                 confirms takes the whole list with it and the edge answers `source_drifted`, \
+                 so a shorter list than `call_sites_total` always means cap or budget",
+                loc::LocationUnavailable::vocabulary(),
+            ),
             "total": "usize — distinct neighbours discovered, before the max_nodes cap",
             "returned": "usize — neighbours returned in `nodes` (after the cap)",
             "dropped_count": "usize — neighbours dropped by the cap (total - returned)",
@@ -538,7 +627,7 @@ mod tests {
         // The contract version must be bumped in lockstep with any response-shape change
         // (a new action, node/edge kind, or result field). The history of what each bump
         // added lives in git, not here.
-        assert_eq!(schema["schema_version"], "32");
+        assert_eq!(schema["schema_version"], "33");
         // A bumped number over unchanged text would certify a contract the server no longer
         // honours, so the new keys are asserted by description, not by version alone.
         assert!(schema["envelope"]["freshness"].is_string(), "the freshness envelope advertised");
@@ -608,7 +697,7 @@ mod tests {
     fn assert_structured_mirrors_text(result: &CallToolResult) {
         let structured =
             result.structured_content.as_ref().expect("structuredContent must be populated");
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         let parsed: Value = serde_json::from_str(text).expect("text mirror must be valid JSON");
         assert_eq!(&parsed, structured, "text mirror must match structuredContent");
     }
@@ -641,7 +730,7 @@ mod tests {
     #[test]
     fn schema_and_loading_populate_structured_content() {
         assert_structured_mirrors_text(&schema());
-        assert_eq!(schema().structured_content.unwrap()["schema_version"], "32");
+        assert_eq!(schema().structured_content.unwrap()["schema_version"], "33");
 
         assert_structured_mirrors_text(&loading(Some("indexing")));
         let body = loading(Some("indexing")).structured_content.unwrap();

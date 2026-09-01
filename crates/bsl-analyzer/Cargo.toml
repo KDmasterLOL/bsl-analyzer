@@ -91,4 +91,4 @@ winresource = "0.1"
 
 [dev-dependencies]
 expect-test.workspace = true
-rmcp = { version = "1.7", features = ["client"] }
+rmcp = { version = "3.1", features = ["client"] }

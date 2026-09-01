@@ -23,6 +23,7 @@
 use notify::{
     Config as NotifyConfig, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
+use project_model::{PathScope, Spellings};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -630,45 +631,22 @@ impl Accumulator {
 /// directory that merely carries that name would be taken under recursive watch.
 /// The permissions add up: in a flat project the workspace IS the scan root, so a
 /// config-named directory there is walked on the ordinary rule.
-///
-/// Both spellings of every directory are kept. `dedup_targets` decides by the
-/// canonical path while `watcher.watch` receives the raw one, so events arrive
-/// spelled either way and a predicate holding one spelling would discard a whole
-/// tree declared through a symlink.
 #[derive(Debug, Default, Clone)]
 struct Scope {
-    scan_roots: Vec<Spellings>,
+    /// The scan roots and the subtrees punched out of them — asked, never
+    /// re-implemented: the walk decides the same pair of inputs with the same type,
+    /// and a second answer here is how a file ends up walked but unwatched.
+    ///
+    /// Holes are the analyzer's own derived cache: by default it sits at
+    /// `<workspace>/.build`, inside the recursive watch, so every index write the
+    /// server performs comes back as an event about the workspace it was analyzing.
+    /// Narrowing by roots alone cannot express that — the cache is not a smaller root,
+    /// it is a hole inside one.
+    paths: PathScope,
+    /// Directories watched non-recursively for the project-config files sitting
+    /// directly in them. Not roots: the hub's own concern, and the only question asked
+    /// of them is whether one IS a given file's parent.
     config_dirs: Vec<Spellings>,
-}
-
-/// Every spelling one watched directory can appear under in an event path.
-///
-/// Two, because a scope is only ever built from [`ResolvedTargets`], whose paths
-/// are already absolute: `declared` is what `watcher.watch` receives and what the
-/// backend therefore reports, `canonical` is what topology decisions rank by. The
-/// two part company as soon as the path crosses a symlink, and a predicate holding
-/// one of them would discard a whole tree declared through the other.
-#[derive(Debug, Clone)]
-struct Spellings {
-    declared: PathBuf,
-    canonical: PathBuf,
-}
-
-impl Spellings {
-    fn of(path: &Path) -> Self {
-        Self {
-            declared: path.to_path_buf(),
-            canonical: path.canonicalize().unwrap_or_else(|_| path.to_path_buf()),
-        }
-    }
-
-    fn covers(&self, path: &Path) -> bool {
-        path.starts_with(&self.declared) || path.starts_with(&self.canonical)
-    }
-
-    fn is(&self, path: &Path) -> bool {
-        path == self.declared || path == self.canonical
-    }
 }
 
 /// Watch targets whose relative paths have been resolved against the current
@@ -773,23 +751,42 @@ impl Scope {
     /// [`watch_targets_for`]). Built from the DESIRED targets, not the armed ones:
     /// a root that failed to arm is still part of the scope, and its events —
     /// arriving through a covering target — must not be dropped.
-    fn from_targets(targets: &ResolvedTargets) -> Self {
-        let spellings = |t: &WatchTarget| Spellings::of(&t.path);
+    fn from_targets(targets: &ResolvedTargets, excluded: &[PathBuf]) -> Self {
         let targets = targets.as_slice();
+        let scan_roots: Vec<PathBuf> =
+            targets.iter().filter(|t| t.recursive).map(|t| t.path.clone()).collect();
         Self {
-            scan_roots: targets.iter().filter(|t| t.recursive).map(spellings).collect(),
-            config_dirs: targets.iter().filter(|t| !t.recursive).map(spellings).collect(),
+            // Rebuilt here rather than carried over, because this runs on every re-arm
+            // and the roots are what changed: a root declared under the cache after the
+            // hub came up is carved back out of it, instead of being dropped in silence
+            // for the rest of the process.
+            paths: PathScope::new(&scan_roots, excluded),
+            config_dirs: targets
+                .iter()
+                .filter(|t| !t.recursive)
+                .map(|t| Spellings::of(&t.path))
+                .collect(),
         }
+    }
+
+    #[cfg(test)]
+    fn from_targets_for_test(targets: &ResolvedTargets) -> Self {
+        Self::from_targets(targets, &[])
+    }
+
+    /// Whether `path` lies in a subtree the hub does not speak for.
+    fn is_excluded(&self, path: &Path) -> bool {
+        self.paths.is_hole(path)
     }
 
     /// Whether a change to `path` may be walked and taken under recursive watch.
     fn may_walk(&self, path: &Path) -> bool {
-        self.scan_roots.iter().any(|root| root.covers(path))
+        !self.is_excluded(path) && self.paths.covers(path)
     }
 
     /// Whether a change to `path` may be recorded for consumers.
     fn may_record(&self, path: &Path) -> bool {
-        self.may_walk(path) || self.is_project_config(path)
+        !self.is_excluded(path) && (self.may_walk(path) || self.is_project_config(path))
     }
 
     /// A project-config file sitting DIRECTLY in a config directory. Decided from
@@ -800,7 +797,7 @@ impl Scope {
         let named_like_a_config = path
             .file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| project_model::PROJECT_INPUT_FILE_NAMES.contains(&n));
+            .is_some_and(project_model::is_project_input_file_name);
         if !named_like_a_config {
             return false;
         }
@@ -813,6 +810,24 @@ struct HubInner {
     acc: Mutex<Accumulator>,
     /// Signalled when there is new work to drain, or setup has settled.
     wake: Condvar,
+    /// How many times sinks were woken. A wake that carries no new work costs a
+    /// consumer a full drain-and-apply pass, and the cost is invisible in the
+    /// accumulator: a wake without a generation bump leaves no trace there. The
+    /// counter is the only observable that separates "nothing was recorded" from
+    /// "nothing was recorded and nobody was disturbed".
+    notifications: AtomicU64,
+    /// Subtrees the hub does not speak for, fixed when the hub is created.
+    ///
+    /// On the inner, not in the watch targets: `Scope` is rebuilt from the targets on
+    /// every re-arm, and `ensure_roots` is called by consumers that know the scan
+    /// roots but nothing about the cache layout (the graph builder, the diagnostics
+    /// lifecycle). Carrying the exclusions in the target list would let any of them
+    /// drop the exclusions by simply not knowing to pass them.
+    excluded: Vec<PathBuf>,
+    /// Events dropped because they landed in an excluded subtree. Diagnostic only:
+    /// a workspace whose cache is being written constantly is otherwise
+    /// indistinguishable from a quiet one.
+    excluded_events: AtomicU64,
     /// Set once the recursive watch is armed; false until the hub thread finishes
     /// setup (or forever, if setup failed).
     watching: AtomicBool,
@@ -867,6 +882,28 @@ impl HubInner {
         self.scope.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
+    /// Wake the sinks. The single door: a bare `wake.notify_all()` elsewhere would
+    /// not be counted, and an uncounted wake is exactly the one that spins a sink.
+    /// The only way a `Scope` is built after construction: it carries the hub's own
+    /// exclusions, so a caller that re-arms with a new root set cannot drop them.
+    fn scope_from(&self, targets: &ResolvedTargets) -> Scope {
+        Scope::from_targets(targets, &self.excluded)
+    }
+
+    /// Note an event dropped for landing in an excluded subtree.
+    fn note_excluded(&self, path: &Path) {
+        let total = self.excluded_events.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::trace!(path = %path.display(), total, "change hub dropped an event inside an excluded root");
+        if total.is_multiple_of(1024) {
+            tracing::debug!(total, "change hub keeps dropping events inside an excluded root");
+        }
+    }
+
+    fn notify(&self) {
+        self.notifications.fetch_add(1, Ordering::Relaxed);
+        self.wake.notify_all();
+    }
+
     fn set_scope(&self, scope: Scope) {
         *self.scope.lock().unwrap_or_else(PoisonError::into_inner) = scope;
     }
@@ -883,7 +920,7 @@ impl HubInner {
             Err(error) => {
                 tracing::warn!("workspace watch event error: {error}");
                 self.lock_acc().enter_rescan(false, DegradeReason::RuntimeError);
-                self.wake.notify_all();
+                self.notify();
                 return Vec::new();
             }
         };
@@ -908,15 +945,35 @@ impl HubInner {
         // in its own right, and nothing in notify's contract ties it to one kind.
         // Inotify raises it without a path; FSEvents attaches one, commonly the
         // workspace directory, which in a nested layout lies outside every scan root.
-        if event.need_rescan() {
-            self.lock_acc().enter_rescan(false, DegradeReason::UnknownEvent);
-        }
+        let rescan_moved_generation = if event.need_rescan() {
+            let mut acc = self.lock_acc();
+            let before = acc.generation;
+            acc.enter_rescan(false, DegradeReason::UnknownEvent);
+            acc.generation != before
+        } else {
+            false
+        };
 
         let scope = self.scope();
+        for path in event.paths.iter().filter(|path| scope.is_excluded(path)) {
+            self.note_excluded(path);
+        }
         let paths: Vec<PathBuf> =
             event.paths.iter().filter(|path| scope.may_record(path)).cloned().collect();
         if !event.paths.is_empty() && paths.is_empty() {
-            self.wake.notify_all();
+            // Nothing was recorded, so there is nothing for a sink to drain. Waking
+            // one anyway is not merely wasteful: a sink that writes into the watched
+            // tree on every pass (the cache lease does) turns the wake into the next
+            // event, and the two feed each other at syscall speed.
+            //
+            // "Nothing was recorded" is not the same as "nothing happened", though: a
+            // rescan notice moves the generation before this filter runs, and the
+            // notice is exactly the case where its path says nothing about what was
+            // lost. Staying silent on a moved generation would leave every sink asleep
+            // until its own timeout, blind to the whole window.
+            if rescan_moved_generation {
+                self.notify();
+            }
             return Vec::new();
         }
 
@@ -975,7 +1032,7 @@ impl HubInner {
             _ => self.lock_acc().enter_rescan(false, DegradeReason::UnknownEvent),
         }
 
-        self.wake.notify_all();
+        self.notify();
         rewatch
     }
 
@@ -984,7 +1041,7 @@ impl HubInner {
     fn drain_channel_overflow(&self) {
         if self.channel_overflow.swap(false, Ordering::Relaxed) {
             self.lock_acc().enter_rescan(true, DegradeReason::Overflow);
-            self.wake.notify_all();
+            self.notify();
         }
     }
 
@@ -998,7 +1055,7 @@ impl HubInner {
             "change hub could not extend watch to new subtree; drift there may be missed: {error}"
         );
         self.lock_acc().enter_rescan(false, DegradeReason::RewatchFailed);
-        self.wake.notify_all();
+        self.notify();
     }
 
     /// A target that could not be placed leaves a subtree unwatched under a path
@@ -1015,7 +1072,7 @@ impl HubInner {
     /// reconciler's, the same bargain an unarmable root gets.
     fn note_unplaced_targets(&self) {
         self.lock_acc().enter_rescan(false, DegradeReason::WatcherSetup);
-        self.wake.notify_all();
+        self.notify();
     }
 
     /// Is anything declared, present and unwatched right now?
@@ -1025,14 +1082,14 @@ impl HubInner {
 
     fn mark_setup_failed(&self) {
         self.lock_acc().setup_failed = true;
-        self.wake.notify_all();
+        self.notify();
     }
 
     fn mark_watching(&self) {
         self.watching.store(true, Ordering::SeqCst);
         // Bump generation under the lock so `wait_until_watching` wakers re-check.
         self.lock_acc().generation += 1;
-        self.wake.notify_all();
+        self.notify();
     }
 }
 
@@ -1098,7 +1155,15 @@ fn classify_path(path: &Path) -> Option<(PathBuf, ChangeKind)> {
         // interruption, a momentary race) must not tombstone a live file.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             let canonical = canonical_for_missing(path);
-            if path.extension().is_none() {
+            // A project input is known to be a file whatever its name looks like:
+            // `.env` carries no extension, and the extension-less heuristic below
+            // would read its removal as a vanished directory and force a full
+            // rescan instead of a tombstone.
+            let named_like_a_file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(project_model::is_project_input_file_name);
+            if path.extension().is_none() && !named_like_a_file {
                 Some((canonical, ChangeKind::SubtreeRemoved))
             } else {
                 Some((canonical, ChangeKind::MaybeRemoved))
@@ -1234,14 +1299,44 @@ impl WorkspaceChangeHub {
     }
 
     /// [`Self::start`] with explicit per-target modes (see [`watch_targets_for`]).
+    #[cfg(test)]
     pub(crate) fn start_targets(targets: Vec<WatchTarget>) -> Self {
-        Self::start_with_capacity(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD)
+        Self::start_targets_excluding(targets, Vec::new())
+    }
+
+    /// [`Self::start_targets`] with subtrees the hub must not speak for.
+    ///
+    /// `excluded` is fixed here and nowhere else: see [`HubInner::excluded`] for why a
+    /// re-arm must not be able to change it. Each path is taken in both the spelling
+    /// given and its canonical form, because an event names whichever of the two the
+    /// watch was armed with.
+    pub(crate) fn start_targets_excluding(
+        targets: Vec<WatchTarget>,
+        excluded: Vec<PathBuf>,
+    ) -> Self {
+        Self::start_seamed(
+            targets,
+            DEFAULT_CAPACITY,
+            COVERAGE_TICK_PERIOD,
+            false,
+            None,
+            None,
+            excluded,
+        )
     }
 
     /// A hub whose thread the operating system refused to start.
     #[cfg(test)]
     pub(crate) fn start_with_unstartable_thread(targets: Vec<WatchTarget>) -> Self {
-        Self::start_seamed(targets, DEFAULT_CAPACITY, COVERAGE_TICK_PERIOD, true, None, None)
+        Self::start_seamed(
+            targets,
+            DEFAULT_CAPACITY,
+            COVERAGE_TICK_PERIOD,
+            true,
+            None,
+            None,
+            Vec::new(),
+        )
     }
 
     /// A hub held just short of arming until the returned guard is released or dropped, so
@@ -1259,6 +1354,7 @@ impl WorkspaceChangeHub {
             false,
             Some(Arc::new(move || gate.wait())),
             None,
+            Vec::new(),
         );
         (hub, HubHoldGuard(hold))
     }
@@ -1286,11 +1382,13 @@ impl WorkspaceChangeHub {
             false,
             None,
             Some(refusals.as_refusal()),
+            Vec::new(),
         )
     }
 
+    #[cfg(test)]
     fn start_with_capacity(targets: Vec<WatchTarget>, cap: usize, tick_period: Duration) -> Self {
-        Self::start_seamed(targets, cap, tick_period, false, None, None)
+        Self::start_seamed(targets, cap, tick_period, false, None, None, Vec::new())
     }
 
     /// The hub with its startup seams exposed. Production passes `false` and two `None`s.
@@ -1310,18 +1408,23 @@ impl WorkspaceChangeHub {
         refuse_spawn: bool,
         before_arm: Option<BeforeArm>,
         watch_refusal: Option<WatchRefusal>,
+        excluded: Vec<PathBuf>,
     ) -> Self {
         let placed = ResolvedTargets::here(targets.clone());
+
         let inner = Arc::new(HubInner {
             acc: Mutex::new(Accumulator::new(cap)),
             wake: Condvar::new(),
+            notifications: AtomicU64::new(0),
             watching: AtomicBool::new(false),
             channel_overflow: AtomicBool::new(false),
             watched_roots: Mutex::new(Vec::new()),
             // A starting value only; the hub thread re-derives it right before
             // arming, so the relative spellings are resolved against the same
             // current directory the backend will use.
-            scope: Mutex::new(Scope::from_targets(&placed)),
+            scope: Mutex::new(Scope::from_targets(&placed, &excluded)),
+            excluded,
+            excluded_events: AtomicU64::new(0),
             tick_period,
             ticks: AtomicU64::new(0),
             rearms: AtomicU64::new(0),
@@ -1571,7 +1674,7 @@ impl WorkspaceChangeHub {
     /// Entries are kept; the caller applies the drift it already found.
     pub(crate) fn degrade_external(&self) {
         self.inner.lock_acc().enter_rescan(false, DegradeReason::ReconcileMiss);
-        self.inner.wake.notify_all();
+        self.inner.notify();
     }
 
     /// Whether the watch is armed. False means setup is still in flight or failed.
@@ -1629,13 +1732,32 @@ impl WorkspaceChangeHub {
     /// then return the current generation. Sink threads pass the generation they
     /// last observed to sleep until there is new work.
     pub(crate) fn wait_for_change(&self, since: u64, timeout: Duration) -> u64 {
-        let acc = self.inner.lock_acc();
-        if acc.generation > since {
-            return acc.generation;
+        let deadline = Instant::now() + timeout;
+        let mut acc = self.inner.lock_acc();
+        loop {
+            if acc.generation > since {
+                return acc.generation;
+            }
+            // A condition variable may wake without a signal at all, and every
+            // signal on this one is shared by every sink. Returning on the wake
+            // itself would report "there is work" on a generation that never moved,
+            // and the caller's answer to that is a full drain-and-apply pass.
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return acc.generation;
+            };
+            let (guard, _) = self
+                .inner
+                .wake
+                .wait_timeout(acc, remaining)
+                .unwrap_or_else(|poison| poison.into_inner());
+            acc = guard;
         }
-        let (acc, _) =
-            self.inner.wake.wait_timeout(acc, timeout).unwrap_or_else(|poison| poison.into_inner());
-        acc.generation
+    }
+
+    /// Wakes delivered to sinks so far. See [`HubInner::notifications`].
+    #[cfg(test)]
+    pub(crate) fn notifications(&self) -> u64 {
+        self.inner.notifications.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -1954,7 +2076,7 @@ fn refresh_blind_targets(
             tracing::warn!(root = ?target.path, "workspace change hub is not watching a declared root; changes under it are found only by a reconcile");
         }
         inner.lock_acc().enter_rescan(false, DegradeReason::RewatchFailed);
-        inner.wake.notify_all();
+        inner.notify();
     }
 }
 
@@ -2042,7 +2164,7 @@ fn run_hub_thread(
     if !targets.is_complete() {
         inner.note_unplaced_targets();
     }
-    inner.set_scope(Scope::from_targets(&targets));
+    inner.set_scope(inner.scope_from(&targets));
     // The declared set, kept for the life of the thread: `dedup_targets` below drops
     // whatever a recursive ancestor absorbs or a canonical duplicate collapses, and
     // either can become a target in its own right when a link is retargeted. A set
@@ -2226,7 +2348,7 @@ fn retry_blind_targets(
     }
     inner.publish_watched_roots(armed);
     inner.lock_acc().enter_rescan(false, DegradeReason::Rearmed);
-    inner.wake.notify_all();
+    inner.notify();
 }
 
 /// Take a new declared set that the caller believes needs no re-arming.
@@ -2257,7 +2379,7 @@ fn apply_declaration(
         || cover_differs_from_armed(&cover_from_snapshot(&next, &current), armed);
     *snapshot = current;
     *declared = next;
-    inner.set_scope(Scope::from_targets(&resolved));
+    inner.set_scope(inner.scope_from(&resolved));
     if moved {
         // Denies coverage on an unplaced target itself, so the branch below is the only
         // one left without that report.
@@ -2303,7 +2425,7 @@ fn apply_rearm(
     if !full_coverage {
         inner.note_unplaced_targets();
     }
-    inner.set_scope(Scope::from_targets(&new_targets));
+    inner.set_scope(inner.scope_from(&new_targets));
     let desired = dedup_targets(new_targets.into_inner());
     let is_armed = |list: &[(WatchTarget, PathBuf)], t: &WatchTarget, c: &PathBuf| {
         list.iter().any(|(at, ac)| at.recursive == t.recursive && ac == c)
@@ -2358,7 +2480,7 @@ fn apply_rearm(
     let mut acc = inner.lock_acc();
     acc.enter_rescan(false, DegradeReason::Rearmed);
     drop(acc);
-    inner.wake.notify_all();
+    inner.notify();
     full_coverage
 }
 
@@ -3354,9 +3476,10 @@ mod tests {
         // the first everywhere and resolves the second on Windows. Without them the
         // test cannot tell the two ways of building the spelling apart.
         let declared = base.join("prefix").join("..").join(".").join("src");
-        let scope = Scope::from_targets(&ResolvedTargets::here(vec![WatchTarget::recursive(
-            declared.clone(),
-        )]));
+        let scope =
+            Scope::from_targets_for_test(&ResolvedTargets::here(vec![WatchTarget::recursive(
+                declared.clone(),
+            )]));
 
         // The reference is computed the way the backend computes it — joining to the
         // current directory, components untouched.
@@ -3531,7 +3654,7 @@ mod tests {
     /// This is what the non-recursive workspace target exists for.
     #[test]
     fn every_config_file_name_in_the_workspace_is_recorded() {
-        for name in project_model::CONFIG_FILE_NAMES {
+        for name in project_model::PROJECT_INPUT_FILE_NAMES {
             let project = nested_project();
             let hub = project.hub();
             let cursor = hub.subscribe();
@@ -3552,7 +3675,7 @@ mod tests {
     /// predicate gated on "the file exists" would drop it.
     #[test]
     fn every_config_file_removal_in_the_workspace_is_recorded() {
-        for name in project_model::CONFIG_FILE_NAMES {
+        for name in project_model::PROJECT_INPUT_FILE_NAMES {
             let project = nested_project();
             let hub = project.hub();
             let cursor = hub.subscribe();
@@ -4296,6 +4419,313 @@ mod tests {
             dir.path().join("a.bsl"),
         ));
         assert_eq!(hub.events_seen(), 2);
+    }
+
+    /// The default cache sits inside the recursive watch, so every index write the
+    /// server performs would otherwise be an event about the workspace it analyzed.
+    #[test]
+    fn writes_inside_the_excluded_cache_are_not_workspace_changes() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join(".build");
+        std::fs::create_dir_all(&cache).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            vec![cache.clone()],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        for name in ["writer.lease", "writer.tmp.4242", "writer.lease.lock"] {
+            hub.ingest_for_test(change_event(EventKind::Create(CreateKind::Any), cache.join(name)));
+        }
+        assert!(hub.materialize(cursor).entries.is_empty(), "a cache write was recorded");
+
+        // Positive control: a source file in the same root must still be recorded, or
+        // the assertion above would hold on a hub that records nothing at all.
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            dir.path().join("M.bsl"),
+        ));
+        assert_eq!(hub.materialize(cursor).entries.len(), 1, "a source edit was dropped");
+    }
+
+    /// An event names the root by whichever spelling the watch was armed with, and that
+    /// is the pre-canonical one. A filter built on the canonical spelling alone matches
+    /// nothing on Windows (`\\?\C:\...` against `C:\...`) while staying green anywhere
+    /// the two happen to coincide; a symlinked root is the same defect, reproducible here.
+    #[test]
+    fn the_excluded_root_is_recognised_under_either_spelling() {
+        let real = tempdir().unwrap();
+        let links = tempdir().unwrap();
+        let link = links.path().join("link");
+        std::os::unix::fs::symlink(real.path(), &link).unwrap();
+        std::fs::create_dir_all(real.path().join(".build")).unwrap();
+
+        let layout = crate::cache::WorkspaceCacheLayout::for_workspace(&link);
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(link.clone())],
+            layout.spellings().iter().map(|p| p.to_path_buf()).collect(),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        for root in [link.join(".build"), real.path().join(".build")] {
+            hub.ingest_for_test(change_event(
+                EventKind::Create(CreateKind::Any),
+                root.join("writer.lease"),
+            ));
+        }
+        assert!(
+            hub.materialize(cursor).entries.is_empty(),
+            "the cache was recognised under only one of its two spellings"
+        );
+    }
+
+    /// The exclusion is a path, not a name: `starts_with` on a `Path` compares whole
+    /// components, and a filter that compared strings would swallow a sibling directory
+    /// whose name merely begins the same way.
+    #[test]
+    fn a_sibling_sharing_the_cache_name_prefix_is_not_excluded() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            vec![dir.path().join(".build")],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        std::fs::create_dir_all(dir.path().join(".buildfoo")).unwrap();
+        let sibling = dir.path().join(".buildfoo").join("M.bsl");
+        std::fs::write(&sibling, "").unwrap();
+        hub.ingest_for_test(change_event(EventKind::Create(CreateKind::Any), sibling));
+        assert_eq!(hub.materialize(cursor).entries.len(), 1, "a sibling directory was excluded");
+    }
+
+    /// The default cache is lazy: it does not exist when the hub starts. The exclusion
+    /// still has to hold once the first index write creates it.
+    #[test]
+    fn a_cache_created_after_the_hub_started_is_still_excluded() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join(".build");
+        let layout = crate::cache::WorkspaceCacheLayout::for_workspace(dir.path());
+        assert!(!cache.exists(), "the fixture must start without the cache");
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            layout.spellings().iter().map(|p| p.to_path_buf()).collect(),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        std::fs::create_dir_all(&cache).unwrap();
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            cache.join("writer.lease"),
+        ));
+        assert!(hub.materialize(cursor).entries.is_empty(), "a lazily-created cache was watched");
+    }
+
+    /// The exclusion must survive a real re-arm. `Scope` is rebuilt from the targets
+    /// every time the watch is re-pointed, and `ensure_roots` is called by consumers
+    /// that know the scan roots but nothing about the cache — so the gate has to force
+    /// the path that rebuilds the scope, not the early return that skips it.
+    #[test]
+    fn a_rearm_onto_new_roots_keeps_the_exclusion() {
+        let dir = tempdir().unwrap();
+        let extension = tempdir().unwrap();
+        let cache = dir.path().join(".build");
+        std::fs::create_dir_all(&cache).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            vec![cache.clone()],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        // Before: the extension root is outside the scope, so its events are dropped.
+        // This is what makes the re-arm below observable rather than assumed.
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            extension.path().join("M.bsl"),
+        ));
+        assert!(hub.materialize(cursor).entries.is_empty());
+
+        assert!(hub.rearm(
+            vec![
+                WatchTarget::recursive(dir.path().to_path_buf()),
+                WatchTarget::recursive(extension.path().to_path_buf()),
+            ],
+            Duration::from_secs(5),
+        ));
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            cache.join("writer.lease"),
+        ));
+        assert!(hub.materialize(cursor).entries.is_empty(), "the re-arm dropped the exclusion");
+
+        // Positive control: the added root is now live, which is the proof the re-arm
+        // actually rebuilt the scope instead of returning early as a no-op.
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            extension.path().join("M.bsl"),
+        ));
+        assert_eq!(hub.materialize(cursor).entries.len(), 1, "the re-arm was a no-op");
+    }
+
+    /// A cache outside the workspace changes nothing: the tree is watched as before.
+    #[test]
+    fn a_cache_outside_the_workspace_leaves_the_watch_untouched() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            vec![outside.path().to_path_buf()],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            dir.path().join("M.bsl"),
+        ));
+        assert_eq!(
+            hub.materialize(cursor).entries.len(),
+            1,
+            "an external cache narrowed the watch"
+        );
+    }
+
+    /// A wake costs every sink a full drain-and-apply pass, and a sink that writes
+    /// into the watched tree turns that pass into the next event. The observable is
+    /// the wake counter, not "did `wait_for_change` return": once the wait rechecks
+    /// its predicate it swallows a spurious wake, so a gate phrased over the wait
+    /// stays green on a hub that still disturbs everyone on every foreign event.
+    #[test]
+    fn an_event_filtered_to_nothing_wakes_nobody() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+
+        let before = hub.notifications();
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            outside.path().join("a.bsl"),
+        ));
+        assert_eq!(hub.notifications(), before, "an out-of-scope path woke the sinks");
+
+        // Positive control: an in-scope path must still wake them, or the assert
+        // above would hold on a hub that never wakes anyone at all.
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            dir.path().join("a.bsl"),
+        ));
+        assert!(hub.notifications() > before, "an in-scope path failed to wake the sinks");
+    }
+
+    /// The exclusion is fixed when the hub is created; scan roots are declared again on
+    /// every re-arm. A topology reload can therefore name a root under the cache long
+    /// after the boot-time refusal has had its say, and the hub must not answer that by
+    /// going quietly blind to the root it was just told to follow.
+    #[test]
+    fn a_scan_root_declared_under_the_excluded_cache_wins_over_it() {
+        let ws = tempdir().unwrap();
+        let cache = ws.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(ws.path().to_path_buf())],
+            vec![cache.clone()],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+
+        assert!(hub.rearm(
+            vec![
+                WatchTarget::recursive(ws.path().to_path_buf()),
+                WatchTarget::recursive(cache.join("newext")),
+            ],
+            Duration::from_secs(5),
+        ));
+
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            cache.join("newext").join("M.bsl"),
+        ));
+        assert_eq!(
+            hub.materialize(cursor).entries.len(),
+            1,
+            "a root declared under the cache was silently dropped"
+        );
+
+        // Positive control: the rest of the cache stays excluded, so the carve-out is a
+        // hole in the hole and not a way of switching the exclusion off.
+        hub.ingest_for_test(change_event(
+            EventKind::Create(CreateKind::Any),
+            cache.join("writer.lease"),
+        ));
+        assert_eq!(
+            hub.materialize(cursor).entries.len(),
+            1,
+            "the carve-out disabled the exclusion instead of narrowing it"
+        );
+    }
+
+    /// A rescan notice says the stream lapsed, not that its path changed — so the scope
+    /// filter must not swallow the wake it owes. FSEvents attaches a path to the notice
+    /// (commonly the workspace directory, outside every scan root in a nested layout),
+    /// and an excluded cache root reaches the same branch. Skipping the wake there costs
+    /// the sink its whole timeout with every change in that window unseen.
+    #[test]
+    fn a_rescan_notice_whose_path_is_filtered_still_wakes_the_sink() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join(".build");
+        std::fs::create_dir_all(&cache).unwrap();
+        let hub = WorkspaceChangeHub::start_targets_excluding(
+            vec![WatchTarget::recursive(dir.path().to_path_buf())],
+            vec![cache.clone()],
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let cursor = hub.subscribe();
+        let generation = hub.wait_for_change(0, Duration::from_millis(1));
+        let before = hub.notifications();
+
+        hub.ingest_for_test(Ok(Event::new(EventKind::Other)
+            .add_path(cache.join("writer.lease"))
+            .set_flag(notify::event::Flag::Rescan)));
+
+        assert!(hub.notifications() > before, "a rescan notice woke nobody");
+        assert!(
+            hub.wait_for_change(generation, Duration::from_millis(50)) > generation,
+            "a rescan notice left the sink waiting for its own timeout"
+        );
+        assert!(hub.materialize(cursor).rescan_required, "the notice did not require a rescan");
+    }
+
+    /// A condition variable may wake without a signal, and every signal here is
+    /// shared by every sink. Returning on the wake instead of on the predicate
+    /// reports work that does not exist.
+    #[test]
+    fn wait_for_change_holds_until_the_generation_moves() {
+        let dir = tempdir().unwrap();
+        let hub = WorkspaceChangeHub::start(vec![dir.path().to_path_buf()]);
+        assert!(hub.wait_until_watching(Duration::from_secs(5)));
+        let generation = hub.wait_for_change(0, Duration::from_millis(1));
+
+        let waker = hub.clone();
+        std::thread::spawn(move || {
+            for _ in 0..20 {
+                std::thread::sleep(Duration::from_millis(5));
+                waker.inner.notify();
+            }
+        });
+
+        let started = Instant::now();
+        let observed = hub.wait_for_change(generation, Duration::from_millis(250));
+        assert_eq!(observed, generation, "a bare wake reported work that was not there");
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the wait returned on a wake instead of on the deadline: {:?}",
+            started.elapsed()
+        );
     }
 
     /// Empirical check that a file created under a directory that did not exist

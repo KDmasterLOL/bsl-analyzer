@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.75"
+version = "0.2.76"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -134,7 +134,7 @@ rust-stemmers = "1.2"
 
 expect-test = "1.4"
 tempfile = "3.8"
-syn = { version = "2.0", features = ["full", "parsing"] }
+syn = { version = "2.0", features = ["full", "parsing", "visit"] }
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 

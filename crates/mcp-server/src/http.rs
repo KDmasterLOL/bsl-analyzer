@@ -7,7 +7,11 @@ use std::{
 use axum::{
     body::Body,
     extract::{Request, State},
-    http::{header::HOST, uri::Authority, StatusCode},
+    http::{
+        header::{CONNECTION, CONTENT_LENGTH, HOST},
+        uri::Authority,
+        HeaderValue, StatusCode,
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -19,7 +23,6 @@ use rmcp::transport::streamable_http_server::{
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
-use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::{McpProfile, McpServer};
 
@@ -118,6 +121,21 @@ pub fn wildcard_allowed_hosts(allowed_hosts: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Answer a request the server refuses before reading its body, announcing that the
+/// connection ends here.
+///
+/// hyper cannot keep a connection whose request body was never drained: it closes the
+/// read side, and the socket dies right after the response. Without this header the
+/// response says nothing about that, so an HTTP/1.1 client is entitled to return the
+/// connection to its pool and send the next request into a socket the server has already
+/// closed — surfacing as `IncompleteMessage` on Linux and `WSAECONNABORTED` on Windows
+/// instead of the refusal the server actually sent.
+fn refuse(status: StatusCode) -> Response {
+    let mut response = status.into_response();
+    response.headers_mut().insert(CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
 /// Refuse a disallowed `Host` before anything reads the request body.
 ///
 /// rmcp applies this check inside its own service, which reaches only `/mcp` and only
@@ -137,7 +155,7 @@ async fn host_gate(
         .to_owned();
     if parse_request_authority(&host).is_none() {
         tracing::warn!(host, "rejected request with a malformed Host header");
-        return StatusCode::BAD_REQUEST.into_response();
+        return refuse(StatusCode::BAD_REQUEST);
     }
     if !host_is_allowed(&host, &allowed_hosts) {
         // The refusal is a mismatch between two values, so naming only one of them leaves
@@ -147,7 +165,7 @@ async fn host_gate(
             allowed = %allowed_hosts.join(", "),
             "rejected request with disallowed Host header"
         );
-        return StatusCode::FORBIDDEN.into_response();
+        return refuse(StatusCode::FORBIDDEN);
     }
     next.run(request).await
 }
@@ -184,15 +202,33 @@ fn effective_allowed_hosts(address: SocketAddr, allowed_hosts: Vec<String>) -> A
 }
 
 /// Enforce the body limit ourselves so the answer does not depend on framing.
-/// `RequestBodyLimitLayer` only synthesizes 413 when `Content-Length` already exceeds
-/// the limit; a chunked body of the same size fails mid-read and reaches the client as
-/// rmcp's generic 500.
+///
+/// An announced oversize is refused from `Content-Length` before a byte is read, which
+/// is what `RequestBodyLimitLayer` used to provide; collecting under the same bound then
+/// catches a chunked body of the same size, which the layer never saw and which reached
+/// the client as rmcp's generic 500. Both paths now leave through one refusal, so the
+/// status, the body and the connection outcome cannot differ by framing.
 async fn limit_request_body(request: Request, next: Next) -> Response {
+    if announces_oversize(&request) {
+        return refuse(StatusCode::PAYLOAD_TOO_LARGE);
+    }
     let (parts, body) = request.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, MAX_HTTP_REQUEST_BODY_BYTES).await else {
-        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        return refuse(StatusCode::PAYLOAD_TOO_LARGE);
     };
     next.run(Request::from_parts(parts, Body::from(bytes))).await
+}
+
+/// Whether the request's own `Content-Length` already exceeds the limit, so the refusal
+/// costs no reading at all. A body that announces nothing is still bounded by the collect
+/// above, and so is one whose length does not parse.
+fn announces_oversize(request: &Request) -> bool {
+    request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|announced| announced > MAX_HTTP_REQUEST_BODY_BYTES as u64)
 }
 
 /// Serve stateful MCP sessions and a readiness endpoint on an already-bound
@@ -222,7 +258,6 @@ pub async fn serve_http(
         .route("/health", get(health))
         .with_state(health_state)
         .layer(middleware::from_fn(limit_request_body))
-        .layer(RequestBodyLimitLayer::new(MAX_HTTP_REQUEST_BODY_BYTES))
         .layer(middleware::from_fn_with_state(Arc::clone(&allowed_hosts), host_gate));
 
     // `IntoFuture` rather than a bare await: the shutdown grace below needs to select

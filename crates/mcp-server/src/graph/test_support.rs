@@ -115,6 +115,22 @@ pub(crate) fn wait_until_within(
     }
 }
 
+/// Wait for the graph's STATUS to reach `Ready`.
+///
+/// This is a status barrier and nothing more. It is NOT a barrier for the publish pass
+/// (`notify_published`), and three independent facts keep it that way:
+///
+/// 1. the pass runs with `inner` released on purpose — under the lock it would invert
+///    the lock order against the search engine;
+/// 2. real work sits between the status flip and the pass (`ensure_hub_roots` parses the
+///    configuration and rediscovers roots), so the gap is wide, not instantaneous;
+/// 3. `try_publish_stale_and_catch_up` sets `Ready` and deliberately never runs the pass
+///    at all.
+///
+/// So a test that waits here and then asserts something a publish pass leaves behind —
+/// a hook counter, a consumed mark, a refreshed root table — is asserting a value that
+/// need not exist yet. Wait for the asserted quantity itself with [`wait_until`], or for
+/// the whole pass with [`wait_publish_pass`].
 pub(crate) fn wait_ready(graph: &GraphState) {
     wait_until(graph, "the graph to become ready", || match graph.status() {
         GraphStatus::Ready { .. } => true,
@@ -122,6 +138,25 @@ pub(crate) fn wait_ready(graph: &GraphState) {
             panic!("graph load failed: {msg}; {}", graph_state_summary(graph))
         }
         _ => false,
+    });
+}
+
+/// Wait until at least `passes` completed publish passes have been counted.
+///
+/// The barrier for everything `notify_published` leaves behind, including the part that
+/// runs AFTER its hook returns: the tail consumes leftover marks with
+/// `leftover_bound.swap(0)` … `fetch_max`, and a test sampling between those two reads an
+/// obligation as discharged that is about to be re-armed. Waiting on the hook alone lands
+/// inside that remainder; waiting here lands after it.
+pub(crate) fn wait_publish_pass(graph: &GraphState, passes: usize) {
+    wait_publish_pass_within(graph, WAIT_CEILING, passes);
+}
+
+/// [`wait_publish_pass`] with an explicit ceiling, for callers whose setup makes the
+/// build legitimately slower than the default allows.
+pub(crate) fn wait_publish_pass_within(graph: &GraphState, ceiling: Duration, passes: usize) {
+    wait_until_within(graph, ceiling, &format!("{passes} completed publish pass(es)"), || {
+        graph.publish_passes.load(std::sync::atomic::Ordering::SeqCst) >= passes
     });
 }
 

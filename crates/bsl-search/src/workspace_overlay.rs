@@ -2364,7 +2364,7 @@ impl ScannedFiles {
 /// by, from the one shared workspace walk.
 fn scan_workspace_files(roots: &WorkspaceRoots) -> ScannedFiles {
     let declared: Vec<PathBuf> = roots.entries().map(|(_, root)| root.to_path_buf()).collect();
-    let set = project_model::SourceSet::scan(&declared);
+    let set = project_model::SourceSet::scan_excluding(&declared, roots.excluded());
     let scanned = scanned_files_from(roots, &set);
     if !scanned.clean() {
         tracing::warn!(

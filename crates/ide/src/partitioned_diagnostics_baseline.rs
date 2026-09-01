@@ -507,7 +507,7 @@ pub fn migrate_v1_to_partitioned(
     // Reuse the unchanged schema-v1 validator; migration must not define a second recipe.
     crate::diagnostics_baseline::diagnostics_baseline_json(baseline)?;
     let expected_scope = expected_v1_scope(plan);
-    if baseline.scope != expected_scope {
+    if !crate::diagnostics_baseline::scopes_match(&baseline.scope, &expected_scope) {
         return Err(PartitionedDiagnosticsBaselineError::ScopeMismatch);
     }
     let mut result: BTreeMap<_, Vec<_>> =
@@ -552,7 +552,7 @@ where
         }
         .into());
     }
-    if parsed.scope != expected_v1_scope(plan) {
+    if !crate::diagnostics_baseline::scopes_match(&parsed.scope, &expected_v1_scope(plan)) {
         return Err(PartitionedDiagnosticsBaselineError::ScopeMismatch);
     }
     Ok(parsed.entries)
@@ -1491,7 +1491,7 @@ mod tests {
         };
         DiagnosticsBaselinePartitionPlan {
             project_scope: project_model::DiagnosticsBaselineProjectScope {
-                source_root: "src/cf".to_owned(),
+                source_root: Some("src/cf".to_owned()),
                 extensions: vec![project_model::DiagnosticsBaselineProjectExtension {
                     name: "Ext".to_owned(),
                     path: "src/cfe/Ext".to_owned(),
@@ -1990,7 +1990,7 @@ mod tests {
             serde_json::to_vec(&DiagnosticsBaseline {
                 schema_version: crate::diagnostics_baseline::DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
                 scope: crate::diagnostics_baseline::DiagnosticsBaselineScope {
-                    source_root: "src/cf".to_owned(),
+                    source_root: Some("src/cf".to_owned()),
                     extensions: vec![crate::diagnostics_baseline::DiagnosticsBaselineExtension {
                         name: "Ext".to_owned(),
                         path: "src/cfe/Ext".to_owned(),
@@ -2376,7 +2376,7 @@ mod tests {
         let mut baseline = DiagnosticsBaseline {
             schema_version: crate::diagnostics_baseline::DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
             scope: crate::diagnostics_baseline::DiagnosticsBaselineScope {
-                source_root: "wrong".to_owned(),
+                source_root: Some("wrong".to_owned()),
                 extensions: vec![],
             },
             diagnostics: vec![],

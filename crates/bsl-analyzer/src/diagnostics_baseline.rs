@@ -171,7 +171,7 @@ mod tests {
 
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![],
         };
         let snapshot = DiagnosticsBaselineSnapshot::Ready {
@@ -202,7 +202,7 @@ mod tests {
         let code = DiagnosticCode::EmptyCodeBlock;
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![DiagnosticsBaselineEntry {
                 fingerprint: diagnostic_fingerprint("Module.bsl", code.as_str(), &snippet, 0),
                 path: "Module.bsl".to_owned(),
@@ -267,7 +267,7 @@ mod tests {
 
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![],
         };
         let ready = DiagnosticsBaselineSnapshot::Ready {
@@ -293,7 +293,7 @@ mod tests {
         let known = DiagnosticCode::EmptyCodeBlock;
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![DiagnosticsBaselineEntry {
                 fingerprint: diagnostic_fingerprint("Module.bsl", known.as_str(), &snippet, 0),
                 path: "Module.bsl".to_owned(),

@@ -73,14 +73,16 @@ pub fn at(root: &Path) -> Result<Project, ProjectError> {
 /// graph cache — the one boot path that leaves them alone (see `state::bootstrap`).
 pub fn workspace_roots(
     project: &Project,
+    excluded: &[std::path::PathBuf],
 ) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
     let extensions: Vec<std::path::PathBuf> =
         project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
-    bsl_search::WorkspaceRoots::build_optional(
+    let (roots, rejected) = bsl_search::WorkspaceRoots::build_optional(
         &project.root,
         project.semantic_base_path(),
         &extensions,
-    )
+    );
+    (roots.with_excluded(excluded.to_vec()), rejected)
 }
 
 /// Name every root that did not make it into the table, with its reason: a silently dropped

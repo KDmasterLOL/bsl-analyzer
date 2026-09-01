@@ -68,7 +68,7 @@ impl GlobalState {
             }
         };
 
-        if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+        if let Some(notice) = project.standalone_extension_notice() {
             self.show_warning_message(notice);
         }
 
@@ -248,10 +248,7 @@ impl GlobalState {
                 let path = vfs.file_path(file.file_id);
                 let path_path = path.as_path();
                 let file_name = path_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if matches!(
-                    file_name,
-                    "bsl-analyzer.toml" | ".bsl-analyzer.json" | ".bsl-language-server.json"
-                ) {
+                if project_model::is_project_input_file_name(file_name) {
                     tracing::info!(path = %path_path.display(), "config file changed");
                     // Whether this is structural is decided after the reload
                     // attempt below: only a successful reload changes the
@@ -689,29 +686,31 @@ impl GlobalState {
             return;
         };
 
-        let Some(config_path) = project.configuration_path() else {
-            tracing::debug!("no configuration path, skipping metadata warmup");
-            return;
-        };
-
+        // A base is optional: an extension-only project has none. Only the base's own
+        // warm-up is conditional on it — skipping the whole pass would leave every
+        // root of such a project cold, which is the shape the shared-configuration
+        // work exists to serve.
+        let config_path = project.configuration_path().map(Path::to_path_buf);
         let _span = tracing::info_span!("warm_metadata_cache", ?config_path).entered();
         let start = Instant::now();
 
         let db = self.analysis_host.raw_database();
-        let path_input = ide_db::metadata::intern_configuration_path(
-            db,
-            &config_path.to_string_lossy(),
-            db.config_root_revision_for_path(config_path),
-        );
+        if let Some(config_path) = config_path.as_deref() {
+            let path_input = ide_db::metadata::intern_configuration_path(
+                db,
+                &config_path.to_string_lossy(),
+                db.config_root_revision_for_path(config_path),
+            );
 
-        let config = ide_db::metadata::load_configuration(db, path_input);
+            let config = ide_db::metadata::load_configuration(db, path_input);
 
-        tracing::info!(
-            common_modules = config.common_modules().len(),
-            metadata_objects = config.metadata_objects().len(),
-            registers = config.registers().len(),
-            "metadata cache warmed"
-        );
+            tracing::info!(
+                common_modules = config.common_modules().len(),
+                metadata_objects = config.metadata_objects().len(),
+                registers = config.registers().len(),
+                "metadata cache warmed"
+            );
+        }
 
         let extension_paths: Vec<_> = project.extension_paths().to_vec();
         for (name, ext_path) in &extension_paths {
@@ -825,6 +824,104 @@ fn path_in_workspace(
         return true;
     }
     open_paths.contains(path)
+}
+
+#[cfg(test)]
+mod metadata_warmup_tests {
+    use super::*;
+
+    /// Runs `f` with an INFO-level subscriber writing into a buffer, and returns
+    /// what it logged. `with_default` is thread-local, so parallel tests do not
+    /// see each other's records.
+    fn logged_during<T>(f: impl FnOnce() -> T) -> (T, String) {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(buf.clone())
+            .without_time()
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        (out, text)
+    }
+
+    fn extension_at(root: &Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Configuration.xml"),
+            "<Properties><ConfigurationExtensionPurpose>Customization\
+             </ConfigurationExtensionPurpose></Properties>",
+        )
+        .unwrap();
+    }
+
+    fn warmup_log(build: impl FnOnce(&Path)) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        build(root);
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.to_path_buf()).expect("valid project");
+        let (_, log) = logged_during(|| state.warm_metadata_cache());
+        log
+    }
+
+    /// The warm-up must reach every root the project has. A base is optional, so
+    /// gating the whole pass on it leaves an extension-only project — the shape the
+    /// shared-configuration work exists to serve — entirely cold.
+    #[test]
+    fn the_warm_up_reaches_extension_roots_with_and_without_a_base() {
+        let with_base = warmup_log(|root| {
+            let cf = root.join("src/cf");
+            std::fs::create_dir_all(&cf).unwrap();
+            std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+            extension_at(root, "src/cfe/Feature");
+            std::fs::write(
+                root.join("bsl-analyzer.toml"),
+                "[source]\nroot = \"src/cf\"\nextensions = [\"src/cfe/Feature\"]\n",
+            )
+            .unwrap();
+        });
+        // The control: with a base, both the base and the extension are warmed.
+        assert!(with_base.contains("metadata cache warmed"), "base warmed: {with_base}");
+        assert!(
+            with_base.contains("extension metadata cache warmed"),
+            "extension warmed alongside a base: {with_base}"
+        );
+
+        let without_base = warmup_log(|root| {
+            extension_at(root, "Расширения/Feature");
+            std::fs::write(
+                root.join("bsl-analyzer.toml"),
+                "[source]\nextensions = [\"Расширения/Feature\"]\n",
+            )
+            .unwrap();
+        });
+        assert!(
+            without_base.contains("extension metadata cache warmed"),
+            "an extension-only project must still be warmed: {without_base}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -988,7 +1085,7 @@ directory = "baselines"
         .unwrap();
         let baseline = DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![],
         };
         let bytes = diagnostics_baseline_json(&baseline).unwrap();
@@ -1066,7 +1163,7 @@ directory = "baselines"
 
         let valid = diagnostics_baseline_json(&DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![],
         })
         .unwrap();

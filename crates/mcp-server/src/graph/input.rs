@@ -23,15 +23,30 @@ pub(crate) struct ProjectSnapshot {
     /// `configs`. It travels with a published build so the publish hook never reloads a
     /// newer project and mixes its roots with an older graph.
     pub search_roots: Option<bsl_search::WorkspaceRoots>,
+    /// Subtrees inside `scan_roots` that no pass of this operation may descend into.
+    ///
+    /// Travels with the snapshot for the same reason everything else here does: the file
+    /// enumeration of one project state must never be mixed with the registration of
+    /// another, and "what is not mine to read" is part of that enumeration.
+    pub excluded: Vec<PathBuf>,
 }
 
 impl ProjectSnapshot {
     /// Graph passes run only after the daemon bootstrap validated the project;
     /// a config broken by a mid-session edit restricts the scan to the
     /// workspace root (loud in logs) instead of walking a wrong universe.
+    /// Test-side wrapper. Production states its exclusions: a pass that walked the
+    /// tree without them would index the server's own cache as workspace source, and
+    /// the compiler is the only thing that catches a call site added later and missed.
+    #[cfg(test)]
     pub(crate) fn load(workspace_root: &Path) -> Self {
+        Self::load_excluding(workspace_root, &[])
+    }
+
+    /// [`Self::load`] carrying subtrees no pass may descend into.
+    pub(crate) fn load_excluding(workspace_root: &Path, excluded: &[PathBuf]) -> Self {
         match crate::project::at(workspace_root) {
-            Ok(project) => Self::from_project(&project),
+            Ok(project) => Self::from_project_excluding(&project, excluded),
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -42,12 +57,23 @@ impl ProjectSnapshot {
                     scan_roots: vec![workspace_root.to_path_buf()],
                     configs: ide::WorkspaceConfigsSnapshot::default(),
                     search_roots: None,
+                    excluded: excluded.to_vec(),
                 }
             }
         }
     }
 
+    /// Test-side wrapper: production always states its exclusions, so the form that
+    /// narrows by nothing is not reachable there by construction.
+    #[cfg(test)]
     pub(crate) fn from_project(project: &project_model::Project) -> Self {
+        Self::from_project_excluding(project, &[])
+    }
+
+    pub(crate) fn from_project_excluding(
+        project: &project_model::Project,
+        excluded: &[PathBuf],
+    ) -> Self {
         let scan_roots = project.source_roots();
         // The MCP file universe is enumerated canonically (`enumerate_bsl_files`
         // canonicalizes every `.bsl`), so the registered roots must be canonical
@@ -57,7 +83,8 @@ impl ProjectSnapshot {
             workspace_root: project.root.clone(),
             scan_roots,
             configs: ide::WorkspaceConfigsSnapshot::from_project(project).canonicalized(),
-            search_roots: Some(crate::project::workspace_roots(project).0),
+            search_roots: Some(crate::project::workspace_roots(project, excluded).0),
+            excluded: excluded.to_vec(),
         }
     }
 }

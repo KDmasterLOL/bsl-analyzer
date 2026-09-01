@@ -91,7 +91,7 @@ struct Root {
 }
 
 /// The registered source roots of one workspace.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct WorkspaceRoots {
     /// The workspace itself. Not a source root — root ids are relative to it,
     /// and callers that speak of "the project directory" (the graph, the
@@ -99,7 +99,33 @@ pub struct WorkspaceRoots {
     /// a subdirectory.
     workspace: PathBuf,
     roots: Vec<Root>,
+    /// Subtrees inside the roots that a scan must not descend into.
+    ///
+    /// Carried here because the roots are what every scan of this workspace is driven
+    /// from, and a scan that walked a hole the watcher does not follow would index
+    /// files whose later edits never arrive — present in the corpus, frozen at the
+    /// content of the last full walk. The value belongs to whoever owns the subtree
+    /// (the server's derived cache); this type only carries it to the walk.
+    ///
+    /// Not part of root identity: [`Self::changed_root_ids`] and the transition
+    /// machinery compare roots, and a cache moved without the roots moving is not a
+    /// topology change.
+    excluded: Vec<PathBuf>,
 }
+
+/// Equality is the ROOTS, and the doc on `excluded` is what the machinery around this
+/// type acts on: whole values are compared in both directions — as "the roots did not
+/// move, take the fast path" and as "these are not the roots the plan was made for,
+/// drop it". A derived `PartialEq` puts the cache path on both of those, so the same
+/// unrelated difference would force a full root transition in one place and discard a
+/// valid transition in another.
+impl PartialEq for WorkspaceRoots {
+    fn eq(&self, other: &Self) -> bool {
+        self.workspace == other.workspace && self.roots == other.roots
+    }
+}
+
+impl Eq for WorkspaceRoots {}
 
 impl WorkspaceRoots {
     /// Build the table from the configuration root and the declared extension
@@ -171,7 +197,7 @@ impl WorkspaceRoots {
             roots.push(Root { id, declared: extension.clone(), canonical });
         }
 
-        (Self { workspace: workspace_root.to_path_buf(), roots }, rejected)
+        (Self { workspace: workspace_root.to_path_buf(), roots, excluded: Vec::new() }, rejected)
     }
 
     /// The root a file belongs to and the key it is stored under, or `None` when
@@ -279,6 +305,22 @@ impl WorkspaceRoots {
     }
 
     /// Registered roots as `(id, declared path)`, in registration order.
+    /// Take the subtrees a scan of these roots must not descend into.
+    ///
+    /// A builder step rather than a `build` parameter: every one of the hundred-odd
+    /// call sites that has no cache to speak of keeps working unchanged, and the few
+    /// that own one say so explicitly.
+    #[must_use]
+    pub fn with_excluded(mut self, excluded: Vec<PathBuf>) -> Self {
+        self.excluded = excluded;
+        self
+    }
+
+    /// See [`Self::with_excluded`].
+    pub fn excluded(&self) -> &[PathBuf] {
+        &self.excluded
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Path)> {
         self.roots.iter().map(|root| (root.id.as_str(), root.declared.as_path()))
     }
@@ -420,6 +462,28 @@ mod tests {
     }
 
     const MODULE: &str = "CommonModules/М/Ext/Module.bsl";
+
+    /// Where the cache lives is not a topology fact, and equality is read in both
+    /// directions: as "the roots did not move, take the fast path" and as "these are
+    /// not the roots this plan was made for, drop it". Counting the cache in would
+    /// force a full root transition on one path and discard a valid transition on the
+    /// other — from the same unrelated difference.
+    #[test]
+    fn where_the_cache_lives_is_not_part_of_root_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let made = dirs(dir.path(), &["cf", "cfe/one"]);
+        let (roots, _) = WorkspaceRoots::build(dir.path(), &made[0], &[made[1].clone()]);
+
+        let with_cache = roots.clone().with_excluded(vec![dir.path().join(".build")]);
+        let with_another = roots.clone().with_excluded(vec![dir.path().join("elsewhere")]);
+        assert_eq!(with_cache, with_another, "the cache path entered root identity");
+        assert_eq!(with_cache, roots, "declaring a cache at all entered root identity");
+
+        // Positive control: the roots themselves still decide, or the assertions above
+        // would hold on a build where every table equals every other.
+        let (moved, _) = WorkspaceRoots::build(dir.path(), &made[1], &[]);
+        assert_ne!(with_cache, moved, "two different root sets compared equal");
+    }
 
     #[test]
     fn optional_roots_do_not_invent_a_configuration_for_extension_only_projects() {

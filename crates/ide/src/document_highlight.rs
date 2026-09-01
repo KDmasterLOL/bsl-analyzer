@@ -189,6 +189,48 @@ mod tests {
         );
     }
 
+    /// Highlighting a variable is its reference walk restricted to one file, so an
+    /// identity split into slices highlights only the slice the cursor stands in.
+    /// Every occurrence must light up from every occurrence, writes and reads alike.
+    #[test]
+    fn implicit_local_highlights_span_every_assignment() {
+        let source = r#"
+Процедура Тест()
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+    НаборЗаписей = 2;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+        let (db, file_id) = create_db_with_file(source);
+
+        let expected = vec![
+            ("НаборЗаписей".to_string(), DocumentHighlightKind::Write),
+            ("НаборЗаписей".to_string(), DocumentHighlightKind::Read),
+            ("НаборЗаписей".to_string(), DocumentHighlightKind::Write),
+            ("НаборЗаписей".to_string(), DocumentHighlightKind::Read),
+        ];
+
+        let mut from = 0usize;
+        while let Some(at) = source[from..].find("НаборЗаписей") {
+            let at = from + at;
+            from = at + "НаборЗаписей".len();
+
+            let mut highlights = document_highlights(&db, file_id, TextSize::from(at as u32));
+            highlights.sort_by_key(|highlight| highlight.range.start());
+            let seen: Vec<(String, DocumentHighlightKind)> = highlights
+                .into_iter()
+                .map(|highlight| {
+                    let start: u32 = highlight.range.start().into();
+                    let end: u32 = highlight.range.end().into();
+                    (source[start as usize..end as usize].to_string(), highlight.kind)
+                })
+                .collect();
+
+            assert_eq!(seen, expected, "the cursor at {at} lit only its own slice");
+        }
+    }
+
     #[test]
     fn indexed_assignment_does_not_mark_index_operands_as_write() {
         let source = r#"

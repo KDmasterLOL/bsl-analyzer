@@ -12,6 +12,7 @@ mod graph_query;
 mod http;
 pub mod project;
 mod state;
+mod tasks;
 mod tools;
 #[cfg(test)]
 mod walk_probe;
@@ -26,6 +27,7 @@ pub use graph_db::{
 };
 pub use graph_query::{GraphDb, GraphDbContextProvider};
 pub use http::{serve_http, wildcard_allowed_hosts, MAX_HTTP_REQUEST_BODY_BYTES};
+pub use state::WorkspaceInitError;
 use state::WorkspaceSearchMode;
 pub use state::{OnecConnection, SharedState};
 pub use tools::platform::{
@@ -56,9 +58,9 @@ use std::collections::BTreeSet;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, CallToolResult, ListResourcesResult, PaginatedRequestParams, RawResource,
-    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
-    ServerInfo,
+    CallToolResponse, CallToolResult, ListResourcesResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler};
@@ -461,6 +463,13 @@ struct GraphParams {
     edge_kinds: Vec<String>,
     /// How many top-centrality methods to include in `overview` (default: 20).
     top: Option<usize>,
+    /// Ask each edge where its call is written — for `neighbors`/`callers`/`callees`
+    /// (default: false). Off, an edge carries no `call_site*` key at all, which is how an
+    /// edge nobody asked about is told apart from one that has no place.
+    call_sites: Option<bool>,
+    /// Cap on places per edge when `call_sites` is on (default: 20, max: 200). What the cap
+    /// cuts is declared: `call_sites_total` counts the places before any are shown.
+    max_call_sites: Option<usize>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -979,7 +988,8 @@ impl McpServer {
         &self,
         params: Parameters<MetadataParams>,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
         use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
@@ -1003,7 +1013,8 @@ impl McpServer {
                 &diag.status_report(),
                 self.state.owns_caches(),
                 self.state.standalone_extension_notice().as_deref(),
-            ));
+            )
+            .into());
         }
 
         let live = mode == "infobase" || (mode == "auto" && p.connection.is_some());
@@ -1037,7 +1048,8 @@ impl McpServer {
                     ),
                     None,
                 )),
-            };
+            }
+            .map(CallToolResponse::from);
         }
 
         // `form` reads managed-form XML straight off the configuration source root — data
@@ -1051,7 +1063,8 @@ impl McpServer {
                 &object_type,
                 p.object_name.as_deref(),
                 p.form_name.as_deref(),
-            );
+            )
+            .map(CallToolResponse::from);
         }
 
         // `info`/`tree`/`object` read the resident analysis host. Trigger the build if idle
@@ -1070,75 +1083,76 @@ impl McpServer {
         let max_output_tokens =
             p.max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
 
-        let started = std::time::Instant::now();
         let retry_diag = diag.clone();
-        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
-            let read = || {
-                session.read(|resident, analysis, _generation| {
-                    let _ = resident;
-                    let db = analysis.database();
-                    match action.as_str() {
-                        "info" => {
-                            let (config, extensions) = tools::metadata::configs_from_db(db);
-                            tools::metadata::get_configuration_info(&config, &extensions)
+        tasks::resident_response(
+            self,
+            caller,
+            "metadata",
+            ct,
+            move |session| {
+                let read = || {
+                    session.read(|resident, analysis, _generation| {
+                        let _ = resident;
+                        let db = analysis.database();
+                        match action.as_str() {
+                            "info" => {
+                                let (config, extensions) = tools::metadata::configs_from_db(db);
+                                tools::metadata::get_configuration_info(&config, &extensions)
+                            }
+                            "tree" => {
+                                let (config, extensions) = tools::metadata::configs_from_db(db);
+                                tools::metadata::get_metadata_tree(
+                                    db,
+                                    &config,
+                                    &extensions,
+                                    filter.clone(),
+                                    max_output_tokens,
+                                )
+                            }
+                            "object" => {
+                                let object_type =
+                                    require(object_type.clone(), "object_type", "object")?;
+                                let object_name =
+                                    require(object_name.clone(), "object_name", "object")?;
+                                tools::metadata::object_from_db(db, &object_type, &object_name)
+                            }
+                            other => Err(contract::unknown_action(
+                                McpProfile::Workspace,
+                                "metadata",
+                                other,
+                            )),
                         }
-                        "tree" => {
-                            let (config, extensions) = tools::metadata::configs_from_db(db);
-                            tools::metadata::get_metadata_tree(
-                                db,
-                                &config,
-                                &extensions,
-                                filter.clone(),
-                                max_output_tokens,
-                            )
-                        }
-                        "object" => {
-                            let object_type =
-                                require(object_type.clone(), "object_type", "object")?;
-                            let object_name =
-                                require(object_name.clone(), "object_name", "object")?;
-                            tools::metadata::object_from_db(db, &object_type, &object_name)
-                        }
-                        other => {
-                            Err(contract::unknown_action(McpProfile::Workspace, "metadata", other))
-                        }
-                    }
-                })
-            };
+                    })
+                };
 
-            let mut outcome = read();
-            // A miss for a VALID object type may be an object added since the last throttled
-            // drift scan: force ONE storm-guarded re-scan and retry. A bad object type is
-            // returned as-is (reloading cannot fix it, and it must not force a scan). The
-            // cancellation is observed before the retry: the rescan walks the tree.
-            if action == "object" {
-                if let ResidentOutcome::Ready(Err(_), _) = &outcome {
-                    let valid_type = object_type
-                        .as_deref()
-                        .is_some_and(tools::metadata::is_resolvable_object_type);
-                    if valid_type && !session.is_cancelled() {
-                        session.force_rescan();
-                        outcome = read();
+                // This tool's miss is an error from an object lookup whose type CAN resolve.
+                // A bad object type is returned as-is: no re-scan can turn it into a type,
+                // and asking for one would let a typo walk the tree.
+                let outcome = session.read_retrying_a_stale_miss(read, |answer| {
+                    action == "object"
+                        && answer.is_err()
+                        && object_type
+                            .as_deref()
+                            .is_some_and(tools::metadata::is_resolvable_object_type)
+                });
+
+                match outcome {
+                    ResidentOutcome::Ready(result, _freshness) => result,
+                    ResidentOutcome::Loading => {
+                        Ok(tools::metadata::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                        "metadata is only available in the workspace profile",
+                        None,
+                    )),
+                    ResidentOutcome::Failed(msg) => {
+                        Err(McpError::internal_error(format!("metadata database: {msg}"), None))
                     }
                 }
-            }
-
-            match outcome {
-                ResidentOutcome::Ready(result, _freshness) => result,
-                ResidentOutcome::Loading => Ok(tools::metadata::loading(&session.status_report())),
-                ResidentOutcome::Disabled => Err(McpError::invalid_params(
-                    "metadata is only available in the workspace profile",
-                    None,
-                )),
-                ResidentOutcome::Failed(msg) => {
-                    Err(McpError::internal_error(format!("metadata database: {msg}"), None))
-                }
-            }
-        })
-        .await;
-        cancellable_answer(outcome, "metadata", started, || {
-            tools::metadata::loading(&retry_diag.status_report())
-        })
+            },
+            move || tools::metadata::loading(&retry_diag.status_report()),
+        )
+        .await
     }
 
     /// Search project code or the built-in platform reference from the workspace profile.
@@ -1746,6 +1760,8 @@ impl McpServer {
                         .map_err(|e| McpError::invalid_params(e, None))?;
                     tools::graph::validate_edge_kinds(&p.edge_kinds)
                         .map_err(|e| McpError::invalid_params(e, None))?;
+                    let max_call_sites = tools::graph::call_site_cap(p.max_call_sites)
+                        .map_err(|e| McpError::invalid_params(e, None))?;
                     let neighbors = ide::NeighborsParams {
                         id: &id,
                         dir,
@@ -1754,6 +1770,8 @@ impl McpServer {
                         detail,
                         provenance_filter: p.provenance.clone(),
                         edge_kind_filter: p.edge_kinds.clone(),
+                        call_sites: p.call_sites.unwrap_or(false),
+                        max_call_sites,
                     };
                     let budget =
                         p.max_output_tokens.unwrap_or(tools::graph::DEFAULT_BODY_BUDGET_TOKENS);
@@ -1802,7 +1820,8 @@ impl McpServer {
         &self,
         params: Parameters<SymbolInfoParams>,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
         use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
@@ -1852,129 +1871,128 @@ impl McpServer {
         let graph = self.state.graph().clone();
         graph.ensure_loading();
 
-        let started = std::time::Instant::now();
-        let outcome = crate::diagnostics_state::resident_call(diag.clone(), ct, move |session| {
-            let read = || {
-                session.read(|resident, analysis, _generation| {
-                    // The root table and the unread count are read UNDER the same lock as
-                    // the card, so the envelope describes the resident that answered rather
-                    // than whatever it became afterwards.
-                    let card = tools::symbol_info::resolve_card(
-                        resident,
-                        analysis.database(),
-                        symbol.as_deref(),
-                        root_id.as_deref(),
-                        path.as_deref(),
-                        line,
-                        column,
-                        sections,
-                        locale,
-                    );
-                    card.map(|card| {
-                        (card, resident.workspace_roots().clone(), resident.unread_count())
-                    })
-                })
-            };
-
-            let mut outcome = read();
-            // A resident miss on a well-formed qualified name may be a symbol added since the
-            // last throttled drift scan: force ONE storm-guarded re-scan and retry, matching the
-            // `metadata object` miss path. Observed before the retry: the rescan walks the
-            // tree, and a second full read after the client has gone is pure waste.
-            if let ResidentOutcome::Ready(Ok((None, _, _)), _) = &outcome {
-                if symbol.is_some() && !session.is_cancelled() {
-                    session.force_rescan();
-                    outcome = read();
-                }
-            }
-
-            let (card, roots, unread_files, freshness) = match outcome {
-                ResidentOutcome::Ready(result, freshness) => {
-                    let (card, roots, unread_files) = result?;
-                    (card, roots, unread_files, freshness)
-                }
-                ResidentOutcome::Loading => {
-                    return Ok(tools::symbol_info::loading(&session.status_report()))
-                }
-                ResidentOutcome::Disabled => {
-                    return Err(McpError::invalid_params(
-                        "symbol_info is only available in the workspace profile",
-                        None,
-                    ))
-                }
-                ResidentOutcome::Failed(msg) => {
-                    return Err(tools::symbol_info::database_error(msg))
-                }
-            };
-
-            let snapshot = graph.snapshot();
-            let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
-            let gdb = snapshot.as_ref().map(|s| &*s.graph);
-
-            let stamp = tools::symbol_info::ResidentStamp {
-                roots: Some(&roots),
-                revision: freshness.revision,
-                topology: freshness.topology,
-                stale: freshness.stale,
-                unread_files,
-            };
-
-            match card {
-                Some(mut card) => {
-                    tools::symbol_info::filter_members(
-                        &mut card,
-                        member_kind,
-                        member_name.as_deref(),
-                    );
-                    Ok(tools::symbol_info::render_card(
-                        &card,
-                        gdb,
-                        tools::symbol_info::DEFAULT_TOP_MODULES,
-                        max_output_tokens,
-                        &stamp,
-                    ))
-                }
-                None => {
-                    // Resident miss: offer the name dictionary's candidates for an
-                    // imprecise name. The lookup runs under the resident lock — it
-                    // reads that database's tables, and placing a candidate needs
-                    // the same file set that produced it.
-                    let symbol = symbol.as_deref().unwrap_or_default();
-                    let source = match (&snapshot, graph_state) {
-                        (Some(snapshot), ide::ProviderState::Answered) => {
-                            crate::graph_query::GraphNameSource::answering(&snapshot.graph)
-                        }
-                        (_, state) => crate::graph_query::GraphNameSource::absent(state),
-                    };
-                    let answer = session.read(|resident, analysis, _generation| {
-                        let db = analysis.database();
-                        let query = ide::NameQuery::new(
-                            symbol,
-                            tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
+        let retry_diag = diag.clone();
+        tasks::resident_response(
+            self,
+            caller,
+            "symbol_info",
+            ct,
+            move |session| {
+                let read = || {
+                    session.read(|resident, analysis, _generation| {
+                        // The root table and the unread count are read UNDER the same lock as
+                        // the card, so the envelope describes the resident that answered rather
+                        // than whatever it became afterwards.
+                        let card = tools::symbol_info::resolve_card(
+                            resident,
+                            analysis.database(),
+                            symbol.as_deref(),
+                            root_id.as_deref(),
+                            path.as_deref(),
+                            line,
+                            column,
+                            sections,
+                            locale,
                         );
-                        let found = ide::lookup_names(db, &query, &[&source]);
-                        tools::name_answer::NameAnswer::render(
-                            db,
-                            Some(resident.workspace_roots()),
-                            &found,
-                        )
-                    });
-                    match answer {
-                        ResidentOutcome::Ready(answer, _) => {
-                            Ok(tools::symbol_info::render_not_found(symbol, answer, &stamp))
+                        card.map(|card| {
+                            (card, resident.workspace_roots().clone(), resident.unread_count())
+                        })
+                    })
+                };
+
+                // This tool's miss is an absent card for a request made BY NAME. A positional
+                // request that resolved nothing describes a place, not a name, and a re-scan
+                // cannot put a symbol where the caller pointed.
+                let outcome = session.read_retrying_a_stale_miss(read, |answer| {
+                    symbol.is_some() && matches!(answer, Ok((None, _, _)))
+                });
+
+                let (card, roots, unread_files, freshness) = match outcome {
+                    ResidentOutcome::Ready(result, freshness) => {
+                        let (card, roots, unread_files) = result?;
+                        (card, roots, unread_files, freshness)
+                    }
+                    ResidentOutcome::Loading => {
+                        return Ok(tools::symbol_info::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => {
+                        return Err(McpError::invalid_params(
+                            "symbol_info is only available in the workspace profile",
+                            None,
+                        ))
+                    }
+                    ResidentOutcome::Failed(msg) => {
+                        return Err(tools::symbol_info::database_error(msg))
+                    }
+                };
+
+                let snapshot = graph.snapshot();
+                let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
+                let gdb = snapshot.as_ref().map(|s| &*s.graph);
+
+                let stamp = tools::symbol_info::ResidentStamp {
+                    roots: Some(&roots),
+                    revision: freshness.revision,
+                    topology: freshness.topology,
+                    stale: freshness.stale,
+                    unread_files,
+                };
+
+                match card {
+                    Some(mut card) => {
+                        tools::symbol_info::filter_members(
+                            &mut card,
+                            member_kind,
+                            member_name.as_deref(),
+                        );
+                        Ok(tools::symbol_info::render_card(
+                            &card,
+                            gdb,
+                            tools::symbol_info::DEFAULT_TOP_MODULES,
+                            max_output_tokens,
+                            &stamp,
+                        ))
+                    }
+                    None => {
+                        // Resident miss: offer the name dictionary's candidates for an
+                        // imprecise name. The lookup runs under the resident lock — it
+                        // reads that database's tables, and placing a candidate needs
+                        // the same file set that produced it.
+                        let symbol = symbol.as_deref().unwrap_or_default();
+                        let source = match (&snapshot, graph_state) {
+                            (Some(snapshot), ide::ProviderState::Answered) => {
+                                crate::graph_query::GraphNameSource::answering(&snapshot.graph)
+                            }
+                            (_, state) => crate::graph_query::GraphNameSource::absent(state),
+                        };
+                        let answer = session.read(|resident, analysis, _generation| {
+                            let db = analysis.database();
+                            let query = ide::NameQuery::new(
+                                symbol,
+                                tools::symbol_info::DEFAULT_CANDIDATE_LIMIT,
+                            );
+                            let found = ide::lookup_names(db, &query, &[&source]);
+                            tools::name_answer::NameAnswer::render(
+                                db,
+                                Some(resident.workspace_roots()),
+                                &found,
+                            )
+                        });
+                        match answer {
+                            ResidentOutcome::Ready(answer, _) => {
+                                Ok(tools::symbol_info::render_not_found(symbol, answer, &stamp))
+                            }
+                            // The resident was evicted between the card read and this
+                            // one; a retry envelope is the honest answer, not a miss
+                            // with no candidates.
+                            _ => Ok(tools::symbol_info::loading(&session.status_report())),
                         }
-                        // The resident was evicted between the card read and this
-                        // one; a retry envelope is the honest answer, not a miss
-                        // with no candidates.
-                        _ => Ok(tools::symbol_info::loading(&session.status_report())),
                     }
                 }
-            }
-        })
-        .await;
-        cancellable_answer(outcome, "symbol_info", started, || {
-            tools::symbol_info::loading(&diag.status_report())
-        })
+            },
+            move || tools::symbol_info::loading(&retry_diag.status_report()),
+        )
+        .await
     }
 
     /// Every occurrence of ONE symbol across the workspace, each labelled with what it does
@@ -2009,8 +2027,9 @@ impl McpServer {
         &self,
         params: Parameters<ReferencesParams>,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
-        use crate::diagnostics_state::{resident_call, ResidentOutcome};
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
+        use crate::diagnostics_state::ResidentOutcome;
 
         let p = params.0;
         if p.symbol.is_none() && p.path.is_none() {
@@ -2039,89 +2058,82 @@ impl McpServer {
 
         let max_output_tokens = p.max_output_tokens.unwrap_or(tools::references::DEFAULT_BUDGET);
 
-        let started = std::time::Instant::now();
-        let outcome = resident_call(diag.clone(), ct, move |session| {
-            let snapshot = graph.snapshot();
-            let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
-            let graph_source = match (&snapshot, graph_state) {
-                (Some(snapshot), ide::ProviderState::Answered) => {
-                    crate::graph_query::GraphNameSource::answering(&snapshot.graph)
-                }
-                (_, state) => crate::graph_query::GraphNameSource::absent(state),
-            };
+        let retry_diag = diag.clone();
+        tasks::resident_response(
+            self,
+            caller,
+            "references",
+            ct,
+            move |session| {
+                let snapshot = graph.snapshot();
+                let graph_state = graph_provider_state(&graph.status(), snapshot.is_some());
+                let graph_source = match (&snapshot, graph_state) {
+                    (Some(snapshot), ide::ProviderState::Answered) => {
+                        crate::graph_query::GraphNameSource::answering(&snapshot.graph)
+                    }
+                    (_, state) => crate::graph_query::GraphNameSource::absent(state),
+                };
 
-            // The whole answer is assembled under the resident read lock: the hits, the
-            // paths they are published under and the root table that names them all
-            // describe ONE revision, and taking any of them afterwards would stamp the
-            // envelope of a resident that no longer produced the body.
-            let read = || {
-                session.read(|resident, analysis, _generation| {
-                    let params = tools::references::Params {
-                        symbol: p.symbol.as_deref(),
-                        anchor_root_id: p.anchor_root_id.as_deref(),
-                        root_id: p.root_id.as_deref(),
-                        path: p.path.as_deref(),
-                        line: p.line,
-                        column: p.column,
-                        line_content: p.line_content.as_deref(),
-                        area_root_id: p.area_root_id.as_deref(),
-                        area_path_prefix: p.area_path_prefix.as_deref(),
-                        kinds: &p.kinds,
-                        include_declaration: p.include_declaration,
-                        limit: p.limit,
-                        max_files: p.max_files,
-                        include_preview: p.include_preview,
-                    };
-                    tools::references::answer(
-                        resident,
-                        analysis.database(),
-                        &params,
-                        max_output_tokens,
-                        &[&graph_source],
-                    )
-                })
-            };
+                // The whole answer is assembled under the resident read lock: the hits, the
+                // paths they are published under and the root table that names them all
+                // describe ONE revision, and taking any of them afterwards would stamp the
+                // envelope of a resident that no longer produced the body.
+                let read = || {
+                    session.read(|resident, analysis, _generation| {
+                        let params = tools::references::Params {
+                            symbol: p.symbol.as_deref(),
+                            anchor_root_id: p.anchor_root_id.as_deref(),
+                            root_id: p.root_id.as_deref(),
+                            path: p.path.as_deref(),
+                            line: p.line,
+                            column: p.column,
+                            line_content: p.line_content.as_deref(),
+                            area_root_id: p.area_root_id.as_deref(),
+                            area_path_prefix: p.area_path_prefix.as_deref(),
+                            kinds: &p.kinds,
+                            include_declaration: p.include_declaration,
+                            limit: p.limit,
+                            max_files: p.max_files,
+                            include_preview: p.include_preview,
+                        };
+                        tools::references::answer(
+                            resident,
+                            analysis.database(),
+                            &params,
+                            max_output_tokens,
+                            &[&graph_source],
+                        )
+                    })
+                };
 
-            let mut outcome = read();
-            // An answer that carries evidence of a divergence may be describing a resident
-            // that fell behind the last throttled drift scan, and both `not_found` and
-            // `anchor_stale` are outcomes a caller acts on as final. Force ONE storm-guarded
-            // re-scan and retry, the same way a `symbol_info` card miss does. WHICH answers
-            // qualify is decided by the answer itself — see `warrants_rescan`; nothing is
-            // decided here, because a decision written here cannot be observed from a test.
-            if let ResidentOutcome::Ready(Ok(answer), _) = &outcome {
-                // Observed before the retry, not only inside it: the rescan itself walks
-                // the tree, and a second full answer after the client has gone is the
-                // most expensive thing this tool can do for nobody.
-                if tools::references::warrants_rescan(answer) && !session.is_cancelled() {
-                    session.force_rescan();
-                    outcome = read();
-                }
-            }
+                // This tool's miss is decided by the answer itself, not by the shape of the
+                // request — see `warrants_rescan`.
+                let outcome = session.read_retrying_a_stale_miss(read, |answer| {
+                    matches!(answer, Ok(answer) if tools::references::warrants_rescan(answer))
+                });
 
-            match outcome {
-                ResidentOutcome::Ready(answer, freshness) => Ok(tools::references::finish(
-                    answer?,
-                    freshness.revision,
-                    freshness.topology,
-                    freshness.stale,
-                )),
-                ResidentOutcome::Loading => {
-                    Ok(tools::references::loading(&session.status_report()))
+                match outcome {
+                    ResidentOutcome::Ready(answer, freshness) => Ok(tools::references::finish(
+                        answer?,
+                        freshness.revision,
+                        freshness.topology,
+                        freshness.stale,
+                    )),
+                    ResidentOutcome::Loading => {
+                        Ok(tools::references::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                        "references is only available in the workspace profile",
+                        None,
+                    )),
+                    ResidentOutcome::Failed(msg) => {
+                        Err(McpError::internal_error(format!("references database: {msg}"), None))
+                    }
                 }
-                ResidentOutcome::Disabled => Err(McpError::invalid_params(
-                    "references is only available in the workspace profile",
-                    None,
-                )),
-                ResidentOutcome::Failed(msg) => {
-                    Err(McpError::internal_error(format!("references database: {msg}"), None))
-                }
-            }
-        })
-        .await;
-        cancellable_answer(outcome, "references", started, || {
-            tools::references::loading(&diag.status_report())
-        })
+            },
+            move || tools::references::loading(&retry_diag.status_report()),
+        )
+        .await
     }
 
     /// Semantic analyzer findings the compiler and grep cannot give you — unreachable code,
@@ -2143,7 +2155,8 @@ impl McpServer {
         &self,
         params: Parameters<DiagnosticsParams>,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
         let p = params.0;
         // Only the actions that honour a budget are held to its minimum: `schema` and
         // `status` ignore `max_output_tokens` entirely, and refusing them for a value
@@ -2164,14 +2177,14 @@ impl McpServer {
         match p.action.as_str() {
             // `catalog` and `schema` are static (compile-time metadata), so they need
             // no resident analysis database and answer in either profile.
-            "schema" => Ok(tools::diagnostics::schema()),
+            "schema" => Ok(tools::diagnostics::schema().into()),
             "catalog" => {
                 let locale = match p.locale.as_deref() {
                     Some(s) => ide::Locale::from_config_str(s)
                         .map_err(|e| McpError::invalid_params(e.to_string(), None))?,
                     None => ide::Locale::default(),
                 };
-                Ok(tools::diagnostics::catalog(locale, &p.codes, p.max_output_tokens))
+                Ok(tools::diagnostics::catalog(locale, &p.codes, p.max_output_tokens).into())
             }
             // `status` reports the resident lifecycle (and kicks the lazy build) so an
             // agent can start it and poll progress instead of a flat `loading`.
@@ -2182,10 +2195,11 @@ impl McpServer {
                     &diag.status_report(),
                     self.state.owns_caches(),
                     self.state.standalone_extension_notice().as_deref(),
-                ))
+                )
+                .into())
             }
-            "file" => self.diagnostics_file(p, ct).await,
-            "workspace" => self.diagnostics_workspace(p, ct).await,
+            "file" => self.diagnostics_file(p, ct, caller).await,
+            "workspace" => self.diagnostics_workspace(p, ct, caller).await,
             other => Err(contract::unknown_action(McpProfile::Workspace, "diagnostics", other)),
         }
     }
@@ -2196,7 +2210,8 @@ impl McpServer {
         &self,
         p: DiagnosticsParams,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
         use tools::diagnostics::{parse_detail, parse_min_severity, FileFilters};
 
         let diag = self.state.diagnostics().clone();
@@ -2227,43 +2242,46 @@ impl McpServer {
             detailed,
         };
 
-        let started = std::time::Instant::now();
         let retry_diag = diag.clone();
-        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
-            // `generation` is supplied by `read` under the lock (so `result_id` describes
-            // the exact resident state queried), and the freshness verdict is computed
-            // under that same lock and returned alongside — the envelope is atomic.
-            let outcome = session.read(|resident, analysis, generation| {
-                tools::diagnostics::file_findings(
-                    resident,
-                    analysis,
-                    root_id.as_deref(),
-                    &path,
-                    &filters,
-                    generation,
-                )
-            });
-            use crate::diagnostics_state::ResidentOutcome;
-            match outcome {
-                ResidentOutcome::Ready((result, completeness), freshness) => {
-                    Ok(tools::diagnostics::envelope(freshness, completeness, result))
+        tasks::resident_response(
+            self,
+            caller,
+            "diagnostics file",
+            ct,
+            move |session| {
+                // `generation` is supplied by `read` under the lock (so `result_id` describes
+                // the exact resident state queried), and the freshness verdict is computed
+                // under that same lock and returned alongside — the envelope is atomic.
+                let outcome = session.read(|resident, analysis, generation| {
+                    tools::diagnostics::file_findings(
+                        resident,
+                        analysis,
+                        root_id.as_deref(),
+                        &path,
+                        &filters,
+                        generation,
+                    )
+                });
+                use crate::diagnostics_state::ResidentOutcome;
+                match outcome {
+                    ResidentOutcome::Ready((result, completeness), freshness) => {
+                        Ok(tools::diagnostics::envelope(freshness, completeness, result))
+                    }
+                    ResidentOutcome::Loading => {
+                        Ok(tools::diagnostics::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                        "diagnostics 'file' is only available in the workspace profile",
+                        None,
+                    )),
+                    ResidentOutcome::Failed(msg) => {
+                        Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                    }
                 }
-                ResidentOutcome::Loading => {
-                    Ok(tools::diagnostics::loading(&session.status_report()))
-                }
-                ResidentOutcome::Disabled => Err(McpError::invalid_params(
-                    "diagnostics 'file' is only available in the workspace profile",
-                    None,
-                )),
-                ResidentOutcome::Failed(msg) => {
-                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
-                }
-            }
-        })
-        .await;
-        cancellable_answer(outcome, "diagnostics file", started, || {
-            tools::diagnostics::loading(&retry_diag.status_report())
-        })
+            },
+            move || tools::diagnostics::loading(&retry_diag.status_report()),
+        )
+        .await
     }
 
     /// The `diagnostics workspace` action: an opt-in, bounded whole-config sweep that
@@ -2279,7 +2297,8 @@ impl McpServer {
         &self,
         p: DiagnosticsParams,
         ct: tokio_util::sync::CancellationToken,
-    ) -> Result<CallToolResult, McpError> {
+        caller: tasks::TaskCapable,
+    ) -> Result<CallToolResponse, McpError> {
         use crate::diagnostics_state::{ResidentOutcome, SweepOptions};
         use tools::diagnostics::{
             parse_min_severity, DEFAULT_MAX_SWEEP_FILES, MAX_SWEEP_FILES_CEILING,
@@ -2310,42 +2329,47 @@ impl McpServer {
         // concurrent calls stay untouched.
         let started = std::time::Instant::now();
         let retry_diag = diag.clone();
-        let outcome = crate::diagnostics_state::resident_call(diag, ct, move |session| {
-            let sweep_cancel = std::sync::Arc::clone(session.cancel());
-            let outcome = session.read_fanout(|resident, generation| {
-                let sweep = resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
-                if sweep.cancelled {
-                    tracing::info!(
-                        tool = "diagnostics",
-                        action = "workspace",
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        files_processed = sweep.files_swept,
-                        files_total = sweep.files_total,
-                        "MCP call cancelled, sweep unwound early"
-                    );
+        tasks::resident_response(
+            self,
+            caller,
+            "diagnostics workspace",
+            ct,
+            move |session| {
+                let sweep_cancel = std::sync::Arc::clone(session.cancel());
+                let outcome = session.read_fanout(|resident, generation| {
+                    let sweep =
+                        resident.workspace_aggregates(resident.config(), &opts, &sweep_cancel);
+                    if sweep.cancelled {
+                        tracing::info!(
+                            tool = "diagnostics",
+                            action = "workspace",
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            files_processed = sweep.files_swept,
+                            files_total = sweep.files_total,
+                            "MCP call cancelled, sweep unwound early"
+                        );
+                    }
+                    tools::diagnostics::workspace_findings(&sweep, generation, max_output_tokens)
+                });
+                match outcome {
+                    ResidentOutcome::Ready((result, completeness), freshness) => {
+                        Ok(tools::diagnostics::envelope(freshness, completeness, result))
+                    }
+                    ResidentOutcome::Loading => {
+                        Ok(tools::diagnostics::loading(&session.status_report()))
+                    }
+                    ResidentOutcome::Disabled => Err(McpError::invalid_params(
+                        "diagnostics 'workspace' is only available in the workspace profile",
+                        None,
+                    )),
+                    ResidentOutcome::Failed(msg) => {
+                        Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
+                    }
                 }
-                tools::diagnostics::workspace_findings(&sweep, generation, max_output_tokens)
-            });
-            match outcome {
-                ResidentOutcome::Ready((result, completeness), freshness) => {
-                    Ok(tools::diagnostics::envelope(freshness, completeness, result))
-                }
-                ResidentOutcome::Loading => {
-                    Ok(tools::diagnostics::loading(&session.status_report()))
-                }
-                ResidentOutcome::Disabled => Err(McpError::invalid_params(
-                    "diagnostics 'workspace' is only available in the workspace profile",
-                    None,
-                )),
-                ResidentOutcome::Failed(msg) => {
-                    Err(McpError::internal_error(format!("diagnostics database: {msg}"), None))
-                }
-            }
-        })
-        .await;
-        cancellable_answer(outcome, "diagnostics workspace", started, || {
-            tools::diagnostics::loading(&retry_diag.status_report())
-        })
+            },
+            move || tools::diagnostics::loading(&retry_diag.status_report()),
+        )
+        .await
     }
 
     /// The map of ONE `.bsl` file: its `#Область` tree, the procedures, functions and module
@@ -2380,7 +2404,7 @@ impl McpServer {
             let project = crate::project::at(&workspace_root).map_err(|e| {
                 McpError::internal_error(format!("workspace project failed to load: {e}"), None)
             })?;
-            let (roots, _rejected) = crate::project::workspace_roots(&project);
+            let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
             tools::outline::answer(
                 &roots,
                 &workspace_root,
@@ -2618,7 +2642,15 @@ impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some(profile_instructions(self.profile).into());
-        info.capabilities = ServerCapabilities::builder().enable_tools().enable_resources().build();
+        let mut capabilities = ServerCapabilities::builder().enable_tools().enable_resources();
+        // Declared only where it is served: without the declaration the dispatcher answers
+        // `tasks/get` with `-32601`, and with it a client would read a promise of a branch
+        // this build does not take. The handshake is thus the one place a caller learns
+        // which of the two answers it can expect.
+        if tasks::enabled() {
+            capabilities = capabilities.enable_tasks();
+        }
+        info.capabilities = capabilities.build();
         // NOT `Implementation::from_build_env()`: that macro expands inside rmcp, so it
         // reports rmcp's own name and version — a consumer reading `serverInfo` to learn
         // which analyzer build it is talking to gets the transport library instead.
@@ -2635,15 +2667,14 @@ impl ServerHandler for McpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let resource = RawResource::new(contract::CONTRACT_URI, "contract")
+        let resource = Resource::new(contract::CONTRACT_URI, "contract")
             .with_title("Tool and CLI contract")
             .with_description(
                 "Machine-readable declaration of this build's surfaces: MCP tools with their \
                  actions and parameters, the CLI commands and flags, and a contract version \
                  separate from the build version.",
             )
-            .with_mime_type("application/json")
-            .no_annotation();
+            .with_mime_type("application/json");
         Ok(ListResourcesResult::with_all_items(vec![resource]))
     }
 
@@ -2651,7 +2682,7 @@ impl ServerHandler for McpServer {
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         if request.uri != contract::CONTRACT_URI {
             return Err(McpError::resource_not_found(
                 format!("Unknown resource '{}'", request.uri),
@@ -2662,7 +2693,36 @@ impl ServerHandler for McpServer {
             .map_err(|e| McpError::internal_error(format!("contract serialization: {e}"), None))?;
         Ok(ReadResourceResult::new(vec![
             ResourceContents::text(body, contract::CONTRACT_URI).with_mime_type("application/json")
-        ]))
+        ])
+        .into())
+    }
+
+    /// The three task methods are pass-throughs on purpose: the registry is the only owner
+    /// of a handle's state, and a second place deciding what a status means is a second
+    /// place to get it wrong. The dispatcher has already refused a caller that did not
+    /// declare the extension before any of them is reached.
+    async fn get_task(
+        &self,
+        request: rmcp::model::GetTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::GetTaskResult, McpError> {
+        Ok(rmcp::model::GetTaskResult::new(self.state.tasks().get_task(&request.task_id)?))
+    }
+
+    async fn update_task(
+        &self,
+        request: rmcp::model::UpdateTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.state.tasks().update_task(&request.task_id, request.input_responses)
+    }
+
+    async fn cancel_task(
+        &self,
+        request: rmcp::model::CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.state.tasks().cancel_task(&request.task_id)
     }
 }
 
@@ -2934,6 +2994,8 @@ mod graph_supersession_contract {
             provenance: Vec::new(),
             edge_kinds: Vec::new(),
             top: None,
+            call_sites: None,
+            max_call_sites: None,
         })
     }
 
@@ -3001,13 +3063,23 @@ mod graph_supersession_contract {
             .await
             .expect("resolve_names must not wait for the lease lock")
             .expect("resolve still answers from its other providers"),
-            BusyGraphHandler::SymbolInfo => tokio::time::timeout(
-                Duration::from_millis(500),
-                server.symbol_info(symbol_params("Сервер.Считать"), token()),
-            )
-            .await
-            .expect("symbol_info must not wait for the lease lock")
-            .expect("the resident card survives unavailable graph enrichment"),
+            BusyGraphHandler::SymbolInfo => {
+                let response = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    server.symbol_info(
+                        symbol_params("Сервер.Считать"),
+                        token(),
+                        tasks::TaskCapable(false),
+                    ),
+                )
+                .await
+                .expect("symbol_info must not wait for the lease lock")
+                .expect("the resident card survives unavailable graph enrichment");
+                match response {
+                    rmcp::model::CallToolResponse::Complete(result) => result,
+                    _ => panic!("a caller that declared no task extension is answered inline"),
+                }
+            }
         };
         assert!(answer.structured_content.is_some());
 
@@ -3272,6 +3344,9 @@ mod tool_descriptions {
             builds, traversal returns a retry envelope — but `resolve` answers anyway, from the
             name dictionary, and names every source it could not consult.
               - action: overview | schema | status | node | source | neighbors | callers | callees | resolve
+              - call_sites: Ask each edge where its call is written — for `neighbors`/`callers`/`callees`
+            (default: false). Off, an edge carries no `call_site*` key at all, which is how an
+            edge nobody asked about is told apart from one that has no place.
               - depth: Traversal depth for neighbors (default: 1).
               - detail: names | signatures | bodies (default: signatures).
               - dir: in | out | both — only for `neighbors` (default: in).
@@ -3279,6 +3354,8 @@ mod tool_descriptions {
             contains/data_binding) — lets metadata-impact queries isolate e.g. only `query_ref`.
               - id: Durable node id (required for node/neighbors/callers/callees).
               - ids: Durable node ids (required for `source`).
+              - max_call_sites: Cap on places per edge when `call_sites` is on (default: 20, max: 200). What the cap
+            cuts is declared: `call_sites_total` counts the places before any are shown.
               - max_nodes: Server-side cap on returned neighbour nodes (default: 50).
               - max_output_tokens: Output budget in tokens (~4 chars each) for source-bearing actions: `source`
             (default 4000) and `node`/`neighbors` at `detail=bodies` (default 6000). When the
@@ -3484,5 +3561,153 @@ mod tool_descriptions {
               - type_name: Owning platform type when `name` is a member of a specific type (optional).
 
         "###]].assert_eq(&rendered);
+    }
+}
+
+/// Each tool consults the stale-miss rescan hatch on ITS OWN miss and on nothing else.
+///
+/// What the consultation is worth is settled elsewhere, on stands where the answer itself
+/// changes; what is settled here is that the tool asks — and that it does not ask for an
+/// answer nobody doubted, which is what a policy applied unconditionally would do.
+#[cfg(test)]
+mod rescan_hatch_consultations {
+    use super::*;
+    use crate::diagnostics_state::DiagnosticsState;
+
+    const DECLARED: &str = "Сервер.Считать";
+    const ABSENT: &str = "Сервер.НетТакогоИмени";
+
+    fn stand() -> (tempfile::TempDir, McpServer, DiagnosticsState) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::graph::test_support::sample_workspace(root);
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let state = SharedState::workspace(root.to_path_buf()).expect("valid workspace project");
+        state.diagnostics().ensure_loading();
+        crate::diagnostics_state::test_support::wait_ready(state.diagnostics());
+        let diag = state.diagnostics().clone();
+        (dir, McpServer::new(McpProfile::Workspace, state), diag)
+    }
+
+    fn token() -> tokio_util::sync::CancellationToken {
+        tokio_util::sync::CancellationToken::new()
+    }
+
+    fn metadata_params(object_type: &str, object_name: &str) -> Parameters<MetadataParams> {
+        Parameters(MetadataParams {
+            action: "object".to_owned(),
+            filter: None,
+            meta_type: None,
+            name_mask: None,
+            max_items: None,
+            object_type: Some(object_type.to_owned()),
+            object_name: Some(object_name.to_owned()),
+            form_name: None,
+            max_output_tokens: None,
+            connection: None,
+            mode: None,
+        })
+    }
+
+    fn symbol_params(symbol: &str) -> Parameters<SymbolInfoParams> {
+        Parameters(SymbolInfoParams {
+            symbol: Some(symbol.to_owned()),
+            root_id: None,
+            path: None,
+            line: None,
+            column: None,
+            include: Vec::new(),
+            member_kind: None,
+            member_name: None,
+            locale: None,
+            max_output_tokens: None,
+        })
+    }
+
+    fn references_params(symbol: &str) -> Parameters<ReferencesParams> {
+        Parameters(ReferencesParams {
+            symbol: Some(symbol.to_owned()),
+            anchor_root_id: None,
+            root_id: None,
+            path: None,
+            line: None,
+            column: None,
+            line_content: None,
+            area_root_id: None,
+            area_path_prefix: None,
+            kinds: Vec::new(),
+            include_declaration: None,
+            limit: None,
+            max_files: None,
+            include_preview: None,
+            max_output_tokens: None,
+        })
+    }
+
+    /// A miss for a type that CAN resolve is a candidate for an object added since the
+    /// last walk. A type that cannot resolve is not: no walk turns a typo into a type,
+    /// and asking for one would let a bad parameter stat the workspace.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metadata_object_consults_the_rescan_hatch_on_a_resolvable_type_miss() {
+        let (_dir, server, diag) = stand();
+
+        let before = diag.forced_rescans();
+        let _ = server
+            .metadata(
+                metadata_params("Справочник", "НетТакогоОбъекта"),
+                token(),
+                tasks::TaskCapable(false),
+            )
+            .await;
+        assert_eq!(diag.forced_rescans(), before + 1, "a resolvable type miss consults the hatch");
+
+        let before = diag.forced_rescans();
+        let _ = server
+            .metadata(
+                metadata_params("НеизвестныйТип", "НетТакогоОбъекта"),
+                token(),
+                tasks::TaskCapable(false),
+            )
+            .await;
+        assert_eq!(diag.forced_rescans(), before, "control: an unresolvable type does not");
+
+        server.shutdown();
+    }
+
+    /// An absent card for a request made BY NAME is a candidate; a name that resolved is
+    /// not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn symbol_info_consults_the_rescan_hatch_on_a_named_symbol_miss() {
+        let (_dir, server, diag) = stand();
+
+        let before = diag.forced_rescans();
+        let _ = server.symbol_info(symbol_params(ABSENT), token(), tasks::TaskCapable(false)).await;
+        assert_eq!(diag.forced_rescans(), before + 1, "a name that missed consults the hatch");
+
+        let before = diag.forced_rescans();
+        let _ =
+            server.symbol_info(symbol_params(DECLARED), token(), tasks::TaskCapable(false)).await;
+        assert_eq!(diag.forced_rescans(), before, "control: a name that resolved does not");
+
+        server.shutdown();
+    }
+
+    /// The same for the answer-shaped miss this tool decides by its outcome.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn references_consults_the_rescan_hatch_on_a_named_symbol_miss() {
+        let (_dir, server, diag) = stand();
+
+        let before = diag.forced_rescans();
+        let _ =
+            server.references(references_params(ABSENT), token(), tasks::TaskCapable(false)).await;
+        assert_eq!(diag.forced_rescans(), before + 1, "a name that missed consults the hatch");
+
+        let before = diag.forced_rescans();
+        let _ = server
+            .references(references_params(DECLARED), token(), tasks::TaskCapable(false))
+            .await;
+        assert_eq!(diag.forced_rescans(), before, "control: an answer that resolved does not");
+
+        server.shutdown();
     }
 }

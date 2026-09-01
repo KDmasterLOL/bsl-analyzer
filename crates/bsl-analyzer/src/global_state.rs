@@ -1063,6 +1063,131 @@ mod vfs_race_tests {
         assert!(second.version > first.version, "each loader config carries a fresh version");
     }
 
+    /// Every file the project is derived from must re-derive it when it changes.
+    /// `.env` carries the shared-configuration root, so it is such a file; watching
+    /// it without reacting leaves the analyzer on the old base until a restart.
+    /// The analyzer's own config file is the control: both inputs, one outcome.
+    #[test]
+    fn a_disk_edit_of_any_project_input_reloads_the_project() {
+        fn edited(state: &mut GlobalState, path: &std::path::Path, text: &str) -> bool {
+            {
+                let mut vfs = state.vfs.write();
+                vfs.set_file_contents(vfs::VfsPath::new(path.to_path_buf()), Some(Arc::from(text)));
+            }
+            state.process_changes(false).config_file_changed
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        std::fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \".\"\n").unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.to_path_buf()).expect("initial load");
+
+        assert!(
+            edited(
+                &mut state,
+                &root.join(project_model::CONFIG_FILE_NAMES[0]),
+                "[source]\nroot = \".\"\n",
+            ),
+            "control: an analyzer-config edit re-derives the project"
+        );
+        assert!(
+            edited(
+                &mut state,
+                &root.join(project_model::PROJECT_ENV_FILE_NAME),
+                "ONEC_CONFIGURATIONS_ROOT=/opt/configurations\n",
+            ),
+            "a .env edit is a project input too, so it must re-derive the project"
+        );
+    }
+
+    /// Saving a project input from the editor reloads the project. Hand-editing
+    /// `.env` is the intended way to move the shared configuration root, so a save
+    /// of it must behave like a save of the analyzer's config file — the control.
+    #[test]
+    fn saving_any_project_input_reloads_the_project() {
+        fn shared(root: &std::path::Path, version: &str) {
+            let dir = root.join("UT11").join(version);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").unwrap();
+        }
+        fn saved(state: &mut GlobalState, path: &std::path::Path) {
+            crate::handlers::handle_did_save(
+                state,
+                lsp_types::DidSaveTextDocumentParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: lsp_types::Url::from_file_path(path).unwrap(),
+                    },
+                    text: None,
+                },
+            )
+            .unwrap();
+        }
+        let base = |state: &GlobalState| -> std::path::PathBuf {
+            state
+                .project
+                .as_ref()
+                .and_then(|project| project.configuration_path())
+                .expect("the shared configuration resolves")
+                .to_path_buf()
+        };
+
+        // The process environment wins over `.env`, so a machine that exports the
+        // variable would resolve a different base and fail this test for a reason
+        // that has nothing to do with the reload being measured.
+        assert!(
+            std::env::var_os(project_model::SHARED_CONFIGURATIONS_ROOT_ENV).is_none(),
+            "unset {} to run this test",
+            project_model::SHARED_CONFIGURATIONS_ROOT_ENV
+        );
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = tmp.path().join("configurations");
+        shared(&store, "1.0.0");
+        shared(&store, "2.0.0");
+        let other = tmp.path().join("other-configurations");
+        shared(&other, "1.0.0");
+        shared(&other, "2.0.0");
+
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let toml = |version: &str| {
+            format!("[source.configuration]\nid = \"UT11\"\nversion = \"{version}\"\n")
+        };
+        std::fs::write(root.join("bsl-analyzer.toml"), toml("1.0.0")).unwrap();
+        let env_path = root.join(project_model::PROJECT_ENV_FILE_NAME);
+        std::fs::write(&env_path, format!("ONEC_CONFIGURATIONS_ROOT={}\n", store.display()))
+            .unwrap();
+
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender);
+        state.init_empty_source_root();
+        state.set_workspace_root(root.clone()).expect("initial load");
+        assert_eq!(base(&state), store.join("UT11").join("1.0.0"));
+
+        // Control: saving the analyzer's own config file reloads the project.
+        std::fs::write(root.join("bsl-analyzer.toml"), toml("2.0.0")).unwrap();
+        saved(&mut state, &root.join("bsl-analyzer.toml"));
+        assert_eq!(
+            base(&state),
+            store.join("UT11").join("2.0.0"),
+            "control: a saved analyzer config moves the resolved base"
+        );
+
+        // The subject: the same must hold for the file that carries the store root.
+        std::fs::write(&env_path, format!("ONEC_CONFIGURATIONS_ROOT={}\n", other.display()))
+            .unwrap();
+        saved(&mut state, &env_path);
+        assert_eq!(
+            base(&state),
+            other.join("UT11").join("2.0.0"),
+            "a saved .env must move the resolved base too"
+        );
+    }
+
     #[test]
     fn test_lsp_before_loader() {
         let (sender, _receiver) = crossbeam_channel::unbounded();

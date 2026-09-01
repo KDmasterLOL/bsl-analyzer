@@ -63,7 +63,11 @@ use crate::graph::input::{build_source_root, db_for_files};
 // holds them with a null file, and nothing about the workspace changed, so no
 // fingerprint moves: a stale artefact would keep answering about metadata objects
 // with a durable id and no place, which is the split this version closes.
-pub(crate) const SCHEMA_VERSION: u32 = 18;
+// 19: `edges` rows carry the call site — the byte range of the call in the `from` node's
+// file, or the code saying why there is none. A version-18 artefact has neither, and its
+// edges are otherwise indistinguishable from this binary's, so serving call sites from it
+// would answer "no place" for every edge that has one.
+pub(crate) const SCHEMA_VERSION: u32 = 19;
 
 /// One file's persisted identity in the `files` table: its stat-only fingerprint
 /// and (for `.bsl`) its resolution-signature hash. Persisting these per path lets a
@@ -232,6 +236,9 @@ impl GraphDbWriter {
                 to_id      TEXT NOT NULL,
                 kind       TEXT NOT NULL,
                 provenance TEXT NOT NULL,
+                call_start INTEGER,
+                call_end   INTEGER,
+                call_absent TEXT,
                 crosses    INTEGER NOT NULL
             );
 
@@ -307,8 +314,9 @@ impl GraphDbWriter {
         let tx = self.conn.transaction().context("begin edge batch")?;
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO edges (from_id, to_id, kind, provenance, crosses) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO edges \
+                 (from_id, to_id, kind, provenance, call_start, call_end, call_absent, crosses) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for row in rows {
                 stmt.execute(params![
@@ -316,6 +324,9 @@ impl GraphDbWriter {
                     row.to_id,
                     row.kind,
                     row.provenance,
+                    row.call_start,
+                    row.call_end,
+                    row.call_site_absent,
                     row.crosses as i64,
                 ])?;
             }
@@ -1153,14 +1164,18 @@ pub(crate) fn update_graph_database_bodies(
         for edge in &rows.edges {
             let to_id = canonicalize_aux_id(&existing_mdo, &edge.to_id);
             tx.prepare_cached(
-                "INSERT INTO edges (from_id, to_id, kind, provenance, crosses) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO edges \
+                 (from_id, to_id, kind, provenance, call_start, call_end, call_absent, crosses) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?
             .execute(params![
                 edge.from_id,
                 to_id,
                 edge.kind,
                 edge.provenance,
+                edge.call_start,
+                edge.call_end,
+                edge.call_site_absent,
                 edge.crosses as i64
             ])?;
         }
@@ -1567,6 +1582,9 @@ mod tests {
             to_id: to.to_string(),
             kind: "call",
             provenance: "resolved",
+            call_start: None,
+            call_end: None,
+            call_site_absent: Some(ide::NO_CALL_SITE),
             crosses: false,
         }
     }
@@ -2182,6 +2200,9 @@ mod tests {
                     to_id: "method/common/Target/Цель".to_string(),
                     kind: "notify_ref",
                     provenance: "string_resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
                 EdgeRow {
@@ -2189,6 +2210,9 @@ mod tests {
                     to_id: "method/common/Target/Цель".to_string(),
                     kind: "idle_handler",
                     provenance: "string_resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
                 EdgeRow {
@@ -2196,6 +2220,9 @@ mod tests {
                     to_id: "method/common/Target/Цель".to_string(),
                     kind: "event_subscription",
                     provenance: "string_resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
                 EdgeRow {
@@ -2203,6 +2230,9 @@ mod tests {
                     to_id: "method/common/Target/Цель".to_string(),
                     kind: "set_action",
                     provenance: "string_resolved",
+                    call_start: None,
+                    call_end: None,
+                    call_site_absent: Some(ide::NO_CALL_SITE),
                     crosses: false,
                 },
             ])

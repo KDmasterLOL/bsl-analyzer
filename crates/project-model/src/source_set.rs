@@ -58,12 +58,24 @@ impl SourceSet {
     /// one traversal of the tree and emits exactly one `workspace_scan` event —
     /// callers count those events to prove an operation walked once.
     pub fn scan(roots: &[PathBuf]) -> SourceSet {
+        Self::scan_excluding(roots, &[])
+    }
+
+    /// [`Self::scan`] without descending into `excluded`.
+    ///
+    /// For subtrees the caller owns and the walk must not read back as sources — the
+    /// analyzer's own derived cache, which by default sits inside the very tree being
+    /// scanned. Kept as a separate entry point so the plain `scan` stays the one that
+    /// narrows by nothing: an exclusion is always something a caller states, never
+    /// something the walk decides by name.
+    pub fn scan_excluding(roots: &[PathBuf], excluded: &[PathBuf]) -> SourceSet {
         SCANS_ON_THREAD.with(|c| c.set(c.get() + 1));
         let _span = tracing::info_span!("workspace_scan", roots = roots.len()).entered();
+        let scope = crate::path_scope::PathScope::new(roots, excluded);
         let mut outcome = WalkOutcome::default();
         let mut slots: Vec<Slot> = Vec::new();
         for root in roots {
-            partition_root(root, &mut outcome, &mut slots);
+            partition_root(root, &scope, &mut outcome, &mut slots);
         }
 
         // Deep-walk the directory units in parallel. `collect` keeps the input
@@ -74,7 +86,7 @@ impl SourceSet {
             .filter_map(|slot| match slot {
                 Slot::Subtree { unit, root } => {
                     let mut unit_outcome = WalkOutcome::default();
-                    walk_tree(unit, root, &mut unit_outcome);
+                    walk_tree(unit, root, &scope, &mut unit_outcome);
                     Some(unit_outcome)
                 }
                 Slot::File(_) => None,
@@ -138,9 +150,20 @@ enum Slot {
 /// DIRECTORIES into parallel units. Anything else — files, links of every kind,
 /// errors — is handled here, at its original depth, because a unit walk restarts
 /// depth at zero and would misread a top-level dangling link as an unreadable root.
-fn partition_root(root: &Path, outcome: &mut WalkOutcome, slots: &mut Vec<Slot>) {
+fn partition_root(
+    root: &Path,
+    scope: &crate::path_scope::PathScope,
+    outcome: &mut WalkOutcome,
+    slots: &mut Vec<Slot>,
+) {
     let mut dir_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
-    for entry in walkdir::WalkDir::new(root).follow_links(true).max_depth(1).sort_by_file_name() {
+    let shallow = walkdir::WalkDir::new(root)
+        .follow_links(true)
+        .max_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| !entry.file_type().is_dir() || !scope.is_hole(entry.path()));
+    for entry in shallow {
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {

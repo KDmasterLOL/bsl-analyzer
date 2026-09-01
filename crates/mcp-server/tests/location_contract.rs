@@ -435,3 +435,82 @@ async fn one_relative_path_in_two_roots_addresses_two_files() {
 
     client.cancel().await.ok();
 }
+
+/// A place published on a graph EDGE is addressable, exactly as a place published on a
+/// symbol is.
+///
+/// The edge is the point: `graph` answers from its own artefact with its own freshness,
+/// while `diagnostics` answers from the resident. A pair that survives that crossing is
+/// what makes the call site usable; one that does not is decoration attached to an edge.
+///
+/// The positive control is the same pair under an unregistered root — without it, "the file
+/// was served" cannot be told from "this tool serves anything it is handed".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_site_published_on_an_edge_addresses_a_file_diagnostics_can_serve() {
+    let ws = stage_workspace();
+    write_common_module(
+        ws.path(),
+        "Вызыватель",
+        &format!(
+            "&НаСервере\nФункция Позвать() Экспорт\n    \
+             Возврат {STAND_METHOD}();\nКонецФункции\n"
+        ),
+    );
+    let client = workspace_client(ws.path()).await;
+
+    let answer = poll(
+        &client,
+        "graph",
+        args(&[
+            ("action", Value::from("callers")),
+            ("id", Value::from("method/common/ПервыйОбщийМодуль/НеУстаревшаяФункция")),
+            ("call_sites", Value::from(true)),
+        ]),
+    )
+    .await;
+
+    let edges = answer["result"]["edges"].as_array().expect("edges is a list");
+    let place = edges
+        .iter()
+        .find(|edge| edge["from"] == "method/common/Вызыватель/Позвать")
+        .and_then(|edge| edge["call_sites"].as_array())
+        .and_then(|places| places.first())
+        .unwrap_or_else(|| panic!("the calling edge carries a place: {answer}"));
+
+    assert_eq!(place["position_encoding"], "utf-16");
+    assert_eq!(place["schema_version"], "1");
+    let root_id = place["root_id"].as_str().expect("root_id is a string").to_owned();
+    let path = place["path"].as_str().expect("path is a string").to_owned();
+    assert!(path.contains("Вызыватель"), "the place addresses the CALLER's file: {place}");
+
+    let diagnostics = poll(
+        &client,
+        "diagnostics",
+        args(&[
+            ("action", Value::from("file")),
+            ("root_id", Value::from(root_id)),
+            ("path", Value::from(path.clone())),
+        ]),
+    )
+    .await;
+    assert!(
+        diagnostics["result"].get("error").is_none(),
+        "a pair from a graph edge must address a file diagnostics can serve, got {}",
+        diagnostics["result"],
+    );
+
+    let foreign = poll(
+        &client,
+        "diagnostics",
+        args(&[
+            ("action", Value::from("file")),
+            ("root_id", Value::from("no-such-root")),
+            ("path", Value::from(path)),
+        ]),
+    )
+    .await;
+    assert_eq!(
+        foreign["result"]["error"], "unknown_root",
+        "an unregistered root is an honest refusal, not another file: {foreign}",
+    );
+}

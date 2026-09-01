@@ -1386,7 +1386,7 @@ mod tests {
     /// field, so structured-aware and plain clients see byte-identical JSON.
     fn assert_structured_mirrors_text(result: &CallToolResult) {
         let structured = body_of(result);
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         let parsed: Value = serde_json::from_str(text).expect("text mirror must be valid JSON");
         assert_eq!(&parsed, structured, "text mirror must match structuredContent");
     }
@@ -1599,12 +1599,9 @@ mod tests {
     mod file_action {
         use super::*;
         use crate::cancel::RequestCancel;
-        use crate::diagnostics_state::{
-            DiagnosticsState, DiagnosticsStatus, ResidentOutcome, SweepOptions,
-        };
+        use crate::diagnostics_state::{DiagnosticsState, ResidentOutcome, SweepOptions};
         use std::fs;
         use std::path::{Path, PathBuf};
-        use std::time::Duration;
 
         fn write(root: &Path, rel: &str, text: &str) {
             let path = root.join(rel);
@@ -1647,14 +1644,8 @@ mod tests {
         fn ready_state(root: &Path) -> DiagnosticsState {
             let state = DiagnosticsState::for_workspace(root.to_path_buf());
             state.ensure_loading();
-            for _ in 0..300 {
-                match state.status() {
-                    DiagnosticsStatus::Ready { .. } => return state,
-                    DiagnosticsStatus::Failed(m) => panic!("load failed: {m}"),
-                    _ => std::thread::sleep(Duration::from_millis(10)),
-                }
-            }
-            panic!("db did not become ready");
+            crate::diagnostics_state::test_support::wait_ready(&state);
+            state
         }
 
         fn run(state: &DiagnosticsState, path: &Path, filters: &FileFilters) -> Value {
@@ -2420,7 +2411,7 @@ mod tests {
             let baseline_path = root.join("baseline.json");
             let mut baseline = DiagnosticsBaseline {
                 schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
                 diagnostics: vec![],
             };
             fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();
@@ -2501,7 +2492,7 @@ mod tests {
             let relative = "CommonModules/Сервер/Ext/Module.bsl";
             let baseline = DiagnosticsBaseline {
                 schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
                 diagnostics: vec![DiagnosticsBaselineEntry {
                     fingerprint: diagnostic_fingerprint(relative, "UnreachableCode", "Возврат;", 0),
                     path: relative.to_owned(),
@@ -2548,7 +2539,7 @@ mod tests {
             let baseline_path = root.join("baseline.json");
             let baseline = DiagnosticsBaseline {
                 schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-                scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+                scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
                 diagnostics: vec![],
             };
             let bytes = diagnostics_baseline_json(&baseline).unwrap();

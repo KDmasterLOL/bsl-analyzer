@@ -26,19 +26,28 @@ pub(crate) const STALL_REPORT_FILE: &str = "bsl-graph-stall-report.txt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceCacheLayout {
     root: PathBuf,
+    /// The root as the caller spelled it, before canonicalisation.
+    ///
+    /// Kept because a file watcher reports events under the spelling its watch was
+    /// armed with, and that is the pre-canonical one: on Windows `canonicalize`
+    /// answers `\\?\C:\...` while the watcher says `C:\...`, and on any platform a
+    /// symlinked root and its target are two names for the same directory. A caller
+    /// that has to tell "is this event inside my own cache" needs both, and keeping
+    /// only the canonical one is a filter that silently matches nothing.
+    declared: PathBuf,
 }
 
 impl WorkspaceCacheLayout {
     /// The backwards-compatible lazy layout under `<workspace>/.build`.
     pub fn for_workspace(workspace_root: &Path) -> Self {
-        let root = workspace_root.join(".build");
-        let root = std::fs::canonicalize(&root).unwrap_or(root);
-        Self { root }
+        let declared = workspace_root.join(".build");
+        let root = std::fs::canonicalize(&declared).unwrap_or_else(|_| declared.clone());
+        Self { root, declared }
     }
 
     /// A layout whose root has already been resolved by the caller.
     pub fn from_root(root: PathBuf) -> Self {
-        Self { root }
+        Self { declared: root.clone(), root }
     }
 
     /// Resolve, create, and canonicalize an explicit `--cache-dir` value.
@@ -57,11 +66,20 @@ impl WorkspaceCacheLayout {
                 format!("failed to canonicalize --cache-dir {}: {error}", requested.display()),
             )
         })?;
-        Ok(Self { root })
+        Ok(Self { root, declared: requested })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Every spelling this cache root can appear under in a file-watcher event.
+    ///
+    /// Both, and deduplicated only by the caller: the two coincide whenever the path
+    /// was already canonical, and differ exactly in the cases a single-spelling check
+    /// gets wrong.
+    pub fn spellings(&self) -> [&Path; 2] {
+        [self.declared.as_path(), self.root.as_path()]
     }
 
     pub fn ensure(&self) -> std::io::Result<()> {

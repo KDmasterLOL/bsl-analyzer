@@ -1157,7 +1157,7 @@ mod tests {
             .windows(2)
             .all(|pair| { pair[0]["name"].as_str().unwrap() < pair[1]["name"].as_str().unwrap() }));
 
-        let text = first.content[0].raw.as_text().expect("JSON text mirror").text.as_str();
+        let text = first.content[0].as_text().expect("JSON text mirror").text.as_str();
         assert_eq!(serde_json::from_str::<Value>(text).unwrap(), body);
 
         let tiny = render_card(&card, None, DEFAULT_TOP_MODULES, 1, &stamp(&roots));

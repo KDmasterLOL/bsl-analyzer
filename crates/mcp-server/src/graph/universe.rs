@@ -87,8 +87,16 @@ pub(crate) struct ScannedUniverse {
 
 impl ScannedUniverse {
     /// One walk, all projections.
+    /// Test-side wrapper: production always states its exclusions, so the form that
+    /// narrows by nothing is not reachable there by construction.
+    #[cfg(test)]
     pub(crate) fn scan(roots: &[PathBuf]) -> ScannedUniverse {
-        let set = SourceSet::scan(roots);
+        Self::scan_excluding(roots, &[])
+    }
+
+    /// [`Self::scan`] without descending into `excluded`.
+    pub(crate) fn scan_excluding(roots: &[PathBuf], excluded: &[PathBuf]) -> ScannedUniverse {
+        let set = SourceSet::scan_excluding(roots, excluded);
         ScannedUniverse {
             files: bsl_files_from(&set),
             stats: file_stats_from(&set),

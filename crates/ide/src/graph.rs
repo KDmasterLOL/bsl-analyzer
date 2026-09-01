@@ -145,7 +145,15 @@ pub struct ModuleMethod {
 /// A resolved call edge, projected for the agent. In a neighbours response the
 /// traversal root's id is carried once in `root`, not repeated per edge: an absent
 /// `from`/`to` means that endpoint is the root node.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent, for the reason it is absent on [`NodeRef`]: the call sites
+/// are `serde_json::Value`s, which the serving layer owns the shape of.
+///
+/// The four `call_site*` fields are all absent unless the caller asked for call sites, and
+/// that silence is load-bearing: "this edge has no place" and "nobody asked where this edge
+/// is" are different answers, and an edge that answered the first to a caller who asked
+/// neither would be read as the second.
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct EdgeRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -153,8 +161,58 @@ pub struct EdgeRef {
     pub to: Option<String>,
     pub kind: &'static str,
     pub provenance: &'static str,
+    /// Where the call is written, one place per site, under the MCP location contract.
+    /// Never a partial list: a site that failed verification takes the whole list with it
+    /// (see `call_sites_unavailable`), so a shorter list than `call_sites_total` means the
+    /// display budget or the per-edge cap cut it, and `call_sites_truncated` says so.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sites: Option<Vec<serde_json::Value>>,
+    /// How many sites the artefact records for this edge, counted before any of them is
+    /// shown. Present exactly when `call_sites` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sites_total: Option<usize>,
+    /// The shown list is shorter than `call_sites_total` because the cap or the output
+    /// budget cut it — never because a site was dropped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub call_sites_truncated: bool,
+    /// Why there is no place for this edge, from the location contract's closed vocabulary.
+    /// Exactly one of this and `call_sites` is set on an edge whose caller asked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_sites_unavailable: Option<&'static str>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub crosses_client_to_server: bool,
+}
+
+/// The location contract's code for an edge that stands for no call in code at all.
+/// Re-exported from `hir-def` so the serving layer can assert one vocabulary, the same way
+/// it does for [`NO_SOURCE_LOCATION`].
+pub const NO_CALL_SITE: &str = hir::NO_CALL_SITE;
+
+/// The location contract's code for an edge whose call site this build does not record.
+pub const CALL_SITE_NOT_RECORDED: &str = hir::CALL_SITE_NOT_RECORDED;
+
+/// The location contract's code for a span the file has moved out from under.
+/// Spelled here as a literal for the same reason as its neighbours; the serving layer
+/// asserts the two agree.
+pub const SOURCE_DRIFTED: &str = "source_drifted";
+
+/// Why the rows an edge was grouped from carry no span — or `None` when at least one of
+/// them does, which leaves the question to whoever holds the root table and the file.
+///
+/// The answer is read off the rows, never off [`EdgeRef::kind`]: the kind of a call read out
+/// of a body is reassigned during resolution (a manager, notify or idle edge gets its kind
+/// after extraction), so a kind-driven rule would call a recorded span absent.
+pub fn call_site_absence_reason(sites: &[hir::CallSite]) -> Option<&'static str> {
+    if sites.iter().any(|site| matches!(site, hir::CallSite::Recorded(_))) {
+        return None;
+    }
+    // Homogeneous in practice, since one pass produces one edge kind. Answering "never"
+    // for a group holding one "not yet" would still be the worse of the two mistakes.
+    if sites.iter().any(|site| matches!(site, hir::CallSite::NotRecorded)) {
+        Some(CALL_SITE_NOT_RECORDED)
+    } else {
+        Some(NO_CALL_SITE)
+    }
 }
 
 /// Cold-start orientation for an unfamiliar project.
@@ -293,6 +351,12 @@ pub struct NeighborsParams<'a> {
     /// Keep only edges whose kind label (call/manager_access/query_ref/contains/…) is in
     /// this set, when non-empty. Independent of `provenance_filter` (both must pass).
     pub edge_kind_filter: Vec<String>,
+    /// Whether the caller asked where each edge's call is written. `false` leaves every
+    /// `call_site*` field off the edge, which is how a consumer tells "nobody asked" from
+    /// "this edge has no place".
+    pub call_sites: bool,
+    /// At most this many places per edge. What the cap cuts is declared, never silent.
+    pub max_call_sites: usize,
 }
 
 /// A method's outbound graph context, rendered for embedding enrichment. A semantic
@@ -2110,15 +2174,39 @@ impl<'a> GraphCtx<'a> {
         // A `Direction::Both` sweep visits an edge from each endpoint, so a
         // self-call surfaces twice; dedup by `(from, to, kind)` so the two
         // manager edge kinds between the same pair are not collapsed.
-        let mut seen_edges: std::collections::HashSet<(GraphNode, GraphNode, EdgeKind)> =
-            std::collections::HashSet::new();
-        let edges = out_edges
+        // The rows of one edge are its call sites: the projection keeps one row per site, so
+        // grouping is what turns them back into an edge that carries every place.
+        let mut seen_edges: std::collections::HashMap<
+            (GraphNode, GraphNode, EdgeKind),
+            Vec<hir::CallSite>,
+        > = std::collections::HashMap::new();
+        let mut order: Vec<(GraphNode, GraphNode, EdgeKind)> = Vec::new();
+        let mut representative: std::collections::HashMap<
+            (GraphNode, GraphNode, EdgeKind),
+            &WorkspaceCallEdge,
+        > = std::collections::HashMap::new();
+        for e in out_edges.iter().filter(|e| {
+            (e.from == root || kept.contains(&e.from)) && (e.to == root || kept.contains(&e.to))
+        }) {
+            let key = (e.from.clone(), e.to.clone(), e.kind);
+            match seen_edges.entry(key.clone()) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(vec![e.call_site]);
+                    order.push(key.clone());
+                    representative.insert(key, e);
+                }
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    slot.get_mut().push(e.call_site);
+                }
+            }
+        }
+        let edges = order
             .iter()
-            .filter(|e| {
-                (e.from == root || kept.contains(&e.from)) && (e.to == root || kept.contains(&e.to))
+            .map(|key| {
+                let edge = representative[key];
+                let sites = &seen_edges[key];
+                self.edge_ref(edge, &root, sites, params)
             })
-            .filter(|e| seen_edges.insert((e.from.clone(), e.to.clone(), e.kind)))
-            .map(|e| self.edge_ref(e, &root))
             .collect();
 
         // Distribution + connector-loss over the deduped full neighbourhood (every
@@ -2177,13 +2265,30 @@ impl<'a> GraphCtx<'a> {
 
     /// Project an edge for the agent. An endpoint equal to `root` is omitted
     /// (`None`), since the neighbours response already carries the root node once.
-    fn edge_ref(&self, edge: &WorkspaceCallEdge, root: &GraphNode) -> EdgeRef {
+    ///
+    /// `sites` are the call sites of every row this edge was grouped from, in projection
+    /// order. This path holds no root table, so a recorded site can never be addressed here
+    /// — it names `roots_unavailable`, exactly as the artefact-backed projection does when it
+    /// serves without one. That agreement is what the parity gate compares.
+    fn edge_ref(
+        &self,
+        edge: &WorkspaceCallEdge,
+        root: &GraphNode,
+        sites: &[hir::CallSite],
+        params: &NeighborsParams<'_>,
+    ) -> EdgeRef {
         let endpoint = |n: &GraphNode| (n != root).then(|| self.encode_node(n).0);
+        let call_sites_unavailable =
+            params.call_sites.then(|| call_site_absence_reason(sites).unwrap_or(ROOTS_UNAVAILABLE));
         EdgeRef {
             from: endpoint(&edge.from),
             to: endpoint(&edge.to),
             kind: edge_kind_label(edge.kind),
             provenance: provenance_label(edge),
+            call_sites: None,
+            call_sites_total: None,
+            call_sites_truncated: false,
+            call_sites_unavailable,
             crosses_client_to_server: edge.crosses_client_to_server,
         }
     }
@@ -2972,6 +3077,8 @@ mod tests {
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         assert_eq!(res.root.id, "method/common/Сервер/Считать");
@@ -3002,6 +3109,8 @@ mod tests {
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let res = a.graph_neighbors(ROOT, None, &params).expect("neighbors resolve");
         // The cap drops the sole caller, but `total` still reflects the real fan-out.
@@ -3054,6 +3163,8 @@ mod tests {
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -3098,6 +3209,8 @@ mod tests {
             detail: GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         assert!(res.nodes.iter().any(|n| n.id == "method/common/Вызыватель/Делать"));
@@ -3236,6 +3349,8 @@ mod tests {
             detail: GraphDetail::Names,
             provenance_filter: vec!["inferred".to_string()],
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let res = a.graph_neighbors(ROOT, None, &params).unwrap();
         // The only incoming edge is `resolved`, so the inferred-only filter drops it.
@@ -3673,6 +3788,7 @@ mod tests {
             to: object_item.clone(),
             kind: EdgeKind::Contains,
             provenance: EdgeProvenance::Resolved,
+            call_site: hir::CallSite::Structural,
             crosses_client_to_server: false,
         };
         let row = encoder.edge_row(&edge);
@@ -3681,6 +3797,10 @@ mod tests {
         assert_eq!(row.from_id, ctx.encode_node(&edge.from).0);
         assert_eq!(row.to_id, ctx.encode_node(&edge.to).0);
         assert_eq!(row.provenance, "resolved");
+        // A form containing an item is not a call: the row says so with the code, not with
+        // an absent span a consumer would read as "somewhere, unknown".
+        assert_eq!((row.call_start, row.call_end), (None, None));
+        assert_eq!(row.call_site_absent, Some(NO_CALL_SITE));
     }
 }
 

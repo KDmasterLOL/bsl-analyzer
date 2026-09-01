@@ -1,7 +1,7 @@
 use bsl_metadata::metadata_object::MdoType;
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::Configuration;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -137,12 +137,12 @@ pub fn get_metadata_tree(
     } else {
         let mut result = format_summary_tree(db, config)?;
         if !extensions.is_empty() {
-            let text = result.content[0].raw.as_text().expect("text").text.clone();
+            let text = result.content[0].as_text().expect("text").text.clone();
             let mut out = text;
             for (name, ext_config) in extensions {
                 out.push_str(&format_extension_summary(db, name, ext_config));
             }
-            result = CallToolResult::success(vec![Content::text(out)]);
+            result = CallToolResult::success(vec![ContentBlock::text(out)]);
         }
         Ok(result)
     }
@@ -217,7 +217,7 @@ fn format_summary_tree(
     }
     let _ = writeln!(out, "\nИспользуйте `filter` для получения списка объектов категории.");
 
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
 }
 
 /// Map a user-supplied category filter to a canonical category the tree understands.
@@ -365,7 +365,7 @@ fn format_filtered_tree(
         "\n-- список усечён под max_output_tokens; повысьте бюджет или запросите объект действием `object` --\n",
     );
 
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
 }
 
 fn format_common_module_flags(m: &bsl_metadata::CommonModule) -> String {
@@ -456,7 +456,7 @@ pub fn get_object_structure(
     // so it is looked up by name rather than via `find_metadata_object`/`find_register`.
     if mdo_type == MdoType::EventSubscription {
         return match config.find_event_subscription(object_name) {
-            Some(sub) => Ok(CallToolResult::success(vec![Content::text(
+            Some(sub) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_event_subscription_structure(sub),
             )])),
             None => Err(McpError::invalid_params(
@@ -467,13 +467,15 @@ pub fn get_object_structure(
     }
 
     if let Some(obj) = config.find_metadata_object(mdo_type, object_name) {
-        return Ok(CallToolResult::success(vec![Content::text(format_metadata_object_structure(
-            obj, mdo_type,
-        ))]));
+        return Ok(CallToolResult::success(vec![ContentBlock::text(
+            format_metadata_object_structure(obj, mdo_type),
+        )]));
     }
 
     if let Some(reg) = config.find_register_by_type_and_name(mdo_type, object_name) {
-        return Ok(CallToolResult::success(vec![Content::text(format_register_structure(reg))]));
+        return Ok(CallToolResult::success(vec![ContentBlock::text(format_register_structure(
+            reg,
+        ))]));
     }
 
     Err(McpError::invalid_params(
@@ -490,7 +492,7 @@ fn get_service_structure(
 ) -> Result<CallToolResult, McpError> {
     match kind {
         ServiceKind::Http => match config.find_http_service(object_name) {
-            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+            Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_http_service_structure(service),
             )])),
             None => Err(McpError::invalid_params(
@@ -499,7 +501,7 @@ fn get_service_structure(
             )),
         },
         ServiceKind::Web => match config.find_web_service(object_name) {
-            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+            Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_web_service_structure(service),
             )])),
             None => Err(McpError::invalid_params(
@@ -508,7 +510,7 @@ fn get_service_structure(
             )),
         },
         ServiceKind::Integration => match config.find_integration_service(object_name) {
-            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+            Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_integration_service_structure(service),
             )])),
             None => Err(McpError::invalid_params(
@@ -768,7 +770,7 @@ pub fn get_configuration_info(
         }
     }
 
-    Ok(CallToolResult::success(vec![Content::text(out)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
 }
 
 /// Read forms from disk. `source_root` MUST be the configuration root (the
@@ -856,7 +858,7 @@ fn forms_in_container(
             .map_err(|e| McpError::internal_error(format!("Ошибка чтения формы: {e}"), None))?;
         let form = bsl_metadata::xml_parser::parse_form_xml(&xml)
             .map_err(|e| McpError::internal_error(format!("Ошибка разбора формы: {e}"), None))?;
-        Ok(CallToolResult::success(vec![Content::text(format_form(&form, Some(fname)))]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(format_form(&form, Some(fname)))]))
     } else {
         let mut form_names = Vec::new();
         if let Ok(entries) = std::fs::read_dir(container) {
@@ -880,7 +882,7 @@ fn forms_in_container(
         }
         let _ =
             writeln!(out, "\nИспользуйте `form_name` для получения структуры конкретной формы.");
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 }
 
@@ -1004,7 +1006,7 @@ pub fn object_from_db(
 
     if mdo_type == MdoType::EventSubscription {
         return match db.resolve_event_subscription_across_roots(object_name) {
-            Some(sub) => Ok(CallToolResult::success(vec![Content::text(
+            Some(sub) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_event_subscription_structure(&sub),
             )])),
             None => Err(McpError::invalid_params(
@@ -1015,13 +1017,15 @@ pub fn object_from_db(
     }
 
     if let Some(obj) = db.resolve_metadata_object_across_roots(mdo_type, object_name) {
-        return Ok(CallToolResult::success(vec![Content::text(format_metadata_object_structure(
-            &obj, mdo_type,
-        ))]));
+        return Ok(CallToolResult::success(vec![ContentBlock::text(
+            format_metadata_object_structure(&obj, mdo_type),
+        )]));
     }
 
     if let Some(reg) = db.resolve_register_across_roots(mdo_type, object_name) {
-        return Ok(CallToolResult::success(vec![Content::text(format_register_structure(&reg))]));
+        return Ok(CallToolResult::success(vec![ContentBlock::text(format_register_structure(
+            &reg,
+        ))]));
     }
 
     Err(McpError::invalid_params(
@@ -1037,7 +1041,7 @@ fn service_from_db(
 ) -> Result<CallToolResult, McpError> {
     match kind {
         ServiceKind::Http => match db.resolve_http_service_across_roots(object_name) {
-            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+            Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_http_service_structure(&service),
             )])),
             None => Err(McpError::invalid_params(
@@ -1046,7 +1050,7 @@ fn service_from_db(
             )),
         },
         ServiceKind::Web => match db.resolve_web_service_across_roots(object_name) {
-            Some(service) => Ok(CallToolResult::success(vec![Content::text(
+            Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                 format_web_service_structure(&service),
             )])),
             None => Err(McpError::invalid_params(
@@ -1056,7 +1060,7 @@ fn service_from_db(
         },
         ServiceKind::Integration => {
             match db.resolve_integration_service_across_roots(object_name) {
-                Some(service) => Ok(CallToolResult::success(vec![Content::text(
+                Some(service) => Ok(CallToolResult::success(vec![ContentBlock::text(
                     format_integration_service_structure(&service),
                 )])),
                 None => Err(McpError::invalid_params(
@@ -1145,7 +1149,7 @@ mod tests {
     use super::*;
 
     fn extract_text(result: &CallToolResult) -> &str {
-        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+        result.content[0].as_text().expect("expected text content").text.as_str()
     }
 
     /// Every listing a cancelled `metadata` call can enter stops at its first item

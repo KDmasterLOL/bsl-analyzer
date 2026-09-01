@@ -661,8 +661,11 @@ impl GraphState {
         // ONE project load serves both components: the roots the stats walk and
         // the topology hash come from the same snapshot, so the fold can never
         // pair one project state's files with another's topology.
-        let project = super::input::ProjectSnapshot::load(root);
-        let universe = super::universe::ScannedUniverse::scan(&project.scan_roots);
+        let project = super::input::ProjectSnapshot::load_excluding(root, &self.cache_exclusions());
+        let universe = super::universe::ScannedUniverse::scan_excluding(
+            &project.scan_roots,
+            &project.excluded,
+        );
         let clean = universe.clean();
         let mut entries: Vec<(String, u128, u64)> =
             universe.stats.into_iter().map(|s| (s.path, s.mtime, s.len)).collect();
@@ -756,7 +759,7 @@ fn entry_is_config_file(entry: &ChangeEntry) -> bool {
     let is_config = |path: &Path| {
         path.file_name()
             .and_then(|n| n.to_str())
-            .is_some_and(|n| project_model::PROJECT_INPUT_FILE_NAMES.contains(&n))
+            .is_some_and(project_model::is_project_input_file_name)
     };
     is_config(&entry.canonical) || is_config(&entry.raw)
 }
@@ -845,6 +848,27 @@ mod tests {
             entry_touches_scan_universe(&entry),
             "Module.BSL входит во вселенную скана — хаб обязан сбросить кэш отпечатка"
         );
+    }
+
+    /// Every file the project is derived from shapes the extension topology, so a
+    /// change to any of them must touch the scan universe. Enumerated from the
+    /// shared list rather than spelled out here: a point that stops recognising one
+    /// of them reddens this test instead of going unnoticed.
+    #[test]
+    fn every_project_input_touches_the_scan_universe() {
+        for name in project_model::PROJECT_INPUT_FILE_NAMES {
+            let path = std::path::PathBuf::from("/w").join(name);
+            let entry = ChangeEntry {
+                canonical: path.clone(),
+                raw: path,
+                kind: ChangeKind::MaybeChanged,
+                seq: 1,
+            };
+            assert!(
+                entry_touches_scan_universe(&entry),
+                "a change to {name} must touch the scan universe"
+            );
+        }
     }
 
     /// A request miss never reopens a replaced shared file, even when its token looks compatible.

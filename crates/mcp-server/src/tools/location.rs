@@ -147,6 +147,23 @@ location_unavailable! {
     /// `RootsUnavailable`: the table was there, the path was not.
     SourcePathUnavailable => "source_path_unavailable",
         "the entity has a file, but its path could not be named";
+
+    /// A graph edge with no call in code behind it: it was derived from metadata rather than
+    /// read out of a body. There is no span to publish and there never will be.
+    NoCallSite => "no_call_site",
+        "the edge is derived from metadata, not from a call written in code";
+
+    /// A graph edge that DOES stand for something written in code, whose span the build does
+    /// not keep. Distinct from `NoCallSite` for the reason the vocabulary exists: one code for
+    /// both would teach a consumer to stop expecting a span that a later build can supply.
+    CallSiteNotRecorded => "call_site_not_recorded",
+        "the call site exists in code, but the graph does not record its span";
+
+    /// The file moved under a span the build recorded. Publishing it would hand back a
+    /// plausible and wrong range — the one failure a place is least able to survive, since a
+    /// consumer cuts text with it.
+    SourceDrifted => "source_drifted",
+        "the file changed after the graph was built, so its recorded spans cannot be trusted";
 }
 
 impl LocationUnavailable {

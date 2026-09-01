@@ -302,7 +302,7 @@ impl WorkspaceRootsTransitionSeed {
     pub fn plan(self) -> Result<WorkspaceRootsTransitionPlan, SearchError> {
         let declared: Vec<PathBuf> =
             self.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
-        let set = project_model::SourceSet::scan(&declared);
+        let set = project_model::SourceSet::scan_excluding(&declared, self.next_roots.excluded());
         if !set.clean() {
             return Err(SearchError::Index(format!(
                 "workspace root transition scan is incomplete: unreadable={}, canonical_fallbacks={}",
@@ -399,7 +399,7 @@ impl WorkspaceRootsTransitionPlan {
     pub fn revalidate(self) -> Result<Option<ValidatedWorkspaceRootsTransitionPlan>, SearchError> {
         let declared: Vec<PathBuf> =
             self.next_roots.entries().map(|(_, path)| path.to_path_buf()).collect();
-        let set = project_model::SourceSet::scan(&declared);
+        let set = project_model::SourceSet::scan_excluding(&declared, self.next_roots.excluded());
         if !set.clean() {
             return Err(SearchError::Index(format!(
                 "workspace root transition validation scan is incomplete: unreadable={}, canonical_fallbacks={}",
@@ -1839,7 +1839,7 @@ impl SearchEngine {
                 &owned
             }
         };
-        let set = project_model::SourceSet::scan(declared);
+        let set = project_model::SourceSet::scan_excluding(declared, roots.excluded());
         Self::files_from_scan(roots, &set)
     }
 

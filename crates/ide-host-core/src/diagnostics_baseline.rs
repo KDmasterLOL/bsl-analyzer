@@ -810,7 +810,7 @@ include = ["main"]
         std::fs::remove_file(dir.path().join("baseline.json")).unwrap();
         let baseline = DiagnosticsBaseline {
             schema_version: ide::diagnostics_baseline::DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
             diagnostics: vec![],
         };
         std::fs::write(

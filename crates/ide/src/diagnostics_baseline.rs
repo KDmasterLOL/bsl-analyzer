@@ -47,7 +47,9 @@ pub struct DiagnosticsBaseline {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsBaselineScope {
-    pub source_root: String,
+    /// `None` for an extension-only project, which has no base configuration.
+    /// A project that has one serializes exactly as before.
+    pub source_root: Option<String>,
     pub extensions: Vec<DiagnosticsBaselineExtension>,
 }
 
@@ -260,6 +262,21 @@ pub fn diagnostics_baseline_json(
     Ok(bytes)
 }
 
+/// Scope equality that tolerates the legacy spelling of "this project has no
+/// nested configuration root".
+///
+/// Before the base became optional it was stored as an empty string, which is
+/// indistinguishable from a base sitting at the project root — both spell `""`.
+/// Published baselines still carry it, so an absent base and an empty one are the
+/// same scope. Only the comparison is tolerant: the stored spelling is what gets
+/// fingerprinted, so an existing baseline keeps its identity.
+pub fn scopes_match(left: &DiagnosticsBaselineScope, right: &DiagnosticsBaselineScope) -> bool {
+    fn base(scope: &DiagnosticsBaselineScope) -> &str {
+        scope.source_root.as_deref().unwrap_or_default()
+    }
+    base(left) == base(right) && left.extensions == right.extensions
+}
+
 fn validate_diagnostics_baseline(
     baseline: &DiagnosticsBaseline,
     expected_scope: &DiagnosticsBaselineScope,
@@ -270,10 +287,12 @@ fn validate_diagnostics_baseline(
             expected: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
         });
     }
-    if &baseline.scope != expected_scope {
+    if !scopes_match(&baseline.scope, expected_scope) {
         return Err(DiagnosticsBaselineError::ScopeMismatch);
     }
-    validate_relative_path(&baseline.scope.source_root, true)?;
+    if let Some(source_root) = baseline.scope.source_root.as_deref() {
+        validate_relative_path(source_root, true)?;
+    }
     for extension in &baseline.scope.extensions {
         validate_relative_path(&extension.path, false)?;
     }
@@ -655,11 +674,31 @@ mod tests {
         ));
     }
 
+    /// A baseline published before the base became optional spells "no nested
+    /// configuration root" as an empty string. The project now reports no base at
+    /// all for such a layout, and the two must still be the same scope — otherwise
+    /// every existing baseline of a project without a nested root is rejected as a
+    /// scope mismatch on the first run after the upgrade.
+    #[test]
+    fn a_legacy_empty_source_root_still_matches_a_project_without_a_base() {
+        let stored =
+            DiagnosticsBaselineScope { source_root: Some(String::new()), extensions: vec![] };
+        let computed = DiagnosticsBaselineScope { source_root: None, extensions: vec![] };
+        assert!(scopes_match(&stored, &computed), "legacy empty base matches an absent one");
+        assert!(scopes_match(&computed, &stored), "and the comparison is symmetric");
+
+        // The control: a real difference is still a mismatch, so the tolerance is
+        // not "everything matches".
+        let nested =
+            DiagnosticsBaselineScope { source_root: Some("src/cf".to_owned()), extensions: vec![] };
+        assert!(!scopes_match(&nested, &computed), "a nested base is a different scope");
+    }
+
     #[test]
     fn diagnostics_baseline_io_rejects_incompatible_scope_and_paths() {
         let baseline = baseline(vec![]);
         let other_scope =
-            DiagnosticsBaselineScope { source_root: "other".to_owned(), extensions: vec![] };
+            DiagnosticsBaselineScope { source_root: Some("other".to_owned()), extensions: vec![] };
         let bytes = serde_json::to_vec(&baseline).unwrap();
         assert!(matches!(
             parse_diagnostics_baseline(&bytes, &other_scope),
@@ -668,7 +707,7 @@ mod tests {
 
         let invalid = DiagnosticsBaseline {
             scope: DiagnosticsBaselineScope {
-                source_root: "/absolute".to_owned(),
+                source_root: Some("/absolute".to_owned()),
                 extensions: vec![],
             },
             ..baseline
@@ -708,7 +747,10 @@ mod tests {
     fn baseline(diagnostics: Vec<DiagnosticsBaselineEntry>) -> DiagnosticsBaseline {
         DiagnosticsBaseline {
             schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-            scope: DiagnosticsBaselineScope { source_root: "src".to_owned(), extensions: vec![] },
+            scope: DiagnosticsBaselineScope {
+                source_root: Some("src".to_owned()),
+                extensions: vec![],
+            },
             diagnostics,
         }
     }

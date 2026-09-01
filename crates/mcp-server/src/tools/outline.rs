@@ -544,7 +544,7 @@ mod tests {
 
     fn roots_of(workspace: &Path) -> WorkspaceRoots {
         let project = crate::project::at(workspace).expect("the stand is a valid project");
-        crate::project::workspace_roots(&project).0
+        crate::project::workspace_roots(&project, &[]).0
     }
 
     fn call(
@@ -1133,7 +1133,7 @@ mod tests {
     /// question does not arise.
     #[test]
     fn both_tools_echo_the_same_path_for_the_same_refusal() {
-        use crate::diagnostics_state::{DiagnosticsState, DiagnosticsStatus, ResidentOutcome};
+        use crate::diagnostics_state::{DiagnosticsState, ResidentOutcome};
 
         let missing = "CommonModules/НетТакого/Ext/Module.bsl";
         let (_dir, workspace) = stand("Процедура П() КонецПроцедуры\n");
@@ -1142,15 +1142,7 @@ mod tests {
 
         let state = DiagnosticsState::for_workspace(workspace.clone());
         state.ensure_loading();
-        let ready = (0..300).any(|_| match state.status() {
-            DiagnosticsStatus::Ready { .. } => true,
-            DiagnosticsStatus::Failed(message) => panic!("the resident failed to load: {message}"),
-            _ => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                false
-            }
-        });
-        assert!(ready, "the resident must be ready for the comparison to mean anything");
+        crate::diagnostics_state::test_support::wait_ready(&state);
         let filters = crate::tools::diagnostics::FileFilters {
             min_severity: ide::SeverityBucket::Warning,
             codes: Vec::new(),

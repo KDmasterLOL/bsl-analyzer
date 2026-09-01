@@ -452,11 +452,7 @@ pub fn handle_did_save(state: &mut GlobalState, params: DidSaveTextDocumentParam
     let mut config_reloaded = false;
     if let Ok(path) = uri.to_file_path() {
         if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if (name == "bsl-analyzer.toml"
-                || name == ".bsl-analyzer.json"
-                || name == ".bsl-language-server.json")
-                && state.reload_project_config()
-            {
+            if project_model::is_project_input_file_name(name) && state.reload_project_config() {
                 config_reloaded = true;
                 for uri in state.opened_document_uris() {
                     schedule_diagnostics(state, &uri);

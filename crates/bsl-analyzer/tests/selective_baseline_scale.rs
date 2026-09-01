@@ -21,7 +21,7 @@ const TEST_NAME: &str = "large_selective_v1_migration_streams_skipped_entries_wi
 fn plan(selection: DiagnosticsBaselineSelection) -> DiagnosticsBaselinePartitionPlan {
     DiagnosticsBaselinePartitionPlan {
         project_scope: DiagnosticsBaselineProjectScope {
-            source_root: "src/cf".to_owned(),
+            source_root: Some("src/cf".to_owned()),
             extensions: vec![DiagnosticsBaselineProjectExtension {
                 name: "Ext".to_owned(),
                 path: "src/cfe/Ext".to_owned(),

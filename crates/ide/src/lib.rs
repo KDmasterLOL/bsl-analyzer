@@ -43,14 +43,15 @@ pub use document_highlight::{DocumentHighlight, DocumentHighlightKind};
 pub use folding::{FoldingRange, FoldingRangeKind};
 pub use formatting::{FormattingConfig, FormattingResult};
 pub use graph::{
-    build_workspace_graph_rows, classify_graph_id, confidence_label, method_graph_id,
-    method_id_for_path, module_id_of_method, rank_resolve_candidates, reproject_changed_modules,
-    resolve_name_segment, scope_for_path, warm_batch_config_roots, BatchDbOpener, ChunkRow,
-    Direction, EdgeRef, FusedChunkSink, GraphBuildSummary, GraphBuildTicker, GraphContext,
-    GraphDetail, GraphError, GraphIdKind, GraphOverview, GraphRowSink, ModuleMethod,
-    NeighborsParams, NeighborsResult, NodeRef, NodeResult, ReprojectedRows, ResolveCandidate,
-    ResolveResult, SourceItem, SourceResult, MAX_DROPPED_SAMPLE, NO_SOURCE_LOCATION,
-    ROOTS_UNAVAILABLE,
+    build_workspace_graph_rows, call_site_absence_reason, classify_graph_id, confidence_label,
+    method_graph_id, method_id_for_path, module_id_of_method, rank_resolve_candidates,
+    reproject_changed_modules, resolve_name_segment, scope_for_path, warm_batch_config_roots,
+    BatchDbOpener, ChunkRow, Direction, EdgeRef, FusedChunkSink, GraphBuildSummary,
+    GraphBuildTicker, GraphContext, GraphDetail, GraphError, GraphIdKind, GraphOverview,
+    GraphRowSink, ModuleMethod, NeighborsParams, NeighborsResult, NodeRef, NodeResult,
+    ReprojectedRows, ResolveCandidate, ResolveResult, SourceItem, SourceResult,
+    CALL_SITE_NOT_RECORDED, MAX_DROPPED_SAMPLE, NO_CALL_SITE, NO_SOURCE_LOCATION,
+    ROOTS_UNAVAILABLE, SOURCE_DRIFTED,
 };
 pub use hir::graph_index;
 pub use hir::AnnotationKind;

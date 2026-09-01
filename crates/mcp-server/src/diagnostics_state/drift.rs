@@ -23,9 +23,6 @@ pub(super) const RECONCILE_INTERVAL: Duration = Duration::from_secs(90);
 
 pub(super) const MIN_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
 
-pub(super) const CONFIG_FILES: [&str; 3] =
-    ["bsl-analyzer.toml", ".bsl-analyzer.json", ".bsl-language-server.json"];
-
 pub(super) fn reconcile_interval() -> Duration {
     clamp_reconcile_interval(
         std::env::var("BSL_MCP_RECONCILE_SECS").ok().and_then(|s| s.parse::<u64>().ok()),
@@ -55,6 +52,12 @@ impl DiagnosticsState {
     #[cfg(test)]
     pub(super) fn scan_count(&self) -> usize {
         self.scan_count.load(Ordering::SeqCst)
+    }
+
+    /// `pub(crate)`, unlike its neighbours: the handler-level gates live in `lib.rs`.
+    #[cfg(test)]
+    pub(crate) fn forced_rescans(&self) -> usize {
+        self.forced_rescans.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -728,6 +731,8 @@ impl DiagnosticsState {
     }
 
     pub(crate) fn force_rescan(&self) {
+        #[cfg(test)]
+        self.forced_rescans.fetch_add(1, Ordering::SeqCst);
         let mut cache = lock_recover(&self.scan);
         let stale = cache.as_ref().is_none_or(|c| c.at.elapsed() >= FORCE_RESCAN_FLOOR);
         if stale {
@@ -756,7 +761,7 @@ impl DiagnosticsState {
         let Some(root) = self.workspace_root.as_deref() else {
             return std::collections::HashSet::new();
         };
-        CONFIG_FILES
+        project_model::PROJECT_INPUT_FILE_NAMES
             .iter()
             .map(|name| {
                 let path = root.join(name);
@@ -927,8 +932,11 @@ impl DiagnosticsState {
         // baseline — otherwise the comparison could pair one state's files with
         // another's topology and mask (or fabricate) drift.
         let config_files_fp = config_files_fingerprint(root);
-        let project = crate::graph::input::ProjectSnapshot::load(root);
-        let (stats, verdict) = crate::graph::scan::scan_stats_over_roots(&project.scan_roots);
+        let project = crate::graph::input::ProjectSnapshot::load_excluding(root, &self.excluded);
+        let (stats, verdict) = crate::graph::scan::scan_stats_over_roots_excluding(
+            &project.scan_roots,
+            &project.excluded,
+        );
         let config_fp = config_identity(config_files_fp, &project.configs);
         *cache = Some(ScanCache {
             at: Instant::now(),
@@ -1160,7 +1168,12 @@ pub(super) fn config_identity(
 /// BEFORE the project load, pairing with how the build captures its baseline.
 pub(super) fn config_identity_now(root: &Path) -> u64 {
     let config_files_fp = config_files_fingerprint(root);
-    config_identity(config_files_fp, &crate::graph::input::ProjectSnapshot::load(root).configs)
+    // No exclusions, and none are needed: this snapshot is read for its configs alone
+    // and never walked, so what the tree contains does not reach the answer.
+    config_identity(
+        config_files_fp,
+        &crate::graph::input::ProjectSnapshot::load_excluding(root, &[]).configs,
+    )
 }
 
 /// Whether the ignored-authors filter must be (re)built. Fail-open logic:
@@ -1197,7 +1210,7 @@ pub(super) fn config_files_fingerprint(root: &Path) -> u64 {
     use std::time::UNIX_EPOCH;
 
     let mut entries: Vec<(String, u64, u128)> = Vec::new();
-    for name in CONFIG_FILES {
+    for name in project_model::PROJECT_INPUT_FILE_NAMES {
         let path = root.join(name);
         if let Ok(meta) = std::fs::metadata(&path) {
             let mtime = meta
@@ -1225,6 +1238,7 @@ mod tests {
         MIN_RECONCILE_INTERVAL, RECONCILE_INTERVAL,
     };
     use super::super::test_support::*;
+    use crate::change_hub::Health;
 
     #[test]
     fn author_filter_rebuild_decision_covers_every_transition() {
@@ -1256,6 +1270,44 @@ mod tests {
     /// The resident's config identity must move on a `dependsOn`-only edit while the
     /// per-file stat channel stays silent — that identity is the only trigger a full
     /// rebuild (with re-derived closures) has for such a change.
+    /// `.env` carries the shared-configuration root, so the resident is derived
+    /// from it. Both drift channels must see it: the scan channel through the
+    /// config identity, and the event channel through the watched path set.
+    /// The analyzer's own config file is the control on each.
+    #[test]
+    fn drift_treats_the_env_file_as_a_project_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let env_path = root.join(project_model::PROJECT_ENV_FILE_NAME);
+
+        // Scan channel. The two values differ in LENGTH, not just content: the
+        // fingerprint is (name, len, mtime), and same-length values inside one
+        // mtime tick would leave it unchanged for reasons unrelated to the rule.
+        fs::write(&env_path, "ONEC_CONFIGURATIONS_ROOT=/opt/a\n").unwrap();
+        let before = config_identity_now(root);
+        fs::write(&env_path, "ONEC_CONFIGURATIONS_ROOT=/opt/bbbbbbbbbb\n").unwrap();
+        assert_ne!(
+            before,
+            config_identity_now(root),
+            "a .env edit must move the resident's config identity"
+        );
+
+        // Event channel: the watched set decides whether a drained entry counts as
+        // config drift at all.
+        let (state, _hub) = state_with_hub(root);
+        let watched = state.config_file_paths();
+        let canonical = |p: std::path::PathBuf| p.canonicalize().unwrap_or(p);
+        assert!(
+            watched.contains(&canonical(root.join(project_model::CONFIG_FILE_NAMES[0]))),
+            "control: the analyzer config file is watched for drift"
+        );
+        assert!(
+            watched.contains(&canonical(env_path)),
+            "the .env file must be watched for drift as well"
+        );
+    }
+
     #[test]
     fn config_identity_tracks_a_depends_on_only_edit() {
         let dir = tempfile::tempdir().unwrap();
@@ -1382,7 +1434,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(10));
         fs::write(&module, UNREADABLE).unwrap();
-        assert!(wait_for_apply(&state, gen0), "the unreadable body is a drift move");
+        wait_for_apply(&state, gen0, "the unreadable body is a drift move");
 
         let filters = crate::tools::diagnostics::FileFilters {
             min_severity: ide::SeverityBucket::Hint,
@@ -1431,7 +1483,7 @@ mod tests {
         let gen1 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(&module, "&НаСервере\nФункция Считать() Экспорт КонецФункции\n").unwrap();
-        assert!(wait_for_apply(&state, gen1), "the readable body applies");
+        wait_for_apply(&state, gen1, "the readable body applies");
         let out = state
             .read(|resident, _| (resident.file_id_for(&module).is_some(), resident.unread_count()));
         let ResidentOutcome::Ready((served, unread), _) = out else { panic!("expected Ready") };
@@ -1473,7 +1525,7 @@ mod tests {
         let gen0 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(module_path(root, "Сервер"), UNREADABLE).unwrap();
-        assert!(wait_for_apply(&state, gen0), "the unreadable body applies as drift");
+        wait_for_apply(&state, gen0, "the unreadable body applies as drift");
 
         let out = state.read(|r, _| {
             let anchor = r.file_id_for(&anchor_path).expect("the neighbour keeps serving");
@@ -1506,7 +1558,7 @@ mod tests {
         let born_bad = module_path(root, "Новый");
         fs::create_dir_all(born_bad.parent().unwrap()).unwrap();
         fs::write(&born_bad, UNREADABLE).unwrap();
-        assert!(wait_for_apply(&state, gen0), "the new unreadable file is drift");
+        wait_for_apply(&state, gen0, "the new unreadable file is drift");
 
         let out = state.read(|r, _| {
             let interned = r.vfs_file_id_for_test(&born_bad);
@@ -1673,12 +1725,12 @@ mod tests {
         let gen0 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(&victim, UNREADABLE).unwrap();
-        assert!(wait_for_apply(&state, gen0), "it becomes a hole first");
+        wait_for_apply(&state, gen0, "it becomes a hole first");
 
         let gen1 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::remove_file(&victim).unwrap();
-        assert!(wait_for_apply(&state, gen1), "removing it moves the resident again");
+        wait_for_apply(&state, gen1, "removing it moves the resident again");
 
         let out = state.read(|r, _| {
             let anchor_id = r.file_id_for(&anchor).expect("the neighbour keeps serving");
@@ -1777,13 +1829,13 @@ mod tests {
         let gen0 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(module_path(root, "Сервер"), UNREADABLE).unwrap();
-        assert!(wait_for_apply(&state, gen0), "the unreadable body applies as drift");
+        wait_for_apply(&state, gen0, "the unreadable body applies as drift");
         assert_eq!(composition(&state), (0, 1), "unreadable is recorded, not merely dropped");
 
         let gen1 = state.generation();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(module_path(root, "Сервер"), body).unwrap();
-        assert!(wait_for_apply(&state, gen1), "the restored body applies as drift");
+        wait_for_apply(&state, gen1, "the restored body applies as drift");
         assert_eq!(composition(&state), (1, 0), "and the mark is gone once it reads again");
     }
 
@@ -1862,7 +1914,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(10));
         write_common_module(root, "ААльфа", true, "Процедура Внутренняя()\nКонецПроцедуры");
 
-        assert!(wait_for_apply(&state, gen0), "the add applies in place");
+        wait_for_apply(&state, gen0, "the add applies in place");
         assert!(
             matches!(state.status(), DiagnosticsStatus::Ready { .. }),
             "incremental add stays Ready"
@@ -1909,7 +1961,7 @@ mod tests {
         fs::create_dir_all(body.parent().unwrap()).unwrap();
         fs::write(&body, "Процедура Тест()\n    Перем Неиспользуемая;\nКонецПроцедуры").unwrap();
 
-        assert!(wait_for_apply(&state, gen0), "the bare add applies in place");
+        wait_for_apply(&state, gen0, "the bare add applies in place");
         let out = state.read(|resident, _| {
             let id = resident.file_id_for(&body).expect("bare body resolves");
             resident.analysis().diagnostics(id, &DiagnosticsConfig::default()).len()
@@ -1941,7 +1993,7 @@ mod tests {
         let doomed = module_path(root, "Удаляемый");
         fs::remove_file(&doomed).unwrap();
 
-        assert!(wait_for_apply(&state, gen0), "the removal applies in place");
+        wait_for_apply(&state, gen0, "the removal applies in place");
         assert!(
             matches!(state.status(), DiagnosticsStatus::Ready { .. }),
             "incremental removal stays Ready"
@@ -1955,6 +2007,14 @@ mod tests {
 
     /// Idle eviction drops the resident db back to `Idle` after the quiet period, and
     /// a later read rebuilds it.
+    ///
+    /// This is the one place where the sweeper's clock IS the subject, so it stays
+    /// raised — and therefore nothing here may assert on a state the sweeper is free to
+    /// take away. Every assertion is about `generation` instead: it is bumped on each
+    /// publication and eviction never rolls it back, so the sweeper may fire whenever it
+    /// likes and what was read stays true. Waiting to observe `Ready` would be the
+    /// opposite: the resident is entitled to vanish before the observer reaches it, and
+    /// `Idle` is not a state the wait can end on.
     #[test]
     fn idle_eviction_drops_and_rebuilds() {
         let dir = tempfile::tempdir().unwrap();
@@ -1964,21 +2024,21 @@ mod tests {
         let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
         state.eviction_after = Duration::from_millis(50);
         state.ensure_loading();
-        wait_ready(&state);
 
-        // No reads for longer than the eviction window → sweeper drops it.
-        for _ in 0..300 {
-            if state.status() == DiagnosticsStatus::Idle {
-                break;
+        // No reads for longer than the eviction window → the sweeper drops what it built.
+        wait_until("the sweeper evicts the resident it built", || {
+            match (state.generation(), state.status()) {
+                (built, DiagnosticsStatus::Idle) if built >= 1 => Ok(()),
+                observed => Err(observed),
             }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
+        });
 
-        // A later use rebuilds.
+        // A later use rebuilds: a second publication, not merely a second `Ready`.
         state.ensure_loading();
-        wait_ready(&state);
-        assert!(matches!(state.status(), DiagnosticsStatus::Ready { .. }));
+        wait_until("a later use rebuilds the resident", || match state.generation() {
+            rebuilt if rebuilt >= 2 => Ok(()),
+            rebuilt => Err(format!("only {rebuilt} publications so far")),
+        });
     }
 
     /// `status_report` reflects the lifecycle: `idle` before load, `ready` with the file
@@ -2359,17 +2419,18 @@ mod tests {
         let root = dir.path();
         sample_workspace(root);
 
+        // The sweeper is not raised: the subject is what a read does AFTER an eviction,
+        // so the eviction is driven by the very step the sweeper takes. A sweeper armed
+        // before the resident exists would let it vanish between the publication of
+        // `Ready` and the observation of it, and the wait for `Ready` would then never
+        // end.
         let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
-        state.eviction_after = Duration::from_millis(50);
+        state.without_idle_sweeper();
+        state.eviction_after = Duration::ZERO;
         state.ensure_loading();
         wait_ready(&state);
 
-        for _ in 0..300 {
-            if state.status() == DiagnosticsStatus::Idle {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        assert!(state.evict_if_idle(), "an untouched ready resident is evicted");
         assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
 
         // A metadata read after eviction: re-trigger the build and read. It is Loading (still
@@ -2449,7 +2510,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(wait_for_apply(&state, gen0), "the body edit must be applied via drain");
+        wait_for_apply(&state, gen0, "the body edit must be applied via drain");
         assert_eq!(state.scan_count(), 0, "the event-driven hot path performs no scan");
 
         let text = state.read(|resident, _| {
@@ -2481,7 +2542,7 @@ mod tests {
         // Flip the common module's server flag: a pure `.xml` edit (no body change).
         write_common_module_xml(root, "Сервер", false);
 
-        assert!(wait_for_apply(&state, gen0), "the xml edit must be applied via drain");
+        wait_for_apply(&state, gen0, "the xml edit must be applied via drain");
         assert_eq!(
             state.status_report().reload,
             "none",
@@ -2513,7 +2574,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(wait_for_apply(&state, gen0), "a degraded hub still applies the edit via scan");
+        wait_for_apply(&state, gen0, "a degraded hub still applies the edit via scan");
         assert!(state.scan_count() > 0, "the degraded path uses the scan, matching today");
     }
 
@@ -2600,12 +2661,12 @@ mod tests {
         )
         .unwrap();
         // Confirm the hub delivered the change (so the diagnostics cursor has it too)...
-        assert!(wait_for_delivery(&hub, &mut observer, "Module.bsl"), "hub delivered the edit");
+        wait_for_delivery(&hub, &mut observer, "Module.bsl", "hub delivered the edit");
         // ...then simulate a lossy sink dropping it: consume the cursor without applying.
         // Consume to quiet, not once: one write is several raw events, and any the hub
         // has yet to record would be read as a delivery by the tick — the opposite of
         // the loss this test sets up.
-        assert!(discard_until_quiet(&state, &hub, 3), "the hub went quiet before the tick");
+        discard_until_quiet(&state, &hub, 3, "the hub went quiet before the tick");
         // The sink stays lossy for the whole tick, and that has to be arranged rather
         // than hoped for. One write is not one event: the watcher may deliver the same
         // file again while the reconciler scans, and step 3 of the tick then counts the
@@ -2696,7 +2757,7 @@ mod tests {
             "&НаСервере\nФункция Считать() Экспорт Возврат 42; КонецФункции\n",
         )
         .unwrap();
-        assert!(wait_for_apply(&state, gen0), "post-rebuild edits apply to the new resident");
+        wait_for_apply(&state, gen0, "post-rebuild edits apply to the new resident");
         let text = state.read(|r, _| {
             let fid = r.file_id_for(&module_path(root, "Сервер")).unwrap();
             r.analysis().file_text(fid)
@@ -2736,6 +2797,13 @@ mod tests {
 
     /// Idle eviction releases the hub cursor so an evicted resident does not pin the
     /// accumulator against reclamation.
+    ///
+    /// The eviction is driven by calling `evict_if_idle` — the very step the sweeper
+    /// takes — instead of raising the sweeper and waiting out its clock. What is under
+    /// test is the release, not the schedule; and a sweeper armed before the resident
+    /// exists makes the assertion BEFORE the eviction race the eviction itself, since
+    /// the resident may vanish between the publication of `Ready` and the observation
+    /// of it.
     #[test]
     fn eviction_releases_hub_cursor() {
         let dir = tempfile::tempdir().unwrap();
@@ -2743,18 +2811,14 @@ mod tests {
         sample_workspace(root);
 
         let (mut state, _hub) = state_with_hub(root);
-        state.eviction_after = Duration::from_millis(50);
+        state.without_idle_sweeper();
+        state.eviction_after = Duration::ZERO;
         state.ensure_loading();
         wait_ready(&state);
         assert!(state.has_hub_cursor(), "a built resident holds a cursor");
 
-        for _ in 0..300 {
-            if state.status() == DiagnosticsStatus::Idle {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(state.status(), DiagnosticsStatus::Idle, "resident evicted after idle");
+        assert!(state.evict_if_idle(), "an untouched ready resident is evicted");
+        assert_eq!(state.status(), DiagnosticsStatus::Idle, "eviction drops the resident");
         assert!(!state.has_hub_cursor(), "eviction drops the cursor");
     }
 
@@ -2860,7 +2924,7 @@ mod tests {
             "&НаСервере\nФункция Считать() Экспорт Возврат 11; КонецФункции\n",
         )
         .unwrap();
-        assert!(wait_for_delivery(&hub, &mut observer, "Module.bsl"), "hub delivered the edit");
+        wait_for_delivery(&hub, &mut observer, "Module.bsl", "hub delivered the edit");
 
         // A read during the rebuild must NOT drain/apply (else the edit is lost).
         let gen0 = raw_generation(&state);
@@ -2871,7 +2935,7 @@ mod tests {
         lock_recover(&state.inner).reload = ReloadState::Idle;
 
         // The still-pending edit now applies to the (current) resident on the next read.
-        assert!(wait_for_apply(&state, gen0), "the pending edit applies once the rebuild ends");
+        wait_for_apply(&state, gen0, "the pending edit applies once the rebuild ends");
         let text = state.read(|r, _| {
             let fid = r.file_id_for(&module_path(root, "Сервер")).unwrap();
             r.analysis().file_text(fid)
@@ -3608,7 +3672,7 @@ mod tests {
         fs::write(&ext_module, "&НаСервере\nФункция Р() Экспорт Возврат 9; КонецФункции\n")
             .unwrap();
 
-        assert!(wait_for_apply(&state, gen0), "an extension-root edit is delivered via drain");
+        wait_for_apply(&state, gen0, "an extension-root edit is delivered via drain");
         assert_eq!(state.scan_count(), 0, "the event-driven path performs no scan");
     }
 
@@ -3642,7 +3706,7 @@ mod tests {
         let mut observer = hub.subscribe();
         std::thread::sleep(Duration::from_millis(10));
         fs::write(root.join("CommonModules/Сервер/Ext/Module.bsl.tmp"), "editor swap").unwrap();
-        assert!(wait_for_delivery(&hub, &mut observer, ".tmp"), "hub delivered the temp file");
+        wait_for_delivery(&hub, &mut observer, ".tmp", "hub delivered the temp file");
 
         let gen0 = raw_generation(&state);
         // A read drains the diagnostics cursor (which holds the .tmp), and must apply nothing.
@@ -4087,8 +4151,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
             write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
             // Without this the test could pass having never triggered a rebuild at all.
-            assert!(
-                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+            wait_for_delivery(
+                &hub,
+                &mut observer,
+                "bsl-analyzer.toml",
                 "the hub delivered the config edit, so the drain will ask for a rebuild",
             );
 
@@ -4316,8 +4382,10 @@ mod tests {
             let mut observer = hub.subscribe();
             std::thread::sleep(Duration::from_millis(10));
             write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
-            assert!(
-                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+            wait_for_delivery(
+                &hub,
+                &mut observer,
+                "bsl-analyzer.toml",
                 "the hub delivered the config edit",
             );
             // Let the rebuild be asked for, declined, and its forced scan run.
@@ -4333,8 +4401,10 @@ mod tests {
                 "Catalogs/Товары/Ext/ObjectModule.bsl",
                 "Процедура ПередЗаписью(Отказ) КонецПроцедуры",
             );
-            assert!(
-                wait_for_delivery(&hub, &mut observer, "ObjectModule.bsl"),
+            wait_for_delivery(
+                &hub,
+                &mut observer,
+                "ObjectModule.bsl",
                 "the hub delivered the new file",
             );
             for _ in 0..20 {
@@ -4384,8 +4454,10 @@ mod tests {
             let mut observer = hub.subscribe();
             std::thread::sleep(Duration::from_millis(10));
             write(root, "bsl-analyzer.toml", "[diagnostics.parameters]\nTypo = true\n");
-            assert!(
-                wait_for_delivery(&hub, &mut observer, "bsl-analyzer.toml"),
+            wait_for_delivery(
+                &hub,
+                &mut observer,
+                "bsl-analyzer.toml",
                 "the hub delivered the config edit",
             );
             for _ in 0..50 {
@@ -4394,8 +4466,10 @@ mod tests {
             }
 
             write_catalog(root, "Товары", 9);
-            assert!(
-                wait_for_delivery(&hub, &mut observer, "Товары.xml"),
+            wait_for_delivery(
+                &hub,
+                &mut observer,
+                "Товары.xml",
                 "the hub delivered the new descriptor",
             );
             for _ in 0..20 {
@@ -4457,5 +4531,187 @@ mod tests {
             );
             open_dir(&closed);
         }
+    }
+
+    fn resident_has_file(state: &DiagnosticsState, path: &std::path::Path) -> bool {
+        match state.read(|r, _| r.file_id_for(path).is_some()) {
+            ResidentOutcome::Ready(v, _) => v,
+            _ => panic!("the resident must be ready on this stand"),
+        }
+    }
+
+    /// Poll until the resident carries `path`, or the budget runs out. A fixed sleep
+    /// cannot replace this: the work being waited for is a full rebuild, whose duration
+    /// is the machine's to decide.
+    fn resident_gains_file(
+        state: &DiagnosticsState,
+        path: &std::path::Path,
+        budget: Duration,
+    ) -> bool {
+        let deadline = Instant::now() + budget;
+        while Instant::now() < deadline {
+            if resident_has_file(state, path) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        resident_has_file(state, path)
+    }
+
+    /// A NAME lookup rather than a path one: resolve a metadata object by its name from
+    /// the module that lives beside it. `None` while that module is not resident.
+    fn catalog_resolves_from(
+        state: &DiagnosticsState,
+        module: &std::path::Path,
+        name: &str,
+    ) -> Option<bool> {
+        match state.read(|r, _| {
+            let fid = r.file_id_for(module)?;
+            Some(
+                r.db()
+                    .resolve_metadata_object_for_file(fid, bsl_metadata::MdoType::Catalog, name)
+                    .is_some(),
+            )
+        }) {
+            ResidentOutcome::Ready(v, _) => v,
+            _ => panic!("the resident must be ready on this stand"),
+        }
+    }
+
+    /// The watch reaches the scan roots and the workspace root itself, and nothing in
+    /// between: `watch_targets_for` arms each scan root recursively plus the workspace
+    /// root non-recursively. A scan root that is a GRANDCHILD therefore leaves its parent
+    /// directory watched by nobody, and a whole new root appearing there raises no event
+    /// at all — while the hub stays healthy, because a piece of tree nobody declared
+    /// cannot be counted blind. This is where the forced re-scan is the only thing
+    /// standing between the caller and a final-looking miss for a name that exists.
+    ///
+    /// The control that makes the negative observation readable is on the same stand: a
+    /// module written INSIDE the scan root must arrive by the event path, with no scan at
+    /// all. Without it, "not delivered" and "harness sees nothing" look the same.
+    #[test]
+    fn a_forced_rescan_finds_a_root_the_healthy_hub_never_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // The only scan root is `src/cf`, a grandchild of the workspace root.
+        let cf = root.join("src/cf");
+        fs::create_dir_all(&cf).unwrap();
+        fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(&cf, "Сервер", true, "&НаСервере\nФункция Ч() Экспорт КонецФункции");
+        fs::write(root.join("bsl-analyzer.toml"), "[source]\nroot = \"src/cf\"\n").unwrap();
+
+        let project = project_model::Project::new(root).expect("valid test project");
+        let targets = crate::change_hub::watch_targets_for(root, &project.source_roots());
+        // An hour between coverage ticks: no re-arm can happen mid-test.
+        let hub = crate::change_hub::WorkspaceChangeHub::start_targets_with_period(
+            targets,
+            Duration::from_secs(3600),
+        );
+        assert!(hub.wait_until_watching(Duration::from_secs(5)), "the hub must arm");
+
+        let mut state =
+            DiagnosticsState::for_workspace(root.to_path_buf()).with_change_hub(hub.clone());
+        state.drift_interval = Duration::from_millis(0);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Positive control, same stand: a new module INSIDE the recursive scan root must
+        // arrive without any force, and through the event path (no scan).
+        write_common_module(&cf, "Ковбой", true, "&НаСервере\nФункция Ф() Экспорт КонецФункции");
+        let watched = cf.join("CommonModules/Ковбой/Ext/Module.bsl");
+        assert!(
+            resident_gains_file(&state, &watched, Duration::from_secs(30)),
+            "control: a change inside the watch must arrive with no force at all"
+        );
+        assert_eq!(state.scan_count(), 0, "control: it arrived by the event path, not by a scan");
+
+        // The change: a whole new auto-discovered extension root under `src`, which
+        // nothing watches — the root's own watch is not recursive.
+        let ext = root.join("src/cfe/Расш");
+        fs::create_dir_all(&ext).unwrap();
+        fs::write(ext.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_common_module(
+            &ext,
+            "РасшМодуль",
+            true,
+            "&НаСервере\nФункция Р() Экспорт КонецФункции",
+        );
+        write_catalog(&ext, "Товары", 9);
+        let ext_module = ext.join("CommonModules/РасшМодуль/Ext/Module.bsl");
+        let never_written = ext.join("CommonModules/Призрак/Ext/Module.bsl");
+
+        // A settle window: a negative observation needs time in which the event could
+        // have arrived and did not.
+        std::thread::sleep(Duration::from_millis(500));
+
+        let cursor = *lock_recover(&state.hub_cursor);
+        assert_eq!(hub.health_for(cursor), Health::Healthy, "the hub is healthy and right");
+        assert!(!resident_has_file(&state, &ext_module), "the ordinary read must not see it");
+        assert_eq!(state.scan_count(), 0, "and the healthy path still walks nothing");
+
+        state.force_rescan();
+        // A new root is a change of configuration identity, so the scan behind the force
+        // starts a rebuild instead of applying anything in place: the name appears on one
+        // of the reads after it, not on the read that consumed the flag.
+        assert!(
+            resident_gains_file(&state, &ext_module, Duration::from_secs(30)),
+            "the forced re-scan must surface a root the watch never reached"
+        );
+        assert_eq!(
+            catalog_resolves_from(&state, &ext_module, "Товары"),
+            Some(true),
+            "and the NAME resolves once it has"
+        );
+        assert_eq!(
+            catalog_resolves_from(&state, &ext_module, "Призрак"),
+            Some(false),
+            "control: a name absent from disk resolves neither before nor after"
+        );
+        assert!(
+            !resident_has_file(&state, &never_written),
+            "control: a path absent from disk is not found after the force either"
+        );
+    }
+
+    /// Inside the drift window the scan is served from cache, so a module written there
+    /// is invisible however many times the caller reads. The forced re-scan drops that
+    /// cache, which is the whole of its second half — and the half the healthy-hub stand
+    /// above cannot exercise, because a healthy hub never fills the cache at all.
+    #[test]
+    fn a_forced_rescan_finds_a_module_written_inside_the_drift_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+
+        let mut state = DiagnosticsState::for_workspace(root.to_path_buf());
+        state.drift_interval = Duration::from_secs(60);
+        state.ensure_loading();
+        wait_ready(&state);
+
+        // Warm the throttle cache: a successful build leaves it empty, and an empty cache
+        // is walked by the very next read — which would make the miss below unobservable.
+        let _ = state.read(|_, _| ());
+        assert!(lock_recover(&state.scan).is_some(), "the window is armed");
+
+        // Older than the storm-guard floor, so the force is allowed to drop the cache.
+        std::thread::sleep(FORCE_RESCAN_FLOOR + Duration::from_millis(50));
+        write_common_module(
+            root,
+            "Опоздавший",
+            true,
+            "&НаСервере\nФункция О() Экспорт КонецФункции",
+        );
+        let late = root.join("CommonModules/Опоздавший/Ext/Module.bsl");
+        let never_written = root.join("CommonModules/Призрак/Ext/Module.bsl");
+
+        assert!(!resident_has_file(&state, &late), "inside the window the cache answers");
+
+        state.force_rescan();
+        assert!(resident_has_file(&state, &late), "the forced re-scan drops the cache and walks");
+        assert!(
+            !resident_has_file(&state, &never_written),
+            "control: the walk finds what is on disk, not whatever was asked for"
+        );
     }
 }

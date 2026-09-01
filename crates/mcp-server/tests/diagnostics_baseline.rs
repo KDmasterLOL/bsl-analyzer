@@ -97,7 +97,7 @@ async fn baseline_parity_partial_stale_error_recovery_and_cancellation() {
     let baseline_path = root.join("baseline.json");
     let mut baseline = DiagnosticsBaseline {
         schema_version: DIAGNOSTICS_BASELINE_SCHEMA_VERSION,
-        scope: DiagnosticsBaselineScope { source_root: String::new(), extensions: vec![] },
+        scope: DiagnosticsBaselineScope { source_root: None, extensions: vec![] },
         diagnostics: vec![],
     };
     std::fs::write(&baseline_path, diagnostics_baseline_json(&baseline).unwrap()).unwrap();

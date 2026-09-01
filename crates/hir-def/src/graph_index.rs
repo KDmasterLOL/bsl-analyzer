@@ -25,8 +25,9 @@ use vfs::FileId;
 
 use crate::{
     call_graph::{
-        EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch, ResolvedCallEdge,
-        ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge, WorkspaceCallGraph,
+        CallSite, EdgeKind, EdgeProvenance, GraphMethodEntry, GraphNode, MethodDispatch,
+        ResolvedCallEdge, ResolvedModuleSummary, ResolvedTarget, WorkspaceCallEdge,
+        WorkspaceCallGraph, CALL_SITE_NOT_RECORDED, NO_CALL_SITE,
     },
     call_hierarchy_index::MethodCallPair,
     configs::{BodySearch, ConfigsDatabase},
@@ -1552,6 +1553,7 @@ pub fn project_workspace_subscription_edges<DB: ConfigsDatabase>(
                 to,
                 kind: EdgeKind::EventSubscriptionRef,
                 provenance: EdgeProvenance::StringResolved,
+                call_site: CallSite::Structural,
                 crosses_client_to_server: false,
             });
         }
@@ -1624,6 +1626,7 @@ fn subsystem_membership_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdg
         to,
         kind: EdgeKind::SubsystemMembership,
         provenance: EdgeProvenance::Resolved,
+        call_site: CallSite::Structural,
         crosses_client_to_server: false,
     }
 }
@@ -1683,6 +1686,7 @@ fn register_records_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
         to,
         kind: EdgeKind::RegisterRecords,
         provenance: EdgeProvenance::Resolved,
+        call_site: CallSite::Structural,
         crosses_client_to_server: false,
     }
 }
@@ -1870,6 +1874,7 @@ fn role_reference_edge(
         to,
         kind: EdgeKind::RoleReference,
         provenance,
+        call_site: CallSite::Structural,
         crosses_client_to_server: false,
     }
 }
@@ -1880,6 +1885,7 @@ fn contains_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
         to,
         kind: EdgeKind::Contains,
         provenance: EdgeProvenance::Resolved,
+        call_site: CallSite::Structural,
         crosses_client_to_server: false,
     }
 }
@@ -1890,6 +1896,7 @@ fn data_binding_edge(from: GraphNode, to: GraphNode) -> WorkspaceCallEdge {
         to,
         kind: EdgeKind::DataBinding,
         provenance: EdgeProvenance::Resolved,
+        call_site: CallSite::Structural,
         crosses_client_to_server: false,
     }
 }
@@ -2086,6 +2093,15 @@ pub struct EdgeRow {
     pub to_id: String,
     pub kind: &'static str,
     pub provenance: &'static str,
+    /// The call site's byte range in the `from` node's file, when this build recorded one.
+    /// One row per site: the store keeps edge multiplicity as the projection produced it,
+    /// and serving groups the rows back into one edge carrying every span.
+    pub call_start: Option<u32>,
+    pub call_end: Option<u32>,
+    /// Why there is no span, when there is none. Persisted rather than derived at read time:
+    /// the two absences differ by which pass produced the row, and nothing in the row itself
+    /// says which — least of all `kind`.
+    pub call_site_absent: Option<&'static str>,
     pub crosses: bool,
 }
 
@@ -2480,11 +2496,21 @@ impl<'a> GraphRowEncoder<'a> {
 
     /// Project a resolved edge to its storage row.
     pub fn edge_row(&self, edge: &WorkspaceCallEdge) -> EdgeRow {
+        let (call_start, call_end, call_site_absent) = match edge.call_site {
+            CallSite::Recorded(range) => {
+                (Some(range.start().into()), Some(range.end().into()), None)
+            }
+            CallSite::NotRecorded => (None, None, Some(CALL_SITE_NOT_RECORDED)),
+            CallSite::Structural => (None, None, Some(NO_CALL_SITE)),
+        };
         EdgeRow {
             from_id: self.encode(&edge.from).0,
             to_id: self.encode(&edge.to).0,
             kind: edge_kind_label(edge.kind),
             provenance: provenance_label(edge.provenance),
+            call_start,
+            call_end,
+            call_site_absent,
             crosses: edge.crosses_client_to_server,
         }
     }

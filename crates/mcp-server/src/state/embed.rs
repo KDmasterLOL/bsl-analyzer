@@ -1486,7 +1486,7 @@ mod tests {
             roots_refresh_requested: true,
             workspace_roots: crate::project::at(&workspace)
                 .ok()
-                .map(|project| crate::project::workspace_roots(&project).0),
+                .map(|project| crate::project::workspace_roots(&project, &[]).0),
         };
         let outcome = SharedState::refresh_search_roots_after_graph(
             &engine,
@@ -1534,7 +1534,7 @@ mod tests {
             roots_refresh_requested: true,
             workspace_roots: crate::project::at(&workspace)
                 .ok()
-                .map(|project| crate::project::workspace_roots(&project).0),
+                .map(|project| crate::project::workspace_roots(&project, &[]).0),
         };
 
         let root_drift_epoch = Arc::new(AtomicU64::new(0));
@@ -2771,7 +2771,7 @@ mod tests {
     fn a_leftover_pickup_that_could_not_run_keeps_its_obligation() {
         use bsl_search::{Chunk, ChunkKind, SearchEngine, Store};
         use std::sync::atomic::Ordering;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let dir = tempdir().unwrap();
         let workspace = dir.path().to_path_buf();
@@ -2814,13 +2814,10 @@ mod tests {
         let graph = crate::graph::GraphState::for_workspace(workspace.clone())
             .with_publish_hook(leftover_test_hook(&engine_arc, &workspace, &fire_bounds));
         graph.ensure_loading();
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
-            if Instant::now() > deadline {
-                panic!("graph did not build: {:?}", graph.status());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // The boot build's publish PASS, not its status: the pass ends with the same
+        // `leftover_bound.swap(0)` … `fetch_max` the assertion below reads, so a wait that
+        // stops at `Ready` lets the background tail steal the bound this test arms.
+        crate::graph::test_support::wait_publish_pass_within(&graph, Duration::from_secs(120), 1);
 
         // Take the rendered-from database away, so the pickup below can only skip. The graph
         // stays `Ready`, so the pickup does fire — it just cannot do anything.
@@ -2886,13 +2883,10 @@ mod tests {
         let graph = crate::graph::GraphState::for_workspace(workspace.clone())
             .with_publish_hook(leftover_test_hook(&engine_arc, &workspace, &fire_bounds));
         graph.ensure_loading();
-        let deadline = Instant::now() + Duration::from_secs(120);
-        while !matches!(graph.status(), crate::graph::GraphStatus::Ready { .. }) {
-            if Instant::now() > deadline {
-                panic!("graph did not build: {:?}", graph.status());
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        // The boot build's publish PASS, not its status: the pass ends with the same
+        // `leftover_bound.swap(0)` … `fetch_max` the assertion below reads, so a wait that
+        // stops at `Ready` lets the background tail steal the bound this test arms.
+        crate::graph::test_support::wait_publish_pass_within(&graph, Duration::from_secs(120), 1);
 
         let graph_db = crate::cache::graph_db_path(&workspace);
         let taken = graph_db.with_extension("db.taken");

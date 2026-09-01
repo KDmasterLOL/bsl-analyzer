@@ -1,4 +1,5 @@
 mod bootstrap;
+pub use bootstrap::WorkspaceInitError;
 mod embed;
 mod overlay_retry;
 mod sync;
@@ -93,6 +94,15 @@ pub struct SharedState {
     /// The overlay retry driver — the one owner of every Embed pass (startup included).
     /// `None` outside PostgresRemoteOverlay-with-embedder, where no such pass exists.
     overlay_retry: Option<Arc<overlay_retry::OverlayRetry>>,
+    /// Registry of the tasks opened by the `io.modelcontextprotocol/tasks` extension.
+    ///
+    /// It lives on the daemon process, not on the session: a task handle that a client
+    /// picks up again after its connection dropped is the whole point of the extension,
+    /// and a registry owned by `McpServer`'s per-session clone would die with the wire.
+    /// The manager is itself `Arc`-backed, so every session of a backend addresses the
+    /// same tasks. Its durability ends where the process does — an idle-TTL exit takes
+    /// the handles with it, and the contract names that as a lawful `-32602`.
+    tasks: rmcp::task_manager::TaskManager,
 }
 
 #[derive(Clone)]
@@ -193,7 +203,7 @@ impl SharedState {
     pub(crate) fn standalone_extension_notice(&self) -> Option<String> {
         let root = self.workspace_root.as_deref()?;
         let project = crate::project::at(root).ok()?;
-        project_model::standalone_extension_notice(project.source_path())
+        project.standalone_extension_notice()
     }
 
     pub(crate) fn superseded(&self) -> bool {
@@ -219,6 +229,10 @@ impl SharedState {
 
     pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
         &self.diagnostics
+    }
+
+    pub(crate) fn tasks(&self) -> &rmcp::task_manager::TaskManager {
+        &self.tasks
     }
 
     // Consumed by the diagnostics/graph sinks once they subscribe; exposed now so

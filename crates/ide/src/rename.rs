@@ -261,4 +261,50 @@ mod tests {
         );
         assert_ne!(file_a, file_b);
     }
+
+    /// A rename edits exactly the references, so an identity split into slices does
+    /// not refuse — it silently rewrites half the occurrences and leaves a body where
+    /// one variable has become two.
+    ///
+    /// The declared body is the control: the same text with `Перем` already renames in
+    /// full, so a run where only the implicit body loses sites names the split alone.
+    #[test]
+    fn renaming_an_implicit_local_edits_every_occurrence() {
+        const IMPLICIT: &str = r#"
+Процедура Тест()
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+    НаборЗаписей = 2;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+        const DECLARED: &str = r#"
+Процедура Тест()
+    Перем НаборЗаписей;
+    НаборЗаписей = 1;
+    Сообщить(НаборЗаписей);
+    НаборЗаписей = 2;
+    Сообщить(НаборЗаписей);
+КонецПроцедуры
+"#;
+
+        for (label, source, expected) in
+            [("implicit", IMPLICIT, 4usize), ("control: declared", DECLARED, 5)]
+        {
+            let (db, file_id) = single_file(source);
+            let mut from = 0usize;
+            while let Some(at) = source[from..].find("НаборЗаписей") {
+                let at = from + at;
+                from = at + "НаборЗаписей".len();
+                let edits = rename(&db, file_id, TextSize::from(at as u32), "Набор")
+                    .expect("a local is renameable");
+                assert_eq!(
+                    edits.len(),
+                    expected,
+                    "{label}: renaming from the occurrence at {at} would rewrite only part \
+                     of the variable: {edits:?}"
+                );
+            }
+        }
+    }
 }

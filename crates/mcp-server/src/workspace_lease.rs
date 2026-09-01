@@ -54,6 +54,21 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 /// foreign owner may take the workspace. Comfortably above [`HEARTBEAT_INTERVAL`] so a loaded
 /// machine cannot make a live owner look dead.
 const STALE_AFTER: Duration = Duration::from_secs(60);
+/// How often a held fence restamps the record through `checkpoint`.
+///
+/// The checkpoint exists so a LONG transaction does not let the record go stale; a
+/// consumer that opens a fence per pass would otherwise restamp at the rate of its
+/// own loop, and with the cache inside the watched tree each restamp is an event
+/// that starts the next pass.
+///
+/// One second, not [`HEARTBEAT_INTERVAL`]: throttling raises the record's worst-case
+/// age from "the gap between checkpoints" to "that gap plus the window", so the
+/// window is what a gap that is safe today may grow by. [`is_stale`] compares
+/// strictly against [`STALE_AFTER`], so at one second every gap up to 59 s stays
+/// exactly as safe as it is now, while the restamp rate drops by three orders of
+/// magnitude.
+const CHECKPOINT_MIN_INTERVAL: Duration = Duration::from_secs(1);
+
 /// How long a cached ownership verdict is reused before the record is read again. Every gated
 /// write path consults the lease, so this keeps the check off the syscall path without letting
 /// a demotion go unnoticed for long.
@@ -133,6 +148,12 @@ struct Inner {
     /// would otherwise see the record it just removed as "nobody owns this" and re-claim it.
     released: AtomicBool,
     checked_at: Mutex<Option<Instant>>,
+    /// When [`WorkspaceLease::with_ownership_checkpointed`] last restamped the record.
+    ///
+    /// On the shared inner, not on one call: a hot consumer opens a NEW fence on every
+    /// pass, so a window scoped to a single fence would reset on each of them and never
+    /// hold anything back.
+    stamped_at: Mutex<Option<Instant>>,
 }
 
 impl WorkspaceLease {
@@ -201,6 +222,7 @@ impl WorkspaceLease {
                 superseded: AtomicBool::new(false),
                 released: AtomicBool::new(false),
                 checked_at: Mutex::new(None),
+                stamped_at: Mutex::new(None),
             }),
         }
     }
@@ -219,6 +241,7 @@ impl WorkspaceLease {
             superseded: AtomicBool::new(false),
             released: AtomicBool::new(false),
             checked_at: Mutex::new(None),
+            stamped_at: Mutex::new(None),
         });
         let lease = Self { inner };
         // A starting daemon outbids whatever it finds — newest wins is the whole rule.
@@ -421,16 +444,21 @@ impl WorkspaceLease {
         match read_record(path) {
             Some(record) if record.token == mine => {
                 let mut checkpoint = || {
+                    // Checked on EVERY call, never throttled: this is how a callback
+                    // holding the fence learns it must roll back, and delaying that by
+                    // the window would let it keep publishing over the new owner.
                     if self.inner.released.load(Ordering::SeqCst)
                         || self.inner.superseded.load(Ordering::SeqCst)
                     {
                         return ControlFlow::Break(());
                     }
-                    let _ = write_record(
-                        path,
-                        self.inner.generation.load(Ordering::SeqCst),
-                        self.inner.token.load(Ordering::SeqCst),
-                    );
+                    if self.restamp_is_due() {
+                        let _ = write_record(
+                            path,
+                            self.inner.generation.load(Ordering::SeqCst),
+                            self.inner.token.load(Ordering::SeqCst),
+                        );
+                    }
                     ControlFlow::Continue(())
                 };
                 match write(&mut checkpoint) {
@@ -448,6 +476,19 @@ impl WorkspaceLease {
                 self.inner.owns.store(false, Ordering::SeqCst);
                 *checked_at = Some(Instant::now());
                 LeaseOutcome::TransientRefusal
+            }
+        }
+    }
+
+    /// Whether enough time has passed since the last restamp, marking one if so.
+    fn restamp_is_due(&self) -> bool {
+        let mut stamped = lock_recover(&self.inner.stamped_at);
+        let now = Instant::now();
+        match *stamped {
+            Some(last) if now.duration_since(last) < CHECKPOINT_MIN_INTERVAL => false,
+            _ => {
+                *stamped = Some(now);
+                true
             }
         }
     }
@@ -798,6 +839,7 @@ mod tests {
                 superseded: AtomicBool::new(false),
                 released: AtomicBool::new(false),
                 checked_at: Mutex::new(None),
+                stamped_at: Mutex::new(None),
             }),
         };
         assert_eq!(unclaimed.with_ownership_outcome(|| "written"), LeaseOutcome::TransientRefusal);
@@ -842,6 +884,85 @@ mod tests {
             });
 
         assert_eq!(outcome, LeaseOutcome::Applied(Err("store failed")));
+    }
+
+    /// The window's UPPER bound, asserted on the constant rather than by waiting.
+    ///
+    /// A test that sleeps for the window cannot see how large the window is: it derives
+    /// its own duration from the value under test and passes at any size. The bound is
+    /// arithmetic, so it belongs here as arithmetic — throttling raises the record's
+    /// worst-case age from the gap between checkpoints to that gap plus the window, and
+    /// `is_stale` compares strictly, so a one-second window is what keeps every gap that
+    /// is safe today (up to 59 s) exactly as safe.
+    #[test]
+    fn the_restamp_window_cannot_make_a_safe_checkpoint_gap_stale() {
+        let largest_gap_safe_today = STALE_AFTER - Duration::from_secs(1);
+        assert!(
+            CHECKPOINT_MIN_INTERVAL + largest_gap_safe_today <= STALE_AFTER,
+            "a {CHECKPOINT_MIN_INTERVAL:?} window lets a {largest_gap_safe_today:?} gap go stale"
+        );
+    }
+
+    /// The hot consumer opens a NEW fence on every pass, so the window has to live on
+    /// the lease. Scoped to one fence it would reset on each pass and hold nothing back.
+    ///
+    /// The observable is the record's modification time, not `!is_stale`: `is_stale`
+    /// compares strictly against `STALE_AFTER`, so a gap of `STALE_AFTER - window` never
+    /// makes a record stale at any window size, and a control phrased over it would pass
+    /// on a window of sixty seconds just as happily as on one second.
+    #[test]
+    fn the_restamp_window_spans_separate_fences() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let path = lease_path(dir.path());
+        let stamp = || std::fs::metadata(&path).unwrap().modified().unwrap();
+        let restamp = |lease: &WorkspaceLease| {
+            lease.with_ownership_checkpointed(|checkpoint| {
+                assert_eq!(checkpoint(), ControlFlow::Continue(()));
+                ControlFlow::Continue(())
+            })
+        };
+
+        assert_eq!(restamp(&lease), LeaseOutcome::Applied(()));
+        let first = stamp();
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(restamp(&lease), LeaseOutcome::Applied(()));
+        assert_eq!(stamp(), first, "a second fence inside the window restamped the record");
+
+        std::thread::sleep(CHECKPOINT_MIN_INTERVAL + Duration::from_millis(100));
+        assert_eq!(restamp(&lease), LeaseOutcome::Applied(()));
+        assert!(stamp() > first, "a fence past the window did not restamp the record");
+    }
+
+    /// Throttling the restamp must not throttle the stop check. The two live in one
+    /// closure, and holding the whole closure back would let a callback keep publishing
+    /// over a new owner for the length of the window.
+    #[test]
+    fn a_throttled_checkpoint_still_reports_a_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = WorkspaceLease::claim(dir.path());
+        let releaser = lease.clone();
+        let observer = lease.clone();
+
+        let outcome: LeaseOutcome<()> = lease.with_ownership_checkpointed(|checkpoint| {
+            // The first call is never throttled, so the second is the one under test:
+            // it falls inside the window and must still answer Break.
+            assert_eq!(checkpoint(), ControlFlow::Continue(()));
+            // `release` sets the flag before it goes for the lock this fence is holding,
+            // so waiting on the flag costs nothing while waiting on the call would block
+            // for the whole lock timeout.
+            std::thread::spawn(move || releaser.release());
+            while !observer.is_released() {
+                std::thread::yield_now();
+            }
+            if checkpoint().is_break() {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+
+        assert_eq!(outcome, LeaseOutcome::Terminal);
     }
 
     #[test]

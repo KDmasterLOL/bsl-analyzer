@@ -7,6 +7,27 @@ use crate::change_hub::{SinkCursor, WorkspaceChangeHub};
 use super::lifecycle::{lock_recover, DiagnosticsState};
 use super::types::{DiagnosticsStatus, ResidentOutcome};
 
+/// A private copy of the checked-in metadata fixture, so derived caches never land in the
+/// repo tree and each stand starts cold.
+pub(crate) fn staged_designer_fixture() -> tempfile::TempDir {
+    let src = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../bsl-metadata/fixtures/designer"));
+    let dst = tempfile::TempDir::new().expect("scratch workspace");
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry.expect("walk fixture");
+        let rel = entry.path().strip_prefix(src).expect("path under fixture root");
+        let target = dst.path().join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&target).expect("mkdir");
+        } else {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).expect("mkdir parent");
+            }
+            fs::copy(entry.path(), &target).expect("copy fixture file");
+        }
+    }
+    dst
+}
+
 pub(crate) fn write(root: &Path, rel: &str, text: &str) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -116,7 +137,7 @@ pub(crate) fn workspace_with_an_outside_extension() -> (tempfile::TempDir, PathB
 /// would pin the test to a rule it is not testing.
 pub(crate) fn extension_root_id(workspace: &Path, extension: &Path) -> String {
     let project = crate::project::at(workspace).expect("the fixture is a valid project");
-    let (roots, _rejected) = crate::project::workspace_roots(&project);
+    let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
     let file = extension.join(SHARED_MODULE_REL);
     let canonical = file.canonicalize().expect("the extension's module exists");
     roots.root_of(&file, &canonical).expect("the extension's file has an owning root").root_id
@@ -146,29 +167,53 @@ pub(crate) fn workspace_with_a_nested_configuration() -> (tempfile::TempDir, Pat
     (dir, workspace)
 }
 
-/// Ждёт готовности базы, а исчерпав ожидание — говорит, чего именно дождался.
+/// Потолок любого ожидания в тестовом харнессе.
 ///
-/// Голое «не стало готовым» о превышении бюджета и о зависшей загрузке
-/// сообщает одинаково, и падение под полным прогоном приходится
-/// расследовать заново. Поэтому в сообщении стоит последний наблюдённый
-/// статус и потраченное время: по ним видно, упёрлись ли мы в бюджет на
-/// загруженной машине или загрузка не двигалась вовсе.
-pub(crate) fn wait_ready(state: &DiagnosticsState) {
+/// Щедрый намеренно: под нагрузкой и сборка резидента, и доставка событий
+/// растягиваются, а в зелёном прогоне большой потолок не стоит ничего — срок
+/// расходуется только там, где ожидаемое так и не наступило.
+fn wait_budget() -> Duration {
+    std::env::var("BSL_TEST_WAIT_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(Duration::from_secs(30), Duration::from_secs)
+}
+
+/// Ждать наступления события до срока, а не заданное число раз.
+///
+/// Число итераций сроком не является: под нагрузкой сон переполняется, и «300 раз
+/// по 10 мс» — это не три секунды, а сколько придётся. Проба поэтому возвращает
+/// либо результат, либо наблюдение, объясняющее, почему ещё не время; исчерпав
+/// срок, помощник называет предмет ожидания, последнее наблюдение и потраченное
+/// время. Немое «не дождался» — ровно тот отчёт, по которому причину падения
+/// приходится расследовать с нуля.
+pub(crate) fn wait_until<T, S: std::fmt::Debug>(
+    what: &str,
+    mut probe: impl FnMut() -> Result<T, S>,
+) -> T {
     let started = std::time::Instant::now();
-    let mut last = state.status();
-
-    for _ in 0..300 {
-        match state.status() {
-            DiagnosticsStatus::Ready { .. } => return,
-            DiagnosticsStatus::Failed(msg) => panic!("diagnostics load failed: {msg}"),
-            other => {
-                last = other;
-                std::thread::sleep(Duration::from_millis(10));
-            }
+    let budget = wait_budget();
+    loop {
+        let observation = match probe() {
+            Ok(value) => return value,
+            Err(observation) => observation,
+        };
+        if started.elapsed() >= budget {
+            panic!(
+                "{what}: not satisfied in {:?}, last observation {observation:?}",
+                started.elapsed()
+            );
         }
+        std::thread::sleep(Duration::from_millis(10));
     }
+}
 
-    panic!("diagnostics db did not become ready in {:?}, last status {last:?}", started.elapsed());
+pub(crate) fn wait_ready(state: &DiagnosticsState) {
+    wait_until("the diagnostics db becomes ready", || match state.status() {
+        DiagnosticsStatus::Ready { .. } => Ok(()),
+        DiagnosticsStatus::Failed(msg) => panic!("diagnostics load failed: {msg}"),
+        other => Err(other),
+    });
 }
 
 pub(super) fn write_catalog(root: &Path, name: &str, code_length: u32) {
@@ -274,51 +319,53 @@ pub(super) fn discard_until_quiet(
     state: &DiagnosticsState,
     hub: &WorkspaceChangeHub,
     quiet_rounds: usize,
-) -> bool {
-    let mut quiet = 0;
-    for _ in 0..300 {
+    what: &str,
+) {
+    let mut quiet = 0usize;
+    wait_until(what, || {
         let before = hub.events_seen();
         state.drain_and_discard_cursor();
         if hub.events_seen() == before {
             quiet += 1;
             if quiet == quiet_rounds {
-                return true;
+                return Ok(());
             }
         } else {
             quiet = 0;
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
+        Err(format!("{quiet}/{quiet_rounds} quiet rounds, {} events seen", hub.events_seen()))
+    });
 }
 
 pub(super) fn raw_generation(state: &DiagnosticsState) -> u64 {
     lock_recover(&state.inner).generation
 }
 
-pub(super) fn wait_for_apply(state: &DiagnosticsState, generation: u64) -> bool {
-    for _ in 0..300 {
+pub(super) fn wait_for_apply(state: &DiagnosticsState, generation: u64, what: &str) {
+    wait_until(what, || {
         let _ = state.read(|_, _| ());
-        if raw_generation(state) > generation {
-            return true;
+        match raw_generation(state) {
+            now if now > generation => Ok(()),
+            now => Err(format!("generation still {now}, waiting for more than {generation}")),
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
+    });
 }
 
 pub(super) fn wait_for_delivery(
     hub: &WorkspaceChangeHub,
     cursor: &mut SinkCursor,
     needle: &str,
-) -> bool {
-    for _ in 0..300 {
+    what: &str,
+) {
+    let mut drained = 0usize;
+    wait_until(what, || {
         let batch = hub.drain(*cursor);
         *cursor = batch.cursor;
+        drained += batch.entries.len();
         if batch.entries.iter().any(|entry| entry.raw.to_string_lossy().contains(needle)) {
-            return true;
+            Ok(())
+        } else {
+            Err(format!("{drained} entries delivered, none holding {needle:?}"))
         }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    false
+    });
 }

@@ -770,7 +770,7 @@ mod tests {
             "search_code",
         );
 
-        assert_eq!(result.content[0].raw.as_text().expect("text").text, "No results found.");
+        assert_eq!(result.content[0].as_text().expect("text").text, "No results found.");
         let body = result.structured_content.expect("structured envelope");
         assert_eq!(body["hits"], json!([]));
         assert_eq!(body["total"], 0);

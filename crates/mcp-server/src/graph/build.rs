@@ -162,7 +162,7 @@ impl GraphState {
         // shared hub back onto its older root set: re-derive the live topology
         // (config parse + discovery, no tree walk) and skip when this build's
         // snapshot is already superseded — the fresher build re-arms instead.
-        let live = crate::graph::ProjectSnapshot::load(root);
+        let live = crate::graph::ProjectSnapshot::load_excluding(root, &self.cache_exclusions());
         if super::scan::topology_u64(&live.configs) != built_topology {
             tracing::info!("skipping hub re-arm: the built snapshot's topology is superseded");
             return;
@@ -377,7 +377,8 @@ impl GraphState {
         // the profile recompute, the pre-fingerprint and the patch, so neither a
         // config edit nor a file landing mid-operation can hand two passes two
         // different trees. Only the straddle check walks again.
-        let project = crate::graph::ProjectSnapshot::load(workspace_root);
+        let project =
+            crate::graph::ProjectSnapshot::load_excluding(workspace_root, &self.cache_exclusions());
         // A topology change re-shapes visibility for ANY module even when only
         // `.bsl` bodies drifted on disk — never body-patch across it.
         match GraphDb::open(&db_path).and_then(|g| g.freshness_token()) {
@@ -385,7 +386,10 @@ impl GraphState {
                 if stored_token.topology == super::scan::topology_u64(&project.configs) => {}
             _ => return PublishAttemptOutcome::FallBack,
         }
-        let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let pre = crate::graph::universe::ScannedUniverse::scan_excluding(
+            &project.scan_roots,
+            &project.excluded,
+        );
         // Before the diff, not inside the bracket: a diff against a short scan reads
         // hidden files as removals, and an unreadable EMPTY subtree does not move the
         // stats at all — the diff cannot see incompleteness, only the verdict can.
@@ -494,8 +498,14 @@ impl GraphState {
                 },
             )
             .map_err(LoadFailure::operation)?;
-            let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
-            let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
+            let post_project = crate::graph::ProjectSnapshot::load_excluding(
+                workspace_root,
+                &self.cache_exclusions(),
+            );
+            let post = crate::graph::universe::ScannedUniverse::scan_excluding(
+                &post_project.scan_roots,
+                &post_project.excluded,
+            );
             let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
             // `pre.clean()` is guaranteed above; it stays in the formula so the two
             // decisions cannot drift apart if the gate ever moves.
@@ -592,8 +602,12 @@ impl GraphState {
         let Ok((revision, fingerprint, force_stale)) = graph.freshness_token() else {
             return PublishAttemptOutcome::FallBack;
         };
-        let project = crate::graph::ProjectSnapshot::load(workspace_root);
-        let now = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+        let project =
+            crate::graph::ProjectSnapshot::load_excluding(workspace_root, &self.cache_exclusions());
+        let now = crate::graph::universe::ScannedUniverse::scan_excluding(
+            &project.scan_roots,
+            &project.excluded,
+        );
         let fp_now = super::scan::fingerprint_of(&now.stats, &project.configs);
         if !cache_is_reusable(force_stale, fingerprint, fp_now, now.clean()) {
             return PublishAttemptOutcome::FallBack;
@@ -768,8 +782,12 @@ fn build_and_publish_graph_file(
     // ONE project snapshot and ONE scanned universe serve the pre-fingerprint,
     // the build and the persisted `files` rows: every pre-publication pass sees
     // the same tree by construction. Only the straddle check walks again.
-    let project = crate::graph::ProjectSnapshot::load(workspace_root);
-    let pre = crate::graph::universe::ScannedUniverse::scan(&project.scan_roots);
+    let project =
+        crate::graph::ProjectSnapshot::load_excluding(workspace_root, &graph.cache_exclusions());
+    let pre = crate::graph::universe::ScannedUniverse::scan_excluding(
+        &project.scan_roots,
+        &project.excluded,
+    );
     build_and_publish_scanned(workspace_root, &project, &pre, generation, graph, chunk_sink)
 }
 
@@ -822,8 +840,12 @@ fn build_and_publish_scanned(
     // The post-scan derives a FRESH project snapshot AND a fresh walk: the straddle
     // check must see the world as it is now, or a topology/root change landing
     // mid-build would compare the frozen snapshot against itself and publish clean.
-    let post_project = crate::graph::ProjectSnapshot::load(workspace_root);
-    let post = crate::graph::universe::ScannedUniverse::scan(&post_project.scan_roots);
+    let post_project =
+        crate::graph::ProjectSnapshot::load_excluding(workspace_root, &graph.cache_exclusions());
+    let post = crate::graph::universe::ScannedUniverse::scan_excluding(
+        &post_project.scan_roots,
+        &post_project.excluded,
+    );
     let fp_post = super::scan::fingerprint_of(&post.stats, &post_project.configs);
     let force_stale = publish_force_stale(fp_pre, fp_post, pre.clean(), post.clean());
     {
@@ -1423,6 +1445,38 @@ mod tests {
         assert!(!graph.withheld_build.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    /// Driven through the real cold-build entry point, not through the walk it happens
+    /// to call.
+    ///
+    /// A gate that scans a hand-built snapshot proves the mechanism and nothing about
+    /// the caller: it stays green while the primary build path loads a snapshot with no
+    /// exclusions at all, which is exactly the shape this defect had. The file count is
+    /// the observable because it is what the build persists.
+    #[test]
+    fn a_cold_build_does_not_take_modules_from_its_own_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        sample_workspace(root);
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(root);
+        let graph = GraphState::for_workspace_with_cache(root.to_path_buf(), cache.clone());
+
+        let clean = build_and_publish_graph_file(root, 1, &graph, None).unwrap();
+
+        // The same workspace, plus a module dropped inside the analyzer's own cache.
+        crate::graph::test_support::write_common_module(
+            &cache.root().join("vendor"),
+            "Чужой",
+            true,
+            "&НаСервере\nФункция Чуж() Экспорт КонецФункции",
+        );
+        let with_vendored = build_and_publish_graph_file(root, 2, &graph, None).unwrap();
+
+        assert_eq!(
+            with_vendored.files, clean.files,
+            "a module under the cache entered the graph built from the workspace"
+        );
+    }
+
     #[test]
     fn fresh_and_cached_publication_paths_propagate_final_install_refusal() {
         let refuse_install = super::super::snapshot::refuse_snapshot_install_for_test;
@@ -1586,6 +1640,8 @@ mod tests {
                     detail: ide::GraphDetail::Names,
                     provenance_filter: Vec::new(),
                     edge_kind_filter: Vec::new(),
+                    call_sites: false,
+                    max_call_sites: 0,
                 },
                 None,
             )
@@ -2383,6 +2439,8 @@ mod tests {
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: kinds,
+            call_sites: false,
+            max_call_sites: 0,
         };
 
         // Unfiltered: both the call to Бета.ШагБ and the query_ref to Номенклатура.
@@ -2411,6 +2469,8 @@ mod tests {
                     detail: ide::GraphDetail::Names,
                     provenance_filter: Vec::new(),
                     edge_kind_filter: Vec::new(),
+                    call_sites: false,
+                    max_call_sites: 0,
                 },
                 None,
             )
@@ -2454,7 +2514,7 @@ mod tests {
         .expect("graph database builds");
         let gdb = GraphDb::open(&out).expect("graph database opens");
         let project = crate::project::at(root).expect("the fixture is a project");
-        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
 
         let id = "method/common/Сервер/Считать";
         let node = gdb
@@ -2525,7 +2585,7 @@ mod tests {
         .expect("graph database builds");
         let gdb = GraphDb::open(&out).expect("graph database opens");
         let project = crate::project::at(root).expect("the fixture is a project");
-        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
         let id = "method/common/Сервер/Считать";
 
         // Control: before the drift the node has both ranges.
@@ -2581,7 +2641,7 @@ mod tests {
         )
         .expect("graph database builds");
         let project = crate::project::at(root).expect("the fixture is a project");
-        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
         let id = "method/common/Сервер/Считать";
 
         // Grow the BODY: the name keeps its offset, the closing keyword does not.
@@ -2646,7 +2706,7 @@ mod tests {
         )
         .expect("graph database builds");
         let project = crate::project::at(root).expect("the fixture is a project");
-        let (roots, _rejected) = crate::project::workspace_roots(&project);
+        let (roots, _rejected) = crate::project::workspace_roots(&project, &[]);
 
         // Everything the graph knows about is read from the database from here on; the
         // sources exist only as a trap.
@@ -2912,6 +2972,8 @@ mod tests {
             detail: ide::GraphDetail::Signatures,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -2919,6 +2981,22 @@ mod tests {
         .unwrap();
         let sql_nb = serde_json::to_value(gdb.neighbors(&params, None).unwrap().unwrap()).unwrap();
         assert_eq!(mem_nb, sql_nb, "neighbors JSON");
+
+        // Asking for places must not split the two projections either. Neither holds a root
+        // table here, so both must answer `roots_unavailable` for the same edges — and a
+        // projection that grew the fields on one side only would diverge right here.
+        let with_places = ide::NeighborsParams { call_sites: true, max_call_sites: 20, ..params };
+        let mem_sites = serde_json::to_value(
+            analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &with_places).unwrap(),
+        )
+        .unwrap();
+        let sql_sites =
+            serde_json::to_value(gdb.neighbors(&with_places, None).unwrap().unwrap()).unwrap();
+        assert_eq!(mem_sites, sql_sites, "neighbors JSON with call sites");
+        assert_eq!(
+            mem_sites["edges"][0]["call_sites_unavailable"], "roots_unavailable",
+            "without a root table a recorded span has no address to publish: {mem_sites}"
+        );
 
         let ids = [id.to_string()];
         let mem_src =
@@ -3270,6 +3348,8 @@ mod tests {
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let mem_nb = serde_json::to_value(
             analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap(),
@@ -3326,6 +3406,8 @@ mod tests {
             detail: ide::GraphDetail::Names,
             provenance_filter: Vec::new(),
             edge_kind_filter: Vec::new(),
+            call_sites: false,
+            max_call_sites: 0,
         };
         let mem = analysis.graph_neighbors(GRAPH_SOURCE_ROOT, Some(root), &params).unwrap();
         let sql = gdb.neighbors(&params, None).unwrap().unwrap();
@@ -3679,6 +3761,449 @@ mod tests {
         );
         build_whole_graph(root, &out, 1, &meta()).expect("rebuilds");
         assert_ne!(server_sig(&out), base, "renaming a method changes the signature hash");
+    }
+
+    // ---- call sites on edges ------------------------------------------------------
+
+    /// Build the artefact for `root` and open it together with the workspace's own root
+    /// table, which is what turns a recorded span into an addressable place.
+    fn built_with_roots(root: &Path) -> (GraphDb, bsl_search::WorkspaceRoots) {
+        let out = graph_db_path(root);
+        fs::create_dir_all(out.parent().unwrap()).unwrap();
+        build_whole_graph(
+            root,
+            &out,
+            1,
+            &crate::graph_db::GraphMeta {
+                revision: 1,
+                fingerprint: crate::graph_db::GraphFp::default(),
+                files: 0,
+                built_at: "t".to_string(),
+            },
+        )
+        .expect("graph database builds");
+        let gdb = GraphDb::open(&out).expect("graph database opens and validates");
+        let (roots, _rejected) = bsl_search::WorkspaceRoots::build(root, root, &[]);
+        (gdb, roots)
+    }
+
+    fn asking_for_call_sites(id: &str, dir: ide::Direction) -> ide::NeighborsParams<'_> {
+        ide::NeighborsParams {
+            id,
+            dir,
+            depth: 1,
+            max_nodes: 50,
+            detail: ide::GraphDetail::Names,
+            provenance_filter: Vec::new(),
+            edge_kind_filter: Vec::new(),
+            call_sites: true,
+            max_call_sites: crate::tools::graph::DEFAULT_CALL_SITE_CAP,
+        }
+    }
+
+    /// The text a place cuts, read back through the published UTF-16 positions — so an
+    /// assertion is about the source a consumer would get, not about numbers agreeing with
+    /// themselves.
+    fn cut(text: &str, place: &serde_json::Value, key: &str) -> String {
+        let range = &place[key];
+        let index = line_index::LineIndex::new(text);
+        let offset = |line: &str, ch: &str| -> usize {
+            let line = range[line].as_u64().expect("a published line") as u32;
+            let utf16_col = range[ch].as_u64().expect("a published character") as u32;
+            let byte_col = index
+                .utf16_col_to_byte_col(text, line, utf16_col)
+                .expect("the published column is inside its line");
+            let start = index.try_line_start(line).expect("the published line is inside the file");
+            u32::from(start) as usize + byte_col as usize
+        };
+        text[offset("start_line", "start_character")..offset("end_line", "end_character")]
+            .to_string()
+    }
+
+    /// Two calls to one method from one body are ONE edge with TWO places, and each place
+    /// cuts the call it stands for.
+    ///
+    /// The positive control is the second caller: it calls once, so a projection that
+    /// reported a fixed number of places, or one that lost the multiplicity by deduplicating
+    /// rows, would disagree with one of the two edges in the same answer.
+    #[test]
+    fn an_edge_carries_one_place_per_call_and_each_place_cuts_that_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Считать() Экспорт КонецФункции",
+        );
+        write_common_module(
+            root,
+            "Дважды",
+            true,
+            "&НаСервере\nПроцедура Оба() Экспорт\nСервер.Считать();\nСервер.Считать();\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Однажды",
+            true,
+            "&НаСервере\nПроцедура Раз() Экспорт\nСервер.Считать();\nКонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let params = asking_for_call_sites("method/common/Сервер/Считать", ide::Direction::In);
+        let result = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+
+        let by_caller = |module: &str| {
+            result
+                .edges
+                .iter()
+                .find(|e| e.from.as_deref() == Some(module))
+                .unwrap_or_else(|| panic!("an edge from {module}: {:?}", result.edges))
+        };
+        let twice = by_caller("method/common/Дважды/Оба");
+        let once = by_caller("method/common/Однажды/Раз");
+
+        assert_eq!(twice.call_sites_total, Some(2), "two calls, two recorded places");
+        assert_eq!(once.call_sites_total, Some(1), "the control caller calls once");
+        assert!(twice.call_sites_unavailable.is_none() && once.call_sites_unavailable.is_none());
+
+        let places = twice.call_sites.as_ref().expect("places");
+        assert_eq!(places.len(), 2);
+        assert!(!twice.call_sites_truncated, "nothing was cut, so nothing may claim it was");
+
+        let text = fs::read_to_string(root.join("CommonModules/Дважды/Ext/Module.bsl")).unwrap();
+        for place in places {
+            // The first thing the task asks for is that this be the SAME object the other
+            // tools publish. Nothing else here would notice a place that quietly grew its
+            // own shape, so the contract's own type is what accepts it — `deny_unknown_fields`
+            // included.
+            let parsed: crate::tools::location::WireLocation =
+                serde_json::from_value(place.clone()).unwrap_or_else(|e| {
+                    panic!("a call site is a location contract v1 place: {e}: {place}")
+                });
+            assert!(parsed.range.is_some() && parsed.enclosing_range.is_some());
+
+            assert_eq!(place["path"], "CommonModules/Дважды/Ext/Module.bsl");
+            assert_eq!(place["root_id"], "");
+            assert_eq!(place["position_encoding"], "utf-16");
+            assert_eq!(place["schema_version"], "1");
+            assert_eq!(cut(&text, place, "range"), "Сервер.Считать()");
+            let enclosing = cut(&text, place, "enclosing_range");
+            assert!(
+                enclosing.contains("Процедура Оба()") && enclosing.ends_with("КонецПроцедуры"),
+                "the enclosing range is the whole calling declaration, got {enclosing:?}"
+            );
+            assert!(
+                enclosing.contains(&cut(&text, place, "range")),
+                "the enclosing range contains the call it encloses"
+            );
+        }
+        // Ordered by position, not by whatever order the store walked the rows in.
+        let first = &places[0]["range"];
+        let second = &places[1]["range"];
+        assert!(
+            first["start_line"].as_u64() < second["start_line"].as_u64(),
+            "places are ordered by position: {places:?}"
+        );
+    }
+
+    /// An edge nobody asked about carries no `call_site*` key at all — which is what makes
+    /// "no place" a different answer from "not asked".
+    ///
+    /// Both halves run over the SAME artefact and the same edge, so the difference is the
+    /// request and nothing else.
+    #[test]
+    fn an_edge_not_asked_about_is_silent_and_an_edge_without_a_place_names_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_common_module(
+            root,
+            "Читатель",
+            true,
+            "&НаСервере\nПроцедура Читать() Экспорт\nЗапрос = \"ВЫБРАТЬ Код ИЗ Справочник.Номенклатура\";\nКонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let id = "method/common/Читатель/Читать";
+
+        let mut silent = asking_for_call_sites(id, ide::Direction::Out);
+        silent.call_sites = false;
+        let unasked = gdb.neighbors(&silent, Some(&roots)).unwrap().unwrap();
+        let quiet = unasked.edges.first().expect("the query read is an edge");
+        assert_eq!(quiet.kind, "query_ref");
+        assert!(
+            quiet.call_sites.is_none()
+                && quiet.call_sites_total.is_none()
+                && quiet.call_sites_unavailable.is_none()
+                && !quiet.call_sites_truncated,
+            "an unasked edge says nothing about places: {quiet:?}"
+        );
+
+        let asked = gdb
+            .neighbors(&asking_for_call_sites(id, ide::Direction::Out), Some(&roots))
+            .unwrap()
+            .unwrap();
+        let named = asked.edges.first().expect("the same edge");
+        assert_eq!(named.kind, "query_ref");
+        // The read IS written in the module; this build keeps no span for it. Saying
+        // `no_call_site` here would teach the consumer to stop expecting one.
+        assert_eq!(named.call_sites_unavailable, Some(ide::CALL_SITE_NOT_RECORDED));
+        assert!(named.call_sites.is_none() && named.call_sites_total.is_none());
+    }
+
+    /// A structural edge — one derived from metadata rather than from code — says there is
+    /// no call site at all, and says it with the other code.
+    #[test]
+    fn a_metadata_derived_edge_says_it_has_no_call_site() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_catalog_form(
+            root,
+            "Номенклатура",
+            "ФормаЭлемента",
+            "&НаКлиенте\nПроцедура ПриОткрытии(Отказ)\nКонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let params =
+            asking_for_call_sites("form/Catalog/Номенклатура/ФормаЭлемента", ide::Direction::Out);
+        let result = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+
+        let contains: Vec<_> = result.edges.iter().filter(|e| e.kind == "contains").collect();
+        assert!(!contains.is_empty(), "a form contains its items: {:?}", result.edges);
+        for edge in contains {
+            assert_eq!(edge.call_sites_unavailable, Some(ide::NO_CALL_SITE));
+            assert!(edge.call_sites.is_none());
+        }
+    }
+
+    /// A file that moved under ONE of an edge's recorded spans takes the whole list with it.
+    ///
+    /// The positive control is the same artefact answering before the edit: without it the
+    /// test could not tell "the drift was caught" from "this edge never had places". The
+    /// edit is chosen so the FIRST span still lands on its call — a per-span drop would
+    /// leave one place and a `call_sites_total` of two, which reads as an undeclared
+    /// truncation, and that is the answer this rule exists to forbid.
+    #[test]
+    fn one_drifted_span_takes_the_whole_place_list_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Считать() Экспорт КонецФункции",
+        );
+        let module = "CommonModules/Дважды/Ext/Module.bsl";
+        write_common_module(
+            root,
+            "Дважды",
+            true,
+            "&НаСервере\nПроцедура Оба() Экспорт\nСервер.Считать();\nСервер.Считать();\nКонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let params = asking_for_call_sites("method/common/Сервер/Считать", ide::Direction::In);
+
+        let before = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+        let edge = before.edges.first().expect("one caller");
+        assert_eq!(edge.call_sites.as_ref().map(Vec::len), Some(2), "the control: both places");
+
+        // Rewrite only the SECOND call. Everything before it keeps its offsets, so span one
+        // still cuts its call and span two now cuts something else.
+        write(
+            root,
+            module,
+            "&НаСервере\nПроцедура Оба() Экспорт\nСервер.Считать();\nСервер.Иное();\nКонецПроцедуры",
+        );
+
+        let after = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+        let edge = after.edges.first().expect("the edge is still in the artefact");
+        assert_eq!(edge.call_sites_unavailable, Some(ide::SOURCE_DRIFTED));
+        assert!(
+            edge.call_sites.is_none() && edge.call_sites_total.is_none(),
+            "a drifted edge publishes no partial list: {edge:?}"
+        );
+    }
+
+    /// The cap shortens the shown list and says so; `call_sites_total` keeps counting what
+    /// the artefact records, so the two numbers stay comparable.
+    ///
+    /// The positive control is the same graph served with a cap above the number of places:
+    /// an implementation that counted `total` after truncating, or that trimmed silently,
+    /// passes every other gate here and fails this pair.
+    #[test]
+    fn a_capped_place_list_is_declared_and_still_counts_what_it_did_not_show() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Считать() Экспорт КонецФункции",
+        );
+        let calls = "Сервер.Считать();\n".repeat(5);
+        write_common_module(
+            root,
+            "Пять",
+            true,
+            &format!("&НаСервере\nПроцедура Много() Экспорт\n{calls}КонецПроцедуры"),
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let mut params = asking_for_call_sites("method/common/Сервер/Считать", ide::Direction::In);
+
+        params.max_call_sites = 2;
+        let (capped, completeness) =
+            crate::tools::graph::neighbors(&gdb, &params, 6000, Some(&roots));
+        let edge = &capped["edges"][0];
+        assert_eq!(edge["call_sites"].as_array().map(Vec::len), Some(2), "the cap shortened it");
+        assert_eq!(edge["call_sites_total"], 5, "the total counts what the artefact records");
+        assert_eq!(edge["call_sites_truncated"], true);
+        let reasons = completeness.to_value();
+        assert!(
+            reasons["reasons"].as_array().unwrap().iter().any(|r| r["code"] == "result_cap"
+                && r["detail"].as_str().unwrap().contains("call sites")),
+            "the cap is named in the envelope: {reasons}"
+        );
+
+        params.max_call_sites = 10;
+        let (whole, completeness) =
+            crate::tools::graph::neighbors(&gdb, &params, 6000, Some(&roots));
+        let edge = &whole["edges"][0];
+        assert_eq!(edge["call_sites"].as_array().map(Vec::len), Some(5));
+        assert_eq!(edge["call_sites_total"], 5);
+        assert!(edge.get("call_sites_truncated").is_none(), "nothing was cut: {edge}");
+        assert!(
+            completeness.is_complete(),
+            "an uncut answer is complete: {}",
+            completeness.to_value()
+        );
+    }
+
+    /// Every edge kind a body produces has a recorded span, so none of them may answer
+    /// `no_call_site` — and none may answer `source_drifted` on a freshly built artefact.
+    ///
+    /// The kinds here are the ones whose `EdgeKind` is assigned during RESOLUTION rather
+    /// than during extraction: a rule that decided "has a place" by kind would send exactly
+    /// these to "there is no place, and there never will be" while their spans sat in the
+    /// artefact. `source_drifted` is asserted absent because a name check that no legitimate
+    /// call satisfies would degrade this whole class into a false drift, silently.
+    #[test]
+    fn every_body_derived_edge_kind_publishes_its_place_on_a_fresh_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        write_catalog(root, "Номенклатура", 1);
+        write_common_module(
+            root,
+            "Обработчики",
+            false,
+            "&НаКлиенте\nПроцедура ПослеЗакрытия(Результат, Параметры) Экспорт\nКонецПроцедуры",
+        );
+        write_common_module(
+            root,
+            "Трогает",
+            false,
+            "&НаКлиенте\n\
+             Процедура Всё() Экспорт\n\
+             Справочники.Номенклатура.СоздатьЭлемент();\n\
+             Справочники.Номенклатура.НайтиПоКоду();\n\
+             Оповещение = Новый ОписаниеОповещения(\"ПослеЗакрытия\", Обработчики);\n\
+             КонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let params = asking_for_call_sites("method/common/Трогает/Всё", ide::Direction::Out);
+        let result = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+
+        let body_derived: Vec<_> = result
+            .edges
+            .iter()
+            .filter(|e| matches!(e.kind, "manager_creates" | "manager_access" | "notify_ref"))
+            .collect();
+        assert_eq!(
+            body_derived.len(),
+            3,
+            "one edge of each body-derived kind under test: {:?}",
+            result.edges
+        );
+        let text = fs::read_to_string(root.join("CommonModules/Трогает/Ext/Module.bsl")).unwrap();
+        for edge in body_derived {
+            assert!(
+                edge.call_sites_unavailable.is_none(),
+                "{} has a recorded span, so it may not name an absence ({:?})",
+                edge.kind,
+                edge.call_sites_unavailable
+            );
+            let places = edge.call_sites.as_ref().expect("places");
+            assert_eq!(places.len(), 1, "{} is written once", edge.kind);
+            let call = cut(&text, &places[0], "range");
+            assert!(
+                call.contains('(') && call.ends_with(')'),
+                "{} cuts its call expression, got {call:?}",
+                edge.kind
+            );
+        }
+    }
+
+    /// A span that slid onto a call to a DIFFERENT method whose name merely CONTAINS the
+    /// old one is drift, not a confirmation.
+    ///
+    /// This is the class a substring check cannot see: `Считать` sits inside `СчитатьИное`,
+    /// so the moved span certifies itself and the published place cuts someone else's call.
+    /// The neighbouring test only covers the name disappearing outright, which every
+    /// weakening of this check still catches — so without this one the check is graded on
+    /// the input it cannot fail.
+    #[test]
+    fn a_span_that_slid_onto_a_longer_name_is_drift_and_not_a_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_common_module(
+            root,
+            "Сервер",
+            true,
+            "&НаСервере\nФункция Считать() Экспорт КонецФункции\n\
+             &НаСервере\nФункция СчитатьИное() Экспорт КонецФункции",
+        );
+        let module = "CommonModules/Дважды/Ext/Module.bsl";
+        write_common_module(
+            root,
+            "Дважды",
+            true,
+            "&НаСервере\nПроцедура Оба() Экспорт\nСервер.Считать();\nСервер.Считать();\nКонецПроцедуры",
+        );
+
+        let (gdb, roots) = built_with_roots(root);
+        let params = asking_for_call_sites("method/common/Сервер/Считать", ide::Direction::In);
+
+        let before = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+        assert_eq!(
+            before.edges.first().and_then(|e| e.call_sites.as_ref()).map(Vec::len),
+            Some(2),
+            "the control: the unedited file confirms both spans"
+        );
+
+        // Only the second call changes, and it changes into a name that CONTAINS the old
+        // one — so the moved span still reads `Считать` as a prefix.
+        write(
+            root,
+            module,
+            "&НаСервере\nПроцедура Оба() Экспорт\nСервер.Считать();\nСервер.СчитатьИное();\nКонецПроцедуры",
+        );
+
+        let after = gdb.neighbors(&params, Some(&roots)).unwrap().unwrap();
+        let edge = after.edges.first().expect("the edge is still in the artefact");
+        assert_eq!(
+            edge.call_sites_unavailable,
+            Some(ide::SOURCE_DRIFTED),
+            "a span reading another method's name is not a confirmed place: {edge:?}"
+        );
+        assert!(edge.call_sites.is_none(), "and it publishes nothing: {edge:?}");
     }
 
     fn write_catalog(root: &Path, name: &str, id: u8) {
@@ -4155,6 +4680,8 @@ mod tests {
                     detail: ide::GraphDetail::Names,
                     provenance_filter: Vec::new(),
                     edge_kind_filter: Vec::new(),
+                    call_sites: false,
+                    max_call_sites: 0,
                 },
                 None,
             )
@@ -4492,6 +5019,8 @@ mod tests {
                     detail: ide::GraphDetail::Names,
                     provenance_filter: Vec::new(),
                     edge_kind_filter: Vec::new(),
+                    call_sites: false,
+                    max_call_sites: 0,
                 },
                 None,
             )

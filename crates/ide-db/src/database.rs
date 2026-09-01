@@ -618,12 +618,16 @@ impl RootDatabaseImpl {
     }
 
     /// Set the workspace config roots without dependency topology (every
-    /// extension independent — the pre-`dependsOn` semantics). Exactly ONE entry
-    /// must carry the `None` label (the base configuration); every other entry is
-    /// an extension with a `Some(name)` label. Consumers that split base from
-    /// extensions (e.g. [`Self::ordered_config_roots`], `metadata_listings_for_file`)
-    /// rely on this: two `None` entries would silently be treated as two bases,
-    /// and zero would drop the base.
+    /// extension independent — the pre-`dependsOn` semantics). At most ONE entry
+    /// may carry the `None` label (the base configuration); every other entry is
+    /// an extension with a `Some(name)` label. Two `None` entries would silently be
+    /// treated as two bases.
+    ///
+    /// Zero is legal and means an extension-only project, which has no base at all.
+    /// Consumers that split base from extensions must handle it: such a project is
+    /// bootstrapped once its own roots are listed, and the readers that take a
+    /// single side read the file's visibility chain instead of a base — see
+    /// [`Self::substrate_listings`].
     pub fn set_all_config_paths(&mut self, paths: Vec<(Option<String>, std::path::PathBuf)>) {
         self.set_workspace_configs_snapshot(metadata::WorkspaceConfigsSnapshot::from_paths(paths));
     }
@@ -888,17 +892,56 @@ impl RootDatabaseImpl {
         let main_listing = roots.main.as_ref().map(|p| self.metadata_listing(&p.to_string_lossy()));
         let chain_listings: Vec<Option<metadata::MetadataListingInput>> =
             roots.chain.iter().map(|(_, p)| self.metadata_listing(&p.to_string_lossy())).collect();
-        // "Bootstrapped" requires the main root's listing to actually be set. When
-        // there is no main config root at all (the batch / CLI path that never
-        // calls `set_workspace_configs`), `main_listing` is `None`, which must
-        // read as "not bootstrapped" so the caller falls back to the whole-config
-        // lookup. A root present but without a listing (batch/graph/tests) is
-        // likewise not bootstrapped — EVERY chain root must be listed, or the
-        // per-MDO path would silently drop a dependency's objects.
-        let bootstrapped =
-            matches!(main_listing, Some(Some(_))) && chain_listings.iter().all(|l| l.is_some());
+        // "Bootstrapped" means every listing this resolution needs is present.
+        // Which listings those are depends on the project: one with a base needs the
+        // base listed, while an extension-only project has no base to list and is
+        // served entirely by the chain. Demanding a base listing from a project that
+        // has none would pin it to the whole-config fallback forever.
+        //
+        // With no config roots registered at all (the batch / CLI path that never
+        // calls `set_workspace_configs`) the chain is empty and nothing is
+        // bootstrapped, so callers reach their whole-config fallback. A root present
+        // but without a listing (batch/graph/tests) is likewise not bootstrapped —
+        // EVERY chain root must be listed, or the per-MDO path would silently drop a
+        // dependency's objects.
+        let base_ready = match roots.main {
+            Some(_) => matches!(main_listing, Some(Some(_))),
+            None => !roots.chain.is_empty(),
+        };
+        let bootstrapped = base_ready && chain_listings.iter().all(|l| l.is_some());
 
         Some((main_listing.flatten(), chain_listings, bootstrapped))
+    }
+
+    /// The listings a per-file lookup reads once the substrate is populated: the
+    /// base when the project has one, otherwise the file's own visibility chain.
+    ///
+    /// Lookups that compose a base with an overlay take `main` and the chain apart
+    /// themselves; this is for the ones that read a single side. Reading `main`
+    /// alone would answer "not found" for an extension-only project, which has no
+    /// base — while the whole-config fallback answers correctly from the extension.
+    fn substrate_listings(
+        main_listing: Option<metadata::MetadataListingInput>,
+        chain_listings: &[Option<metadata::MetadataListingInput>],
+    ) -> Vec<metadata::MetadataListingInput> {
+        match main_listing {
+            Some(listing) => vec![listing],
+            // The chain is stored dependencies-first with the file's own extension
+            // last, but replacement runs the other way: the extension that owns the
+            // file wins over the one it borrows from. Reading it forward would hand
+            // back a dependency's object and quietly disagree with the whole-config
+            // path, which composes the overlay.
+            None => chain_listings.iter().rev().flatten().copied().collect(),
+        }
+    }
+
+    /// Names collected from several listings, deduplicated the way
+    /// [`Self::subsystem_names_for_file`] does it: one chain can declare the same
+    /// object in a dependency and in the extension that borrows it, and a list shown
+    /// to the user must carry it once. Case-insensitive, because BSL names are.
+    fn dedup_names(names: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        names.into_iter().filter(|name| seen.insert(name.fold_lower())).collect()
     }
 
     /// Resolve a single metadata object visible to `file_id` at per-MDO Salsa
@@ -1119,7 +1162,7 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::HTTPService>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1131,7 +1174,9 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_http_service(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings)
+            .into_iter()
+            .find_map(|listing| metadata::resolve_http_service(self, listing, name.to_string()))
     }
 
     pub fn resolve_web_service_for_file(
@@ -1139,7 +1184,7 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::WebService>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1151,11 +1196,13 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_web_service(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings)
+            .into_iter()
+            .find_map(|listing| metadata::resolve_web_service(self, listing, name.to_string()))
     }
 
     pub fn http_service_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, _ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1175,17 +1222,21 @@ impl RootDatabaseImpl {
                 .unwrap_or_default();
         }
 
-        let mut out = Vec::new();
-        for listing in [main_listing].into_iter().flatten() {
-            for entry in listing.http_services(self).iter() {
-                out.push(entry.name.clone());
-            }
-        }
-        out
+        Self::dedup_names(
+            Self::substrate_listings(main_listing, &chain_listings).into_iter().flat_map(
+                |listing| {
+                    listing
+                        .http_services(self)
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect::<Vec<_>>()
+                },
+            ),
+        )
     }
 
     pub fn web_service_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, _ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1201,13 +1252,17 @@ impl RootDatabaseImpl {
                 .unwrap_or_default();
         }
 
-        let mut out = Vec::new();
-        for listing in [main_listing].into_iter().flatten() {
-            for entry in listing.web_services(self).iter() {
-                out.push(entry.name.clone());
-            }
-        }
-        out
+        Self::dedup_names(
+            Self::substrate_listings(main_listing, &chain_listings).into_iter().flat_map(
+                |listing| {
+                    listing
+                        .web_services(self)
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect::<Vec<_>>()
+                },
+            ),
+        )
     }
 
     pub fn resolve_integration_service_for_file(
@@ -1215,7 +1270,7 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::IntegrationService>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1227,20 +1282,23 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_integration_service(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings).into_iter().find_map(|listing| {
+            metadata::resolve_integration_service(self, listing, name.to_string())
+        })
     }
 
     /// The event-subscription counterpart of [`resolve_common_module_for_file`]:
     /// resolve a subscription by name visible to `file_id`. Event subscriptions are
     /// flat one-file metadata. `Configuration::merge_extension_overlay` does not
     /// merge subscriptions today, so the bootstrapped path intentionally resolves
-    /// from the main listing only to match the merged whole-config lookup.
+    /// from the base listing, or from the file's own visibility chain when the
+    /// project has no base, to match the merged whole-config lookup.
     pub fn resolve_event_subscription_for_file(
         &self,
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::EventSubscription>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1252,11 +1310,13 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_event_subscription(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings).into_iter().find_map(|listing| {
+            metadata::resolve_event_subscription(self, listing, name.to_string())
+        })
     }
 
     pub fn event_subscription_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, _ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1276,13 +1336,17 @@ impl RootDatabaseImpl {
                 .unwrap_or_default();
         }
 
-        let mut out = Vec::new();
-        for listing in [main_listing].into_iter().flatten() {
-            for entry in listing.event_subscriptions(self).iter() {
-                out.push(entry.name.clone());
-            }
-        }
-        out
+        Self::dedup_names(
+            Self::substrate_listings(main_listing, &chain_listings).into_iter().flat_map(
+                |listing| {
+                    listing
+                        .event_subscriptions(self)
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect::<Vec<_>>()
+                },
+            ),
+        )
     }
 
     pub fn enumerate_event_subscriptions_for_file(
@@ -1339,13 +1403,14 @@ impl RootDatabaseImpl {
     /// Resolve the scheduled job `name` visible to `file_id` at per-scheduled-job
     /// granularity. Scheduled jobs are flat one-file metadata. The scheduled-job
     /// counterpart of [`resolve_event_subscription_for_file`]; the bootstrapped
-    /// path reads the main listing only to match the merged whole-config lookup.
+    /// path reads the base listing, or the file's own visibility chain when the
+    /// project has no base, to match the merged whole-config lookup.
     pub fn resolve_scheduled_job_for_file(
         &self,
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::ScheduledJob>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1357,11 +1422,13 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_scheduled_job(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings)
+            .into_iter()
+            .find_map(|listing| metadata::resolve_scheduled_job(self, listing, name.to_string()))
     }
 
     pub fn scheduled_job_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, _ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1377,13 +1444,17 @@ impl RootDatabaseImpl {
                 .unwrap_or_default();
         }
 
-        let mut out = Vec::new();
-        for listing in [main_listing].into_iter().flatten() {
-            for entry in listing.scheduled_jobs(self).iter() {
-                out.push(entry.name.clone());
-            }
-        }
-        out
+        Self::dedup_names(
+            Self::substrate_listings(main_listing, &chain_listings).into_iter().flat_map(
+                |listing| {
+                    listing
+                        .scheduled_jobs(self)
+                        .iter()
+                        .map(|entry| entry.name.clone())
+                        .collect::<Vec<_>>()
+                },
+            ),
+        )
     }
 
     pub fn resolve_role_for_file(
@@ -1391,7 +1462,7 @@ impl RootDatabaseImpl {
         file_id: FileId,
         name: &str,
     ) -> Option<Arc<bsl_metadata::Role>> {
-        let (main_listing, _ext_listing, bootstrapped) =
+        let (main_listing, chain_listings, bootstrapped) =
             self.metadata_listings_for_file(file_id)?;
 
         if !bootstrapped {
@@ -1403,11 +1474,13 @@ impl RootDatabaseImpl {
                 .map(Arc::new);
         }
 
-        main_listing.and_then(|l| metadata::resolve_role(self, l, name.to_string()))
+        Self::substrate_listings(main_listing, &chain_listings)
+            .into_iter()
+            .find_map(|listing| metadata::resolve_role(self, listing, name.to_string()))
     }
 
     pub fn role_names_for_file(&self, file_id: FileId) -> Vec<String> {
-        let Some((main_listing, _ext_listing, bootstrapped)) =
+        let Some((main_listing, chain_listings, bootstrapped)) =
             self.metadata_listings_for_file(file_id)
         else {
             return Vec::new();
@@ -1421,13 +1494,13 @@ impl RootDatabaseImpl {
                 .unwrap_or_default();
         }
 
-        let mut out = Vec::new();
-        for listing in [main_listing].into_iter().flatten() {
-            for entry in listing.roles(self).iter() {
-                out.push(entry.name.clone());
-            }
-        }
-        out
+        Self::dedup_names(
+            Self::substrate_listings(main_listing, &chain_listings).into_iter().flat_map(
+                |listing| {
+                    listing.roles(self).iter().map(|entry| entry.name.clone()).collect::<Vec<_>>()
+                },
+            ),
+        )
     }
 
     pub fn enumerate_roles_for_file(&self, file_id: FileId) -> Vec<Arc<bsl_metadata::Role>> {
@@ -1777,7 +1850,7 @@ impl RootDatabaseImpl {
 
     /// Resolve an event subscription by name across base + every extension. Event
     /// subscriptions carry no extension-overlay merge (mirroring
-    /// [`Self::resolve_event_subscription_for_file`], which reads the main listing only),
+    /// [`Self::resolve_event_subscription_for_file`], which reads a single side),
     /// so this returns the first match in precedence order — base wins, an
     /// extension-only subscription is still surfaced.
     pub fn resolve_event_subscription_across_roots(

@@ -1,6 +1,6 @@
 //! Response-shaping helpers shared by the agent-facing tools.
 
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -88,7 +88,7 @@ pub fn text_within_budget(
     note: &str,
 ) -> CallToolResult {
     truncate_text_to_budget(&mut text, max_output_tokens, note);
-    CallToolResult::success(vec![Content::text(text)])
+    CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
 /// Emit `body` as `structuredContent` while keeping `text` — a human-readable rendering, not
@@ -97,7 +97,7 @@ pub fn text_within_budget(
 /// clients read the envelope. Both describe the same answer, so callers must budget the pair
 /// together (see [`crate::tools::search`]), not the text alone.
 pub fn structured_with_text(text: String, body: Value) -> CallToolResult {
-    let mut result = CallToolResult::success(vec![Content::text(text)]);
+    let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
     result.structured_content = Some(body);
     result
 }
@@ -143,7 +143,7 @@ mod tests {
     fn structured_with_text_keeps_the_human_rendering_as_the_content_block() {
         let result = structured_with_text("#1 hit".to_owned(), json!({ "hits": [] }));
 
-        assert_eq!(result.content[0].raw.as_text().expect("text").text, "#1 hit");
+        assert_eq!(result.content[0].as_text().expect("text").text, "#1 hit");
         assert_eq!(result.structured_content.expect("structured"), json!({ "hits": [] }));
         assert_eq!(result.is_error, Some(false));
     }

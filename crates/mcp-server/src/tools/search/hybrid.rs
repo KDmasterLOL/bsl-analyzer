@@ -308,7 +308,7 @@ mod tests {
         };
         assert!(hits.iter().any(|hit| hit.symbol_name == "Предыдущая"));
         assert!(matches!(semantic, super::super::types::CodeHits::Unavailable(_)));
-        let hybrid_text = hybrid.content[0].raw.as_text().unwrap().text.as_str();
+        let hybrid_text = hybrid.content[0].as_text().unwrap().text.as_str();
         assert!(hybrid_text.contains("Предыдущая"), "{hybrid_text}");
         assert!(!hybrid_text.contains("Новая"), "{hybrid_text}");
         assert!(old.is_superseded());
@@ -346,7 +346,7 @@ mod tests {
             usize::MAX,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+        let text = result.content[0].as_text().expect("text content").text.as_str();
 
         assert!(text.contains("ПроверитьИНН"), "{text}");
         assert!(text.contains("-- RAG semantic index is still building"), "{text}");
@@ -376,7 +376,7 @@ mod tests {
             usize::MAX,
         )
         .unwrap();
-        let text = result.content[0].raw.as_text().expect("text content").text.as_str();
+        let text = result.content[0].as_text().expect("text content").text.as_str();
 
         assert!(text.contains("ПроверитьИНН"), "{text}");
         assert!(text.contains("-- semantic skipped: runtime initialization failed --"), "{text}");
@@ -408,7 +408,7 @@ mod tests {
             usize::MAX,
         )
         .unwrap();
-        let text = hit_result.content[0].raw.as_text().expect("text").text.as_str();
+        let text = hit_result.content[0].as_text().expect("text").text.as_str();
         let hit_pos = text.find("ПроверитьИНН").expect("hit line present");
         let note_pos = text.find("-- semantic skipped").expect("note present");
         assert!(note_pos > hit_pos, "note must trail the hit lines: {text}");
@@ -426,7 +426,7 @@ mod tests {
             usize::MAX,
         )
         .unwrap();
-        let empty_text = empty_result.content[0].raw.as_text().expect("text").text.as_str();
+        let empty_text = empty_result.content[0].as_text().expect("text").text.as_str();
         assert_eq!(empty_text, "No results found.");
         assert!(!empty_text.contains("--"), "no trailing note without hits: {empty_text}");
         // The text says nothing about the degradation, but a machine consumer must not read
@@ -461,7 +461,7 @@ mod tests {
             let note = "с".repeat(note_length);
             for budget in (50usize..=2000).step_by(25) {
                 let result = assemble_code_response(&hits, None, None, Some(&note), budget);
-                let text = result.content[0].raw.as_text().expect("text").text.as_str();
+                let text = result.content[0].as_text().expect("text").text.as_str();
                 let body = result.structured_content.as_ref().expect("structured");
                 let size = text.len() + serde_json::to_string(body).unwrap().len();
 
@@ -516,7 +516,7 @@ mod tests {
             )
             .unwrap();
 
-            let text = result.content[0].raw.as_text().expect("text").text.as_str();
+            let text = result.content[0].as_text().expect("text").text.as_str();
             let body = result.structured_content.as_ref().expect("structured");
             let size = text.len() + serde_json::to_string(body).unwrap().len();
 
@@ -565,7 +565,7 @@ mod tests {
         )
         .unwrap();
 
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         assert!(text.starts_with("Modality tag per hit:"), "text listing unchanged: {text}");
 
         let body = result.structured_content.as_ref().expect("structured listing");
@@ -620,7 +620,7 @@ mod tests {
         assert_eq!(body["progress"]["chunks"]["done"], 40);
         assert_eq!(body["progress"]["batches"]["total"], 10);
 
-        let text = result.content[0].raw.as_text().expect("text mirror").text.as_str();
+        let text = result.content[0].as_text().expect("text mirror").text.as_str();
         let mirror: serde_json::Value =
             serde_json::from_str(text).expect("text mirror must be valid JSON");
         assert_eq!(&mirror, body, "text mirror must match structuredContent");

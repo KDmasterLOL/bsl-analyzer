@@ -11,7 +11,7 @@ use std::{
 };
 
 use mcp_server::{serve_http, McpProfile, McpServer, SharedState, MAX_HTTP_REQUEST_BODY_BYTES};
-use reqwest::header::{ACCEPT, CONTENT_TYPE, HOST};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::{
     model::CallToolRequestParams, service::RunningService,
     transport::StreamableHttpClientTransport, RoleClient, ServiceExt,
@@ -241,6 +241,61 @@ async fn disallowed_host_is_rejected_before_mcp_dispatch() {
     server.stop().await;
 }
 
+/// A browser `Origin` neither opens nor closes the door: the gate is the `Host`.
+///
+/// The transport can validate `Origin` too, but only against an allowlist we deliberately
+/// never populate — leaving that list empty is what keeps a non-browser client, which sends
+/// no `Origin` at all, from being refused. The pair below pins both halves of that decision:
+/// presenting an `Origin` must not get a request past the `Host` gate, and must not get it
+/// refused either. Without the first half the gate would pass on a build that stopped
+/// checking `Host`; without the second, on a build that started refusing every `Origin`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_origin_header_changes_nothing_on_either_side_of_the_host_gate() {
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let client = reqwest::Client::new();
+
+    // An `initialize`, not a `ping`: a request that needs a session the test has not opened
+    // is turned away by the transport before anything looks at `Origin`, and then "not
+    // refused" would hold no matter what the Origin handling did. This one is served, so
+    // the assertion below is about the answer rather than about the absence of one status.
+    let allowed = client
+        .post(server.mcp_url())
+        .header(HOST, "127.0.0.1")
+        .header(ORIGIN, "https://app.example.test")
+        .header(ACCEPT, MCP_ACCEPT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"origin-probe","version":"0"}}}"#,
+        )
+        .send()
+        .await
+        .expect("request should receive an HTTP response");
+    let status = allowed.status();
+    let body = allowed.text().await.expect("the answer has a body");
+    assert!(
+        status.is_success() && body.contains("protocolVersion"),
+        "a request carrying an Origin was not served: {status} {body}"
+    );
+
+    let refused = client
+        .post(server.mcp_url())
+        .header(HOST, "attacker.example")
+        .header(ORIGIN, "https://app.example.test")
+        .header(ACCEPT, MCP_ACCEPT)
+        .header(CONTENT_TYPE, "application/json")
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#)
+        .send()
+        .await
+        .expect("request should receive an HTTP response");
+    assert_eq!(
+        refused.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "a disallowed Host was served because the request carried an Origin"
+    );
+
+    server.stop().await;
+}
+
 /// Captured warnings, shared by every test in this binary. The transport serves on its own
 /// tokio worker threads, so a thread-scoped subscriber would never see its events; the
 /// global one does, and each caller keys its assertions on an allowlist entry unique to
@@ -329,8 +384,13 @@ async fn oversized_request_body_is_rejected() {
         Err(error) => assert!(error.is_request(), "unexpected transport failure: {error}"),
     }
 
-    let health =
-        client.get(server.health_url()).send().await.expect("server should survive the refusal");
+    // Survival is a property of the server, not of the connection the refusal ran on:
+    // that one is closed by design, and asking on it would measure keep-alive instead.
+    let health = reqwest::Client::new()
+        .get(server.health_url())
+        .send()
+        .await
+        .expect("server should survive the refusal");
     assert_eq!(health.status(), reqwest::StatusCode::OK);
 
     server.stop().await;
@@ -356,8 +416,8 @@ async fn oversized_chunked_body_is_rejected_with_the_same_status() {
         .await
         .expect("headers should be written");
     // The body is written concurrently with reading the reply: the server refuses
-    // mid-body and keeps the connection alive, so neither waiting for the write to
-    // finish nor reading to EOF would terminate.
+    // mid-body without draining the rest, so waiting for the write to finish would
+    // block on a peer that has stopped reading.
     let (mut reader, mut writer) = stream.into_split();
     let body = tokio::spawn(async move {
         let _ = writer.write_all(&vec![b'x'; oversized]).await;
@@ -494,4 +554,195 @@ async fn cancellation_stops_an_active_session_and_releases_the_listener() {
         .expect("graceful shutdown should release the port even with an active client");
     drop(rebound);
     drop(client);
+}
+
+/// Read a response head from a raw socket, stopping at the blank line so the reader
+/// never swallows the start of whatever comes next.
+async fn read_response_head(reader: &mut (impl tokio::io::AsyncReadExt + Unpin)) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        let read = tokio::time::timeout(TEST_TIMEOUT, reader.read(&mut byte))
+            .await
+            .expect("the server should answer")
+            .expect("the response should be readable");
+        assert_ne!(
+            read,
+            0,
+            "the server closed without answering: {}",
+            String::from_utf8_lossy(&head)
+        );
+        head.push(byte[0]);
+    }
+    String::from_utf8_lossy(&head).into_owned()
+}
+
+async fn response_head_for(address: SocketAddr, request: &str) -> String {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream =
+        tokio::net::TcpStream::connect(address).await.expect("test client should connect");
+    stream.write_all(request.as_bytes()).await.expect("the request should be written");
+    read_response_head(&mut stream).await
+}
+
+/// The chunked oversize needs a body writer running alongside the read: the server stops
+/// reading at the limit, so writing the whole thing first would never finish.
+async fn chunked_oversize_response_head(address: SocketAddr) -> String {
+    use tokio::io::AsyncWriteExt;
+
+    let oversized = MAX_HTTP_REQUEST_BODY_BYTES + 1;
+    let mut stream =
+        tokio::net::TcpStream::connect(address).await.expect("test client should connect");
+    stream
+        .write_all(
+            format!(
+                "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAccept: {MCP_ACCEPT}\r\n\
+                 Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{oversized:x}\r\n"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("headers should be written");
+    let (mut reader, mut writer) = stream.into_split();
+    let body = tokio::spawn(async move {
+        let _ = writer.write_all(&vec![b'x'; oversized]).await;
+    });
+
+    let head = read_response_head(&mut reader).await;
+    body.abort();
+    head
+}
+
+fn announced_oversize_request(address: SocketAddr) -> String {
+    let oversized = MAX_HTTP_REQUEST_BODY_BYTES + 1;
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAccept: {MCP_ACCEPT}\r\n\
+         Content-Type: application/json\r\nContent-Length: {oversized}\r\n\r\n"
+    )
+}
+
+fn host_refusal_request(host: &str) -> String {
+    // Announces a body and sends one byte of it, so the refusal provably precedes the
+    // read rather than merely racing it.
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: {host}\r\nAccept: {MCP_ACCEPT}\r\n\
+         Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{{"
+    )
+}
+
+fn announces_a_closed_connection(head: &str) -> bool {
+    head.to_ascii_lowercase().contains("\r\nconnection: close\r\n")
+}
+
+/// Every refusal the server answers before routing leaves the request body unread, and
+/// hyper cannot keep such a connection: it closes the read side and the socket dies right
+/// after the response. Saying nothing leaves an HTTP/1.1 client entitled to pool that
+/// connection and send its next request into a socket the server already closed — which
+/// is how a refusal surfaces as `IncompleteMessage` on Linux and `WSAECONNABORTED` on
+/// Windows instead of as the status the server actually sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_refusal_before_routing_announces_the_closed_connection() {
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let address = server.address;
+
+    let refusals = [
+        (
+            "an announced oversize",
+            response_head_for(address, &announced_oversize_request(address)).await,
+        ),
+        ("a chunked oversize", chunked_oversize_response_head(address).await),
+        (
+            "a malformed Host",
+            response_head_for(address, &host_refusal_request("[[localhost]]")).await,
+        ),
+        (
+            "a disallowed Host",
+            response_head_for(address, &host_refusal_request("attacker.example")).await,
+        ),
+    ];
+    for (refusal, head) in refusals {
+        assert!(
+            announces_a_closed_connection(&head),
+            "the refusal of {refusal} discards the request body and closes the socket, \
+             so the response must say so: {head}"
+        );
+    }
+
+    server.stop().await;
+}
+
+/// The limit is a property of the request, not of how the request was framed. While the
+/// announced size was refused by one layer and the chunked size by another, the two
+/// answers differed in body and content type for no reason a client could act on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_oversize_refusal_does_not_depend_on_framing() {
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let address = server.address;
+
+    let announced = response_head_for(address, &announced_oversize_request(address)).await;
+    let chunked = chunked_oversize_response_head(address).await;
+
+    let without_date = |head: &str| {
+        head.lines()
+            .filter(|line| !line.to_ascii_lowercase().starts_with("date:"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        without_date(&announced),
+        without_date(&chunked),
+        "one limit must give one answer, whichever framing announced the oversize"
+    );
+
+    server.stop().await;
+}
+
+/// A refusal that did read the whole body leaves a perfectly usable connection, and
+/// closing it would cost every client a reconnect for nothing. `/health` is registered
+/// for GET only, so a complete POST to it is refused by the router — after the body was
+/// collected. Without this case, closing every response whatsoever would satisfy every
+/// other gate here.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refusal_that_read_the_body_keeps_the_connection() {
+    use tokio::io::AsyncWriteExt;
+
+    let server = TestServer::start(loopback_allowed_hosts()).await;
+    let address = server.address;
+    let mut stream =
+        tokio::net::TcpStream::connect(address).await.expect("test client should connect");
+    stream
+        .write_all(
+            format!(
+                "POST /health HTTP/1.1\r\nHost: {address}\r\n\
+                 Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("the request should be written");
+
+    let refusal = read_response_head(&mut stream).await;
+    assert!(
+        refusal.starts_with("HTTP/1.1 405"),
+        "expected a method refusal from the router, got: {}",
+        refusal.lines().next().unwrap_or_default()
+    );
+    assert!(
+        !announces_a_closed_connection(&refusal),
+        "the body was read, so the connection is still good and must not be given up: {refusal}"
+    );
+
+    stream
+        .write_all(format!("GET /health HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes())
+        .await
+        .expect("the second request should be written");
+    let reused = read_response_head(&mut stream).await;
+    assert!(
+        reused.starts_with("HTTP/1.1 200"),
+        "the connection the refusal kept must still serve: {}",
+        reused.lines().next().unwrap_or_default()
+    );
+
+    server.stop().await;
 }

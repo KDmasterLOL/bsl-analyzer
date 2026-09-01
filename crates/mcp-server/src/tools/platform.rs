@@ -1835,7 +1835,7 @@ mod tests {
     }
 
     fn extract_text(result: &CallToolResult) -> &str {
-        result.content[0].raw.as_text().expect("expected text content").text.as_str()
+        result.content[0].as_text().expect("expected text content").text.as_str()
     }
 
     fn structured(result: &CallToolResult) -> &serde_json::Value {

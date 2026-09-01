@@ -281,7 +281,7 @@ fn build_check_config_report(
     );
     let _ = writeln!(out, "  Extensions from: {}", providers.extensions.label(config_path));
     if let Ok(project) = project {
-        if let Some(notice) = project_model::standalone_extension_notice(project.source_path()) {
+        if let Some(notice) = project.standalone_extension_notice() {
             let _ = writeln!(out, "  WARNING: {notice}");
         }
     }

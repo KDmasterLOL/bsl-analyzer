@@ -175,6 +175,47 @@ impl ReferenceSearchState {
     }
 }
 
+/// Why a workspace could not be brought up.
+#[derive(Debug)]
+pub enum WorkspaceInitError {
+    /// The project config or its extension topology is invalid: a daemon must not come
+    /// up analyzing a differently-shaped project than the one configured.
+    Project(project_model::ProjectError),
+    /// The derived-cache root contains a scan root, so following that root and treating
+    /// the cache as the server's own output are mutually exclusive.
+    CacheCoversScanRoot { cache: std::path::PathBuf, root: std::path::PathBuf },
+}
+
+impl std::fmt::Display for WorkspaceInitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkspaceInitError::Project(error) => error.fmt(f),
+            WorkspaceInitError::CacheCoversScanRoot { cache, root } => write!(
+                f,
+                "cache directory {} contains the scanned source root {}; \
+                 choose a cache directory outside every source root",
+                cache.display(),
+                root.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WorkspaceInitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            WorkspaceInitError::Project(error) => Some(error),
+            WorkspaceInitError::CacheCoversScanRoot { .. } => None,
+        }
+    }
+}
+
+impl From<project_model::ProjectError> for WorkspaceInitError {
+    fn from(error: project_model::ProjectError) -> Self {
+        WorkspaceInitError::Project(error)
+    }
+}
+
 impl SharedState {
     /// The workspace search mode implied by the baseline bootstrap: configured INTENT,
     /// never connect success. EVERY postgres-configured outcome — a deferred connect
@@ -201,7 +242,7 @@ impl SharedState {
     /// Errors when the project config or its extension topology is invalid: a
     /// daemon must not come up analyzing a differently-shaped project than the
     /// one configured.
-    pub fn workspace(source_dir: PathBuf) -> Result<Self, project_model::ProjectError> {
+    pub fn workspace(source_dir: PathBuf) -> Result<Self, WorkspaceInitError> {
         let cache = crate::cache::WorkspaceCacheLayout::for_workspace(&source_dir);
         Self::workspace_with_cache(source_dir, cache)
     }
@@ -210,9 +251,41 @@ impl SharedState {
     pub fn workspace_with_cache(
         source_dir: PathBuf,
         cache: crate::cache::WorkspaceCacheLayout,
-    ) -> Result<Self, project_model::ProjectError> {
+    ) -> Result<Self, WorkspaceInitError> {
         let project = crate::project::at(&source_dir)?;
         let source_root = project.configuration_path().map(Path::to_path_buf);
+
+        // One value, used by everything that reads the tree: the watch, the walk that
+        // feeds the graph and the search index, and the roots the engine registers. Two
+        // derivations of "where my cache is" would be two chances to disagree, and a
+        // disagreement here reads as a file that is indexed but never updated.
+        let cache_exclusions: Vec<PathBuf> =
+            cache.spellings().iter().map(|path| path.to_path_buf()).collect();
+
+        // A cache that contains a watched root would exclude that whole root from the
+        // watch (see the hub below), leaving the server serving a tree it silently
+        // stopped following. Refused rather than excluded, because the two are
+        // indistinguishable from the outside: a typo in `--cache-dir` and a deliberate
+        // choice look alike, and the deliberate one has no use.
+        //
+        // Asked of the same type the watch and the walk ask, and asked about the targets
+        // the hub is actually given rather than the scan roots alone: the workspace root
+        // rides along as a non-recursive target so config edits are delivered even in a
+        // nested layout, and the exclusion is consulted before the config-file branch. A
+        // check over scan roots only would let a cache covering the workspace root
+        // swallow every config edit in silence — the same failure the check exists to
+        // refuse, one target over.
+        let scan_roots = project.source_roots();
+        let watched: Vec<PathBuf> =
+            crate::change_hub::watch_targets_for(&project.root, &scan_roots)
+                .into_iter()
+                .map(|target| target.path)
+                .collect();
+        if let Some((cache_root, root)) =
+            project_model::PathScope::new(&watched, &cache_exclusions).hole_covering_a_root()
+        {
+            return Err(WorkspaceInitError::CacheCoversScanRoot { cache: cache_root, root });
+        }
 
         // Claimed before any background pass starts, so the graph's very first build already
         // knows whether this daemon owns the workspace's derived caches or is the superseded
@@ -225,7 +298,9 @@ impl SharedState {
         // named at all, which is the silence the warning exists to break. The resident builds
         // the same table on every config drift and deliberately says nothing: a line repeated
         // per rebuild buries the one that is new.
-        crate::project::warn_about_rejected_roots(&crate::project::workspace_roots(&project).1);
+        crate::project::warn_about_rejected_roots(
+            &crate::project::workspace_roots(&project, &cache_exclusions).1,
+        );
 
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
         let index_progress = IndexProgress::new();
@@ -260,11 +335,14 @@ impl SharedState {
         // one path that declares nothing. The window belongs to that test rather than to a
         // session: a serving daemon calls `warm_start` right after this constructor, and the
         // resident's publish re-declares the roots too.
-        let scan_roots = project.source_roots();
-        let change_hub = WorkspaceChangeHub::start_targets(crate::change_hub::watch_targets_for(
-            &project.root,
-            &scan_roots,
-        ));
+        // The derived cache is excluded here and nowhere else. It is the server's own
+        // output, so a change inside it is never a workspace change — and by default it
+        // lives at `<workspace>/.build`, inside the recursive watch, where every index
+        // write would otherwise come back as an event about the tree being analyzed.
+        let change_hub = WorkspaceChangeHub::start_targets_excluding(
+            crate::change_hub::watch_targets_for(&project.root, &scan_roots),
+            cache.spellings().iter().map(|p| p.to_path_buf()).collect(),
+        );
 
         // Subscribed here, synchronously, before the thread that reads disk even exists —
         // the same order the graph and the resident already keep, where the cursor is taken
@@ -333,8 +411,9 @@ impl SharedState {
         // kept fresh by the resident's own drift poll, so no separate configuration
         // snapshot is loaded here. The same resident serves the search overlay's incremental
         // reindex through the snapshot-source adapter.
-        let diagnostics =
-            DiagnosticsState::for_workspace(source_dir.clone()).with_change_hub(change_hub.clone());
+        let diagnostics = DiagnosticsState::for_workspace(source_dir.clone())
+            .with_excluded(cache_exclusions.clone())
+            .with_change_hub(change_hub.clone());
         let snapshot_source: Arc<dyn bsl_search::ModuleSnapshotSource> = Arc::new(
             crate::diagnostics_state::ResidentModuleSnapshotSource::new(diagnostics.clone()),
         );
@@ -380,6 +459,7 @@ impl SharedState {
             change_hub: Some(change_hub),
             workspace_lease,
             overlay_retry,
+            tasks: rmcp::task_manager::TaskManager::new(),
         })
     }
 
@@ -687,6 +767,7 @@ impl SharedState {
             change_hub: None,
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             overlay_retry: None,
+            tasks: rmcp::task_manager::TaskManager::new(),
         }
     }
 
@@ -710,6 +791,7 @@ impl SharedState {
             change_hub: None,
             workspace_lease: crate::workspace_lease::WorkspaceLease::unmanaged(),
             overlay_retry: None,
+            tasks: rmcp::task_manager::TaskManager::new(),
         }
     }
 
@@ -976,8 +1058,11 @@ impl SharedState {
         Ok(())
     }
 
-    fn roots_of(project: &project_model::Project) -> bsl_search::WorkspaceRoots {
-        crate::project::workspace_roots(project).0
+    fn roots_of(
+        project: &project_model::Project,
+        excluded: &[PathBuf],
+    ) -> bsl_search::WorkspaceRoots {
+        crate::project::workspace_roots(project, excluded).0
     }
 
     fn semantic_runtime_status_for_mode(
@@ -1033,6 +1118,12 @@ impl SharedState {
         graph: &GraphState,
         lease: &crate::workspace_lease::WorkspaceLease,
     ) -> Result<Option<WorkspaceSearchInit>, bsl_search::SearchError> {
+        // The graph carries the resolved cache layout, so this pass reads the tree
+        // through the same hole the watch does instead of re-deriving where the cache is.
+        let excluded: Vec<PathBuf> = graph
+            .cache()
+            .map(|cache| cache.spellings().iter().map(|path| path.to_path_buf()).collect())
+            .unwrap_or_default();
         let watch_armed = match watch {
             Some((hub, policy)) => Self::await_watch(hub, policy),
             None => false,
@@ -1078,7 +1169,7 @@ impl SharedState {
             else {
                 return Ok(None);
             };
-            let roots = Self::roots_of(&project);
+            let roots = Self::roots_of(&project, &excluded);
             let Some(()) = Self::startup_apply_once(lease, || {
                 Self::configure_workspace_engine(
                     &mut engine,
@@ -1204,7 +1295,7 @@ impl SharedState {
         // embeddings, throwing away vectors already paid for — the opposite of resume.
         // Changed files are still detected and re-embedded via their content-hash mismatch.
 
-        let roots = Self::roots_of(&project);
+        let roots = Self::roots_of(&project, &excluded);
         // Declaring the local mode also clears inherited fingerprint rows: they claim
         // "verified against the manifest", which this mode can neither honour nor refresh —
         // a row surviving the local period would suppress a same-stat edit after a switch
@@ -1911,6 +2002,116 @@ mod tests {
             },
             external_baseline: None,
         })
+    }
+
+    /// The walk and the watch must describe the same tree. A source file under the
+    /// cache that the walk indexes but the watch never reports is worse than either
+    /// alone: it enters the corpus and then freezes at the content of the last full
+    /// scan, because no edit to it ever arrives as drift.
+    #[test]
+    fn a_source_file_under_the_cache_enters_neither_the_walk_nor_the_watch() {
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("Configuration.xml"),
+            "<Configuration><Name>Conf</Name></Configuration>",
+        )
+        .unwrap();
+        write_common_module_tree(
+            workspace.path(),
+            "Живой",
+            "Процедура Проц() Экспорт КонецПроцедуры\n",
+        );
+        let cache = crate::cache::WorkspaceCacheLayout::for_workspace(workspace.path());
+        let vendored = cache.root().join("vendor");
+        write_common_module_tree(&vendored, "Чужой", "Процедура Чуж() Экспорт КонецПроцедуры\n");
+
+        let excluded: Vec<PathBuf> =
+            cache.spellings().iter().map(|path| path.to_path_buf()).collect();
+        let project = crate::project::at(workspace.path()).unwrap();
+        let snapshot =
+            crate::graph::input::ProjectSnapshot::from_project_excluding(&project, &excluded);
+        let universe = crate::graph::universe::ScannedUniverse::scan_excluding(
+            &snapshot.scan_roots,
+            &snapshot.excluded,
+        );
+
+        let walked: Vec<String> =
+            universe.files.iter().map(|(_, path)| path.display().to_string()).collect();
+        assert!(
+            walked.iter().any(|path| path.contains("Живой")),
+            "the workspace module was not walked: {walked:?}"
+        );
+        assert!(
+            !walked.iter().any(|path| path.contains("Чужой")),
+            "a module under the cache was walked: {walked:?}"
+        );
+    }
+
+    /// A cache that contains a scan root would exclude that root from the watch, so the
+    /// server would serve a tree it stopped following. Every scan root is checked, not
+    /// just the configuration root: an extension root swallowed the same way is the same
+    /// silent hole, and a check named after one member of the class leaves the rest open.
+    #[test]
+    fn a_cache_that_contains_a_scanned_root_is_refused() {
+        let workspace = tempdir().unwrap();
+        fs::write(
+            workspace.path().join("Configuration.xml"),
+            "<Configuration><Name>Conf</Name></Configuration>",
+        )
+        .unwrap();
+
+        let parent = crate::cache::WorkspaceCacheLayout::from_root(
+            workspace.path().parent().unwrap().to_path_buf(),
+        );
+        let refused = SharedState::workspace_with_cache(workspace.path().to_path_buf(), parent);
+        let Err(error) = refused else {
+            panic!("a cache above the source root must be refused");
+        };
+        assert!(
+            matches!(error, crate::WorkspaceInitError::CacheCoversScanRoot { .. }),
+            "unexpected error: {error}"
+        );
+
+        // The workspace root is watched too — non-recursively, for config files — and
+        // the exclusion is consulted before the config branch, so a cache covering it
+        // swallows every config edit just as silently.
+        // The sources live OUTSIDE the project directory on purpose: with them inside,
+        // a cache covering the project root covers the scan root too, and a check that
+        // looks only at scan roots refuses the case anyway — the input would not tell
+        // the two implementations apart.
+        let elsewhere = tempdir().unwrap();
+        let sources = elsewhere.path().join("sources");
+        let nested = tempdir().unwrap();
+        fs::create_dir_all(&sources).unwrap();
+        fs::write(
+            sources.join("Configuration.xml"),
+            "<Configuration><Name>Conf</Name></Configuration>",
+        )
+        .unwrap();
+        fs::write(
+            nested.path().join("bsl-analyzer.toml"),
+            format!("[source]\nroot = \"{}\"\n", sources.display()),
+        )
+        .unwrap();
+        let over_project_root =
+            crate::cache::WorkspaceCacheLayout::from_root(nested.path().to_path_buf());
+        let refused_config =
+            SharedState::workspace_with_cache(nested.path().to_path_buf(), over_project_root);
+        let Err(error) = refused_config else {
+            panic!("a cache covering the workspace root must be refused");
+        };
+        assert!(
+            matches!(error, crate::WorkspaceInitError::CacheCoversScanRoot { .. }),
+            "unexpected error: {error}"
+        );
+
+        // Positive control: a cache beside the workspace is the ordinary case and must
+        // still be accepted, or the assertion above would hold on a build that refuses
+        // every cache it is given.
+        let beside = tempdir().unwrap();
+        let ok = crate::cache::WorkspaceCacheLayout::from_root(beside.path().to_path_buf());
+        SharedState::workspace_with_cache(workspace.path().to_path_buf(), ok)
+            .expect("a cache outside every source root must be accepted");
     }
 
     #[test]
@@ -2622,7 +2823,7 @@ mod tests {
 
         let project = crate::project::at(ws).expect("valid extension-only project");
         assert!(project.configuration_path().is_none());
-        let (roots, rejected) = crate::project::workspace_roots(&project);
+        let (roots, rejected) = crate::project::workspace_roots(&project, &[]);
         assert!(rejected.is_empty());
         assert!(roots.configuration().is_none());
 
@@ -2664,7 +2865,7 @@ mod tests {
         );
         state.shutdown();
         let result = result.expect("metadata form must resolve under the nested config root");
-        let text = result.content[0].raw.as_text().expect("text content").text.clone();
+        let text = result.content[0].as_text().expect("text content").text.clone();
         assert!(text.contains("ФормаСписка"), "form listing resolves under src/cf: {text}");
     }
     #[test]
