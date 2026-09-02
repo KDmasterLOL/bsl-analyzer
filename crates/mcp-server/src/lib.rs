@@ -970,6 +970,10 @@ impl McpServer {
         self.state.superseded()
     }
 
+    pub(crate) fn background_work_active(&self) -> bool {
+        self.state.background_work_active()
+    }
+
     /// Browse the configuration's metadata: objects, their structure, and managed forms.
     /// Use to answer "what objects exist / what does object X contain / what is on form Y" —
     /// attributes, tabular sections, forms, types — straight from the metadata substrate. Not

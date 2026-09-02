@@ -181,6 +181,8 @@ async fn serve(
                         "backend superseded by a newer daemon generation and idle; shutting down"
                     );
                     break;
+                } else if server.background_work_active() {
+                    idle_since = None;
                 } else {
                     let grace = if warmed.load(Ordering::SeqCst) { idle_ttl } else { orphan_grace };
                     let since = *idle_since.get_or_insert_with(Instant::now);

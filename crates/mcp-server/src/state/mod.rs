@@ -15,6 +15,7 @@ use bsl_search::IndexProgress;
 use onec_client::Client as OnecClient;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) use types::{
@@ -67,6 +68,7 @@ pub struct SharedState {
     onec_connections: BTreeMap<String, OnecConnection>,
     debug_session: Arc<Mutex<Option<bsl_debug::session::DebugSession>>>,
     search_engine: SharedSearchEngine,
+    workspace_search_initializing: Arc<AtomicBool>,
     index_progress: Arc<IndexProgress>,
     semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
     /// Outcome of the startup overlay warmup, so `search status` can distinguish "no local
@@ -213,6 +215,18 @@ impl SharedState {
 
     pub(crate) fn owns_caches(&self) -> bool {
         self.workspace_lease.owns_caches()
+    }
+
+    pub(crate) fn background_work_active(&self) -> bool {
+        self.workspace_search_initializing.load(Ordering::Relaxed)
+            || self.reference_search.loading()
+            || self.index_progress.is_active()
+            || self.semantic_runtime.try_lock().map_or(true, |status| {
+                matches!(
+                    *status,
+                    SemanticRuntimeStatus::Indexing | SemanticRuntimeStatus::OverlaySyncing
+                )
+            })
     }
 
     /// Start building the diagnostics resident now instead of on the first tool call.
@@ -580,5 +594,21 @@ mod standalone_extension_tests {
 
         std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
         assert!(state.standalone_extension_notice().is_none(), "and must go away again");
+    }
+}
+
+#[cfg(test)]
+mod background_lifetime_tests {
+    use super::SharedState;
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn active_indexing_keeps_the_backend_alive() {
+        let state = SharedState::shared();
+        assert!(!state.background_work_active());
+
+        state.index_progress().active.store(true, Ordering::Relaxed);
+
+        assert!(state.background_work_active());
     }
 }
