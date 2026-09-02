@@ -20,7 +20,7 @@ use rmcp::ServiceExt;
 use tempfile::TempDir;
 
 fn reference_server() -> McpServer {
-    McpServer::new(McpProfile::Reference, SharedState::reference(None))
+    McpServer::new(McpProfile::Reference, SharedState::shared())
 }
 
 #[cfg(any(unix, windows))]
