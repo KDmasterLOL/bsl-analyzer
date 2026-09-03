@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::literal_context;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use std::collections::HashSet;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
@@ -28,7 +29,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let authorized_str = ctx.config_string(
             DiagnosticCode::MagicDate,
             "authorizedDates",
@@ -250,7 +251,7 @@ fn is_in_date_function_simple_assignment(token: &SyntaxToken) -> bool {
 }
 
 #[inline]
-pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::MagicDate;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -286,34 +287,15 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
             date_str
         ),
         severity: ctx.severity(code),
-        range: token.text_range(),
+        range: LocalRange::of_detached_node(token.text_range()),
         tags: ctx.tags(code),
         fixes: vec![],
     });
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("MagicDate::check").entered();
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            check_token(&token, &mut diagnostics, ctx);
-        }
-    }
-
-    tracing::debug!(count = diagnostics.len(), "MagicDate diagnostics found");
-
-    diagnostics
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config};
+    use crate::test_utils::{check_diagnostics_for, check_diagnostics_for_with_config};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     #[test]
     fn test_line_31_detection() {
@@ -321,7 +303,7 @@ mod tests {
     ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));
 КонецПроцедуры"#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
 
         assert_eq!(diagnostics.len(), 1, "Should detect the date inside nested function calls");
     }
@@ -331,7 +313,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	День = Дата("00020101") + Шаг;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Дата() in expression should be detected");
     }
 
@@ -340,7 +322,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	День = Дата("00020101121314") + Шаг;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Дата() with time in expression should be detected");
     }
 
@@ -349,7 +331,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	День = '00010102' + Шаг;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Single-quoted date in expression should be detected");
     }
 
@@ -360,7 +342,7 @@ mod tests {
 		Сейчас = Сейчас + Шаг;
 	КонецЦикла;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Date in while condition should be detected");
     }
 
@@ -369,7 +351,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	ИменаПараметров = СтроковыеФункции.РазложитьСтрокуВМассивПодстрок(ИмяПараметра, "00050101", "00050101");
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 2, "Both dates in method call should be detected");
     }
 
@@ -378,7 +360,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	Настройки = Настройки('12350101');
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Date in function argument should be detected");
     }
 
@@ -387,7 +369,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	Настройки.Свойство("00020501121314", ЗначениеЕдиничногоПараметра);
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "String date in method call should be detected");
     }
 
@@ -396,7 +378,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	Выполнить("00020501121314" + '12350101');
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 2, "Both dates in Выполнить should be detected");
     }
 
@@ -405,7 +387,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	ОтборЭлемента.ПравоеЗначение = Новый СтандартнаяДатаНачала(Дата('19800101000000'));
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Date inside nested constructor call should be detected");
     }
 
@@ -414,7 +396,7 @@ mod tests {
         let code = r#"Процедура Тест()
 	Значение = ?(А = '39990202', '39991231235959', '39990101000000');
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 3, "All three dates in ternary should be detected");
     }
 
@@ -424,7 +406,7 @@ mod tests {
 	Если Сейчас < Дата("12340101") Тогда
 	КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Date in if condition should be detected");
     }
 
@@ -432,7 +414,7 @@ mod tests {
     fn test_configured_authorized_dates() {
         let code = "Процедура Тест()\n\tДата1 = '19800101' + Шаг;\n\tДата2 = '20250101' + Шаг;\nКонецПроцедуры";
 
-        let diagnostics_default = check_ast_diagnostic(code, check);
+        let diagnostics_default = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics_default.len(), 2, "Both dates should be detected by default");
 
         let mut config = DiagnosticsConfig::default();
@@ -442,7 +424,8 @@ mod tests {
                 "authorizedDates": "00010101,00010101000000,000101010000,19800101"
             }),
         );
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics =
+            check_diagnostics_for_with_config(code, config, DiagnosticCode::MagicDate);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -457,35 +440,35 @@ mod tests {
     #[test]
     fn test_single_quoted_date_in_expression() {
         let code = r"День = '00010102' + Шаг;";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Single-quoted date in expression should be detected");
     }
 
     #[test]
     fn test_date_function_simple_assignment_excluded() {
         let code = r#"День = Дата("00020101");"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 0, "Simple Дата() assignment should be excluded");
     }
 
     #[test]
     fn test_date_function_expression_detected() {
         let code = r#"День = Дата("00020101") + Шаг;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 1, "Дата() in expression should be detected");
     }
 
     #[test]
     fn test_authorized_date_excluded() {
         let code = r#"День = '00010101';"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 0, "Authorized date should be excluded");
     }
 
     #[test]
     fn test_return_statement_excluded() {
         let code = r"Возврат '39991231235959';";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::MagicDate);
         assert_eq!(diagnostics.len(), 0, "Date in return statement should be excluded");
     }
 }

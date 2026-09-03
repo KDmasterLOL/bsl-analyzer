@@ -8,8 +8,13 @@ use crate::{
     MethodId, ModuleId,
 };
 
+/// A synthetic key for the `n`-th method of a hand-built module.
+fn key(n: u32) -> crate::MethodKey {
+    crate::MethodKey::first(&format!("М{n}"))
+}
+
 fn method(file_id: u32, local_id: u32) -> MethodId {
-    MethodId { module: ModuleId::new(vfs::FileId(file_id)), local_id }
+    MethodId { module: ModuleId::new(vfs::FileId(file_id)), local_id: key(local_id) }
 }
 
 fn pair(caller: MethodId, target: MethodId) -> MethodCallPair {
@@ -151,7 +156,7 @@ fn method_call_pair_from_resolved_edge_includes_call_and_callback_kinds() {
         EdgeKind::IdleHandler,
     ] {
         let edge = ResolvedCallEdge {
-            caller: CallerId::Method(caller_local),
+            caller: CallerId::Method(key(caller_local)),
             target: ResolvedTarget::Method(target),
             kind,
             range: TextRange::empty(TextSize::from(0)),
@@ -160,7 +165,7 @@ fn method_call_pair_from_resolved_edge_includes_call_and_callback_kinds() {
 
         // Then: the edge projects to a method pair.
         let pair = MethodCallPair::from_resolved_edge(module, &edge).expect("included edge kind");
-        assert_eq!(pair.caller, MethodId { module, local_id: caller_local });
+        assert_eq!(pair.caller, MethodId { module, local_id: key(caller_local) });
         assert_eq!(pair.target, target);
     }
 }
@@ -187,7 +192,7 @@ fn method_call_pair_from_resolved_edge_excludes_non_method_endpoints() {
         object_name: crate::name::Name::new("Контрагенты"),
     };
     let mdo_edge = ResolvedCallEdge {
-        caller: CallerId::Method(0),
+        caller: CallerId::Method(key(0)),
         target: mdo_target,
         kind: EdgeKind::DirectLocal,
         range: TextRange::empty(TextSize::from(0)),
@@ -196,7 +201,7 @@ fn method_call_pair_from_resolved_edge_excludes_non_method_endpoints() {
     assert!(MethodCallPair::from_resolved_edge(module, &mdo_edge).is_none());
 
     let unresolved_edge = ResolvedCallEdge {
-        caller: CallerId::Method(0),
+        caller: CallerId::Method(key(0)),
         target: ResolvedTarget::Unresolved(crate::call_graph::CallTarget::Unresolved),
         kind: EdgeKind::DirectLocal,
         range: TextRange::empty(TextSize::from(0)),
@@ -211,7 +216,7 @@ fn method_call_pair_from_resolved_edge_excludes_non_hierarchy_edge_kinds() {
     // part of the call hierarchy (artificial, but proves the exhaustive match).
     let module = ModuleId::new(vfs::FileId(1));
     let edge = ResolvedCallEdge {
-        caller: CallerId::Method(0),
+        caller: CallerId::Method(key(0)),
         target: ResolvedTarget::Method(method(2, 0)),
         kind: EdgeKind::SubsystemMembership,
         range: TextRange::empty(TextSize::from(0)),

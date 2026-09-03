@@ -1,9 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 use hir::cfg::{CfgEdgeType, CfgVertex, ControlFlowGraph, NodeIndex};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, Stmt, StmtId, UnaryOp};
-use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHashSet};
 use stdx::case::CaseExt;
 
@@ -33,21 +33,21 @@ enum TransactionType {
 struct TransactionCall {
     tx_type: TransactionType,
     method_name: String,
-    range: TextRange,
+    range: LocalRange,
 }
 
 #[derive(Debug, Clone)]
 struct TransactionIssue {
-    range: TextRange,
+    range: LocalRange,
     method_name: String,
     pair_method: &'static str,
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::PairingBrokenTransaction;
 
-    if ctx.is_disabled_with_metadata(code) {
-        return vec![];
+    if ctx.is_disabled_with_metadata(code) || ctx.is_module_code() {
+        return;
     }
 
     let max_level = ctx
@@ -55,28 +55,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_int(DiagnosticCode::PairingBrokenTransaction, "maxTransactionLevel")
         .unwrap_or(32) as i32;
 
-    let module_bodies = ctx.module_bodies();
-    let module_cfgs = ctx.module_cfgs();
-    let mut diagnostics = Vec::new();
-
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let source_map = match module_bodies.source_map(local_id) {
-            Some(sm) => sm,
-            None => continue,
-        };
-
-        let cfg = match module_cfgs.get(local_id) {
-            Some(cfg) => cfg,
-            None => continue,
-        };
-
-        let issues = check_transaction_pairing_cfg(body, source_map, cfg, max_level);
-        for issue in issues {
-            diagnostics.push(create_diagnostic(issue, code, ctx));
-        }
+    let cfg = ctx.cfg();
+    let issues = check_transaction_pairing_cfg(ctx.body(), ctx.source_map(), &cfg, max_level);
+    for issue in issues {
+        acc.push(create_diagnostic(issue, code, ctx));
     }
-
-    diagnostics
 }
 
 impl TransactionType {
@@ -243,7 +226,7 @@ fn check_transaction_pairing_cfg(
 
     dfs_check_paths(entry, PathState::new(), &mut visited_states, &mut issues, &dfs_ctx);
 
-    let mut seen_ranges: FxHashSet<TextRange> = FxHashSet::default();
+    let mut seen_ranges: FxHashSet<LocalRange> = FxHashSet::default();
     issues.retain(|issue| seen_ranges.insert(issue.range));
 
     issues
@@ -544,8 +527,8 @@ fn get_transaction_type(name: &str) -> Option<TransactionType> {
 fn create_diagnostic(
     issue: TransactionIssue,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: format!(

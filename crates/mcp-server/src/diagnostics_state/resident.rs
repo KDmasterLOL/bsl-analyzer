@@ -559,6 +559,11 @@ impl DiagnosticsResident {
         use std::collections::HashSet;
         use std::panic::AssertUnwindSafe;
 
+        let lacks_owning_configuration = {
+            let snapshot = self.db.workspace_configs_snapshot();
+            !snapshot.has_base() && snapshot.has_externals()
+        };
+
         // Vendor-diff file-gate: unchanged-vs-base files are excluded up front so the
         // sweep never walks thousands of files whose report is guaranteed empty;
         // `files_out_of_scope` keeps the coverage bookkeeping honest about the gap.
@@ -585,6 +590,7 @@ impl DiagnosticsResident {
                 self.holes.len(),
                 baseline,
                 self.diagnostics_baseline.epoch().to_owned(),
+                lacks_owning_configuration,
             );
         }
         let mut files: Vec<FileId> = Vec::with_capacity(self.by_path.len());
@@ -626,6 +632,7 @@ impl DiagnosticsResident {
                 cancelled: false,
                 baseline: error,
                 baseline_epoch: self.diagnostics_baseline.epoch().to_owned(),
+                lacks_owning_configuration,
             };
         }
 
@@ -972,6 +979,7 @@ impl DiagnosticsResident {
             cancelled: cancelled || cancel.is_cancelled(),
             baseline,
             baseline_epoch: self.diagnostics_baseline.epoch().to_owned(),
+            lacks_owning_configuration,
         }
     }
 }

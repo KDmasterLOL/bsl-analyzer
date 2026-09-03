@@ -2,7 +2,7 @@ use cfg::CfgEdgeType;
 use dataflow::{Lattice, Transfer};
 use hir_def::body::Body;
 use hir_def::hir::{BinaryOp, Expr, Literal, Stmt};
-use hir_def::{DefWithBodyId, ExprId, IdConversion, ModuleId, Name};
+use hir_def::{DefWithBodyId, ExprId, IdConversion, MethodIdInput, ModuleId, Name};
 use stdx::case::CaseExt;
 
 use bsl_types::builders::Builders;
@@ -440,8 +440,7 @@ pub fn narrow_body(
     body: Body,
     base_types: FxHashMap<Name, TypeId>,
 ) -> Option<dataflow::DataflowResult<NarrowState>> {
-    let cfg =
-        Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None));
+    let cfg = Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body));
     let mut solver =
         dataflow::DataflowSolver::new(cfg, body, NarrowingTransfer::new(db, base_types));
     solver.set_bottom_factory(NarrowState::new);
@@ -458,12 +457,20 @@ pub fn narrow_query(
 
     let resolve_start = Instant::now();
     let module_id = ModuleId { file_id };
-    let module_bodies = db.module_bodies(module_id);
-
+    // A method's body comes from its own memo: reading the file fold here
+    // would tie every caller keyed by the method to the whole file.
+    let method_body;
+    let module_bodies;
     let body: &Body = match owner {
-        DefWithBodyId::ModuleCode => module_bodies.module_code()?,
+        DefWithBodyId::ModuleCode => {
+            module_bodies = db.module_bodies(module_id);
+            module_bodies.module_code()?
+        }
         DefWithBodyId::Method(local_id) => {
-            module_bodies.lower_result(local_id).map(|lr| &lr.body)?
+            let method = hir_def::MethodId { module: module_id, local_id };
+            db.interface_method(method)?;
+            method_body = db.method_body(MethodIdInput::new(db, method));
+            &method_body
         }
     };
     let resolve_ns = resolve_start.elapsed().as_nanos();
@@ -482,11 +489,9 @@ pub fn narrow_query(
     let body_clone_ns = body_clone_start.elapsed().as_nanos();
 
     let cfg_build_start = Instant::now();
-    let cfg = Arc::new(cfg::CfgBuilder::new().build_graph_from_hir(
-        body_owned.body_stmts_typed(),
-        &body_owned,
-        None,
-    ));
+    let cfg = Arc::new(
+        cfg::CfgBuilder::new().build_graph_from_hir(body_owned.body_stmts_typed(), &body_owned),
+    );
     let cfg_build_ns = cfg_build_start.elapsed().as_nanos();
 
     let solve_start = Instant::now();

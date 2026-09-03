@@ -1,3 +1,4 @@
+use cfg_types::LocalRange;
 use la_arena::Idx;
 use ordered_float::NotNan;
 
@@ -83,15 +84,15 @@ pub struct IfStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::type_complexity)]
 pub struct PreprocIfStmt {
-    pub condition_range: text_size::TextRange,
-    pub directive_range: text_size::TextRange,
-    pub full_range: text_size::TextRange,
+    pub condition_range: LocalRange,
+    pub directive_range: LocalRange,
+    pub full_range: LocalRange,
     /// Parsed `#Если` condition; [`PreprocCondition::Unknown`] when malformed.
     ///
     /// [`PreprocCondition::Unknown`]: crate::preproc_condition::PreprocCondition::Unknown
     pub condition: crate::preproc_condition::PreprocCondition,
     pub then_branch: Box<[StmtIdx]>,
-    pub elsif_branches: Box<[(text_size::TextRange, text_size::TextRange, Box<[StmtIdx]>)]>,
+    pub elsif_branches: Box<[(LocalRange, LocalRange, Box<[StmtIdx]>)]>,
     /// Parsed `#ИначеЕсли` conditions, aligned with `elsif_branches`.
     pub elsif_conditions: Box<[crate::preproc_condition::PreprocCondition]>,
     pub else_branch: Option<Box<[StmtIdx]>>,
@@ -107,8 +108,8 @@ pub enum HirPreBranchKind {
 #[derive(Debug, Clone)]
 pub struct HirPreBranch<'a> {
     pub kind: HirPreBranchKind,
-    pub condition_range: Option<text_size::TextRange>,
-    pub directive_range: Option<text_size::TextRange>,
+    pub condition_range: Option<LocalRange>,
+    pub directive_range: Option<LocalRange>,
     pub stmts: &'a [StmtIdx],
 }
 
@@ -200,13 +201,14 @@ mod preproc_if_stmt_branches_tests {
     use la_arena::{Idx, RawIdx};
 
     use super::{HirPreBranchKind, PreprocIfStmt, Stmt, StmtIdx};
+    use cfg_types::LocalRange;
 
     fn stmt_idx(raw: u32) -> StmtIdx {
         Idx::<Stmt>::from_raw(RawIdx::from_u32(raw))
     }
 
-    fn range(start: u32, end: u32) -> text_size::TextRange {
-        text_size::TextRange::new(start.into(), end.into())
+    fn range(start: u32, end: u32) -> LocalRange {
+        LocalRange::of_detached_node(text_size::TextRange::new(start.into(), end.into()))
     }
 
     #[test]

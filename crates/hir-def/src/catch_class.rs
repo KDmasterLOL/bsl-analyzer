@@ -183,7 +183,7 @@ mod tests {
             .find(|n| matches!(n.kind(), SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF))
             .expect("Should have a method");
         let is_function = method_node.kind() == SyntaxKind::FUNCTION_DEF;
-        lower_method(&method_node, is_function).body
+        std::sync::Arc::unwrap_or_clone(lower_method(&method_node, is_function).body)
     }
 
     fn first_try_except(body: &Body) -> &[StmtIdx] {

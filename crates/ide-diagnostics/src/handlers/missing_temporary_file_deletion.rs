@@ -1,13 +1,16 @@
-use hir::cfg::{CfgBuilder, ControlFlowGraph};
+use hir::cfg::ControlFlowGraph;
 use hir::dataflow::temp_resource::{analyze_open_resources, ResourceEvent, ResourceProvider};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Stmt};
 use regex::Regex;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::sync::Arc;
 use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::utils::regex_cache::cached_regex;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -30,23 +33,22 @@ const INLINE_MESSAGE: &str = "Нужно добавить удаление вр�
 
 #[derive(Debug, Clone)]
 struct Config {
-    deletion_methods: Regex,
+    deletion_methods: Arc<Regex>,
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let pattern = ctx
             .config
             .get_string(DiagnosticCode::MissingTemporaryFileDeletion, "searchDeleteFileMethod")
             .unwrap_or(DEFAULT_SEARCH_DELETE_FILE_METHOD);
         let regex_pattern = format!("(?i)^({})$", pattern);
-        let deletion_methods = Regex::new(&regex_pattern).unwrap_or_else(|e| {
+        let deletion_methods = cached_regex(&regex_pattern).unwrap_or_else(|| {
             tracing::warn!(
-                error = %e,
                 pattern = %pattern,
                 "Invalid searchDeleteFileMethod regex, using default"
             );
-            Regex::new(&format!("(?i)^({})$", DEFAULT_SEARCH_DELETE_FILE_METHOD))
+            cached_regex(&format!("(?i)^({})$", DEFAULT_SEARCH_DELETE_FILE_METHOD))
                 .expect("Default regex must be valid")
         });
         tracing::debug!(pattern = %pattern, "MissingTemporaryFileDeletion config loaded");
@@ -59,54 +61,27 @@ struct AssignedGet {
     lower_name: String,
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::MissingTemporaryFileDeletion;
+
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = Config::from_context(ctx);
-    let module_bodies = ctx.module_bodies();
-    let module_cfgs = ctx.module_cfgs();
-    let mut diagnostics = Vec::new();
 
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        let cfg_arc = module_cfgs.get(local_id);
-        let owned_cfg;
-        let cfg: &ControlFlowGraph = if let Some(ref arc) = cfg_arc {
-            arc.as_ref()
-        } else {
-            owned_cfg = CfgBuilder::new().build_graph_from_hir(
-                body.body_stmts_typed(),
-                body,
-                Some(source_map),
-            );
-            &owned_cfg
-        };
-        diagnostics.extend(check_body(body, source_map, cfg, &config, code, ctx));
-    }
-
-    if let Some(module_result) = module_bodies.module_code_result() {
-        let body = &module_result.body;
-        let source_map = &module_result.source_map;
-        let cfg =
-            CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, Some(source_map));
-        diagnostics.extend(check_body(body, source_map, &cfg, &config, code, ctx));
-    }
-
-    diagnostics.sort_by_key(|d| d.range.start());
-    diagnostics
+    let cfg = ctx.cfg();
+    acc.extend(check_body_resources(ctx.body(), ctx.source_map(), &cfg, &config, code, ctx));
 }
 
-fn check_body(
+fn check_body_resources(
     body: &Body,
     source_map: &BodySourceMap,
     cfg: &ControlFlowGraph,
     config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Vec<Diagnostic> {
+    ctx: &BodyContext,
+) -> Vec<Diagnostic<LocalRange>> {
     let (tracked, suppressed) = collect_assigned_gets(body);
 
     let mut diagnostics = Vec::new();
@@ -303,7 +278,7 @@ fn is_get_temp_filename(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::check_body;
     use crate::test_utils::*;
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
@@ -314,7 +289,7 @@ mod tests {
     fn test_default_config() {
         let code = FIXTURE;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 7:30..7:63
@@ -352,7 +327,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 7:30..7:63
@@ -384,7 +359,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 7:30..7:63
@@ -433,7 +408,7 @@ mod tests {
 КонецПроцедуры
         "#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:30..3:63
@@ -449,7 +424,7 @@ mod tests {
                 ПолучитьИмяВременногоФайла("xml");  // standalone call
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:26..3:48
@@ -465,7 +440,7 @@ mod tests {
                 Файл = Новый Файл(ПолучитьИмяВременногоФайла("xml"));
             КонецПроцедуры
         "#;
-        let diagnostics2 = check_ast_diagnostic(code2, check);
+        let diagnostics2 = check_body_diagnostic(code2, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:35..3:68
@@ -499,7 +474,7 @@ mod tests {
                 ПереместитьФайл(Файл4, "новое_имя.xml");
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
 
         expect![[r#"
             MissingTemporaryFileDeletion @ 8:25..8:58
@@ -525,7 +500,7 @@ mod tests {
                 УдалитьФайлы(ИмяФайла);
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
 
         let code = r#"
@@ -533,7 +508,7 @@ mod tests {
                 ИмяФайла = ПолучитьИмяВременногоФайла("xml");
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:28..3:61
               message: Нужно добавить удаление временного файла 'ИмяФайла' после использования
@@ -546,7 +521,7 @@ mod tests {
                 ПереместитьФайл(ИмяФайла, "новое_имя.xml");
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -560,7 +535,7 @@ mod tests {
                 УдалитьФайлы(Файл3);
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:25..3:58
               message: Нужно добавить удаление временного файла 'Файл1' после использования
@@ -578,7 +553,7 @@ mod tests {
                 TempFile = GetTempFileName("xml");
             EndProcedure
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:28..3:50
               message: Нужно добавить удаление временного файла 'TempFile' после использования
@@ -591,7 +566,7 @@ mod tests {
                 DeleteFiles(TempFile);
             EndProcedure
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -604,7 +579,7 @@ mod tests {
             КонецПроцедуры
         "#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:28..3:61
               message: Нужно добавить удаление временного файла 'ИмяФайла' после использования
@@ -618,7 +593,7 @@ mod tests {
                 "searchDeleteFileMethod": "УдалитьФайлы|DeleteFiles|РаботаСФайламиКлиент.УдалитьФайл"
             }),
         );
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -632,7 +607,7 @@ mod tests {
                 КонецЕсли;
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:24..3:57
               message: Нужно добавить удаление временного файла 'Файл' после использования
@@ -649,7 +624,7 @@ mod tests {
                 УдалитьФайлы(Файл1, Файл2);
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -665,7 +640,7 @@ mod tests {
                 КонецЕсли;
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 4:28..4:61
               message: Нужно добавить удаление временного файла 'Файл' после использования
@@ -683,7 +658,7 @@ mod tests {
                 ПереместитьФайл(Файл1, Файл2);
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -702,7 +677,7 @@ mod tests {
                 УдалитьФайлы(Файл);
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "First Get of a re-assigned name leaks");
     }
 
@@ -715,7 +690,7 @@ mod tests {
                 УдалитьФайлы(?(Условие, Файл1, Файл2));
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:25..3:58
               message: Нужно добавить удаление временного файла 'Файл1' после использования
@@ -734,7 +709,7 @@ mod tests {
                 Записать(GetTempFileName("txt"));
             КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTemporaryFileDeletion @ 3:24..3:57
               message: Нужно добавить удаление временного файла 'Файл' после использования

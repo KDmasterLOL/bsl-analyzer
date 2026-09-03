@@ -137,6 +137,8 @@ fn get_mdo_type_russian(mdo_type: &bsl_metadata::MdoType) -> &'static str {
         MdoType::Constant => "Константа",
         MdoType::DataProcessor => "Обработка",
         MdoType::Report => "Отчет",
+        MdoType::ExternalDataProcessor => "ВнешняяОбработка",
+        MdoType::ExternalReport => "ВнешнийОтчет",
         MdoType::CommonModule => "ОбщийМодуль",
         MdoType::ExternalDataSource => "ВнешнийИсточникДанных",
         MdoType::EventSubscription => "ПодпискаНаСобытие",

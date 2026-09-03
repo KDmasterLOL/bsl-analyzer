@@ -10,6 +10,7 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
+use cfg_types::LocalRange;
 use intern::NormName;
 use line_index::LineIndex;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -25,7 +26,7 @@ use crate::Name;
 pub(crate) struct LoweringCtx {
     pub(crate) body: Body,
     pub(crate) source_map: BodySourceMap,
-    pub(crate) diagnostics: Vec<BodyDiagnostic>,
+    pub(crate) diagnostics: Vec<BodyDiagnostic<LocalRange>>,
     pub(crate) is_function: bool,
 
     pub(crate) local_vars: FxHashMap<NormName, (Name, TextRange)>,
@@ -38,7 +39,7 @@ pub(crate) struct LoweringCtx {
 
     pub(crate) cancel_params: FxHashSet<String>,
 
-    pub(crate) pending_sdbl: Vec<(syntax::TextRange, syntax::SdblQueryInfo)>,
+    pub(crate) pending_sdbl: Vec<(TextRange, syntax::SdblQuery)>,
 
     pub(crate) loop_depth: usize,
 
@@ -159,21 +160,24 @@ impl LoweringCtx {
         self.local_vars.insert(key, (name, range));
     }
 
+    // Lowering runs on a tree rooted at the lowered node itself, so every
+    // range read off it is already relative to that root; these three and
+    // `emit` are where that fact is stamped into the type.
     pub(crate) fn alloc_expr(&mut self, expr: Expr, range: TextRange) -> ExprIdx {
         let id = self.body.exprs.alloc(expr);
-        self.source_map.record_expr(id, range);
+        self.source_map.record_expr(id, LocalRange::of_detached_node(range));
         id
     }
 
     pub(crate) fn alloc_stmt(&mut self, stmt: Stmt, range: TextRange) -> StmtIdx {
         let id = self.body.stmts.alloc(stmt);
-        self.source_map.record_stmt(id, range);
+        self.source_map.record_stmt(id, LocalRange::of_detached_node(range));
         id
     }
 
     pub(crate) fn alloc_binding(&mut self, binding: Binding, range: TextRange) -> BindingIdx {
         let id = self.body.bindings.alloc(binding);
-        self.source_map.record_binding(id, range);
+        self.source_map.record_binding(id, LocalRange::of_detached_node(range));
         id
     }
 
@@ -240,12 +244,15 @@ impl LoweringCtx {
     }
 
     pub(crate) fn emit(&mut self, diagnostic: BodyDiagnostic) {
-        self.diagnostics.push(diagnostic);
+        self.diagnostics.push(diagnostic.map_range(LocalRange::of_detached_node));
     }
 }
 
+/// Lower one method taken from any tree: the node is re-rooted first, so the
+/// result's positions are relative to the method wherever it sat.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
-    lower_method_with_externals(method_node, is_function, None)
+    let root = crate::method_syntax::detach(method_node);
+    lower_method_with_externals(&root, is_function, None)
 }
 
 fn collect_child_exprs(expr: &Expr) -> Vec<ExprIdx> {
@@ -414,6 +421,8 @@ fn literals_equal(a: &crate::hir::Literal, b: &crate::hir::Literal) -> bool {
     }
 }
 
+/// `method_node` must be the root of its tree (see `method_syntax::detach`):
+/// every range recorded below is taken as relative to it.
 pub fn lower_method_with_externals(
     method_node: &SyntaxNode,
     is_function: bool,
@@ -522,11 +531,15 @@ pub fn lower_method_with_externals(
     let size_lines = compute_method_size_lines(method_node, ctx.line_index.as_deref());
 
     LowerResult {
-        body: ctx.body,
+        body: Arc::new(ctx.body),
         source_map: ctx.source_map,
         diagnostics: ctx.diagnostics,
         referenced_externals,
-        external_refs: ctx.external_refs,
+        external_refs: ctx
+            .external_refs
+            .into_iter()
+            .map(|r| r.map_range(LocalRange::of_detached_node))
+            .collect(),
         size_lines,
     }
 }
@@ -602,11 +615,15 @@ pub fn lower_module_code(root: &SyntaxNode, line_index: Option<Arc<LineIndex>>) 
     let referenced_externals = collect_referenced_externals(&ctx.body);
 
     LowerResult {
-        body: ctx.body,
+        body: Arc::new(ctx.body),
         source_map: ctx.source_map,
         diagnostics: ctx.diagnostics,
         referenced_externals,
-        external_refs: ctx.external_refs,
+        external_refs: ctx
+            .external_refs
+            .into_iter()
+            .map(|r| r.map_range(LocalRange::of_detached_node))
+            .collect(),
         size_lines: 0,
     }
 }

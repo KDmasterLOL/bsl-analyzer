@@ -98,7 +98,7 @@ pub const fn derive_primary_impact(
     Impact::new(software_quality, impact_severity)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticType {
     Error,
     CodeSmell,
@@ -106,7 +106,7 @@ pub enum DiagnosticType {
     SecurityHotspot,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticSeverityLevel {
     Info,
     Minor,
@@ -115,7 +115,7 @@ pub enum DiagnosticSeverityLevel {
     Blocker,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MetadataTag {
     Standard,
     Lockinos,

@@ -5,7 +5,7 @@ use cfg_types::IdConversion;
 use hir_def::execution_env::EnvFlags;
 use hir_def::hir::{Expr, Stmt};
 use hir_def::resolver::{Resolution, Resolver};
-use hir_def::{Body, BodySourceMap, ExprId, Name};
+use hir_def::{Body, ExprId, Name};
 use intern::NormName;
 use syntax::TextSize;
 
@@ -84,7 +84,7 @@ pub fn manager_collection_env(mdo_type: bsl_metadata::MdoType) -> EnvFlags {
 /// Body scope for judging a claim at a specific read position.
 pub struct BodyShadowScope<'a> {
     pub body: &'a Body,
-    pub source_map: &'a BodySourceMap,
+    pub source_map: hir_def::body::SourceMapAt<'a>,
     /// Where the read sits, used to pick the owner's value rather than to decide
     /// ownership: the reaching write is the textually-last assignment COMPLETED
     /// before this offset, matching sequential inference. Ownership itself is

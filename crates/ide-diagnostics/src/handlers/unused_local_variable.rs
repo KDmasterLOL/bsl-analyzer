@@ -252,7 +252,7 @@ fn declares_a_local(
 }
 
 fn check_method(
-    local_id: u32,
+    local_id: hir::MethodKey,
     body: &hir::Body,
     module_bodies: &hir::ModuleBodies,
     code: DiagnosticCode,
@@ -384,8 +384,8 @@ fn check_module_level_code(
         None => return diagnostics,
     };
 
-    let body = &lower_result.body;
-    let source_map = &lower_result.source_map;
+    let body = lower_result.body();
+    let source_map = lower_result.source_map();
 
     let read_vars = collect_read_var_names(body);
 
@@ -442,10 +442,10 @@ fn check_module_var_declarations(
         rustc_hash::FxHashSet::default();
 
     for (_local_id, lower_result) in module_bodies.iter_lower_results() {
-        all_referenced_externals.extend(lower_result.referenced_externals.iter().copied());
+        all_referenced_externals.extend(lower_result.referenced_externals().iter().copied());
     }
     if let Some(module_code_result) = module_bodies.module_code_result() {
-        all_referenced_externals.extend(module_code_result.referenced_externals.iter().copied());
+        all_referenced_externals.extend(module_code_result.referenced_externals().iter().copied());
     }
 
     let mut diagnostics = Vec::new();

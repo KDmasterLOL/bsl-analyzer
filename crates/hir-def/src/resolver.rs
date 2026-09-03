@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bsl_metadata::MdObject;
 
 use crate::configs::ConfigsDatabase;
+use crate::module_interface::ModuleInterface;
 use crate::scope::{ExprScopes, ScopeId};
-use crate::symbol_tree::SymbolTree;
 use crate::{DefDatabase, MethodId, ModuleId, Name, PathResolution, QualifiedName, VariableId};
 
 pub struct Resolver {
@@ -16,8 +16,8 @@ pub struct Resolver {
 pub enum Scope {
     /// The enclosing module. `local_symbols` overrides same-module method/variable
     /// resolution with an explicit symbol tree (the *effective* module of an
-    /// `&ИзменениеИКонтроль` extension); `None` resolves through
-    /// `db.symbol_tree(module_id)` exactly as before — the byte-identical default for
+    /// `&ИзменениеИКонтроль` extension); `None` resolves through the module's
+    /// declarations by name (`db.interface_method_named`) — the default for
     /// every ordinary module.
     ///
     /// `base_fallback` is the paired base module of a configuration-*extension* module
@@ -29,7 +29,7 @@ pub enum Scope {
     /// (the `&ИзменениеИКонтроль` effective module already contains the merged base body).
     ModuleScope {
         module_id: ModuleId,
-        local_symbols: Option<Arc<SymbolTree>>,
+        local_symbols: Option<Arc<ModuleInterface>>,
         base_fallback: Option<ModuleId>,
     },
 
@@ -75,12 +75,12 @@ impl Resolver {
 
     /// Like [`Self::with_builtins_and_workspace`], but same-module method/variable
     /// lookups resolve against `local_symbols` (the effective module's symbol tree)
-    /// instead of `db.symbol_tree(module_id)`. Cross-module / metadata resolution still
+    /// instead of the module's declarations by name. Cross-module / metadata resolution still
     /// keys on `module_id.file_id`, which is the base file — correct, because the
     /// effective module *is* the base module with the extension's edits applied.
     pub fn with_builtins_and_workspace_effective(
         module_id: ModuleId,
-        local_symbols: Arc<SymbolTree>,
+        local_symbols: Arc<ModuleInterface>,
     ) -> Self {
         Resolver {
             scopes: vec![
@@ -162,8 +162,8 @@ impl Resolver {
 
     /// The effective module's symbol tree, when this resolver was built with one
     /// ([`Self::with_builtins_and_workspace_effective`]). `None` for every ordinary
-    /// module, in which case same-module lookups fall back to `db.symbol_tree`.
-    fn module_local_symbols(&self) -> Option<&Arc<SymbolTree>> {
+    /// module, in which case same-module lookups go to the declarations by name.
+    fn module_local_symbols(&self) -> Option<&Arc<ModuleInterface>> {
         for scope in &self.scopes {
             if let Scope::ModuleScope { local_symbols, .. } = scope {
                 return local_symbols.as_ref();
@@ -201,14 +201,14 @@ impl Resolver {
             return symbols.find_method(name).map(|m| m.id);
         }
         let module_id = self.module_id()?;
-        if let Some(m) = db.symbol_tree_ref(module_id).find_method(name) {
+        if let Some(m) = db.interface_method_named(module_id, name) {
             return Some(m.id);
         }
         // Weaving: an extension method calling a base-module sibling resolves against the
         // paired base module. The returned `MethodId` carries the base module, so downstream
         // type inference uses the base method's real signature.
         let base = self.module_base_fallback()?;
-        db.symbol_tree_ref(base).find_method(name).map(|m| m.id)
+        db.interface_method_named(base, name).map(|m| m.id)
     }
 
     pub fn resolve_module_variable(&self, db: &dyn DefDatabase, name: &Name) -> Option<VariableId> {
@@ -216,11 +216,11 @@ impl Resolver {
             return symbols.find_variable(name).map(|v| v.id);
         }
         let module_id = self.module_id()?;
-        if let Some(v) = db.symbol_tree_ref(module_id).find_variable(name) {
+        if let Some(v) = db.interface_variable_named(module_id, name) {
             return Some(v.id);
         }
         let base = self.module_base_fallback()?;
-        db.symbol_tree_ref(base).find_variable(name).map(|v| v.id)
+        db.interface_variable_named(base, name).map(|v| v.id)
     }
 
     pub fn user_common_module_exists(&self, db: &dyn ConfigsDatabase, module_name: &Name) -> bool {
@@ -334,8 +334,8 @@ impl Resolver {
             }
             let mut seen_methods = rustc_hash::FxHashSet::default();
             let walk: crate::configs::BodySearch<()> = candidates.search(|module_id| {
-                let symbol_tree = db.symbol_tree_ref(module_id);
-                for method in symbol_tree.exported_methods() {
+                let interface = db.module_interface_ref(module_id);
+                for method in interface.exported_methods() {
                     if seen_methods.insert(intern::NormName::intern(method.name.as_str())) {
                         exports.push(GlobalExportEntry {
                             module: module_name.clone(),
@@ -383,8 +383,8 @@ impl Resolver {
             let mut seen_variables = rustc_hash::FxHashSet::default();
             let walk: crate::BodySearch<()> = bodies.search_merged_surface(|module_id| {
                 let module_id = ModuleId::new(module_id);
-                let symbol_tree = db.symbol_tree_ref(module_id);
-                for method in symbol_tree.exported_methods() {
+                let interface = db.module_interface_ref(module_id);
+                for method in interface.exported_methods() {
                     if seen_methods.insert(intern::NormName::intern(method.name.as_str())) {
                         exports.push(GlobalExportEntry {
                             module: application_module_name(kind),
@@ -399,7 +399,7 @@ impl Resolver {
                         });
                     }
                 }
-                for variable in symbol_tree.exported_variables() {
+                for variable in interface.exported_variables() {
                     if seen_variables.insert(intern::NormName::intern(variable.name.as_str())) {
                         exports.push(GlobalExportEntry {
                             module: application_module_name(kind),
@@ -597,8 +597,7 @@ impl Resolver {
 
         let candidates = self.locate_common_module_candidates(db, module_name)?;
         let found = candidates.search(|target_module_id| {
-            let symbol_tree = db.symbol_tree_ref(target_module_id);
-            symbol_tree.find_method(method_name).map(|m| (m.id, m.is_export))
+            db.interface_method_named(target_module_id, method_name).map(|m| (m.id, m.is_export))
         });
         match found {
             crate::configs::BodySearch::Found((method_id, is_export)) => {
@@ -664,7 +663,7 @@ impl Resolver {
         method_name: &Name,
     ) -> Result<QualifiedMethodResolution, QualifiedMethodError> {
         match candidates.search(|module| {
-            db.symbol_tree_ref(module).find_method(method_name).map(|m| (m.id, m.is_export))
+            db.interface_method_named(module, method_name).map(|m| (m.id, m.is_export))
         }) {
             crate::configs::BodySearch::Found((method_id, is_export)) => {
                 Ok(QualifiedMethodResolution { method_id, is_export })

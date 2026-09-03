@@ -268,37 +268,17 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         Definition::Method(method_id) => {
             let file_id = method_id.module.file_id;
             let tree = db.item_tree_ref(file_id);
-
-            for (idx, item) in tree.top_level_items().iter().enumerate() {
-                if idx == method_id.local_id as usize {
-                    match item {
-                        hir::ModItem::Procedure(proc_idx) => {
-                            let proc = tree.procedure(*proc_idx);
-                            let range = proc.source_range;
-                            let name = proc.name.as_str().to_string();
-                            return Some(NavigationTarget {
-                                file_id,
-                                range,
-                                name,
-                                kind: SymbolKind::Procedure,
-                            });
-                        }
-                        hir::ModItem::Function(func_idx) => {
-                            let func = tree.function(*func_idx);
-                            let range = func.source_range;
-                            let name = func.name.as_str().to_string();
-                            return Some(NavigationTarget {
-                                file_id,
-                                range,
-                                name,
-                                kind: SymbolKind::Function,
-                            });
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            None
+            let method = tree.method(method_id.local_id)?;
+            Some(NavigationTarget {
+                file_id,
+                range: method.source_range(),
+                name: method.name().as_str().to_string(),
+                kind: if method.is_function() {
+                    SymbolKind::Function
+                } else {
+                    SymbolKind::Procedure
+                },
+            })
         }
         Definition::Variable(var_id) => {
             let file_id = var_id.module.file_id;
@@ -324,46 +304,24 @@ fn definition_to_navigation_target<DB: RootDatabase>(
         Definition::Parameter { method_id, param_name, .. } => {
             let file_id = method_id.module.file_id;
             let tree = db.item_tree_ref(file_id);
-
-            for (idx, item) in tree.top_level_items().iter().enumerate() {
-                if idx == method_id.local_id as usize {
-                    let range = match item {
-                        hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
-                        hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
-                        _ => continue,
-                    };
-
-                    return Some(NavigationTarget {
-                        file_id,
-                        range,
-                        name: param_name.as_str().to_string(),
-                        kind: SymbolKind::Variable,
-                    });
-                }
-            }
-            None
+            let range = tree.method(method_id.local_id)?.source_range();
+            Some(NavigationTarget {
+                file_id,
+                range,
+                name: param_name.as_str().to_string(),
+                kind: SymbolKind::Variable,
+            })
         }
         Definition::Local { method_id, var_name } => {
             let file_id = method_id.module.file_id;
             let tree = db.item_tree_ref(file_id);
-
-            for (idx, item) in tree.top_level_items().iter().enumerate() {
-                if idx == method_id.local_id as usize {
-                    let range = match item {
-                        hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
-                        hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
-                        _ => continue,
-                    };
-
-                    return Some(NavigationTarget {
-                        file_id,
-                        range,
-                        name: var_name.as_str().to_string(),
-                        kind: SymbolKind::Variable,
-                    });
-                }
-            }
-            None
+            let range = tree.method(method_id.local_id)?.source_range();
+            Some(NavigationTarget {
+                file_id,
+                range,
+                name: var_name.as_str().to_string(),
+                kind: SymbolKind::Variable,
+            })
         }
         Definition::BuiltinFunction(_)
         | Definition::BuiltinMethodHandle { .. }

@@ -157,6 +157,8 @@ fn mdo_ref_prefix(mdo: MdoType) -> Option<&'static str> {
         MdoType::Constant => Some("ConstantValueManager"),
         MdoType::DataProcessor => Some("DataProcessorObject"),
         MdoType::Report => Some("ReportObject"),
+        MdoType::ExternalDataProcessor => Some("ExternalDataProcessorObject"),
+        MdoType::ExternalReport => Some("ExternalReportObject"),
         MdoType::ExternalDataSource
         | MdoType::CommonModule
         | MdoType::EventSubscription

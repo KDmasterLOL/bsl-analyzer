@@ -1,12 +1,17 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_platform::deprecation::{DeprecationEntry, LifecycleGroup};
-use ide_db::TextRange;
+use hir::LocalRange;
 
 use super::deprecated_platform_facts::{
     canonical_name_for, global_function_fact, is_russian_alias, replacement_for_name,
 };
 
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(
+    name: &str,
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {

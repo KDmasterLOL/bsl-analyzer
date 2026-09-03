@@ -63,15 +63,19 @@ impl RequestCancel {
 
 /// Await a request's blocking task under the rmcp per-request token. Cancellation
 /// wins: when `ct` fires (MCP `notifications/cancelled` or transport shutdown) —
-/// including a token already cancelled before the first poll — the request's salsa
-/// tokens are cancelled via `cancel.cancel_all()` and `None` is returned right away,
-/// WITHOUT waiting for the blocking task: it may still be queued behind another call
-/// on the resident mutex, and once it runs it exits early and logs on its own.
-/// `Some(join result)` when the task finishes first; a completed call never cancels
-/// anything.
+/// including a token already cancelled before the first poll — `on_cancel` runs and
+/// `None` is returned right away, WITHOUT waiting for the blocking task: it may still
+/// be queued behind another call on the resident mutex, and once it runs it exits
+/// early and logs on its own. `Some(join result)` when the task finishes first; a
+/// completed call never cancels anything.
+///
+/// `on_cancel` is how the signal reaches a body that cannot see the token itself:
+/// the resident door fans it out to its salsa tokens through [`RequestCancel`]. A body
+/// that observes a clone of `ct` directly (the search door) has nothing to fan out and
+/// passes a no-op.
 pub(crate) async fn join_unless_cancelled<T>(
     ct: tokio_util::sync::CancellationToken,
-    cancel: std::sync::Arc<RequestCancel>,
+    on_cancel: impl FnOnce(),
     mut join: tokio::task::JoinHandle<T>,
 ) -> Option<Result<T, tokio::task::JoinError>> {
     tokio::select! {
@@ -79,7 +83,7 @@ pub(crate) async fn join_unless_cancelled<T>(
         // join — a cancelled request must never race into a normal response.
         biased;
         _ = ct.cancelled() => {
-            cancel.cancel_all();
+            on_cancel();
             None
         }
         joined = &mut join => Some(joined),
@@ -122,7 +126,7 @@ mod tests {
         let join = tokio::task::spawn_blocking(|| 42);
         let _ = join.is_finished();
 
-        let out = join_unless_cancelled(ct, Arc::clone(&cancel), join).await;
+        let out = join_unless_cancelled(ct, || cancel.cancel_all(), join).await;
         assert!(out.is_none(), "a cancelled request must never produce a normal response");
         assert!(cancel.is_cancelled(), "the cancel must fan out to the request registry");
     }
@@ -136,7 +140,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
         let join = tokio::task::spawn_blocking(move || rx.recv());
 
-        let guard = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join);
+        let guard = join_unless_cancelled(ct.clone(), || cancel.cancel_all(), join);
         let canceller = async {
             tokio::task::yield_now().await;
             ct.cancel();
@@ -158,7 +162,7 @@ mod tests {
         let cancel = Arc::new(RequestCancel::default());
         let join = tokio::task::spawn_blocking(|| 7);
 
-        let out = join_unless_cancelled(ct.clone(), Arc::clone(&cancel), join).await;
+        let out = join_unless_cancelled(ct.clone(), || cancel.cancel_all(), join).await;
         let value = out.expect("uncancelled call yields the join").expect("no panic");
         assert_eq!(value, 7);
         assert!(!cancel.is_cancelled(), "a completed call must not cancel anything");

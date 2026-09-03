@@ -1,3 +1,4 @@
+use super::acquire::{engine_lock_poisoned_error, try_acquire_engine};
 use super::gating::{
     ensure_reference_baseline_runtime_ready, external_baseline_mcp_error,
     map_reference_baseline_resolution,
@@ -6,32 +7,71 @@ use super::render::{
     format_doc_hits, format_lexical_doc_hits, format_semantic_doc_hits, no_hits_response, Envelope,
 };
 use super::status::docs_not_ready;
-use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
-use bsl_search::{lexical_hits_for_resolved_view, SearchEngine};
+use super::types::{AcquireFailure, SearchFailure};
+use super::wait::{embed_unless_cancelled, Withdrawn};
+use crate::baseline::{BaselineCall, ConfiguredBaselineStatus, ExternalBaselineService};
+use bsl_search::{lexical_hits_for_resolved_view, SearchEngine, SearchError};
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
+
+/// The actor's answer with the cancellation taken out: a withdrawn call ends the search
+/// here, and only a real failure reaches the terminal/transient classification below.
+fn unless_withdrawn<R>(
+    call: Result<R, BaselineCall>,
+) -> Result<Result<R, SearchError>, SearchFailure> {
+    match call {
+        Ok(value) => Ok(Ok(value)),
+        Err(BaselineCall::Failed(error)) => Ok(Err(error)),
+        Err(BaselineCall::Withdrawn) => Err(SearchFailure::Cancelled),
+    }
+}
+
+/// The engine guard for one docs call, or the answer to give instead. A stalled lock is
+/// answered with the retry envelope: the index is there, it is merely held.
+fn engine_guard<'a>(
+    engine: &'a Arc<Mutex<Option<SearchEngine>>>,
+    cancel: &CancellationToken,
+    action: &str,
+) -> Result<Result<MutexGuard<'a, Option<SearchEngine>>, CallToolResult>, SearchFailure> {
+    match try_acquire_engine(engine, cancel) {
+        Ok(guard) => Ok(Ok(guard)),
+        Err(AcquireFailure::Poisoned) => Err(engine_lock_poisoned_error().into()),
+        Err(AcquireFailure::Cancelled) => Err(SearchFailure::Cancelled),
+        Err(AcquireFailure::TimedOut) => Ok(Err(docs_not_ready(action))),
+    }
+}
 
 pub fn find_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    cancel: &CancellationToken,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
     max_output_tokens: usize,
-) -> Result<CallToolResult, McpError> {
+) -> Result<CallToolResult, SearchFailure> {
     ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
+    let guard = match engine_guard(engine, cancel, "find_docs")? {
+        Ok(guard) => guard,
+        Err(not_ready) => return Ok(not_ready),
+    };
 
     if let Some(source) = external_baseline {
         if let Some((_, snapshot)) = map_reference_baseline_resolution(
             configured_baseline,
-            source.resolve_snapshot(),
+            unless_withdrawn(source.resolve_snapshot(cancel))?,
             "failed to resolve external reference baseline snapshot for lexical search",
         )? {
-            match source.lexical_search(snapshot.id.0.as_str(), query, Some("platform"), limit) {
+            match unless_withdrawn(source.lexical_search(
+                cancel,
+                snapshot.id.0.as_str(),
+                query,
+                Some("platform"),
+                limit,
+            ))? {
                 Ok(hits) if !hits.is_empty() => {
                     return Ok(format_lexical_doc_hits(&hits, max_output_tokens)
                         .into_response("find_docs"));
@@ -41,7 +81,7 @@ pub fn find_docs(
                 }
                 Err(error) => {
                     if error.is_terminal() {
-                        return Err(external_baseline_mcp_error(&error));
+                        return Err(external_baseline_mcp_error(&error).into());
                     }
                     warn!(
                         snapshot_id = snapshot.id.0.as_str(),
@@ -53,7 +93,7 @@ pub fn find_docs(
 
             if let Some(view) = map_reference_baseline_resolution(
                 configured_baseline,
-                source.resolve_reference_view(),
+                unless_withdrawn(source.resolve_reference_view(cancel))?,
                 "failed to resolve external reference baseline view for lexical search",
             )? {
                 let hits = lexical_hits_for_resolved_view(&view, query, limit, Some("platform"));
@@ -79,83 +119,128 @@ pub fn find_docs(
     Ok(format_doc_hits(&hits, max_output_tokens).into_response("find_docs"))
 }
 
+fn semantic_not_available() -> McpError {
+    McpError::invalid_params(
+        "Semantic search not available. Set EMBEDDING_URL and EMBEDDING_MODEL \
+         environment variables and restart. Use find_docs for text search instead.",
+        None,
+    )
+}
+
 pub fn search_docs(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
+    cancel: &CancellationToken,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
     max_output_tokens: usize,
-) -> Result<CallToolResult, McpError> {
+) -> Result<CallToolResult, SearchFailure> {
     ensure_reference_baseline_runtime_ready(configured_baseline, external_baseline.as_ref())?;
-    let guard =
-        engine.lock().map_err(|e| McpError::internal_error(format!("lock error: {e}"), None))?;
-    if guard.is_none() {
-        return Ok(docs_not_ready("search_docs"));
-    }
-    let engine = guard.as_ref().expect("checked above");
 
-    if !engine.has_semantic() {
-        return Err(McpError::invalid_params(
-            "Semantic search not available. Set EMBEDDING_URL and EMBEDDING_MODEL \
-             environment variables and restart. Use find_docs for text search instead.",
-            None,
-        ));
-    }
+    // The same shape as the semantic code path: take what the embed needs from the engine,
+    // release the lock, embed off it, take the lock again for the now-fast search. The
+    // engine's embedding identity is fixed for the life of the process, so the captures
+    // cannot go stale across the unlocked window (see `semantic_code_hits_fenced`).
+    let (embedder, model_id, dim) = {
+        let guard = match engine_guard(engine, cancel, "search_docs")? {
+            Ok(guard) => guard,
+            Err(not_ready) => return Ok(not_ready),
+        };
+        let Some(engine) = guard.as_ref() else {
+            return Ok(docs_not_ready("search_docs"));
+        };
+        if !engine.has_semantic() {
+            return Err(semantic_not_available().into());
+        }
+        (
+            engine.embedder_clone(),
+            engine.embedding_model().map(str::to_owned),
+            engine.embedding_dimension(),
+        )
+    };
+    let Some(embedder) = embedder else {
+        return Err(semantic_not_available().into());
+    };
 
-    if let Some(source) = external_baseline {
-        if let Some((_, snapshot)) = map_reference_baseline_resolution(
+    // Resolve the baseline snapshot BEFORE the embed, off the lock: a terminal baseline
+    // failure must not cost a wasted round-trip to the embedder.
+    let resolved = match external_baseline.as_ref() {
+        Some(source) => map_reference_baseline_resolution(
             configured_baseline,
-            source.resolve_snapshot(),
+            unless_withdrawn(source.resolve_snapshot(cancel))?,
             "failed to resolve external reference baseline snapshot for semantic search",
-        )? {
-            let query_embedding = engine
-                .embed_query(query)
-                .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
-            let model_id = engine.embedding_model().ok_or_else(|| {
-                McpError::internal_error(
-                    "search error: semantic model id is unavailable".to_owned(),
-                    None,
-                )
-            })?;
-            let dim = engine.embedding_dimension().ok_or_else(|| {
-                McpError::internal_error(
-                    "search error: embedding dimension is unavailable".to_owned(),
-                    None,
-                )
-            })?;
+        )?,
+        None => None,
+    };
 
-            match source.semantic_search(
-                snapshot.id.0.as_str(),
-                &query_embedding,
-                model_id,
-                dim,
-                Some("platform"),
-                limit,
-            ) {
-                Ok(hits) if !hits.is_empty() => {
-                    return Ok(format_semantic_doc_hits(&hits, max_output_tokens)
-                        .into_response("search_docs"));
+    let query_embedding = match embed_unless_cancelled(embedder, query, cancel) {
+        Err(Withdrawn) => return Err(SearchFailure::Cancelled),
+        Ok(Ok(vector)) => vector,
+        Ok(Err(e)) => {
+            return Err(McpError::internal_error(format!("search error: {e}"), None).into());
+        }
+    };
+
+    let guard = match engine_guard(engine, cancel, "search_docs")? {
+        Ok(guard) => guard,
+        Err(not_ready) => return Ok(not_ready),
+    };
+    let Some(engine) = guard.as_ref() else {
+        return Ok(docs_not_ready("search_docs"));
+    };
+    if !engine.has_semantic() {
+        return Err(semantic_not_available().into());
+    }
+
+    if let (Some(source), Some((_, snapshot))) = (external_baseline.as_ref(), resolved) {
+        let model_id = model_id.as_deref().ok_or_else(|| {
+            McpError::internal_error(
+                "search error: semantic model id is unavailable".to_owned(),
+                None,
+            )
+        })?;
+        let dim = dim.ok_or_else(|| {
+            McpError::internal_error(
+                "search error: embedding dimension is unavailable".to_owned(),
+                None,
+            )
+        })?;
+
+        match unless_withdrawn(source.semantic_search(
+            cancel,
+            snapshot.id.0.as_str(),
+            &query_embedding,
+            model_id,
+            dim,
+            Some("platform"),
+            limit,
+        ))? {
+            Ok(hits) if !hits.is_empty() => {
+                return Ok(
+                    format_semantic_doc_hits(&hits, max_output_tokens).into_response("search_docs")
+                );
+            }
+            Ok(_) => {
+                return Ok(no_hits_response(None, Envelope::No, "search_docs"));
+            }
+            Err(error) => {
+                if error.is_terminal() {
+                    return Err(external_baseline_mcp_error(&error).into());
                 }
-                Ok(_) => {
-                    return Ok(no_hits_response(None, Envelope::No, "search_docs"));
-                }
-                Err(error) => {
-                    if error.is_terminal() {
-                        return Err(external_baseline_mcp_error(&error));
-                    }
-                    warn!(
-                        snapshot_id = snapshot.id.0.as_str(),
-                        %error,
-                        "direct semantic search failed for external reference baseline, falling back",
-                    );
-                }
+                warn!(
+                    snapshot_id = snapshot.id.0.as_str(),
+                    %error,
+                    "direct semantic search failed for external reference baseline, falling back",
+                );
             }
         }
     }
 
+    // The local tail searches by the vector already computed: the string form of this
+    // search embeds on its own, under the lock, and would make a second round-trip.
     let hits = engine
-        .search(query, limit, Some("platform"))
+        .search_with_embedding_read_only(&query_embedding, limit, Some("platform"))
         .map_err(|e| McpError::internal_error(format!("search error: {e}"), None))?;
 
     if hits.is_empty() {
@@ -176,6 +261,11 @@ mod tests {
     use serde_json::json;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
+
+    fn never() -> CancellationToken {
+        CancellationToken::new()
+    }
 
     #[test]
     fn find_docs_hits_carry_the_structured_listing_beside_the_text() {
@@ -188,9 +278,16 @@ mod tests {
             .expect("Array reference document");
         engine.index_documents("platform", "platform/Массив", b"v1", &[document], None).unwrap();
 
-        let result =
-            find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
-                .unwrap();
+        let result = find_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            &never(),
+            None,
+            None,
+            "Массив",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
 
         let text = result.content[0].as_text().expect("text mirror").text.as_str();
         assert!(text.starts_with("#1 ["), "text listing unchanged: {text}");
@@ -232,9 +329,16 @@ mod tests {
         let query = expected.name.clone();
         engine.index_documents("platform", "platform/property", b"v1", &[document], None).unwrap();
 
-        let result =
-            find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, &query, 10, usize::MAX)
-                .unwrap();
+        let result = find_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            &never(),
+            None,
+            None,
+            &query,
+            10,
+            usize::MAX,
+        )
+        .unwrap();
         let hit = &result.structured_content.unwrap()["hits"][0];
         assert_eq!(hit["reference_id"], expected.reference_id);
         assert_eq!(hit["kind"], "property");
@@ -270,6 +374,7 @@ mod tests {
 
         let result = search_docs(
             &Arc::new(Mutex::new(Some(engine))),
+            &never(),
             None,
             None,
             &format!("создать значение {}", expected.owner),
@@ -291,7 +396,8 @@ mod tests {
         let engine = SearchEngine::fts_only(&db_path).unwrap();
 
         let building =
-            find_docs(&Arc::new(Mutex::new(None)), None, None, "Массив", 10, usize::MAX).unwrap();
+            find_docs(&Arc::new(Mutex::new(None)), &never(), None, None, "Массив", 10, usize::MAX)
+                .unwrap();
         assert_eq!(
             building.content[0].as_text().expect("text").text,
             "Search index is being built, please try again in a moment.",
@@ -300,9 +406,16 @@ mod tests {
         assert_eq!(building_body["status"], "not_ready");
         assert_eq!(building_body["retry_after_ms"], 1500);
 
-        let empty =
-            find_docs(&Arc::new(Mutex::new(Some(engine))), None, None, "Массив", 10, usize::MAX)
-                .unwrap();
+        let empty = find_docs(
+            &Arc::new(Mutex::new(Some(engine))),
+            &never(),
+            None,
+            None,
+            "Массив",
+            10,
+            usize::MAX,
+        )
+        .unwrap();
         assert_eq!(empty.content[0].as_text().expect("text").text, "No results found.");
         // An empty index and an empty result set must not look alike to a machine consumer.
         assert_eq!(
@@ -331,13 +444,15 @@ mod tests {
 
         let error = search_docs(
             &Arc::new(Mutex::new(Some(engine))),
+            &never(),
             None,
             Some(source),
             "Массив",
             10,
             usize::MAX,
         )
-        .unwrap_err();
+        .unwrap_err()
+        .expect_error();
 
         assert!(error.message.contains("Semantic search not available"));
         assert!(!error.message.contains("centralized reference baseline"));
@@ -351,6 +466,7 @@ mod tests {
 
         let error = find_docs(
             &Arc::new(Mutex::new(Some(engine))),
+            &never(),
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "latest reference".to_owned(),
@@ -362,7 +478,8 @@ mod tests {
             10,
             usize::MAX,
         )
-        .unwrap_err();
+        .unwrap_err()
+        .expect_error();
 
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
         assert!(error.message.contains("Shared reference baseline is unavailable"));
@@ -384,6 +501,7 @@ mod tests {
 
         let error = search_docs(
             &Arc::new(Mutex::new(Some(engine))),
+            &never(),
             Some(&ConfiguredBaselineStatus {
                 backend: "postgres",
                 selection: "latest reference".to_owned(),
@@ -395,7 +513,8 @@ mod tests {
             10,
             usize::MAX,
         )
-        .unwrap_err();
+        .unwrap_err()
+        .expect_error();
 
         assert_eq!(error.code, ErrorCode::INVALID_PARAMS);
         assert!(error.message.contains("Shared reference baseline is unavailable"));
@@ -430,13 +549,15 @@ mod tests {
 
         let result = search_docs(
             &Arc::new(Mutex::new(Some(engine))),
+            &never(),
             None,
             Some(source),
             "Массив",
             10,
             usize::MAX,
         )
-        .unwrap_err();
+        .unwrap_err()
+        .expect_error();
 
         assert!(result.message.contains("Semantic search not available"));
     }

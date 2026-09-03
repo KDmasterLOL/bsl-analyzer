@@ -1,7 +1,111 @@
-use crate::baseline::{ExternalBaselineService, RefreshableExternalBaselineSource};
-use bsl_search::{BaselineRef, CorpusId, LexicalHit, SearchHit, SemanticHit};
+use crate::baseline::{
+    BaselineRequestKind, ExternalBaselineService, RefreshableExternalBaselineSource,
+};
+use bsl_search::{BaselineRef, CorpusId, LexicalHit, SearchHit, SemanticHit, Snapshot};
 use project_model::{SearchPostgresConfig, SearchPostgresCredentialHelperConfig};
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+
+/// The name a scripted actor records for each request kind it serves.
+fn request_name(kind: &BaselineRequestKind) -> &'static str {
+    match kind {
+        BaselineRequestKind::ResolveSnapshot { .. } => "resolve_snapshot",
+        BaselineRequestKind::LexicalSearch { .. } => "lexical",
+        BaselineRequestKind::SemanticSearch { .. } => "semantic",
+        BaselineRequestKind::LoadReferenceSnapshotDocuments { .. } => "load_reference_documents",
+        BaselineRequestKind::LoadBaselineManifest { .. } => "load_manifest",
+        BaselineRequestKind::EmbeddingIdentity { .. } => "embedding_identity",
+        BaselineRequestKind::Shutdown { .. } => "shutdown",
+    }
+}
+
+/// The test's hold over a scripted actor: which requests it has begun, which it has
+/// finished, and the gate that lets a latched one proceed.
+pub(super) struct Latch {
+    started: AtomicUsize,
+    executed: Mutex<Vec<&'static str>>,
+    release: Mutex<mpsc::Sender<()>>,
+}
+
+impl Latch {
+    /// How many requests the worker has taken off the queue and begun.
+    pub(super) fn started(&self) -> usize {
+        self.started.load(Ordering::SeqCst)
+    }
+
+    /// The requests the worker has answered, in order.
+    pub(super) fn executed(&self) -> Vec<&'static str> {
+        self.executed.lock().unwrap().clone()
+    }
+
+    /// Let one latched request proceed.
+    pub(super) fn release_one(&self) {
+        self.release.lock().unwrap().send(()).expect("the worker is alive");
+    }
+
+    /// Block until the worker has begun at least `count` requests.
+    pub(super) fn wait_started(&self, count: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while self.started() < count {
+            assert!(std::time::Instant::now() < deadline, "the worker never began request {count}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// A baseline service whose actor answers every request with an empty success at once,
+/// except the kinds named in `latched`, which it holds until [`Latch::release_one`]. The
+/// queue discipline is the production one (see `ExternalBaselineService::serve`).
+pub(super) fn latched_service(
+    latched: &[&'static str],
+) -> (Arc<ExternalBaselineService>, Arc<Latch>) {
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let latch = Arc::new(Latch {
+        started: AtomicUsize::new(0),
+        executed: Mutex::new(Vec::new()),
+        release: Mutex::new(release_tx),
+    });
+    let latched: HashSet<&'static str> = latched.iter().copied().collect();
+    let worker_latch = Arc::clone(&latch);
+    let service = ExternalBaselineService::with_worker_for_test(move |kind| {
+        let name = request_name(&kind);
+        worker_latch.started.fetch_add(1, Ordering::SeqCst);
+        if latched.contains(name) {
+            release_rx.recv().ok();
+        }
+        worker_latch.executed.lock().unwrap().push(name);
+        match kind {
+            BaselineRequestKind::ResolveSnapshot { reply } => {
+                let _ = reply.send(Ok(Some((
+                    BaselineRef::for_snapshot(CorpusId::WorkspaceCode, "snap-1"),
+                    Snapshot::new("snap-1", CorpusId::WorkspaceCode),
+                ))));
+            }
+            BaselineRequestKind::LexicalSearch { reply, .. } => {
+                let _ = reply.send(Ok(vec![]));
+            }
+            BaselineRequestKind::SemanticSearch { reply, .. } => {
+                let _ = reply.send(Ok(vec![]));
+            }
+            BaselineRequestKind::LoadReferenceSnapshotDocuments { reply, .. } => {
+                let _ = reply.send(Ok(None));
+            }
+            BaselineRequestKind::LoadBaselineManifest { reply, .. } => {
+                let _ = reply.send(Err(bsl_search::SearchError::Index("no manifest".to_owned())));
+            }
+            BaselineRequestKind::EmbeddingIdentity { reply } => {
+                let _ = reply.send(Ok(None));
+            }
+            BaselineRequestKind::Shutdown { reply } => {
+                let _ = reply.send(());
+                return std::ops::ControlFlow::Break(());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    });
+    (service, latch)
+}
 
 pub(super) fn retryable_postgres_source() -> Arc<ExternalBaselineService> {
     let postgres = SearchPostgresConfig {

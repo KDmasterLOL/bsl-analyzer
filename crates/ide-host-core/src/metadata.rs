@@ -48,6 +48,7 @@ struct RootStructureListing {
 pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWrite) {
     let start = Instant::now();
 
+    let snapshot = db.workspace_configs_snapshot();
     let config_paths = db.all_config_paths();
     if config_paths.is_empty() {
         return;
@@ -73,13 +74,23 @@ pub fn bootstrap_metadata_substrate(db: &mut RootDatabaseImpl, vfs: &impl VfsWri
     // and stats the filesystem but never touches the vfs.
     let discoveries: Vec<RootDiscovery> = config_paths
         .iter()
-        .map(|(_, root_path)| {
+        .zip(&snapshot.kinds)
+        .map(|((_, root_path), kind)| {
             let mut mdos =
                 bsl_metadata::discover_metadata_structure(root_path, &bsl_conventions::RealFs);
             mdos.extend(bsl_metadata::discover_register_structure(
                 root_path,
                 &bsl_conventions::RealFs,
             ));
+            // An export root lists nothing by collection: its one object is
+            // discovered by the kind the project established for the root.
+            if let ide_db::metadata::RootKind::External(external) = kind {
+                mdos.extend(bsl_metadata::discover_external_object_structure(
+                    root_path,
+                    &bsl_conventions::RealFs,
+                    *external,
+                ));
+            }
             RootDiscovery {
                 root_string: root_path.to_string_lossy().to_string(),
                 mdos,
@@ -421,12 +432,14 @@ pub fn refresh_metadata_substrate(
         return false;
     }
 
+    let snapshot = db.workspace_configs_snapshot();
     let config_paths = db.all_config_paths();
-    let mut affected: Vec<PathBuf> = Vec::new();
-    for (_, root) in &config_paths {
-        if !affected.iter().any(|r| r == root) && changed_paths.iter().any(|p| p.starts_with(root))
+    let mut affected: Vec<(PathBuf, ide_db::metadata::RootKind)> = Vec::new();
+    for ((_, root), kind) in config_paths.iter().zip(&snapshot.kinds) {
+        if !affected.iter().any(|(r, _)| r == root)
+            && changed_paths.iter().any(|p| p.starts_with(root))
         {
-            affected.push(root.clone());
+            affected.push((root.clone(), *kind));
         }
     }
     if affected.is_empty() {
@@ -446,11 +459,18 @@ pub fn refresh_metadata_substrate(
     let mut listings: Vec<RootStructureListing> = Vec::new();
 
     vfs.with_write(|vfs| {
-        for root in &affected {
+        for (root, kind) in &affected {
             let mut discovered =
                 bsl_metadata::discover_metadata_structure(root, &bsl_conventions::RealFs);
             discovered
                 .extend(bsl_metadata::discover_register_structure(root, &bsl_conventions::RealFs));
+            if let ide_db::metadata::RootKind::External(external) = kind {
+                discovered.extend(bsl_metadata::discover_external_object_structure(
+                    root,
+                    &bsl_conventions::RealFs,
+                    *external,
+                ));
+            }
             let mut entries = Vec::with_capacity(discovered.len());
             for d in discovered {
                 let Some(main) = enroll_refresh(

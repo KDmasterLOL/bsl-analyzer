@@ -2,9 +2,11 @@ pub mod lower;
 
 use smol_str::SmolStr;
 
-use crate::Name;
+use crate::{MethodKey, Name};
 use base_db::RootQueryDb;
+use intern::NormName;
 use la_arena::{Arena, Idx};
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use text_size::{TextRange, TextSize};
 use vfs::FileId;
@@ -23,6 +25,10 @@ pub struct ItemTree {
 
     pub(crate) variables: Arena<Variable>,
 
+    /// Each method's item under its key — the one place a key is assigned
+    /// (see [`MethodKey`]) and the lookup every keyed reader goes through.
+    pub(crate) methods_by_key: FxHashMap<MethodKey, ModItem>,
+
     /// The file has a `#Если` region outside any method — only then can an
     /// item-level preprocessor condition narrow a method's environments, so
     /// consumers may skip the conditional tree entirely when this is false.
@@ -36,8 +42,103 @@ impl Default for ItemTree {
             procedures: Arena::new(),
             functions: Arena::new(),
             variables: Arena::new(),
+            methods_by_key: FxHashMap::default(),
             has_module_preproc: false,
         }
+    }
+}
+
+/// A procedure or function of the item tree, read uniformly: the two item
+/// kinds carry the same declaration facts.
+#[derive(Debug, Clone, Copy)]
+pub enum MethodItem<'a> {
+    Procedure(&'a Procedure),
+    Function(&'a Function),
+}
+
+impl<'a> MethodItem<'a> {
+    pub fn key(self) -> MethodKey {
+        match self {
+            Self::Procedure(p) => p.key,
+            Self::Function(f) => f.key,
+        }
+    }
+
+    pub fn is_function(self) -> bool {
+        matches!(self, Self::Function(_))
+    }
+
+    pub fn name(self) -> &'a Name {
+        match self {
+            Self::Procedure(p) => &p.name,
+            Self::Function(f) => &f.name,
+        }
+    }
+
+    pub fn is_export(self) -> bool {
+        match self {
+            Self::Procedure(p) => p.is_export,
+            Self::Function(f) => f.is_export,
+        }
+    }
+
+    pub fn params(self) -> &'a [Param] {
+        match self {
+            Self::Procedure(p) => &p.params,
+            Self::Function(f) => &f.params,
+        }
+    }
+
+    pub fn annotations(self) -> &'a [Annotation] {
+        match self {
+            Self::Procedure(p) => &p.annotations,
+            Self::Function(f) => &f.annotations,
+        }
+    }
+
+    pub fn source_range(self) -> TextRange {
+        match self {
+            Self::Procedure(p) => p.source_range,
+            Self::Function(f) => f.source_range,
+        }
+    }
+
+    pub fn name_range(self) -> TextRange {
+        match self {
+            Self::Procedure(p) => p.name_range,
+            Self::Function(f) => f.name_range,
+        }
+    }
+
+    pub fn param_list_range(self) -> Option<TextRange> {
+        match self {
+            Self::Procedure(p) => p.param_list_range,
+            Self::Function(f) => f.param_list_range,
+        }
+    }
+
+    pub fn sig_end(self) -> TextSize {
+        match self {
+            Self::Procedure(p) => p.sig_end,
+            Self::Function(f) => f.sig_end,
+        }
+    }
+}
+
+/// Assigns each method its key while the tree is lowered: the ordinal is
+/// the count of earlier declarations of the same folded name.
+#[derive(Default)]
+pub(crate) struct MethodKeys {
+    seen: FxHashMap<NormName, u32>,
+}
+
+impl MethodKeys {
+    pub(crate) fn next(&mut self, name: &Name) -> MethodKey {
+        let name = NormName::intern(name.as_str());
+        let ordinal = self.seen.entry(name).or_insert(0);
+        let key = MethodKey { name, ordinal: *ordinal };
+        *ordinal += 1;
+        key
     }
 }
 
@@ -57,6 +158,38 @@ impl ItemTree {
 
     pub fn top_level_items(&self) -> &[ModItem] {
         &self.top_level
+    }
+
+    /// The methods in declaration order.
+    pub fn methods(&self) -> impl Iterator<Item = MethodItem<'_>> + '_ {
+        self.top_level.iter().filter_map(|item| self.method_item(item))
+    }
+
+    /// The method under `key`; `None` when the module declares no such
+    /// method (or fewer namesakes than the ordinal asks for).
+    pub fn method(&self, key: MethodKey) -> Option<MethodItem<'_>> {
+        self.method_item(self.methods_by_key.get(&key)?)
+    }
+
+    /// The top-level item under `key`, for readers that match on the item
+    /// kind themselves.
+    pub fn item_of(&self, key: MethodKey) -> Option<&ModItem> {
+        self.methods_by_key.get(&key)
+    }
+
+    /// Full range and kind of the method under `key`.
+    pub fn method_at(&self, key: MethodKey) -> Option<(TextRange, bool)> {
+        let item = self.method(key)?;
+        Some((item.source_range(), item.is_function()))
+    }
+
+    /// The method view of a top-level item; `None` for a variable.
+    pub fn method_item(&self, item: &ModItem) -> Option<MethodItem<'_>> {
+        match item {
+            ModItem::Procedure(idx) => Some(MethodItem::Procedure(self.procedure(*idx))),
+            ModItem::Function(idx) => Some(MethodItem::Function(self.function(*idx))),
+            ModItem::Variable(_) => None,
+        }
     }
 
     pub fn has_module_preproc(&self) -> bool {
@@ -97,6 +230,7 @@ pub enum ModItem {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Procedure {
+    pub key: MethodKey,
     pub name: Name,
     pub is_export: bool,
     pub params: Box<[Param]>,
@@ -112,6 +246,7 @@ pub struct Procedure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
+    pub key: MethodKey,
     pub name: Name,
     pub is_export: bool,
     pub params: Box<[Param]>,
@@ -202,6 +337,7 @@ pub(crate) fn item_tree_heap(v: &Arc<ItemTree>) -> usize {
     let tree = &**v;
     let mut bytes = std::mem::size_of::<ItemTree>();
     bytes += vec_bytes::<ModItem>(tree.top_level.len());
+    bytes += crate::heap_estimate::map_table_bytes::<MethodKey, ModItem>(tree.methods_by_key.len());
 
     bytes += vec_bytes::<Procedure>(tree.procedures.len());
     for proc in tree.procedures.values() {
@@ -297,6 +433,7 @@ mod tests {
     #[test]
     fn test_procedure_creation() {
         let proc = Procedure {
+            key: crate::MethodKey::first("ТестоваяПроцедура"),
             name: Name::new("ТестоваяПроцедура"),
             is_export: true,
             params: Box::new([]),
@@ -315,6 +452,7 @@ mod tests {
     #[test]
     fn test_function_with_params() {
         let func = Function {
+            key: crate::MethodKey::first("ТестоваяФункция"),
             name: Name::new("ТестоваяФункция"),
             is_export: false,
             params: Box::new([
@@ -366,6 +504,7 @@ mod tests {
         let mut tree = ItemTree::default();
 
         let proc_idx = tree.procedures.alloc(Procedure {
+            key: crate::MethodKey::first("Процедура1"),
             name: Name::new("Процедура1"),
             is_export: false,
             params: Box::new([]),

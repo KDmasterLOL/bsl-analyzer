@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
-use ide_db::TextRange;
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -17,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &BodyContext) -> Option<Diagnostic<LocalRange>> {
     let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::IfElseIfEndsWithElse,
         "Конструкция Если-ИначеЕсли должна заканчиваться блоком Иначе",
@@ -28,13 +29,13 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
     // The range points at the closing `КонецЕсли`; insert an empty `Иначе` branch with a
     // TODO right before it, matching its indentation. It leaves a placeholder for the
     // author, so it is opt-in rather than part of `source.fixAll`.
-    let text = ctx.file_text();
-    let end_if_start: usize = range.start().into();
+    let text = ctx.root().text().to_string();
+    let end_if_start: usize = range.in_root().start().into();
     let indent = line_indent(&text, end_if_start);
     let insert = format!("Иначе\n{indent}    // TODO: обработать остальные случаи\n{indent}");
     diagnostic.fixes = vec![Fix::manual(
         "Добавить блок Иначе",
-        vec![TextEdit { range: TextRange::empty(range.start()), new_text: insert }],
+        vec![TextEdit { range: LocalRange::empty(range.start()), new_text: insert }],
     )];
 
     Some(diagnostic)

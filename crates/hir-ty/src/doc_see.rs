@@ -29,8 +29,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::docs::{parse_type_expr, DocTypeExpr, TypeDoc};
+use hir_def::module_interface::MethodDecl;
 use hir_def::resolver::Resolver;
-use hir_def::symbol_tree::MethodSymbol;
 use hir_def::{MethodId, MethodIdInput, ModuleId, Name, QualifiedName};
 use stdx::case::CaseExt;
 
@@ -91,7 +91,7 @@ trait SeeTargets {
         from: ModuleId,
         module: &Name,
         method: &Name,
-    ) -> Option<(MethodId, Arc<MethodSymbol>)>;
+    ) -> Option<(MethodId, Arc<MethodDecl>)>;
 }
 
 struct WorkspaceTargets<'db> {
@@ -104,7 +104,7 @@ impl SeeTargets for WorkspaceTargets<'_> {
         from: ModuleId,
         module: &Name,
         method: &Name,
-    ) -> Option<(MethodId, Arc<MethodSymbol>)> {
+    ) -> Option<(MethodId, Arc<MethodDecl>)> {
         let resolver = Resolver::with_workspace_scope(from);
         let resolution = resolver.resolve_qualified_method(self.db, module, method).ok()?;
         // Documentation on a method its own module cannot see is not documentation this slot may
@@ -112,9 +112,8 @@ impl SeeTargets for WorkspaceTargets<'_> {
         if !resolution.is_export {
             return None;
         }
-        let symbol_tree = self.db.symbol_tree_ref(resolution.method_id.module);
-        let symbol = symbol_tree.find_method_by_id(resolution.method_id)?.clone();
-        Some((resolution.method_id, Arc::new(symbol)))
+        let symbol = self.db.interface_method(resolution.method_id)?;
+        Some((resolution.method_id, symbol))
     }
 }
 
@@ -210,7 +209,7 @@ impl Driver<'_> {
         &self,
         from: ModuleId,
         name: &QualifiedName,
-    ) -> Option<(MethodId, Arc<MethodSymbol>, Slot)> {
+    ) -> Option<(MethodId, Arc<MethodDecl>, Slot)> {
         let segments = name.segments();
         let (module, method) = match segments {
             [module, method] | [module, method, _] => (module, method),
@@ -229,7 +228,7 @@ impl Driver<'_> {
         &self,
         db: &dyn TypeKernelDb,
         module: ModuleId,
-        symbol: &MethodSymbol,
+        symbol: &MethodDecl,
         slot: Slot,
     ) -> Option<TypeId> {
         let alternatives = slot_alternatives(symbol, slot)?;
@@ -241,7 +240,7 @@ impl Driver<'_> {
 }
 
 /// The alternatives documented for one slot, in declaration order.
-fn slot_alternatives(symbol: &MethodSymbol, slot: Slot) -> Option<&[TypeDoc]> {
+fn slot_alternatives(symbol: &MethodDecl, slot: Slot) -> Option<&[TypeDoc]> {
     let docs = symbol.docs.as_deref()?;
     match slot {
         Slot::Ret => Some(docs.returned_value.as_slice()),
@@ -256,7 +255,7 @@ fn slot_alternatives(symbol: &MethodSymbol, slot: Slot) -> Option<&[TypeDoc]> {
 }
 
 /// Matched without regard to case, the same way parameter documentation is matched everywhere.
-fn param_index(symbol: &MethodSymbol, name: &Name) -> Option<u32> {
+fn param_index(symbol: &MethodDecl, name: &Name) -> Option<u32> {
     let needle = name.as_str().fold_lower();
     symbol
         .params
@@ -297,16 +296,15 @@ pub fn doc_see_signature_query<'db>(
     let _span = tracing::info_span!(
         "doc_see_signature",
         file_id = mid.module.file_id.0,
-        local_id = mid.local_id,
+        local_id = ?mid.local_id,
     )
     .entered();
 
-    let symbol_tree = db.symbol_tree_ref(mid.module);
-    let Some(symbol) = symbol_tree.find_method_by_id(mid) else {
+    let Some(symbol) = db.interface_method(mid) else {
         return Arc::new(DocSeeSignature::default());
     };
 
-    let signature = crate::method_resolution::materialise_signature(db, symbol);
+    let signature = crate::method_resolution::materialise_signature(db, &symbol);
     // Nothing in this method's documentation names a target, so there is nothing to resolve. This
     // is the answer for the overwhelming majority of methods, and it costs one bit to reach.
     if signature.doc_see.is_empty() {
@@ -318,14 +316,14 @@ pub fn doc_see_signature_query<'db>(
 
     let mut resolved = DocSeeSignature::default();
     if signature.doc_see.ret {
-        resolved.ret = resolve_own_slot(db, &driver, mid.module, symbol, Slot::Ret, signature.ret);
+        resolved.ret = resolve_own_slot(db, &driver, mid.module, &symbol, Slot::Ret, signature.ret);
     }
     for (index, &lowered) in signature.params.iter().enumerate() {
         if !signature.doc_see.param(index) {
             continue;
         }
         let slot = Slot::Param(index as u32);
-        if let Some(ty) = resolve_own_slot(db, &driver, mid.module, symbol, slot, lowered) {
+        if let Some(ty) = resolve_own_slot(db, &driver, mid.module, &symbol, slot, lowered) {
             resolved.params.insert(index as u32, ty);
         }
     }
@@ -352,7 +350,7 @@ fn resolve_own_slot(
     db: &dyn HirDatabase,
     driver: &Driver<'_>,
     module: ModuleId,
-    symbol: &MethodSymbol,
+    symbol: &MethodDecl,
     slot: Slot,
     lowered_by_the_signature: TypeId,
 ) -> Option<TypeId> {

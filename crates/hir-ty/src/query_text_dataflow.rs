@@ -1,14 +1,11 @@
 use std::sync::Arc;
 use stdx::case::CaseExt;
 
-use base_db::FileIdInput;
 use bsl_types::kind::Projection;
 use dataflow::reaching_defs::DefSite;
 use hir_def::body::Body;
 use hir_def::hir::{Expr, Literal, Stmt};
-use hir_def::{
-    sdbl_hir_for_file_query, DefWithBodyId, ExprId, IdConversion, Name, SdblExprId, StmtId,
-};
+use hir_def::{DefWithBodyId, ExprId, IdConversion, MethodIdInput, Name, StmtId};
 use vfs::FileId;
 
 use crate::db::HirDatabase;
@@ -32,8 +29,10 @@ pub(crate) fn refine_query_at_use_site(
 
     let dispatch_stmt_id = body.enclosing_stmt(use_expr_id)?;
 
-    let module_defs = db.module_reaching_definitions(file_id);
-    let method_defs = module_defs.get(local_id)?;
+    let method_defs = db.method_reaching_definitions(MethodIdInput::new(
+        db,
+        hir_def::MethodId { module: hir_def::ModuleId::new(file_id), local_id },
+    ))?;
 
     let mut defs =
         method_defs.defs_for_var_at_stmt(&composite_ru, dispatch_stmt_id).unwrap_or_default();
@@ -95,13 +94,10 @@ fn projections_from_text_assignment(
         return None;
     }
 
-    let sdbl_expr_id = SdblExprId { owner, expr_id: value_id };
-    let file_id_input = FileIdInput::new(db, file_id);
-    let entries = sdbl_hir_for_file_query(db, file_id_input);
-    let (_, pkg) = entries.iter().find(|(id, _)| *id == sdbl_expr_id)?;
+    let pkg = hir_def::sdbl_package_for(db, file_id, owner, value_id)?;
 
     if pkg.queries().is_empty() {
         return None;
     }
-    Some(package_to_projections(db, pkg).into())
+    Some(package_to_projections(db, &pkg).into())
 }

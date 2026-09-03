@@ -158,7 +158,7 @@ fn type_of_module_level_expr_resolves() {
     let expr_id = module_bodies
         .module_code_result()
         .expect("module-level body must be lowered")
-        .source_map
+        .source_map()
         .expr_at_range(literal.syntax().text_range())
         .expect("module-level BodySourceMap must locate the literal");
     let infer = db.infer(file_id);

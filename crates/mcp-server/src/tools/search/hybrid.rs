@@ -2,7 +2,7 @@ use super::lexical::lexical_code_hits_fenced;
 use super::render::{format_code_hits, hits_response, no_hits_response, Envelope};
 use super::semantic::semantic_code_hits_fenced;
 use super::status::search_not_ready;
-use super::types::{CodeHits, HYBRID_FETCH_MULTIPLIER};
+use super::types::{CodeHits, SearchFailure, HYBRID_FETCH_MULTIPLIER};
 use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{fuse_smart, FusedHit, IndexProgress, SearchEngine};
@@ -11,6 +11,7 @@ use rmcp::ErrorData as McpError;
 use std::fmt::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// The one-line legend above the hits: what `[L]` / `[S]` / `[L+S]` mean.
 const MODALITY_LEGEND: &str = "Modality tag per hit: [L] lexical-only · [S] semantic-only · [L+S] found by both (cross-modal agreement).\n";
@@ -35,7 +36,7 @@ fn hits_budget(max_output_tokens: usize, note: Option<&str>) -> usize {
 // per-request value pulled straight from `SharedState`, with no natural sub-grouping that a
 // context struct would not make more obscure than the flat list.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // unmanaged compatibility wrapper
+#[allow(dead_code)] // unmanaged, uncancellable compatibility wrapper for tests
 pub fn hybrid_code(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
@@ -51,6 +52,7 @@ pub fn hybrid_code(
     hybrid_code_fenced(
         engine,
         &crate::workspace_lease::WorkspaceLease::unmanaged(),
+        &CancellationToken::new(),
         semantic_runtime,
         workspace_search_mode,
         configured_baseline,
@@ -61,12 +63,17 @@ pub fn hybrid_code(
         limit,
         max_output_tokens,
     )
+    .map_err(|failure| match failure {
+        SearchFailure::Error(error) => error,
+        SearchFailure::Cancelled => McpError::internal_error("request cancelled", None),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn hybrid_code_fenced(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     lease: &crate::workspace_lease::WorkspaceLease,
+    cancel: &CancellationToken,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
@@ -76,7 +83,7 @@ pub fn hybrid_code_fenced(
     query: &str,
     limit: usize,
     max_output_tokens: usize,
-) -> Result<CallToolResult, McpError> {
+) -> Result<CallToolResult, SearchFailure> {
     // Over-fetch each modality so a hit ranked just outside `limit` in one but boosted by the
     // other can still surface after fusion.
     let fetch = limit.saturating_mul(HYBRID_FETCH_MULTIPLIER).max(limit);
@@ -84,6 +91,7 @@ pub fn hybrid_code_fenced(
     let lexical = lexical_code_hits_fenced(
         engine,
         lease,
+        cancel,
         workspace_search_mode.clone(),
         configured_baseline,
         external_baseline.clone(),
@@ -109,9 +117,15 @@ pub fn hybrid_code_fenced(
         }
     };
 
+    // Between the modalities: the lexical answer is worth nothing to a caller that has
+    // gone, and the semantic half is the expensive one.
+    if cancel.is_cancelled() {
+        return Err(SearchFailure::Cancelled);
+    }
     let semantic = semantic_code_hits_fenced(
         engine,
         lease,
+        cancel,
         semantic_runtime,
         workspace_search_mode,
         configured_baseline,
@@ -198,6 +212,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn search_code_does_not_write_after_supersession() {
@@ -254,6 +269,7 @@ mod tests {
         let clean = lexical_code_hits_fenced(
             &shared,
             &old,
+            &CancellationToken::new(),
             WorkspaceSearchMode::SqliteLocal,
             None,
             None,
@@ -270,6 +286,7 @@ mod tests {
         let lexical = lexical_code_hits_fenced(
             &shared,
             &old,
+            &CancellationToken::new(),
             WorkspaceSearchMode::SqliteLocal,
             None,
             None,
@@ -280,6 +297,7 @@ mod tests {
         let semantic = semantic_code_hits_fenced(
             &shared,
             &old,
+            &CancellationToken::new(),
             &failed,
             WorkspaceSearchMode::SqliteLocal,
             None,
@@ -291,6 +309,7 @@ mod tests {
         let hybrid = hybrid_code_fenced(
             &shared,
             &old,
+            &CancellationToken::new(),
             &failed,
             WorkspaceSearchMode::SqliteLocal,
             None,

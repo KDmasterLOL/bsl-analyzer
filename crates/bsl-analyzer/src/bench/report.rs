@@ -132,6 +132,48 @@ pub struct EditPhases {
     /// First followup invocation after the edit (same value as `cold_ns`).
     /// In mode B this is the whole instrumented apply+request window.
     pub after_edit_ns: u64,
+    /// `edit_burst` points only: how many `didChange`s preceded the followup;
+    /// `edit_apply_ns` is then their sum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst_len: Option<usize>,
+    /// How the edited file was parsed after the edit: counter deltas of the
+    /// database's parse outcomes between the edit and the first followup.
+    /// Mode A only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_outcome: Option<ParseOutcomeDelta>,
+    /// Расхождения сборки строчных диагностик по плитам с файлом за окно
+    /// правки — только под `BSL_SLAB_VERIFY=1`, иначе `None`. Mode A only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slab_verify: Option<u64>,
+}
+
+/// Deltas of [`base_db::ParseStats`] over one edit: whether the method was
+/// spliced, the file was parsed in full, and why a splice was refused.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParseOutcomeDelta {
+    pub full: u64,
+    pub spliced: u64,
+    pub mismatched: u64,
+    /// Refusal reason → count, only the reasons that fired.
+    pub refused: Vec<(String, u64)>,
+}
+
+impl ParseOutcomeDelta {
+    pub fn between(before: base_db::ParseStats, after: base_db::ParseStats) -> Self {
+        let refused = parser::reparse::Refusal::ALL
+            .iter()
+            .filter_map(|refusal| {
+                let delta = after.refused[refusal.index()] - before.refused[refusal.index()];
+                (delta > 0).then(|| (format!("{refusal:?}"), delta))
+            })
+            .collect();
+        Self {
+            full: after.full - before.full,
+            spliced: after.spliced - before.spliced,
+            mismatched: after.mismatched - before.mismatched,
+            refused,
+        }
+    }
 }
 
 /// Nearest-rank percentile; `p` in 0..=100. Empty input yields 0.

@@ -30,9 +30,10 @@ pub(crate) fn status(
         // drift from the sources with nothing in the protocol to explain why.
         "owns_caches": owns_caches,
     });
-    // The workspace is an extension with no main configuration behind it. Its
-    // calls into that configuration cannot resolve, so the findings this backend
-    // is about to report are wrong in a way only the project shape explains.
+    // The project is analyzed without its main configuration — the workspace is
+    // an extension, or it declares external objects and no base. Calls into that
+    // configuration cannot resolve, so the findings this backend is about to
+    // report are wrong in a way only the project shape explains.
     if let Some(notice) = standalone_extension {
         body["standalone_extension"] = json!(notice);
     }

@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -17,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(_name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(_name: &str, range: TextRange, ctx: &AnalysisContext) -> Option<Diagnostic> {
     let code = DiagnosticCode::ExportVariables;
 
     if ctx.is_disabled_with_metadata(code) {

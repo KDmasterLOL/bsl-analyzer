@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use base_db::FileIdInput;
 use hir::ModuleId;
@@ -36,93 +36,61 @@ pub(crate) mod heap_estimate {
         cap.saturating_mul(std::mem::size_of::<K>() + std::mem::size_of::<V>() + 1)
     }
 
-    pub(super) fn module_cfgs_heap(v: &Arc<hir::cfg::ModuleCfgs>) -> usize {
+    pub(super) fn cfg_heap(v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
         v.estimated_heap()
     }
 
-    /// A `method_cfg` result is a clone of an `Arc` owned by `module_cfgs`, so its
-    /// payload is already counted there; report only the (already-counted) pointer.
-    pub(super) fn shared_cfg_heap(_v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
-        0
-    }
-
-    /// Module-level CFG owns its graph; `module_cfgs` stores only a shared `Arc`.
     pub(super) fn module_level_cfg_heap(v: &Arc<hir::cfg::ControlFlowGraph>) -> usize {
         v.estimated_heap()
     }
 
-    pub(super) fn module_reaching_definitions_heap(
-        v: &Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>,
+    /// The result shares its `Body` with the lowering memo, and its own
+    /// estimate leaves the body out.
+    pub(super) fn reaching_defs_heap(
+        v: &Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>,
     ) -> usize {
-        v.estimated_heap()
+        v.as_ref().map_or(0, |r| r.estimated_heap())
     }
 
-    pub(super) fn module_liveness_heap(v: &Arc<hir::dataflow::liveness::ModuleLiveness>) -> usize {
-        v.estimated_heap()
-    }
-
-    pub(super) fn module_path_terminates_heap(
-        v: &Arc<hir::dataflow::path_terminates::ModulePathTerminates>,
+    pub(super) fn path_terminates_heap(
+        v: &Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>>,
     ) -> usize {
-        v.estimated_heap()
-    }
-
-    /// A `reaching_definitions` accessor result is a clone of an `Arc` owned by
-    /// `module_reaching_definitions`; report only the shared pointer.
-    pub(super) fn shared_reaching_defs_heap(
-        _v: &Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>,
-    ) -> usize {
-        0
-    }
-
-    /// A `liveness_analysis` accessor result is a clone of an `Arc` owned by
-    /// `module_liveness_analysis`; report only the shared pointer.
-    pub(super) fn shared_liveness_heap(
-        _v: &Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>,
-    ) -> usize {
-        0
-    }
-
-    /// Module-level liveness is uniquely owned by its query.
-    pub(super) fn module_level_liveness_heap(
-        v: &Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>,
-    ) -> usize {
-        v.as_ref().map_or(0, |a| hir::dataflow::liveness::liveness_result_heap(a))
+        v.as_ref().map_or(0, |r| r.estimated_heap())
     }
 
     pub(super) fn line_index_heap(v: &Arc<line_index::LineIndex>) -> usize {
         v.estimated_heap()
     }
 
+    /// Per-method payloads are owned by `method_hir_metrics_query`; the file
+    /// view counts its table and the module-code metrics it owns.
     pub(super) fn module_hir_metrics_heap(v: &Arc<ModuleHirMetrics>) -> usize {
-        let m = &**v;
-        let metrics_heap = |hm: &hir::metrics::HirMethodMetrics| {
-            vec_bytes::<hir::metrics::ConditionMetrics>(hm.if_conditions.len())
-                + vec_bytes::<hir::metrics::NestingLeafMetrics>(hm.nesting_leaves.len())
-        };
         let mut bytes =
-            map_table_bytes::<u32, Arc<hir::metrics::HirMethodMetrics>>(m.methods.len());
-        for hm in m.methods.values() {
-            bytes += std::mem::size_of::<hir::metrics::HirMethodMetrics>() + metrics_heap(hm);
-        }
-        if let Some(hm) = &m.module_code {
-            bytes += std::mem::size_of::<hir::metrics::HirMethodMetrics>() + metrics_heap(hm);
+            map_table_bytes::<hir::MethodKey, Arc<hir::metrics::HirMethodMetrics>>(v.methods.len());
+        if let Some(hm) = &v.module_code {
+            bytes += std::mem::size_of::<hir::metrics::HirMethodMetrics>()
+                + vec_bytes::<hir::metrics::ConditionMetrics>(hm.if_conditions.len())
+                + vec_bytes::<hir::metrics::NestingLeafMetrics>(hm.nesting_leaves.len());
         }
         bytes
     }
 
+    pub(super) fn hir_metrics_heap(v: &Arc<hir::metrics::HirMethodMetrics>) -> usize {
+        std::mem::size_of::<hir::metrics::HirMethodMetrics>()
+            + vec_bytes::<hir::metrics::ConditionMetrics>(v.if_conditions.len())
+            + vec_bytes::<hir::metrics::NestingLeafMetrics>(v.nesting_leaves.len())
+    }
+
+    pub(super) fn recursive_methods_heap(v: &Arc<rustc_hash::FxHashSet<hir::MethodKey>>) -> usize {
+        map_table_bytes::<hir::MethodKey, ()>(v.len())
+    }
+
     pub(super) fn module_cyclomatic_heap(v: &Arc<ModuleCyclomatic>) -> usize {
-        map_table_bytes::<u32, u32>(v.methods.len())
+        map_table_bytes::<hir::MethodKey, u32>(v.methods.len())
     }
 
     pub(super) fn module_metadata_heap(v: &Arc<hir::ModuleMetadata>) -> usize {
         std::mem::size_of::<hir::ModuleMetadata>() + v.estimated_heap_size()
-    }
-
-    /// A `method_hir_metrics` accessor result is a clone of an `Arc` owned by
-    /// `module_hir_metrics`; report only the (already-counted) pointer.
-    pub(super) fn shared_hir_metrics_heap(_v: &Arc<hir::metrics::HirMethodMetrics>) -> usize {
-        0
     }
 }
 
@@ -130,6 +98,22 @@ pub fn configuration_path_for_file<'db>(
     db: &'db dyn RootDatabase,
     file_id: vfs::FileId,
 ) -> Option<ConfigurationPathInput<'db>> {
+    configuration_path_for_file_query(db, FileIdInput::new(db, file_id))
+}
+
+/// The configuration root of a file, found by walking its directory chain on
+/// disk (`CommonModules/` or `Configuration.xml`). Memoised per file: the walk
+/// lists directories — a common-modules folder of thousands of entries on a
+/// large configuration — and the per-method diagnostics ask for it once per
+/// body. The memo follows the file's source root and the configuration
+/// revisions; a root that appears on disk without any registration is seen
+/// on the next revision of those inputs, not on the next request.
+#[salsa::tracked(heap_size = stdx::heap::zero, returns(copy))]
+fn configuration_path_for_file_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Option<ConfigurationPathInput<'db>> {
+    let file_id = file_id_input.file_id(db);
     let file_path = crate::vfs_helpers::get_file_path(db, file_id)?;
     let config_root = crate::vfs_helpers::find_configuration_root(db, &file_path)?;
     Some(intern_configuration_path(
@@ -174,7 +158,9 @@ pub fn effective_target<'db>(
     ext_file: vfs::FileId,
 ) -> Option<hir::EffectiveModuleId<'db>> {
     let ext_path = crate::vfs_helpers::get_file_path(db, ext_file)?;
-    let roots = db.all_config_paths();
+    // Pairing is a relation between an extension and the base; an external
+    // object's file never pairs, whatever relative path it happens to have.
+    let roots = db.designer_config_paths();
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
@@ -200,7 +186,7 @@ pub fn weaving_target<'db>(
     ext_file: vfs::FileId,
 ) -> Option<hir::WeavingModuleId<'db>> {
     let ext_path = crate::vfs_helpers::get_file_path(db, ext_file)?;
-    let roots = db.all_config_paths();
+    let roots = db.designer_config_paths();
     let base_path = hir::pair_base_module_path(&roots, &ext_path)?;
 
     let source_root = db.file_source_root_input(ext_file).source_root_id(db);
@@ -255,6 +241,19 @@ pub fn module_metadata_query<'db>(
 
     metadata = crate::metadata::build_module_metadata(&file_path, configuration.as_deref());
 
+    if let (Some(config), Some((root, canonical, kind))) =
+        (configuration.as_deref(), db.external_root_of_path(&file_path))
+    {
+        crate::metadata::attach_external_owner(
+            &mut metadata,
+            &file_path,
+            &root,
+            &canonical,
+            kind,
+            config,
+        );
+    }
+
     if matches!(metadata.module_type, bsl_metadata::ModuleType::IntegrationServiceModule)
         && metadata.integration_service.is_none()
     {
@@ -273,270 +272,102 @@ pub fn application_module_files_query<'db>(
     db.resolve_application_module_files_uncached(file_id_input.file_id(db), kind)
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cfgs_heap, returns(clone))]
-pub fn module_cfgs_query<'db>(
-    db: &'db dyn RootDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<hir::cfg::ModuleCfgs> {
-    let file_id = file_id_input.file_id(db);
-    let module_id = hir::ModuleId::new(file_id);
-    let _span = tracing::info_span!("module_cfgs", ?module_id).entered();
+// The per-method dataflow chain is computed from the method's own body and
+// nothing file-wide, so a body edit re-runs it for the edited method only.
+// Each link is retained at the cap of the inference that reads it (8192): a
+// memo evicted below its reader has no old value to backdate against, and the
+// reader above it re-runs — the LRU cascade of github#113. The sweep profile
+// (`set_dataflow_lru_sweep_mode`) shrinks these caps together with the
+// lowering chain.
 
-    let module_bodies = db.module_bodies_ref(module_id);
-
-    let mut cfgs = rustc_hash::FxHashMap::default();
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let source_map = module_bodies.source_map(local_id);
-        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
-            body.body_stmts_typed(),
-            body,
-            source_map,
-        );
-        cfgs.insert(local_id, Arc::new(cfg));
-    }
-    let module_code =
-        module_bodies.module_code().map(|_| module_level_cfg_query(db, file_id_input));
-
-    tracing::debug!(
-        methods = cfgs.len(),
-        has_module_code = module_code.is_some(),
-        "Built module CFGs"
-    );
-    Arc::new(hir::cfg::ModuleCfgs::new(cfgs, module_code))
-}
-
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_cfg_heap, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::cfg_heap, returns(clone))]
 pub fn method_cfg_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
 ) -> Arc<hir::cfg::ControlFlowGraph> {
-    let _span = tracing::info_span!("method_cfg_accessor", ?method_id_input).entered();
+    let _span = tracing::info_span!("method_cfg", ?method_id_input).entered();
+    let body = db.method_body_ref(method_id_input);
+    Arc::new(hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body))
+}
 
-    let method_id = method_id_input.method_id(db);
-    let file_id = method_id.module.file_id;
+/// Reaching definitions over one body. Parameters seed the entry state only
+/// for methods; module-level code has none.
+fn solve_reaching_definitions(
+    cfg: Arc<hir::cfg::ControlFlowGraph>,
+    body_arc: &Arc<hir::Body>,
+    seed_params: bool,
+) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+    use hir::dataflow::reaching_defs::{
+        Definition, DefinitionIndex, ReachingDefs, ReachingDefsTransfer,
+    };
 
-    let file_id_input = base_db::FileIdInput::new(db, file_id);
-    let module_cfgs = db.module_cfgs(file_id_input);
+    let body: &hir::Body = body_arc;
+    let params: Vec<_> = if seed_params {
+        body.params().map(|param_id| (body.binding(param_id).name.clone(), param_id)).collect()
+    } else {
+        Vec::new()
+    };
+    let def_index = DefinitionIndex::from_body_with_params(body, params);
 
-    module_cfgs.get(method_id.local_id).cloned().unwrap_or_else(|| {
-        tracing::debug!("No CFG found for method: {:?}", method_id);
-        Arc::new(hir::cfg::ControlFlowGraph::new())
+    let mut initial_defs = ReachingDefs::new(def_index.clone());
+    if seed_params {
+        for param_id in body.params() {
+            let binding = body.binding(param_id);
+            initial_defs.insert(&Definition::parameter(&binding.name, param_id));
+        }
+    }
+
+    let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), ReachingDefsTransfer);
+    solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
+    solver.set_bottom_factory(|| ReachingDefs::new(def_index.clone()));
+    solver.set_initial_state(initial_defs);
+
+    solver.solve().map(|dataflow_result| {
+        Arc::new(hir::dataflow::reaching_defs::ReachingDefsResult::new(
+            dataflow_result,
+            Arc::clone(body_arc),
+        ))
     })
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_reaching_definitions_heap, returns(clone))]
-pub fn module_reaching_definitions_query<'db>(
-    db: &'db dyn RootDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
-    let file_id = file_id_input.file_id(db);
-    let module_id = hir::ModuleId::new(file_id);
-    let _span = tracing::info_span!("module_reaching_definitions", ?module_id).entered();
-
-    let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies_ref(module_id);
-
-    let mut results = rustc_hash::FxHashMap::default();
-
-    for (local_id, body) in module_bodies.iter_bodies() {
-        db.unwind_if_revision_cancelled();
-
-        let cfg = match module_cfgs.get(local_id) {
-            Some(cfg) => cfg.clone(),
-            None => continue,
-        };
-
-        let params: Vec<_> = body
-            .params()
-            .map(|param_id| {
-                let binding = body.binding(param_id);
-                (binding.name.clone(), param_id)
-            })
-            .collect();
-        let def_index =
-            hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(body, params);
-
-        let mut initial_defs = hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
-        for param_id in body.params() {
-            let binding = body.binding(param_id);
-            let def = hir::dataflow::reaching_defs::Definition::parameter(&binding.name, param_id);
-            initial_defs.insert(&def);
-        }
-
-        let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
-        let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-        solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
-        solver.set_bottom_factory(|| {
-            hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
-        });
-        solver.set_initial_state(initial_defs);
-
-        if let Some(dataflow_result) = solver.solve() {
-            let result = hir::dataflow::reaching_defs::ReachingDefsResult::new(
-                dataflow_result,
-                body.clone(),
-            );
-            results.insert(local_id, Arc::new(result));
-        }
-    }
-
-    let module_code = match (module_bodies.module_code(), module_cfgs.module_code()) {
-        (Some(body), Some(cfg)) => {
-            let def_index = hir::dataflow::reaching_defs::DefinitionIndex::from_body_with_params(
-                body,
-                std::iter::empty(),
-            );
-            let initial_defs = hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone());
-            let transfer = hir::dataflow::reaching_defs::ReachingDefsTransfer;
-            let mut solver =
-                hir::dataflow::DataflowSolver::new(Arc::clone(cfg), body.clone(), transfer);
-            solver.set_max_iterations(hir::dataflow::DEFAULT_MAX_ITERATIONS);
-            solver.set_bottom_factory(|| {
-                hir::dataflow::reaching_defs::ReachingDefs::new(def_index.clone())
-            });
-            solver.set_initial_state(initial_defs);
-            solver.solve().map(|dataflow_result| {
-                Arc::new(hir::dataflow::reaching_defs::ReachingDefsResult::new(
-                    dataflow_result,
-                    body.clone(),
-                ))
-            })
-        }
-        _ => None,
-    };
-
-    tracing::debug!(
-        methods = results.len(),
-        has_module_code = module_code.is_some(),
-        "Analyzed reaching definitions"
-    );
-    Arc::new(hir::dataflow::reaching_defs::ModuleReachingDefs::new(results, module_code))
-}
-
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_path_terminates_heap, returns(clone))]
-pub fn module_path_terminates_query<'db>(
-    db: &'db dyn RootDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
-    let file_id = file_id_input.file_id(db);
-    let module_id = hir::ModuleId::new(file_id);
-    let _span = tracing::info_span!("module_path_terminates", ?module_id).entered();
-
-    let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies_ref(module_id);
-
-    let mut results = rustc_hash::FxHashMap::default();
-
-    for (local_id, body) in module_bodies.iter_bodies() {
-        db.unwind_if_revision_cancelled();
-
-        let cfg = match module_cfgs.get(local_id) {
-            Some(cfg) => cfg,
-            None => continue,
-        };
-
-        if let Some(result) = hir::dataflow::path_terminates::analyze_path_terminates(
-            body,
-            cfg,
-            hir::dataflow::path_terminates::PathTerminatesConfig::default(),
-            hir::dataflow::DEFAULT_MAX_ITERATIONS,
-        ) {
-            results.insert(local_id, Arc::new(result));
-        }
-    }
-
-    tracing::debug!(count = results.len(), "Analyzed module path-terminates");
-    Arc::new(hir::dataflow::path_terminates::ModulePathTerminates::new(results))
-}
-
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_reaching_defs_heap, returns(clone))]
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::reaching_defs_heap, returns(clone))]
 pub fn reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
 ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
-    let _span = tracing::info_span!("reaching_definitions_accessor", ?method_id_input).entered();
-
-    let method_id = method_id_input.method_id(db);
-    let file_id = method_id.module.file_id;
-
-    let file_id_input = base_db::FileIdInput::new(db, file_id);
-    let module_reaching_defs =
-        <dyn RootDatabase as RootDatabase>::module_reaching_definitions(db, file_id_input);
-
-    module_reaching_defs.get(method_id.local_id).cloned()
+    let _span = tracing::info_span!("reaching_definitions", ?method_id_input).entered();
+    let cfg = method_cfg_query(db, method_id_input);
+    solve_reaching_definitions(cfg, db.method_body_ref(method_id_input), true)
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_liveness_heap, returns(clone))]
-pub fn module_liveness_analysis_query<'db>(
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::reaching_defs_heap, returns(clone))]
+pub fn module_code_reaching_definitions_query<'db>(
     db: &'db dyn RootDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
+    file_id_input: FileIdInput<'db>,
+) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
     let file_id = file_id_input.file_id(db);
-    let module_id = hir::ModuleId::new(file_id);
-    let _span = tracing::info_span!("module_liveness", ?module_id).entered();
-    let total_start = Instant::now();
-
-    let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies_ref(module_id);
-
-    let mut results = rustc_hash::FxHashMap::default();
-
-    for (local_id, body) in module_bodies.iter_bodies() {
-        db.unwind_if_revision_cancelled();
-
-        let cfg = match module_cfgs.get(local_id) {
-            Some(cfg) => cfg,
-            None => continue,
-        };
-        let method_start = Instant::now();
-        let block_count = cfg.vertices().count();
-        let stmt_count = body.stmt_count();
-
-        let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
-
-        if let Some(liveness_result) = hir::dataflow::liveness::liveness_analysis_direct(
-            body,
-            cfg,
-            var_index,
-            hir::dataflow::DEFAULT_MAX_ITERATIONS,
-        ) {
-            results.insert(local_id, Arc::new(liveness_result));
-        }
-
-        let elapsed_ms = method_start.elapsed().as_millis();
-        if elapsed_ms >= 100 {
-            tracing::info!(
-                local_id,
-                block_count,
-                stmt_count,
-                elapsed_ms,
-                "Slow module liveness method"
-            );
-        }
-    }
-
-    tracing::info!(
-        count = results.len(),
-        elapsed_ms = total_start.elapsed().as_millis(),
-        "Module liveness batch complete"
-    );
-    Arc::new(hir::dataflow::liveness::ModuleLiveness::new(results))
+    let _span = tracing::info_span!("module_code_reaching_definitions", ?file_id).entered();
+    let module_bodies = db.module_bodies_ref(ModuleId::new(file_id));
+    let body_arc = module_bodies.module_code_arc()?;
+    let cfg = module_level_cfg_query(db, file_id_input);
+    solve_reaching_definitions(cfg, body_arc, false)
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_liveness_heap, returns(clone))]
-pub fn liveness_analysis_query<'db>(
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::path_terminates_heap, returns(clone))]
+pub fn method_path_terminates_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
-) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-    let _span = tracing::info_span!("liveness_analysis_accessor", ?method_id_input).entered();
-
-    let method_id = method_id_input.method_id(db);
-    let file_id = method_id.module.file_id;
-
-    let file_id_input = base_db::FileIdInput::new(db, file_id);
-    let module_liveness = db.module_liveness_analysis(file_id_input);
-
-    module_liveness.get(method_id.local_id).cloned()
+) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
+    let _span = tracing::info_span!("method_path_terminates", ?method_id_input).entered();
+    let cfg = method_cfg_query(db, method_id_input);
+    let body = db.method_body_ref(method_id_input);
+    hir::dataflow::path_terminates::analyze_path_terminates(
+        body,
+        &cfg,
+        hir::dataflow::path_terminates::PathTerminatesConfig::default(),
+        hir::dataflow::DEFAULT_MAX_ITERATIONS,
+    )
+    .map(Arc::new)
 }
 
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_cfg_heap, returns(clone))]
@@ -558,41 +389,10 @@ pub fn module_level_cfg_query<'db>(
         }
     };
 
-    let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
+    let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
     tracing::debug!("Built module-level CFG: {} vertices", cfg.vertices().count());
 
     Arc::new(cfg)
-}
-
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_level_liveness_heap, returns(clone))]
-pub fn module_level_liveness_analysis_query<'db>(
-    db: &'db dyn RootDatabase,
-    file_id_input: base_db::FileIdInput<'db>,
-) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-    let _span = tracing::info_span!("module_level_liveness", ?file_id_input).entered();
-    let file_id = file_id_input.file_id(db);
-    let module_id = hir::ModuleId::new(file_id);
-
-    let module_bodies = db.module_bodies_ref(module_id);
-
-    let body = match module_bodies.module_code() {
-        Some(body) => body,
-        None => {
-            tracing::debug!("No module-level code for liveness analysis: {:?}", module_id);
-            return None;
-        }
-    };
-
-    let cfg = db.module_level_cfg(module_id);
-    let var_index = hir::dataflow::liveness::VariableIndex::from_body(body);
-    let transfer = hir::dataflow::liveness::LivenessTransfer;
-    let mut solver = hir::dataflow::DataflowSolver::new(cfg, body.clone(), transfer);
-    solver.set_direction(hir::dataflow::Direction::Backward);
-    solver.set_bottom_factory(|| hir::dataflow::liveness::Liveness::new(var_index.clone()));
-    let dataflow_result = solver.solve()?;
-
-    tracing::debug!("Module-level liveness analysis converged");
-    Some(Arc::new(dataflow_result))
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::line_index_heap, returns(clone))]
@@ -610,12 +410,12 @@ pub fn line_index_query<'db>(
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleHirMetrics {
-    methods: rustc_hash::FxHashMap<u32, Arc<hir::metrics::HirMethodMetrics>>,
+    methods: rustc_hash::FxHashMap<hir::MethodKey, Arc<hir::metrics::HirMethodMetrics>>,
     module_code: Option<Arc<hir::metrics::HirMethodMetrics>>,
 }
 
 impl ModuleHirMetrics {
-    pub fn get(&self, local_id: u32) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+    pub fn get(&self, local_id: hir::MethodKey) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
         self.methods.get(&local_id).cloned()
     }
 
@@ -643,11 +443,11 @@ impl ModuleHirMetrics {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleCyclomatic {
-    methods: rustc_hash::FxHashMap<u32, u32>,
+    methods: rustc_hash::FxHashMap<hir::MethodKey, u32>,
 }
 
 impl ModuleCyclomatic {
-    pub fn get(&self, local_id: u32) -> u32 {
+    pub fn get(&self, local_id: hir::MethodKey) -> u32 {
         self.methods.get(&local_id).copied().unwrap_or(1)
     }
 
@@ -665,6 +465,23 @@ impl ModuleCyclomatic {
     }
 }
 
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::hir_metrics_heap, returns(clone))]
+pub fn method_hir_metrics_query<'db>(
+    db: &'db dyn RootDatabase,
+    method_id_input: hir::MethodIdInput<'db>,
+) -> Arc<hir::metrics::HirMethodMetrics> {
+    let _span = tracing::info_span!("method_hir_metrics", ?method_id_input).entered();
+    // The line count lives on the lowering, not on the body.
+    let Some(lower) = db.method_lower(method_id_input) else {
+        return Arc::new(hir::metrics::HirMethodMetrics::default());
+    };
+    let mut metrics = hir::metrics::compute_hir_metrics(&lower.body);
+    metrics.size_lines = lower.size_lines;
+    Arc::new(metrics)
+}
+
+/// File view of the per-method metrics, for the batch reporter's per-file
+/// aggregates; diagnostics read the method-keyed query directly.
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_hir_metrics_heap, returns(clone))]
 pub fn module_hir_metrics_query<'db>(
     db: &'db dyn RootDatabase,
@@ -674,78 +491,112 @@ pub fn module_hir_metrics_query<'db>(
     let module_id = ModuleId::new(file_id);
     let _span = tracing::info_span!("module_hir_metrics", ?module_id).entered();
 
-    let module_bodies = db.module_bodies_ref(module_id);
     let mut methods = rustc_hash::FxHashMap::default();
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let mut metrics = hir::metrics::compute_hir_metrics(body);
-        if let Some(lower_result) = module_bodies.lower_result(local_id) {
-            metrics.size_lines = lower_result.size_lines;
-        }
-        methods.insert(local_id, Arc::new(metrics));
+    for decl in db.module_interface_ref(module_id).methods() {
+        db.unwind_if_revision_cancelled();
+        let method_id_input = hir::MethodIdInput::new(db, decl.id);
+        methods.insert(decl.id.local_id, method_hir_metrics_query(db, method_id_input));
     }
-    let module_code = module_bodies
+    let module_code = db
+        .module_bodies_ref(module_id)
         .module_code()
         .map(hir::metrics::compute_hir_metrics)
         .filter(|m| *m != hir::metrics::HirMethodMetrics::default())
         .map(Arc::new);
-    tracing::debug!(
-        count = methods.len(),
-        has_module_code = module_code.is_some(),
-        "Built module HIR metrics",
-    );
     Arc::new(ModuleHirMetrics { methods, module_code })
 }
 
-#[salsa::tracked(lru = 256, heap_size = heap_estimate::shared_hir_metrics_heap, returns(clone))]
-pub fn method_hir_metrics_query<'db>(
+#[salsa::tracked(lru = 8192, heap_size = stdx::heap::zero, returns(copy))]
+pub fn method_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     method_id_input: hir::MethodIdInput<'db>,
-) -> Arc<hir::metrics::HirMethodMetrics> {
-    let _span = tracing::info_span!("method_hir_metrics", ?method_id_input).entered();
-    let method_id = method_id_input.method_id(db);
-    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
-    let module_metrics = module_hir_metrics_query(db, file_id_input);
-    module_metrics
-        .get(method_id.local_id)
-        .unwrap_or_else(|| Arc::new(hir::metrics::HirMethodMetrics::default()))
+) -> u32 {
+    let _span = tracing::info_span!("method_cyclomatic", ?method_id_input).entered();
+    let cfg = method_cfg_query(db, method_id_input);
+    let metrics = method_hir_metrics_query(db, method_id_input);
+    hir::cfg::cyclomatic_complexity(&cfg) + metrics.boolean_ops_count + metrics.ternary_count
 }
 
+/// File view of the per-method cyclomatic complexity, for the batch reporter's
+/// per-file total; diagnostics read the method-keyed query directly.
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_cyclomatic_heap, returns(clone))]
 pub fn module_cyclomatic_query<'db>(
     db: &'db dyn RootDatabase,
     file_id_input: FileIdInput<'db>,
 ) -> Arc<ModuleCyclomatic> {
     let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
     let _span = tracing::info_span!("module_cyclomatic", ?file_id).entered();
 
-    let module_cfgs = db.module_cfgs(file_id_input);
-    let module_id = ModuleId::new(file_id);
-    let module_bodies = db.module_bodies_ref(module_id);
-    let module_metrics = module_hir_metrics_query(db, file_id_input);
     let mut methods = rustc_hash::FxHashMap::default();
-    for (local_id, _body) in module_bodies.iter_bodies() {
-        let Some(cfg) = module_cfgs.get(local_id) else { continue };
-        let base = hir::cfg::cyclomatic_complexity(cfg.as_ref());
-        let extras = module_metrics
-            .get(local_id)
-            .map(|m| m.boolean_ops_count + m.ternary_count)
-            .unwrap_or(0);
-        methods.insert(local_id, base + extras);
+    for decl in db.module_interface_ref(module_id).methods() {
+        db.unwind_if_revision_cancelled();
+        let method_id_input = hir::MethodIdInput::new(db, decl.id);
+        methods.insert(decl.id.local_id, method_cyclomatic_query(db, method_id_input));
     }
-    tracing::debug!(count = methods.len(), "Built module cyclomatic metrics");
     Arc::new(ModuleCyclomatic { methods })
 }
 
-#[salsa::tracked(lru = 256, heap_size = stdx::heap::zero, returns(copy))]
-pub fn method_cyclomatic_query<'db>(
+/// Methods that call themselves, directly or through other methods of the
+/// same module. Derived from the call summary, whose edges carry positions,
+/// but position-free itself: an edit that moves calls without changing them
+/// leaves this value equal, and its per-method readers valid.
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::recursive_methods_heap, returns(clone))]
+pub fn module_recursive_methods_query<'db>(
     db: &'db dyn RootDatabase,
-    method_id_input: hir::MethodIdInput<'db>,
-) -> u32 {
-    let _span = tracing::info_span!("method_cyclomatic", ?method_id_input).entered();
-    let method_id = method_id_input.method_id(db);
-    let file_id_input = FileIdInput::new(db, method_id.module.file_id);
-    let module_metrics = module_cyclomatic_query(db, file_id_input);
-    module_metrics.get(method_id.local_id)
+    file_id_input: FileIdInput<'db>,
+) -> Arc<rustc_hash::FxHashSet<hir::MethodKey>> {
+    use hir::call_graph::{CallTarget, CallerId, EdgeKind};
+
+    let file_id = file_id_input.file_id(db);
+    let summary = db.module_call_summary(ModuleId::new(file_id));
+    let mut graph: rustc_hash::FxHashMap<hir::MethodKey, Vec<hir::MethodKey>> =
+        rustc_hash::FxHashMap::default();
+    for edge in &summary.call_edges {
+        if !matches!(edge.kind, EdgeKind::DirectLocal) {
+            continue;
+        }
+        let CallerId::Method(caller_id) = edge.caller else { continue };
+        let CallTarget::Local { callee_local_id } = edge.target else { continue };
+        graph.entry(caller_id).or_default().push(callee_local_id);
+    }
+
+    let mut recursive = rustc_hash::FxHashSet::default();
+    for &start in graph.keys() {
+        let mut stack = graph.get(&start).cloned().unwrap_or_default();
+        let mut visited = rustc_hash::FxHashSet::default();
+        while let Some(node) = stack.pop() {
+            if node == start {
+                recursive.insert(start);
+                break;
+            }
+            if !visited.insert(node) {
+                continue;
+            }
+            if let Some(next) = graph.get(&node) {
+                stack.extend(next.iter().copied());
+            }
+        }
+    }
+    Arc::new(recursive)
+}
+
+/// Switch the per-method dataflow memos' LRU caps between the interactive
+/// profile and the sweep profile, in step with the lowering chain
+/// (`hir::set_lowering_lru_sweep_mode`): a whole-workspace sweep needs a
+/// closed file's dataflow only while its chunk is analyzed. The interactive
+/// values must stay equal to the `lru` literals on the queries.
+pub fn set_dataflow_lru_sweep_mode(db: &mut dyn RootDatabase, sweep: bool) {
+    const METHOD_INTERACTIVE: usize = 8192;
+    const METHOD_SWEEP: usize = 2048;
+    let cap = if sweep { METHOD_SWEEP } else { METHOD_INTERACTIVE };
+    method_cfg_query::set_lru_capacity(db, cap);
+    reaching_definitions_query::set_lru_capacity(db, cap);
+    method_path_terminates_query::set_lru_capacity(db, cap);
+    method_hir_metrics_query::set_lru_capacity(db, cap);
+    method_cyclomatic_query::set_lru_capacity(db, cap);
+    crate::effects::set_security_state_lru_capacity(db, cap);
+    hir::set_arg_diagnostics_lru_capacity(db, cap);
 }
 
 #[cfg(test)]

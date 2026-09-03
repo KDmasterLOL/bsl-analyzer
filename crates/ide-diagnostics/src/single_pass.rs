@@ -1,41 +1,34 @@
-use crate::{handlers, Diagnostic, DiagnosticsContext};
+use crate::{handlers, BodyContext, Diagnostic};
+use hir::LocalRange;
 use syntax::{SyntaxNode, SyntaxToken};
 
-pub fn collect_syntax_single_pass(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// One walk over the body's nodes and tokens for every single-pass check.
+/// For module-level code the walk skips method subtrees, which their own
+/// bodies cover, so each node of the file is visited exactly once.
+pub fn collect_body_single_pass(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     if !ctx.config.any_enabled(crate::runner::SINGLE_PASS_DIAGNOSTICS) {
-        return Vec::new();
+        return;
     }
 
-    let _span = tracing::debug_span!("collect_syntax_single_pass").entered();
-    let start = std::time::Instant::now();
+    let _span = tracing::debug_span!("collect_body_single_pass").entered();
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node_handlers(&node, &mut diagnostics, ctx);
+    for node in ctx.nodes() {
+        check_node_handlers(&node, acc, ctx);
 
         for element in node.children_with_tokens() {
             if let Some(token) = element.into_token() {
-                check_token_handlers(&token, &mut diagnostics, ctx);
+                check_token_handlers(&token, acc, ctx);
             }
         }
     }
-
-    let elapsed = start.elapsed();
-    tracing::debug!(
-        elapsed_ms = elapsed.as_millis(),
-        count = diagnostics.len(),
-        "Single-pass syntax diagnostics collected"
-    );
-
-    diagnostics
 }
 
 #[inline]
-fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+fn check_node_handlers(
+    node: &SyntaxNode,
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+    ctx: &BodyContext,
+) {
     handlers::useless_ternary_operator::check_node(node, acc, ctx);
     handlers::double_negatives::check_node(node, acc, ctx);
     handlers::unknown_preprocessor_symbol::check_node(node, acc, ctx);
@@ -45,7 +38,11 @@ fn check_node_handlers(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagn
 }
 
 #[inline]
-fn check_token_handlers(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+fn check_token_handlers(
+    token: &SyntaxToken,
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+    ctx: &BodyContext,
+) {
     handlers::yo_letter_usage::check_token(token, acc, ctx);
     handlers::magic_date::check_token(token, acc, ctx);
     handlers::using_hardcode_path::check_token(token, acc, ctx);

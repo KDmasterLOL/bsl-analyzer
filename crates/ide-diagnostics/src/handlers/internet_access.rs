@@ -1,9 +1,10 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 use bsl_platform::security::{registry, Category};
+use hir::BodySourceMap;
+use hir::LocalRange;
 use hir::{Expr, ExprId, IdConversion, Literal};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Vulnerability,
@@ -23,26 +24,21 @@ fn is_internet_constructor(name: &str) -> bool {
     registry().lookup_constructor(name).is_some_and(|e| matches!(e.category, Category::Internet))
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::InternetAccess;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body_for_internet_access(body, source_map, code, ctx, diags);
-    });
-
-    diagnostics.sort_by_key(|d| d.range.start());
-    diagnostics
+    check_body_for_internet_access(ctx.body(), ctx.source_map(), code, ctx, acc);
 }
 
 fn create_diagnostic(
-    range: TextRange,
+    range: LocalRange,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: "Internet access detected (security review required)".to_string(),
@@ -55,10 +51,10 @@ fn create_diagnostic(
 
 fn check_body_for_internet_access(
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
         if let Expr::New { type_name, args } = expr {

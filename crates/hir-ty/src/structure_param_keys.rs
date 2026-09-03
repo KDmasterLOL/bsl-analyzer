@@ -74,7 +74,7 @@ pub fn structure_param_keys_query<'db>(
     let _span = tracing::info_span!(
         "structure_param_keys",
         file_id = mid.module.file_id.0,
-        local_id = mid.local_id,
+        local_id = ?mid.local_id,
     )
     .entered();
 
@@ -96,8 +96,7 @@ fn compute_summary(
     }
 
     let body = db.method_body_ref(MethodIdInput::new(db, mid));
-    let symbol_tree = db.symbol_tree_ref(mid.module);
-    let Some(msym) = symbol_tree.find_method_by_id(mid) else {
+    let Some(msym) = db.interface_method(mid) else {
         return StructureParamSummary::default();
     };
 
@@ -219,8 +218,8 @@ impl<'a> Forwarder<'a> {
             return;
         }
 
-        let callee_tree = self.db.symbol_tree_ref(callee_mid.module);
-        let callee_params = callee_tree.find_method_by_id(callee_mid).map(|m| &m.params);
+        let callee_decl = self.db.interface_method(callee_mid);
+        let callee_params = callee_decl.as_ref().map(|m| &m.params);
 
         for (j, root) in tracked {
             // A `Знач` callee param receives a copy — inserted keys never reach the caller.
@@ -248,10 +247,8 @@ impl<'a> Forwarder<'a> {
         let Expr::Call { callee, .. } = call else { return false };
         let Some(mid) = self.resolve_callee(body, body.expr_idx(*callee)) else { return false };
         self.db
-            .symbol_tree_ref(mid.module)
-            .find_method_by_id(mid)
-            .and_then(|method| method.params.get(arg_index))
-            .is_some_and(|param| param.is_val)
+            .interface_method(mid)
+            .is_some_and(|method| method.params.get(arg_index).is_some_and(|param| param.is_val))
     }
 
     /// Resolve a call's callee to a `MethodId` using only syntactic forms (no inferred receiver):
@@ -266,7 +263,7 @@ impl<'a> Forwarder<'a> {
                 if self.shadowing_locals.contains(&lower) {
                     return None;
                 }
-                if let Some(method) = self.db.symbol_tree_ref(self.module).find_method(name) {
+                if let Some(method) = self.db.interface_method_named(self.module, name) {
                     return Some(method.id);
                 }
                 self.global_methods().get(&lower).copied()

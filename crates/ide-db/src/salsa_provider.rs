@@ -4,7 +4,8 @@ use base_db::{FileIdInput, SourceRootId};
 use bsl_metadata::Configuration;
 use hir::{
     AssignmentResolution, DefWithBodyId, HirDatabase, InferenceDiagnostic, InferenceResult,
-    ItemTree, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, Name, Resolver, SymbolTree,
+    ItemTree, MethodId, ModuleBodies, ModuleId, ModuleIndex, ModuleMetadata, Name, Resolver,
+    SymbolTree,
 };
 use syntax::{Parse, SyntaxNode};
 use vfs::FileId;
@@ -289,8 +290,91 @@ impl AnalysisProvider for SalsaProvider<'_> {
         HirDatabase::infer(self.db, file_id)
     }
 
-    fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>> {
-        HirDatabase::arg_diagnostics(self.db, file_id)
+    fn module_interface(&self, module_id: ModuleId) -> Arc<hir::ModuleInterface> {
+        match self.effective_for(module_id.file_id) {
+            Some(eid) => hir::module_interface_effective(self.db, eid),
+            None => self.db.module_interface(module_id),
+        }
+    }
+
+    // An effective module's interface is one value, so its declarations are
+    // read off it whole; a plain module's come one memo per declaration.
+    fn interface_method(&self, method_id: MethodId) -> Option<Arc<hir::MethodDecl>> {
+        match self.effective_for(method_id.module.file_id) {
+            Some(eid) => hir::module_interface_effective(self.db, eid)
+                .find_method_by_id_shared(method_id)
+                .cloned(),
+            None => self.db.interface_method(method_id),
+        }
+    }
+
+    fn interface_method_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::MethodDecl>> {
+        match self.effective_for(module_id.file_id) {
+            Some(eid) => hir::module_interface_effective(self.db, eid)
+                .find_method_shared(intern::NormName::intern(name.as_str()))
+                .cloned(),
+            None => self.db.interface_method_named(module_id, name),
+        }
+    }
+
+    fn interface_variable_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::VariableDecl>> {
+        match self.effective_for(module_id.file_id) {
+            Some(eid) => hir::module_interface_effective(self.db, eid)
+                .find_variable_shared(intern::NormName::intern(name.as_str()))
+                .cloned(),
+            None => self.db.interface_variable_named(module_id, name),
+        }
+    }
+
+    fn method_syntax(&self, method_id: MethodId) -> Option<SyntaxNode> {
+        let input = hir::MethodIdInput::new(self.db, method_id);
+        hir::method_syntax_query(self.db, input).as_ref().map(|syntax| syntax.detached_root())
+    }
+
+    fn infer_owner(&self, file_id: FileId, owner: DefWithBodyId) -> hir::InferOwnerResult {
+        hir::infer_owner(self.db, file_id, owner)
+    }
+
+    fn arg_diagnostics_of(
+        &self,
+        file_id: FileId,
+        owner: DefWithBodyId,
+    ) -> Arc<Vec<InferenceDiagnostic>> {
+        match owner {
+            DefWithBodyId::Method(local_id) => {
+                let method_id = MethodId { module: ModuleId::new(file_id), local_id };
+                let input = hir::MethodIdInput::new(self.db, method_id);
+                HirDatabase::method_arg_diagnostics(self.db, input)
+            }
+            DefWithBodyId::ModuleCode => HirDatabase::module_code_arg_diagnostics(self.db, file_id),
+        }
+    }
+
+    fn module_level_cfg(&self, file_id: FileId) -> Arc<hir::cfg::ControlFlowGraph> {
+        self.db.module_level_cfg(ModuleId::new(file_id))
+    }
+
+    fn module_recursive_methods(
+        &self,
+        file_id: FileId,
+    ) -> Arc<rustc_hash::FxHashSet<hir::MethodKey>> {
+        let input = FileIdInput::new(self.db, file_id);
+        crate::queries::module_recursive_methods_query(self.db, input)
+    }
+
+    fn module_code_reaching_definitions(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        HirDatabase::module_code_reaching_definitions(self.db, file_id)
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata> {
@@ -315,33 +399,15 @@ impl AnalysisProvider for SalsaProvider<'_> {
         self.db.file_source_root_input(file_id).source_root_id(self.db)
     }
 
-    fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs> {
-        let input = FileIdInput::new(self.db, file_id);
-        self.db.module_cfgs(input)
+    fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
+        self.db.method_cfg(method_id)
     }
 
-    fn module_path_terminates(
+    fn method_path_terminates(
         &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
-        let input = FileIdInput::new(self.db, file_id);
-        self.db.module_path_terminates(input)
-    }
-
-    fn module_liveness_analysis(
-        &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
-        let input = FileIdInput::new(self.db, file_id);
-        self.db.module_liveness_analysis(input)
-    }
-
-    fn module_reaching_definitions(
-        &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
-        let input = FileIdInput::new(self.db, file_id);
-        <dyn RootDatabase as RootDatabase>::module_reaching_definitions(self.db, input)
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
+        self.db.method_path_terminates(method_id)
     }
 
     fn region_tree(&self, file_id: FileId) -> Arc<hir::RegionTree> {
@@ -380,14 +446,6 @@ impl AnalysisProvider for SalsaProvider<'_> {
 
     fn file_external_refs(&self, module_id: ModuleId) -> std::sync::Arc<Vec<hir::ExternalRef>> {
         self.db.file_external_refs(module_id)
-    }
-
-    fn module_level_liveness_analysis(
-        &self,
-        module_id: ModuleId,
-    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
-    {
-        self.db.module_level_liveness_analysis(module_id)
     }
 
     fn resolve_vfs_path(
@@ -441,9 +499,20 @@ impl AnalysisProvider for SalsaProvider<'_> {
         crate::effects::method_effect_summary_query(self.db, method_input)
     }
 
-    fn module_security_state(&self, file_id: FileId) -> Arc<crate::effects::ModuleSecurityState> {
-        let input = FileIdInput::new(self.db, file_id);
-        crate::effects::module_security_state_query(self.db, input)
+    fn method_security_state(
+        &self,
+        method: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        self.db.method_security_state(method)
+    }
+
+    fn module_code_security_state(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        self.db.module_code_security_state(file_id)
     }
 
     fn method_hir_metrics(&self, method: hir::MethodId) -> Arc<hir::metrics::HirMethodMetrics> {

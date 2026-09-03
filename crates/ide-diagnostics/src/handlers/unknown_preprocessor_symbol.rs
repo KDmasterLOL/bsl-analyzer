@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::utils::preprocessor_symbols;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -20,7 +21,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 #[inline]
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::UnknownPreprocessorSymbol;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -37,22 +38,11 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
             code,
             message: format!("Неизвестный символ препроцессора '{}'", text),
             severity: ctx.severity(code),
-            range: node.text_range(),
+            range: LocalRange::of_detached_node(node.text_range()),
             tags: ctx.tags(code),
             fixes: vec![],
         });
     }
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let root = ctx.parse().syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    diagnostics
 }
 
 #[cfg(test)]

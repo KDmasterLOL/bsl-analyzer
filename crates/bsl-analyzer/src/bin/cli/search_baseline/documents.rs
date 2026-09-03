@@ -78,8 +78,12 @@ pub(super) fn build_workspace_code(
     let temp_dir = tempfile::tempdir()?;
     let db_path = temp_dir.path().join("baseline-sync.db");
     let mut engine = SearchEngine::fts_only(&db_path)?;
-    let extensions: Vec<std::path::PathBuf> =
-        project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+    let extensions: Vec<std::path::PathBuf> = project
+        .extension_paths()
+        .iter()
+        .chain(project.external_paths())
+        .map(|(_, path)| path.clone())
+        .collect();
     let (roots, rejected) = bsl_search::WorkspaceRoots::build_optional(
         &project.root,
         project.semantic_base_path(),
@@ -172,8 +176,12 @@ mod tests {
     /// disagree with one on a tree with them — which is exactly the case this exists for.
     fn consumed_keys(root: &Path) -> Keys {
         let project = project_at(root);
-        let extensions: Vec<std::path::PathBuf> =
-            project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+        let extensions: Vec<std::path::PathBuf> = project
+            .extension_paths()
+            .iter()
+            .chain(project.external_paths())
+            .map(|(_, path)| path.clone())
+            .collect();
         let (roots, _) = bsl_search::WorkspaceRoots::build_optional(
             &project.root,
             project.semantic_base_path(),

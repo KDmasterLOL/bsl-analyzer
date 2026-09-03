@@ -1,5 +1,5 @@
 use crate::item_tree::ModItem;
-use crate::{DefDatabase, MethodId, VariableId};
+use crate::{MethodId, VariableId};
 use std::sync::Arc;
 use stdx::case::CaseExt;
 use syntax::{
@@ -113,41 +113,13 @@ impl TypeDoc {
     }
 }
 
-pub fn method_docs_query(db: &dyn DefDatabase, method: MethodId) -> Option<Arc<MethodDocs>> {
-    let tree = db.item_tree(method.module.file_id);
-
-    let items = tree.top_level_items();
-    let item = items.get(method.local_id as usize)?;
-
-    let source_range = match item {
-        ModItem::Procedure(idx) => tree.procedure(*idx).source_range,
-        ModItem::Function(idx) => tree.function(*idx).source_range,
-        ModItem::Variable(_) => return None,
-    };
-
-    let source_text = db.file_text(method.module.file_id);
-    let offset: usize = source_range.start().into();
-    let comments = extract_leading_comments_at_offset(offset, &source_text)?;
-
-    let docs = parse_method_docs(&comments)?;
-
-    Some(Arc::new(docs))
-}
-
 pub fn compute_method_docs(
     _parse: &syntax::Parse<SyntaxNode>,
     tree: &crate::item_tree::ItemTree,
     method_id: MethodId,
     file_text: &str,
 ) -> Option<Arc<MethodDocs>> {
-    let items = tree.top_level_items();
-    let item = items.get(method_id.local_id as usize)?;
-
-    let source_range = match item {
-        ModItem::Procedure(idx) => tree.procedure(*idx).source_range,
-        ModItem::Function(idx) => tree.function(*idx).source_range,
-        ModItem::Variable(_) => return None,
-    };
+    let source_range = tree.method(method_id.local_id)?.source_range();
 
     let offset: usize = source_range.start().into();
     let comments = extract_leading_comments_at_offset(offset, file_text)?;

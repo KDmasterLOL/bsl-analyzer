@@ -1,7 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::ModItem;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -20,55 +20,33 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_METHOD_SIZE: i64 = 200;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::MethodSize;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let max_method_size = ctx.config_int(code, "maxMethodSize", DEFAULT_MAX_METHOD_SIZE) as u32;
-
-    let module_metrics = ctx.module_hir_metrics();
-    if module_metrics.is_empty() {
-        return Vec::new();
+    let (Some(decl), Some(name_range)) = (ctx.decl(), ctx.method_name_range()) else {
+        return;
+    };
+    let metrics = ctx.hir_metrics();
+    if metrics.size_lines == 0 || metrics.size_lines <= max_method_size {
+        return;
     }
-    let module_bodies = ctx.module_bodies();
-    let item_tree = ctx.item_tree();
-
-    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
-    local_ids.sort_unstable();
-
-    let mut out = Vec::new();
-    for local_id in local_ids {
-        let Some(metrics) = module_metrics.get(local_id) else { continue };
-        if metrics.size_lines == 0 || metrics.size_lines <= max_method_size {
-            continue;
-        }
-        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
-        let (name, name_range) = match item {
-            ModItem::Procedure(idx) => {
-                let p = item_tree.procedure(*idx);
-                (p.name.as_str().to_string(), p.name_range)
-            }
-            ModItem::Function(idx) => {
-                let f = item_tree.function(*idx);
-                (f.name.as_str().to_string(), f.name_range)
-            }
-            ModItem::Variable(_) => continue,
-        };
-        out.push(Diagnostic {
-            code,
-            message: format!(
-                "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
-                name, metrics.size_lines, max_method_size
-            ),
-            severity: ctx.severity(code),
-            range: name_range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
-    out
+    acc.push(Diagnostic {
+        code,
+        message: format!(
+            "Длина метода \"{}\" равна {}, что больше установленного лимита в {} строк",
+            decl.name.as_str(),
+            metrics.size_lines,
+            max_method_size
+        ),
+        severity: ctx.severity(code),
+        range: name_range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
 }
 
 #[cfg(test)]

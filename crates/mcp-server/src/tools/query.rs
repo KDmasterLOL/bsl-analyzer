@@ -148,7 +148,7 @@ async fn local_block(
             let db = analysis.database();
             let resolver = ide::AcrossRootsQueryResolver::new(db);
             let roots: Vec<String> = db
-                .all_config_paths()
+                .designer_config_paths()
                 .into_iter()
                 .map(|(label, _)| label.unwrap_or_default())
                 .collect();

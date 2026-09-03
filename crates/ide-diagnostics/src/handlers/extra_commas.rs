@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use ide_db::TextRange;
 use syntax::SyntaxKind;
 
@@ -18,7 +20,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &BodyContext) -> Option<Diagnostic<LocalRange>> {
     let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::ExtraCommas,
         "Не используйте запятые для параметры по умолчанию в конце вызова метода",
@@ -40,9 +42,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
 
 /// Extend the flagged (last) trailing comma backwards over every consecutive comma and
 /// whitespace up to the last real argument, yielding the full run to delete.
-fn trailing_comma_run(ctx: &DiagnosticsContext, range: TextRange) -> Option<TextRange> {
-    let parse = ctx.parse();
-    let comma = parse.syntax_node().token_at_offset(range.start()).right_biased()?;
+fn trailing_comma_run(ctx: &BodyContext, range: LocalRange) -> Option<LocalRange> {
+    let comma = ctx.root().token_at_offset(range.in_root().start()).right_biased()?;
     if comma.kind() != SyntaxKind::COMMA {
         return None;
     }
@@ -58,7 +59,7 @@ fn trailing_comma_run(ctx: &DiagnosticsContext, range: TextRange) -> Option<Text
         prev = syntax::prev_token_past_empty(&token);
     }
 
-    Some(TextRange::new(run_start, comma.text_range().end()))
+    Some(LocalRange::of_detached_node(TextRange::new(run_start, comma.text_range().end())))
 }
 
 #[cfg(test)]

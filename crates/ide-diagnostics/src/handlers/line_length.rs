@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::slab::{self, Block};
+use crate::{AnalysisContext, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::LocalRange;
 use ide_db::TextRange;
 use line_index::{LineIndex, TextSize};
 use std::collections::HashSet;
@@ -33,7 +35,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &AnalysisContext) -> Self {
         let code = DiagnosticCode::LineLength;
 
         let max_line_length =
@@ -65,6 +67,10 @@ struct LineInfo {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    slab::check_file_by_blocks(ctx, check_block)
+}
+
+pub fn check_block(ctx: &AnalysisContext, block: &Block) -> Vec<Diagnostic<LocalRange>> {
     let _span = tracing::debug_span!("LineLength::check").entered();
     let code = DiagnosticCode::LineLength;
 
@@ -73,121 +79,85 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let file_text = ctx.file_text();
-    let file_text = file_text.as_ref();
-
-    let line_index = ctx.line_index();
-    let num_lines = line_index.len_lines();
-
+    let num_lines = block.line_index.len_lines();
     let mut line_infos: Vec<LineInfo> = vec![LineInfo::default(); num_lines as usize];
 
-    mark_multiline_string_lines(&root, &line_index, &mut line_infos);
+    mark_multiline_string_lines(block, &mut line_infos);
+    process_code_tokens(block, &mut line_infos);
+    process_comments(block, &mut line_infos, &config);
 
-    process_code_tokens(&root, file_text, &line_index, &mut line_infos);
-
-    let method_desc_lines = if !config.check_method_description {
-        find_method_description_lines(&root, &line_index)
-    } else {
-        HashSet::new()
-    };
-
-    process_comments(&root, file_text, &line_index, &mut line_infos, &method_desc_lines, &config);
-
-    let diagnostics = generate_diagnostics(
-        &line_infos,
-        &line_index,
-        file_text,
-        config.max_line_length,
-        code,
-        ctx,
-    );
+    let diagnostics = generate_diagnostics(&line_infos, block, config.max_line_length, code, ctx);
 
     tracing::debug!(count = diagnostics.len(), "LineLength diagnostics found");
 
     diagnostics
 }
 
-fn mark_multiline_string_lines(
-    root: &SyntaxNode,
-    line_index: &LineIndex,
-    line_infos: &mut [LineInfo],
-) {
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if matches!(token.kind(), SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
-                let range = token.text_range();
-                let start_line = line_index.line_col(range.start()).line;
-                let end_line = line_index.line_col(range.end()).line;
+fn mark_multiline_string_lines(block: &Block, line_infos: &mut [LineInfo]) {
+    for token in block.tokens {
+        if matches!(token.kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
+            let start_line = block.line_index.line_col(token.range.start()).line;
+            let end_line = block.line_index.line_col(token.range.end()).line;
 
-                for line in start_line..=end_line {
-                    if let Some(info) = line_infos.get_mut(line as usize) {
-                        info.is_multiline_string = true;
-                    }
+            for line in start_line..=end_line {
+                if let Some(info) = line_infos.get_mut(line as usize) {
+                    info.is_multiline_string = true;
                 }
             }
         }
     }
 }
 
-fn process_code_tokens(
-    root: &SyntaxNode,
-    file_text: &str,
-    line_index: &LineIndex,
-    line_infos: &mut [LineInfo],
-) {
-    let mut prev_token_kind: Option<SyntaxKind> = None;
+/// Строка, на которой кончается токен, и его конец в символах от её начала.
+fn column_at(block: &Block, offset: TextSize) -> (usize, usize) {
+    let pos = block.line_index.line_col(offset);
+    let line_start: usize = block.line_index.line_start(pos.line).into();
+    let end = usize::from(offset).min(block.text.len());
+    let end = block.text.floor_char_boundary(end);
+    (pos.line as usize, block.text[line_start..end].chars().count())
+}
 
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            let kind = token.kind();
+fn process_code_tokens(block: &Block, line_infos: &mut [LineInfo]) {
+    // Сосед слева нужен только `;` первым значимым токеном: после хвоста
+    // строкового литерала он длину строки не считает.
+    let mut prev_token_kind: Option<SyntaxKind> = block.prev_significant();
 
-            if kind.is_trivia() {
-                continue;
-            }
+    for token in block.tokens {
+        let kind = token.kind;
 
-            if matches!(kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
-                prev_token_kind = Some(kind);
-                continue;
-            }
+        if kind.is_trivia() {
+            continue;
+        }
 
-            if kind == SyntaxKind::SEMICOLON {
-                if let Some(prev) = prev_token_kind {
-                    if matches!(prev, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
-                        prev_token_kind = Some(kind);
-                        continue;
-                    }
-                }
-            }
-
-            let range = token.text_range();
-            let end_pos = line_index.line_col(range.end());
-            let line = end_pos.line as usize;
-
-            if let Some(info) = line_infos.get_mut(line) {
-                let line_start = line_index.line_start(end_pos.line);
-                let byte_col = u32::from(range.end()) - u32::from(line_start);
-                let line_text_start: usize = line_start.into();
-                let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
-
-                let line_text_end = file_text.floor_char_boundary(line_text_end);
-
-                let char_col = file_text[line_text_start..line_text_end].chars().count();
-
-                info.max_code_char_pos = info.max_code_char_pos.max(char_col);
-                info.max_char_pos = info.max_char_pos.max(char_col);
-                info.has_code = true;
-            }
-
+        if matches!(kind, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
             prev_token_kind = Some(kind);
+            continue;
         }
+
+        if kind == SyntaxKind::SEMICOLON {
+            if let Some(prev) = prev_token_kind {
+                if matches!(prev, SyntaxKind::STRING_PART | SyntaxKind::STRING_TAIL) {
+                    prev_token_kind = Some(kind);
+                    continue;
+                }
+            }
+        }
+
+        let (line, char_col) = column_at(block, token.range.end());
+        if let Some(info) = line_infos.get_mut(line) {
+            info.max_code_char_pos = info.max_code_char_pos.max(char_col);
+            info.max_char_pos = info.max_char_pos.max(char_col);
+            info.has_code = true;
+        }
+
+        prev_token_kind = Some(kind);
     }
 }
 
-fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> HashSet<u32> {
+/// Строки описания методов по файлу: ближайший комментарий над методом на
+/// любом расстоянии и смежные с ним выше — независимо от того, в каком узле
+/// они лежат. Отсортированы по возрастанию.
+pub(crate) fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> Vec<u32> {
     use syntax::ast::{FunctionDef, ProcedureDef};
 
     let mut method_desc_lines = HashSet::new();
@@ -233,66 +203,46 @@ fn find_method_description_lines(root: &SyntaxNode, line_index: &LineIndex) -> H
         }
     }
 
-    method_desc_lines
+    let mut lines: Vec<u32> = method_desc_lines.into_iter().collect();
+    lines.sort_unstable();
+    lines
 }
 
-fn process_comments(
-    root: &SyntaxNode,
-    file_text: &str,
-    line_index: &LineIndex,
-    line_infos: &mut [LineInfo],
-    method_desc_lines: &HashSet<u32>,
-    config: &Config,
-) {
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            if token.kind() != SyntaxKind::COMMENT {
-                continue;
-            }
+fn process_comments(block: &Block, line_infos: &mut [LineInfo], config: &Config) {
+    for token in block.tokens {
+        if token.kind != SyntaxKind::COMMENT {
+            continue;
+        }
 
-            let range = token.text_range();
-            let start_pos = line_index.line_col(range.start());
-            let line = start_pos.line as usize;
+        let line = block.line_index.line_col(token.range.start()).line;
 
-            if !config.check_method_description && method_desc_lines.contains(&(line as u32)) {
-                continue;
-            }
+        if !config.check_method_description && block.description_lines.binary_search(&line).is_ok()
+        {
+            continue;
+        }
 
-            if config.exclude_trailing_comments {
-                if let Some(info) = line_infos.get(line) {
-                    if info.has_code {
-                        continue;
-                    }
+        if config.exclude_trailing_comments {
+            if let Some(info) = line_infos.get(line as usize) {
+                if info.has_code {
+                    continue;
                 }
             }
+        }
 
-            let end_pos = line_index.line_col(range.end());
-            let end_line = end_pos.line as usize;
-
-            if let Some(info) = line_infos.get_mut(end_line) {
-                let line_start = line_index.line_start(end_pos.line);
-                let byte_col = u32::from(range.end()) - u32::from(line_start);
-                let line_text_start: usize = line_start.into();
-                let line_text_end = (line_text_start + byte_col as usize).min(file_text.len());
-
-                let line_text_end = file_text.floor_char_boundary(line_text_end);
-
-                let char_col = file_text[line_text_start..line_text_end].chars().count();
-
-                info.max_char_pos = info.max_char_pos.max(char_col);
-            }
+        let (end_line, char_col) = column_at(block, token.range.end());
+        if let Some(info) = line_infos.get_mut(end_line) {
+            info.max_char_pos = info.max_char_pos.max(char_col);
         }
     }
 }
 
 fn generate_diagnostics(
     line_infos: &[LineInfo],
-    line_index: &LineIndex,
-    file_text: &str,
+    block: &Block,
     max_line_length: usize,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Vec<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Vec<Diagnostic<LocalRange>> {
     let mut diagnostics = Vec::new();
 
     for (line_num, info) in line_infos.iter().enumerate() {
@@ -302,13 +252,8 @@ fn generate_diagnostics(
 
         if info.max_char_pos > max_line_length {
             let line = line_num as u32;
-            let line_start = line_index.line_start(line);
-
-            let line_text_start: usize = line_start.into();
-            let line_range = line_index.line_range(line);
-            let line_text_end: usize =
-                line_range.map(|r| r.end().into()).unwrap_or(file_text.len());
-            let line_text = &file_text[line_text_start..line_text_end.min(file_text.len())];
+            let line_start = block.line_index.line_start(line);
+            let line_text = block.line_text(line).unwrap_or("");
 
             let mut byte_offset = 0usize;
             for (i, ch) in line_text.chars().enumerate() {
@@ -327,7 +272,7 @@ fn generate_diagnostics(
                     info.max_char_pos, max_line_length
                 ),
                 severity: ctx.severity(code),
-                range,
+                range: LocalRange::of_detached_node(range),
                 tags: ctx.tags(code),
                 fixes: vec![],
             });

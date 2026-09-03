@@ -151,3 +151,61 @@ fn call_hierarchy_index_non_bsl_filter() {
         vec![vec![ModuleId::new(bsl_file_id)], vec![ModuleId::new(bsl_file_id)]],
     );
 }
+
+/// A batch database carries the workspace's roots as they were registered —
+/// kinds and closures included. Re-reading them from labels would turn an
+/// external object into an independent extension: visible to the designer's
+/// view, blind to the extensions it must see.
+#[test]
+fn call_hierarchy_index_overlay_keeps_root_kinds_and_closures() {
+    use ide_db::RootDatabase as _;
+
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let cf = directory.path().join("cf");
+    let ext = directory.path().join("ext");
+    let epf = directory.path().join("epf");
+    std::fs::create_dir_all(epf.join("АРМ/Ext")).expect("export layout");
+    std::fs::create_dir_all(&cf).expect("base");
+    std::fs::create_dir_all(&ext).expect("extension");
+    let module = epf.join("АРМ/Ext/ObjectModule.bsl");
+    std::fs::write(&module, "Процедура П() КонецПроцедуры").expect("object module");
+
+    let file_id = FileId(0);
+    let source_root_id = SourceRootId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(file_id, VfsPath::new(module.clone()));
+    let mut db = RootDatabaseImpl::default();
+    db.set_source_root(source_root_id, SourceRoot::new_local(file_set));
+    db.set_file_source_root(file_id, source_root_id);
+    db.set_file_revision_from_disk(file_id, content_revision("Процедура П() КонецПроцедуры"));
+    let paths = vec![(None, cf), (Some("EXT".to_owned()), ext), (Some("EPF".to_owned()), epf)];
+    db.set_workspace_configs_snapshot(ide::WorkspaceConfigsSnapshot {
+        canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        kinds: vec![
+            ide::WorkspaceRootKind::Base,
+            ide::WorkspaceRootKind::Extension,
+            ide::WorkspaceRootKind::External(bsl_metadata::ExternalObjectKind::DataProcessor),
+        ],
+        paths,
+        closures: vec![vec![], vec![], vec![1]],
+        topological_order: vec![0, 1, 2],
+        fingerprint: Some("external".to_owned()),
+    });
+    let registered = db.workspace_configs_snapshot();
+
+    let snapshot = CallHierarchyIndexFrozenSnapshot::capture(
+        &db,
+        source_root_id,
+        &MemDocs::default().freeze(),
+        7,
+    );
+    let batch = snapshot.open_batch(&[ModuleId::new(file_id)]);
+
+    let carried = batch.workspace_configs_snapshot();
+    assert_eq!(carried.kinds, registered.kinds, "the batch keeps every root's kind");
+    assert_eq!(carried.closures, registered.closures, "and every root's closure");
+    assert!(
+        batch.external_root_of_path(&module).is_some(),
+        "so the export's module still belongs to an external root in the batch"
+    );
+}

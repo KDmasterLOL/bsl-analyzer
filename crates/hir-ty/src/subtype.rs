@@ -323,6 +323,8 @@ fn object_mdo_of_kind(kind: MetadataKind) -> Option<bsl_metadata::MdoType> {
         MetadataKind::ChartOfAccountsObject => Some(M::ChartOfAccounts),
         MetadataKind::DataProcessorObject => Some(M::DataProcessor),
         MetadataKind::ReportObject => Some(M::Report),
+        MetadataKind::ExternalDataProcessorObject => Some(M::ExternalDataProcessor),
+        MetadataKind::ExternalReportObject => Some(M::ExternalReport),
         MetadataKind::ChartOfCharacteristicTypesObject => Some(M::ChartOfCharacteristicTypes),
         MetadataKind::ChartOfCalculationTypesObject => Some(M::ChartOfCalculationTypes),
         _ => None,

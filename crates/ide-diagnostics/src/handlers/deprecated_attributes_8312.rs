@@ -1,6 +1,7 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use hir::DeprecatedKind8312;
-use ide_db::TextRange;
+use hir::LocalRange;
 use stdx::case::CaseExt;
 
 use super::deprecated_platform_facts::deprecated_8312_replacement;
@@ -8,9 +9,9 @@ use super::deprecated_platform_facts::deprecated_8312_replacement;
 pub fn from_hir(
     name: &str,
     kind: DeprecatedKind8312,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::DeprecatedPlatformApi;
 
     if ctx.is_disabled_with_metadata(code) {

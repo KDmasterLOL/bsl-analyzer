@@ -1,8 +1,8 @@
 use bsl_types::builders::Builders;
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
+use hir_def::module_interface::MethodDecl;
 use hir_def::resolver::{QualifiedMethodError, Resolver};
-use hir_def::symbol_tree::MethodSymbol;
 use hir_def::ty::{DocSeeSlots, FunctionSignature};
 use hir_def::{MethodId, Name};
 
@@ -45,13 +45,12 @@ pub fn resolve_qualified_call(
             QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
-    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
-    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
-        "method_id returned by Resolver must exist in symbol_tree — \
-         symbol_tree / Resolver are out of sync",
+    let method_symbol = db.interface_method(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in module_interface — \
+         module_interface / Resolver are out of sync",
     );
 
-    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, &method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -67,6 +66,8 @@ fn object_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadata::M
         MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
         MetadataKind::DataProcessorObject => MdoType::DataProcessor,
         MetadataKind::ReportObject => MdoType::Report,
+        MetadataKind::ExternalDataProcessorObject => MdoType::ExternalDataProcessor,
+        MetadataKind::ExternalReportObject => MdoType::ExternalReport,
         MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
         MetadataKind::ChartOfCalculationTypesObject => MdoType::ChartOfCalculationTypes,
         MetadataKind::CatalogRef
@@ -118,7 +119,9 @@ fn record_set_kind_to_mdo(kind: hir_def::ty::MetadataKind) -> Option<bsl_metadat
         | MetadataKind::DataProcessorObject
         | MetadataKind::ChartOfCharacteristicTypesObject
         | MetadataKind::ChartOfCalculationTypesObject
-        | MetadataKind::ReportObject => return None,
+        | MetadataKind::ReportObject
+        | MetadataKind::ExternalDataProcessorObject
+        | MetadataKind::ExternalReportObject => return None,
         MetadataKind::CatalogRef
         | MetadataKind::DocumentRef
         | MetadataKind::EnumRef
@@ -163,13 +166,12 @@ pub fn resolve_record_set_module_call(
             QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
-    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
-    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
-        "method_id returned by Resolver must exist in symbol_tree — \
-         symbol_tree / Resolver are out of sync",
+    let method_symbol = db.interface_method(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in module_interface — \
+         module_interface / Resolver are out of sync",
     );
 
-    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, &method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -191,13 +193,12 @@ pub fn resolve_object_module_call(
             QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
         })?;
 
-    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
-    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
-        "method_id returned by Resolver must exist in symbol_tree — \
-         symbol_tree / Resolver are out of sync",
+    let method_symbol = db.interface_method(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in module_interface — \
+         module_interface / Resolver are out of sync",
     );
 
-    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, &method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -217,13 +218,12 @@ pub fn resolve_aliased_manager_call(
         QualifiedMethodError::BodyUnread => UnresolvedMethodKind::BodyUnread,
     })?;
 
-    let symbol_tree = db.symbol_tree_ref(resolution.method_id.module);
-    let method_symbol = symbol_tree.find_method_by_id(resolution.method_id).expect(
-        "method_id returned by Resolver must exist in symbol_tree — \
-         symbol_tree / Resolver are out of sync",
+    let method_symbol = db.interface_method(resolution.method_id).expect(
+        "method_id returned by Resolver must exist in module_interface — \
+         module_interface / Resolver are out of sync",
     );
 
-    let signature = materialise_signature_enriched(db, resolution.method_id, method_symbol);
+    let signature = materialise_signature_enriched(db, resolution.method_id, &method_symbol);
     Ok(MethodResolution::new(resolution.method_id, resolution.is_export, signature))
 }
 
@@ -357,7 +357,7 @@ pub fn resolve_user_call(
 
 pub(crate) fn materialise_signature(
     db: &dyn TypeKernelDb,
-    method_symbol: &MethodSymbol,
+    method_symbol: &MethodDecl,
 ) -> FunctionSignature {
     let ctx = TyLoweringContext::new();
     // Absent documentation is the common case, and then nothing below changes a single type.
@@ -442,7 +442,7 @@ fn find_param_doc<'a>(
 pub(crate) fn materialise_signature_enriched(
     db: &dyn HirDatabase,
     method_id: hir_def::MethodId,
-    method_symbol: &MethodSymbol,
+    method_symbol: &MethodDecl,
 ) -> FunctionSignature {
     let mut sig: FunctionSignature = materialise_signature(db, method_symbol);
     // A slot documented as a bare `Структура` says nothing the body does not already say, and the
@@ -483,7 +483,10 @@ mod tests {
     #[test]
     fn test_method_resolution_new() {
         let db = InMemoryDb::new();
-        let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
+        let method_id = MethodId {
+            module: hir_def::ModuleId { file_id: FileId(0) },
+            local_id: hir_def::MethodKey::first("М"),
+        };
         let signature = FunctionSignature {
             params: Box::new([db.string(None, false)]),
             defaults: Box::new([false]),
@@ -504,7 +507,10 @@ mod tests {
     #[test]
     fn test_method_resolution_not_export() {
         let db = InMemoryDb::new();
-        let method_id = MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 };
+        let method_id = MethodId {
+            module: hir_def::ModuleId { file_id: FileId(0) },
+            local_id: hir_def::MethodKey::first("М"),
+        };
         let signature = FunctionSignature {
             params: Box::new([]),
             defaults: Box::new([]),
@@ -519,16 +525,18 @@ mod tests {
         assert!(!resolution.is_export);
     }
 
-    /// A method symbol shaped the way `symbol_tree` builds one: the parameter's `type_ref` is the
+    /// A method declaration shaped the way `module_interface` builds one: the parameter's `type_ref` is the
     /// hint the second doc-parser produced, which is what `materialise_signature` lowers.
     fn method_with_docs(
         docs: hir_def::docs::MethodDocs,
         params: &[(&str, Option<hir_def::TypeRef>)],
-    ) -> MethodSymbol {
+    ) -> MethodDecl {
         use hir_def::symbol_tree::ParamSymbol;
-        use syntax::TextRange;
-        MethodSymbol {
-            id: MethodId { module: hir_def::ModuleId { file_id: FileId(0) }, local_id: 0 },
+        MethodDecl {
+            id: MethodId {
+                module: hir_def::ModuleId { file_id: FileId(0) },
+                local_id: hir_def::MethodKey::first("М"),
+            },
             name: Name::new("Тест"),
             is_function: true,
             is_export: true,
@@ -541,9 +549,8 @@ mod tests {
                     type_ref: type_ref.clone(),
                 })
                 .collect(),
-            annotations: Vec::new(),
-            source_range: TextRange::default(),
-            name_range: TextRange::default(),
+            directives: Box::new([]),
+            preproc_env: hir_def::execution_env::EnvFlags::ALL,
             docs: Some(std::sync::Arc::new(docs)),
             return_type_ref: None,
         }

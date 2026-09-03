@@ -58,6 +58,14 @@ pub fn resolve_platform_metadata_ref_method(
     mdo_name: &Name,
     method_name: &Name,
 ) -> Option<PlatformMethodResolution> {
+    // An external object's methods live under the bare platform type: the prefix
+    // index is built from dotted `type_name`s and would answer nothing for it.
+    if let Some(type_name) = kind.bare_platform_type() {
+        let parent_mdo = object_kind_to_parent_mdo(kind)?;
+        let method =
+            bsl_platform::PlatformData::instance().get_method(type_name, method_name.as_str())?;
+        return build_prefixed_resolution(db, vec![method.clone()], parent_mdo, mdo_name);
+    }
     let (prefix, parent_mdo) = metadata_kind_to_prefix_and_mdo(kind)?;
     build_prefixed_resolution(
         db,
@@ -67,15 +75,23 @@ pub fn resolve_platform_metadata_ref_method(
     )
 }
 
+/// The object kind an external object's methods are mapped through; the
+/// external kinds are the only ones carrying a bare platform type.
+pub(crate) fn object_kind_to_parent_mdo(kind: MetadataKind) -> Option<MdoType> {
+    match kind {
+        MetadataKind::ExternalDataProcessorObject => Some(MdoType::ExternalDataProcessor),
+        MetadataKind::ExternalReportObject => Some(MdoType::ExternalReport),
+        _ => None,
+    }
+}
+
 pub fn platform_methods_for_metadata_kind(kind: MetadataKind) -> Vec<PlatformMethod> {
+    let data = bsl_platform::PlatformData::instance();
+    if let Some(type_name) = kind.bare_platform_type() {
+        return data.get_type_methods(type_name).into_iter().cloned().collect();
+    }
     metadata_kind_to_prefix_and_mdo(kind)
-        .map(|(prefix, _)| {
-            bsl_platform::PlatformData::instance()
-                .get_manager_methods(prefix)
-                .into_iter()
-                .cloned()
-                .collect()
-        })
+        .map(|(prefix, _)| data.get_manager_methods(prefix).into_iter().cloned().collect())
         .unwrap_or_default()
 }
 

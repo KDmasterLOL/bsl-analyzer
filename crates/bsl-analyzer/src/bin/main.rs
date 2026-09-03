@@ -530,11 +530,14 @@ mod contract_surface {
                 diff-filter
                 extension !no-extensions
                 extension-depends-on
+                external !no-externals
+                external-depends-on
                 format = console | jsonl
                 git-diff !changed-files
                 ignored-author [ignored-authors]
                 incremental
                 no-extensions !extension
+                no-externals !external
                 only-diagnostic
                 output-dir (-o) [outputDir]
                 quiet (-q) [silent]
@@ -547,7 +550,10 @@ mod contract_surface {
                 configuration-root
                 extension !no-extensions
                 extension-depends-on
+                external !no-externals
+                external-depends-on
                 no-extensions !extension
+                no-externals !external
               diagnostics
                 baseline
                   create
@@ -584,9 +590,12 @@ mod contract_surface {
                   enable-tool
                   extension !no-extensions
                   extension-depends-on
+                  external !no-externals
+                  external-depends-on
                   host !config
                   mode = stdio | broker | broker-required | daemon | http
                   no-extensions !extension
+                  no-externals !external
                   onec-password
                   onec-url
                   onec-user

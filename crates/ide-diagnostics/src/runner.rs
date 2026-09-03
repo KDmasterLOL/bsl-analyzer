@@ -1,18 +1,9 @@
-use crate::single_pass::collect_syntax_single_pass;
 use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
 
-const LINE_DIAGNOSTICS: &[DiagnosticCode] = &[
-    DiagnosticCode::ParseError,
-    DiagnosticCode::ConsecutiveEmptyLines,
-    DiagnosticCode::LineLength,
-    DiagnosticCode::CommentedCode,
-    DiagnosticCode::UsingServiceTag,
-    DiagnosticCode::CanonicalSpellingKeywords,
-    DiagnosticCode::IncorrectLineBreak,
-    DiagnosticCode::InvalidCharacterInFile,
-    DiagnosticCode::MissingSpace,
-    DiagnosticCode::SpaceAtStartComment,
-];
+/// Файловые строчные проверки; строчные проверки по плитам методов живут в
+/// `crate::slab::SLAB_DIAGNOSTICS` и сюда не входят.
+const LINE_DIAGNOSTICS: &[DiagnosticCode] =
+    &[DiagnosticCode::ParseError, DiagnosticCode::ConsecutiveEmptyLines];
 
 pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UselessTernaryOperator,
@@ -29,14 +20,9 @@ pub(crate) const SINGLE_PASS_DIAGNOSTICS: &[DiagnosticCode] = &[
 const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::CodeBlockBeforeSub,
     DiagnosticCode::CodeOutOfRegion,
-    DiagnosticCode::MultilinePreprocessorInstruction,
     DiagnosticCode::DuplicateRegion,
     DiagnosticCode::DuplicateStringLiteral,
     DiagnosticCode::EmptyRegion,
-    DiagnosticCode::ExcessiveAutoTestCheck,
-    DiagnosticCode::MultilingualStringHasAllDeclaredLanguages,
-    DiagnosticCode::MultilingualStringUsingWithTemplate,
-    DiagnosticCode::LatinAndCyrillicSymbolInWord,
     DiagnosticCode::NonStandardRegion,
 ];
 
@@ -62,23 +48,10 @@ const ITEM_TREE_DIAGNOSTICS: &[DiagnosticCode] = &[
 ];
 
 const MODULE_BODIES_DIAGNOSTICS: &[DiagnosticCode] = &[
-    DiagnosticCode::InternetAccess,
-    DiagnosticCode::IsInRoleMethod,
-    DiagnosticCode::PairingBrokenTransaction,
     DiagnosticCode::ServerCallsInFormEvents,
-    DiagnosticCode::TimeoutsInExternalResources,
-    DiagnosticCode::UsingHardcodeSecretInformation,
     DiagnosticCode::DataExchangeLoading,
     DiagnosticCode::TransferringParametersBetweenClientAndServer,
     DiagnosticCode::UnusedLocalMethod,
-    DiagnosticCode::IdenticalExpressions,
-    DiagnosticCode::DuplicatedInsertionIntoCollection,
-    DiagnosticCode::IncorrectUseOfStrTemplate,
-    DiagnosticCode::NumberOfValuesInStructureConstructor,
-    DiagnosticCode::NestedConstructorsInStructureDeclaration,
-    DiagnosticCode::NestedFunctionInParameters,
-    DiagnosticCode::MissingCodeTryCatchEx,
-    DiagnosticCode::UsingHardcodeNetworkAddress,
 ];
 
 const CONFIGURATION_DIAGNOSTICS: &[DiagnosticCode] = &[
@@ -111,22 +84,8 @@ const SDBL_HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::VirtualTableCallWithoutParameters,
 ];
 
-const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] = &[
-    DiagnosticCode::UnreachableCode,
-    DiagnosticCode::UnusedLocalVariable,
-    DiagnosticCode::UnusedParameters,
-    DiagnosticCode::MissingTemporaryFileDeletion,
-    DiagnosticCode::MissingTempStorageDeletion,
-    DiagnosticCode::SetPrivilegedMode,
-    DiagnosticCode::DisableSafeMode,
-    DiagnosticCode::CognitiveComplexity,
-    DiagnosticCode::CyclomaticComplexity,
-    DiagnosticCode::NestedStatements,
-    DiagnosticCode::IfConditionComplexity,
-    DiagnosticCode::MethodSize,
-    DiagnosticCode::NumberOfParams,
-    DiagnosticCode::NumberOfOptionalParams,
-];
+const DATAFLOW_DIAGNOSTICS: &[DiagnosticCode] =
+    &[DiagnosticCode::UnusedLocalVariable, DiagnosticCode::UnusedParameters];
 
 /// Diagnostics that require the configuration-extension merge context (a base module paired
 /// to the analyzed extension file) and therefore run from `apply_extension_merge` rather than
@@ -176,28 +135,16 @@ pub fn collect_line_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     diagnostics.extend(handlers::parse_error::check(ctx));
     diagnostics.extend(handlers::consecutive_empty_lines::check(ctx));
-    diagnostics.extend(handlers::line_length::check(ctx));
-    diagnostics.extend(handlers::commented_code::check(ctx));
-    diagnostics.extend(handlers::using_service_tag::check(ctx));
-    diagnostics.extend(handlers::canonical_spelling_keywords::check(ctx));
-    diagnostics.extend(handlers::incorrect_line_break::check(ctx));
-    diagnostics.extend(handlers::invalid_character_in_file::check(ctx));
-    diagnostics.extend(handlers::missing_space::check(ctx));
-    diagnostics.extend(handlers::space_at_start_comment::check(ctx));
 
     diagnostics
 }
 
 pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if !ctx.config.any_enabled(SINGLE_PASS_DIAGNOSTICS)
-        && !ctx.config.any_enabled(SYNTAX_DIAGNOSTICS)
-    {
+    if !ctx.config.any_enabled(SYNTAX_DIAGNOSTICS) {
         return Vec::new();
     }
 
     let mut diagnostics = Vec::new();
-
-    diagnostics.extend(collect_syntax_single_pass(ctx));
 
     diagnostics.extend(run_diagnostic(
         "CodeBlockBeforeSub",
@@ -205,11 +152,6 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::code_block_before_sub::check,
     ));
     diagnostics.extend(run_diagnostic("CodeOutOfRegion", ctx, handlers::code_out_of_region::check));
-    diagnostics.extend(run_diagnostic(
-        "MultilinePreprocessorInstruction",
-        ctx,
-        handlers::multiline_preprocessor_instruction::check,
-    ));
     diagnostics.extend(run_diagnostic("DuplicateRegion", ctx, handlers::duplicate_region::check));
     diagnostics.extend(run_diagnostic(
         "DuplicateStringLiteral",
@@ -217,26 +159,6 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         handlers::duplicate_string_literal::check,
     ));
     diagnostics.extend(run_diagnostic("EmptyRegion", ctx, handlers::empty_region::check));
-    diagnostics.extend(run_diagnostic(
-        "ExcessiveAutoTestCheck",
-        ctx,
-        handlers::excessive_auto_test_check::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MultilingualStringHasAllDeclaredLanguages",
-        ctx,
-        handlers::multilingual_string_has_all_declared_languages::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MultilingualStringUsingWithTemplate",
-        ctx,
-        handlers::multilingual_string_using_with_template::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "LatinAndCyrillicSymbolInWord",
-        ctx,
-        handlers::latin_and_cyrillic_symbol_in_word::check,
-    ));
     diagnostics.extend(run_diagnostic(
         "NonStandardRegion",
         ctx,
@@ -352,26 +274,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
 
     let mut diagnostics = Vec::new();
 
-    diagnostics.extend(run_diagnostic("InternetAccess", ctx, handlers::internet_access::check));
-    diagnostics.extend(run_diagnostic("IsInRoleMethod", ctx, handlers::is_in_role_method::check));
-
-    diagnostics.extend(run_diagnostic(
-        "PairingBrokenTransaction",
-        ctx,
-        handlers::pairing_broken_transaction::check,
-    ));
-
-    diagnostics.extend(run_diagnostic(
-        "TimeoutsInExternalResources",
-        ctx,
-        handlers::timeouts_in_external_resources::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodeSecretInformation",
-        ctx,
-        handlers::using_hardcode_secret_information::check,
-    ));
-
     diagnostics.extend(run_diagnostic(
         "DataExchangeLoading",
         ctx,
@@ -391,50 +293,6 @@ pub fn collect_module_bodies_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagno
         "ServerCallsInFormEvents",
         ctx,
         handlers::server_calls_in_form_events::check,
-    ));
-
-    diagnostics.extend(run_diagnostic(
-        "IdenticalExpressions",
-        ctx,
-        handlers::identical_expressions::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "DuplicatedInsertionIntoCollection",
-        ctx,
-        handlers::duplicated_insertion_into_collection::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "IncorrectUseOfStrTemplate",
-        ctx,
-        handlers::incorrect_use_of_str_template::check,
-    ));
-
-    diagnostics.extend(run_diagnostic(
-        "NumberOfValuesInStructureConstructor",
-        ctx,
-        handlers::number_of_values_in_structure_constructor::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "NestedConstructorsInStructureDeclaration",
-        ctx,
-        handlers::nested_constructors_in_structure_declaration::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "NestedFunctionInParameters",
-        ctx,
-        handlers::nested_function_in_parameters::check,
-    ));
-
-    diagnostics.extend(run_diagnostic(
-        "MissingCodeTryCatchEx",
-        ctx,
-        handlers::missing_code_try_catch_ex::check,
-    ));
-
-    diagnostics.extend(run_diagnostic(
-        "UsingHardcodeNetworkAddress",
-        ctx,
-        handlers::using_hardcode_network_address::check,
     ));
 
     diagnostics
@@ -558,53 +416,12 @@ pub fn collect_dataflow_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic>
 
     let mut diagnostics = Vec::new();
 
-    diagnostics.extend(run_diagnostic("UnreachableCode", ctx, handlers::unreachable_code::check));
     diagnostics.extend(run_diagnostic(
         "UnusedLocalVariable",
         ctx,
         handlers::unused_local_variable::check,
     ));
     diagnostics.extend(run_diagnostic("UnusedParameters", ctx, handlers::unused_parameters::check));
-    diagnostics.extend(run_diagnostic(
-        "MissingTemporaryFileDeletion",
-        ctx,
-        handlers::missing_temporary_file_deletion::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "MissingTempStorageDeletion",
-        ctx,
-        handlers::missing_temp_storage_deletion::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "SetPrivilegedMode",
-        ctx,
-        handlers::set_privileged_mode::check,
-    ));
-    diagnostics.extend(run_diagnostic("DisableSafeMode", ctx, handlers::disable_safe_mode::check));
-    diagnostics.extend(run_diagnostic(
-        "CognitiveComplexity",
-        ctx,
-        handlers::cognitive_complexity::check,
-    ));
-    diagnostics.extend(run_diagnostic(
-        "CyclomaticComplexity",
-        ctx,
-        handlers::cyclomatic_complexity::check,
-    ));
-    diagnostics.extend(run_diagnostic("NestedStatements", ctx, handlers::nested_statements::check));
-    diagnostics.extend(run_diagnostic(
-        "IfConditionComplexity",
-        ctx,
-        handlers::if_condition_complexity::check,
-    ));
-    diagnostics.extend(run_diagnostic("MethodSize", ctx, handlers::method_size::check));
-    diagnostics.extend(run_diagnostic("NumberOfParams", ctx, handlers::number_of_params::check));
-    diagnostics.extend(run_diagnostic(
-        "NumberOfOptionalParams",
-        ctx,
-        handlers::number_of_optional_params::check,
-    ));
-
     diagnostics
 }
 
@@ -620,6 +437,7 @@ mod tests {
 
         let all_arrays: &[(&str, &[DiagnosticCode])] = &[
             ("LINE_DIAGNOSTICS", LINE_DIAGNOSTICS),
+            ("SLAB_DIAGNOSTICS", crate::slab::SLAB_DIAGNOSTICS),
             ("SINGLE_PASS_DIAGNOSTICS", SINGLE_PASS_DIAGNOSTICS),
             ("SYNTAX_DIAGNOSTICS", SYNTAX_DIAGNOSTICS),
             ("ITEM_TREE_DIAGNOSTICS", ITEM_TREE_DIAGNOSTICS),
@@ -627,6 +445,7 @@ mod tests {
             ("CONFIGURATION_DIAGNOSTICS", CONFIGURATION_DIAGNOSTICS),
             ("SDBL_HIR_DIAGNOSTICS", SDBL_HIR_DIAGNOSTICS),
             ("DATAFLOW_DIAGNOSTICS", DATAFLOW_DIAGNOSTICS),
+            ("BODY_DIAGNOSTICS", crate::body::BODY_DIAGNOSTICS),
             ("HIR_DIAGNOSTICS", crate::hir_dispatch::HIR_DIAGNOSTICS),
             ("METADATA_DIAGNOSTICS", crate::metadata_dispatch::METADATA_DIAGNOSTICS),
             ("INFERENCE_DIAGNOSTICS", crate::hir_inference_dispatch::INFERENCE_DIAGNOSTICS),
@@ -650,6 +469,10 @@ mod tests {
             // stays in lowering, the bare call needs the shadowing guard and is
             // judged in inference.
             DiagnosticCode::FileSystemAccess,
+            // Область по умолчанию — метод, и её судит тело; свод по файлу
+            // (`analyzeFile=true`) остаётся файловым. Оба входа читают один
+            // ключ конфига и взаимно исключают друг друга.
+            DiagnosticCode::DuplicateStringLiteral,
         ];
 
         let mut duplicates = Vec::new();

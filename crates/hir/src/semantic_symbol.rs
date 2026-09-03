@@ -6,7 +6,8 @@ use bsl_types::builders::Builders;
 use bsl_types::kind::{TypeId, TypeKind};
 use hir_def::scope::{ExprScopes, ScopeDef};
 use hir_def::{
-    BindingId, DefDatabase, DefWithBodyId, ExprId, MethodId, ModuleBodies, ModuleId, VariableId,
+    BindingId, DefDatabase, DefWithBodyId, ExprId, MethodId, MethodKey, ModuleBodies, ModuleId,
+    VariableId,
 };
 use hir_ty::narrow::{NarrowExprIndex, NarrowState};
 use hir_ty::{db::HirDatabase, ImplicitLocalInfo};
@@ -111,10 +112,9 @@ pub struct FileSymbolCtx<'db, DB: HirDatabase + base_db::RootQueryDb> {
     file_id: FileId,
     module_id: ModuleId,
     module_bodies: Arc<ModuleBodies>,
-    /// Method-def syntax range → item-tree top-level index, which is also the
-    /// lowered body's local id (both count every top-level item in document
-    /// order).
-    method_ranges: FxHashMap<TextRange, u32>,
+    /// Method-def syntax range → the method's key, under which the lowered
+    /// body is filed.
+    method_ranges: FxHashMap<TextRange, MethodKey>,
     /// When false, explicit binding symbols skip type inference: highlighting
     /// never reads `SemanticSymbol::ty`, and the binding type is the only
     /// symbol field that forces inference for otherwise-syntactic tokens.
@@ -123,10 +123,10 @@ pub struct FileSymbolCtx<'db, DB: HirDatabase + base_db::RootQueryDb> {
     /// equality that matches `eq_ignore_case` — keeping the first binding in
     /// iteration order, like the linear `find` it replaces.
     owner_bindings: RefCell<FxHashMap<DefWithBodyId, Arc<FxHashMap<String, BindingId>>>>,
-    expr_scopes: RefCell<FxHashMap<u32, Arc<ExprScopes>>>,
+    expr_scopes: RefCell<FxHashMap<MethodKey, Arc<ExprScopes>>>,
     /// Memoized scope resolutions keyed by the token text as written, so a
     /// cached `Definition` always embeds the requested casing.
-    local_defs: RefCell<FxHashMap<(u32, String), Option<Definition>>>,
+    local_defs: RefCell<FxHashMap<(MethodKey, String), Option<Definition>>>,
     module_methods: RefCell<FxHashMap<String, Option<MethodId>>>,
     module_vars: RefCell<FxHashMap<String, Option<VariableId>>>,
     global_exports: OnceCell<FxHashMap<String, Definition>>,
@@ -145,17 +145,8 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         let module_bodies = db.module_bodies(module_id);
         let tree = db.item_tree(file_id);
         let mut method_ranges = FxHashMap::default();
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            let source_range = match item {
-                hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-                    tree.procedure(*proc_idx).source_range
-                }
-                hir_def::item_tree::ModItem::Function(func_idx) => {
-                    tree.function(*func_idx).source_range
-                }
-                _ => continue,
-            };
-            method_ranges.entry(source_range).or_insert(idx as u32);
+        for method in tree.methods() {
+            method_ranges.entry(method.source_range()).or_insert(method.key());
         }
         Self {
             sema: Semantics::new(db),
@@ -467,18 +458,14 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     fn resolve_local_uncached(
         &self,
         method_node: &syntax::SyntaxNode,
-        local_id: u32,
+        local_id: MethodKey,
         name: &Name,
     ) -> Option<Definition> {
         let scopes = self.scopes_for(method_node, local_id)?;
         let scope_def = scopes.resolve_name(scopes.root_scope(), name)?;
 
         let tree = self.db().item_tree(self.file_id);
-        let params = match tree.top_level_items().get(local_id as usize)? {
-            hir_def::item_tree::ModItem::Procedure(proc_idx) => &tree.procedure(*proc_idx).params,
-            hir_def::item_tree::ModItem::Function(func_idx) => &tree.function(*func_idx).params,
-            _ => return None,
-        };
+        let params = tree.method(local_id)?.params();
         let method_id = MethodId { module: self.module_id, local_id };
         Some(match scope_def {
             ScopeDef::Parameter => {
@@ -493,7 +480,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     fn scopes_for(
         &self,
         method_node: &syntax::SyntaxNode,
-        local_id: u32,
+        local_id: MethodKey,
     ) -> Option<Arc<ExprScopes>> {
         if let Some(scopes) = self.expr_scopes.borrow().get(&local_id) {
             return Some(scopes.clone());
@@ -512,7 +499,10 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     /// The nearest enclosing method definition, if the item tree knows it.
     /// Outer definitions are not consulted: a name scoped to an unknown inner
     /// definition must not resolve against an enclosing one.
-    fn enclosing_method(&self, token: &syntax::SyntaxToken) -> Option<(syntax::SyntaxNode, u32)> {
+    fn enclosing_method(
+        &self,
+        token: &syntax::SyntaxToken,
+    ) -> Option<(syntax::SyntaxNode, MethodKey)> {
         let mut node = token.parent()?;
         loop {
             if matches!(node.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF) {
@@ -650,14 +640,14 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
     fn body_for_token(
         &self,
         token: &syntax::SyntaxToken,
-    ) -> Option<(DefWithBodyId, &hir_def::Body, &hir_def::BodySourceMap)> {
+    ) -> Option<(DefWithBodyId, &hir_def::Body, hir_def::body::SourceMapAt<'_>)> {
         self.body_for(token.text_range(), token.parent()?)
     }
 
     fn body_for_node(
         &self,
         node: syntax::SyntaxNode,
-    ) -> Option<(DefWithBodyId, &hir_def::Body, &hir_def::BodySourceMap)> {
+    ) -> Option<(DefWithBodyId, &hir_def::Body, hir_def::body::SourceMapAt<'_>)> {
         self.body_for(node.text_range(), node)
     }
 
@@ -673,12 +663,13 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
         &self,
         range: TextRange,
         start: syntax::SyntaxNode,
-    ) -> Option<(DefWithBodyId, &hir_def::Body, &hir_def::BodySourceMap)> {
+    ) -> Option<(DefWithBodyId, &hir_def::Body, hir_def::body::SourceMapAt<'_>)> {
         if let Some(result) = self.module_bodies.module_code_result() {
-            if result.source_map.expr_at_range(range).is_some()
-                || result.source_map.binding_at_range(range).is_some()
+            let source_map = result.source_map();
+            if source_map.expr_at_range(range).is_some()
+                || source_map.binding_at_range(range).is_some()
             {
-                return Some((DefWithBodyId::ModuleCode, &result.body, &result.source_map));
+                return Some((DefWithBodyId::ModuleCode, result.body(), source_map));
             }
         }
 
@@ -687,13 +678,14 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
             if matches!(current.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF) {
                 if let Some(local_id) = self.method_ranges.get(&current.text_range()) {
                     if let Some(result) = self.module_bodies.lower_result(*local_id) {
-                        if result.source_map.expr_at_range(range).is_some()
-                            || result.source_map.binding_at_range(range).is_some()
+                        let source_map = result.source_map();
+                        if source_map.expr_at_range(range).is_some()
+                            || source_map.binding_at_range(range).is_some()
                         {
                             return Some((
                                 DefWithBodyId::Method(*local_id),
-                                &result.body,
-                                &result.source_map,
+                                result.body(),
+                                source_map,
                             ));
                         }
                     }
@@ -713,7 +705,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> FileSymbolCtx<'db, DB> {
 /// later read lands on the write that produced what it reads, while the variable those
 /// occurrences belong to stays one.
 fn select_implicit_local_declaration(
-    source_map: &hir_def::BodySourceMap,
+    source_map: hir_def::body::SourceMapAt<'_>,
     implicit: &ImplicitLocalInfo,
     occurrence_range: TextRange,
     occurrence_ty: TypeId,

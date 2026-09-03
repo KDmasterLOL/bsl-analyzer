@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -17,7 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::UselessTernaryOperator;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -31,25 +33,7 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::UselessTernaryOperator;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    diagnostics
-}
-
-fn check_ternary(node: &SyntaxNode, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+fn check_ternary(node: &SyntaxNode, ctx: &BodyContext) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::UselessTernaryOperator;
 
     let exprs: Vec<_> = node.children().filter(|n| n.kind() == SyntaxKind::EXPR).collect();
@@ -73,7 +57,7 @@ fn check_ternary(node: &SyntaxNode, ctx: &DiagnosticsContext) -> Option<Diagnost
             code,
             message: "Бесполезный тернарный оператор".to_string(),
             severity: ctx.severity(code),
-            range: node.text_range(),
+            range: LocalRange::of_detached_node(node.text_range()),
             tags: ctx.tags(code),
             fixes: canonical_fix(node, condition, condition_bool, true_bool, false_bool, ctx),
         });
@@ -93,8 +77,8 @@ fn canonical_fix(
     condition_bool: Option<BooleanValue>,
     true_bool: Option<BooleanValue>,
     false_bool: Option<BooleanValue>,
-    ctx: &DiagnosticsContext,
-) -> Vec<Fix> {
+    ctx: &BodyContext,
+) -> Vec<Fix<LocalRange>> {
     if condition_bool.is_some()
         || true_bool != Some(BooleanValue::True)
         || false_bool != Some(BooleanValue::False)
@@ -102,24 +86,20 @@ fn canonical_fix(
         return vec![];
     }
 
-    let cond_range = condition.text_range();
-    let text = ctx.file_text();
-    let Some(cond_src) = text.get(cond_range.start().into()..cond_range.end().into()) else {
-        return vec![];
-    };
+    let cond_src = ctx.text_of(LocalRange::of_detached_node(condition.text_range()));
 
     // A compound condition (`Б = 1`, `НЕ Х`) substituted verbatim would change
     // precedence in an operand slot (`Х + ?(Б=1,…)` → `Х + Б = 1` reparses as
     // `(Х + Б) = 1`), so parenthesise it. The parentheses are also clearer for the
     // common `А = (Б = 1)` case where the second `=` is a comparison, and are always
     // valid, so they are added unconditionally for compound conditions.
-    let new_text = if is_compound_condition(condition) {
-        format!("({})", cond_src)
-    } else {
-        cond_src.to_string()
-    };
+    let new_text =
+        if is_compound_condition(condition) { format!("({})", cond_src) } else { cond_src };
 
-    vec![Fix::safe("Заменить на условие", vec![TextEdit { range: node.text_range(), new_text }])]
+    vec![Fix::safe(
+        "Заменить на условие",
+        vec![TextEdit { range: LocalRange::of_detached_node(node.text_range()), new_text }],
+    )]
 }
 
 /// Whether the condition is a binary/unary expression (whose bare substitution could

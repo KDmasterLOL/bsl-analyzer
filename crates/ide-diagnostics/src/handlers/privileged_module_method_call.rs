@@ -66,7 +66,6 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let guard_registry = default_registry();
     let mut module_bodies: Option<Arc<hir::ModuleBodies>> = None;
-    let mut module_cfgs: Option<Arc<hir::cfg::ModuleCfgs>> = None;
 
     let mut diagnostics = Vec::new();
 
@@ -92,8 +91,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
             let resolution = ctx.resolve_qualified_path(module_name, method_name);
             if matches!(resolution, PathResolution::Method(_)) {
-                if is_call_guarded(ctx, edge, &guard_registry, &mut module_bodies, &mut module_cfgs)
-                {
+                if is_call_guarded(ctx, edge, &guard_registry, &mut module_bodies) {
                     continue;
                 }
 
@@ -120,14 +118,12 @@ fn is_call_guarded(
     edge: &CallEdge,
     registry: &GuardRegistry,
     bodies_cache: &mut Option<Arc<hir::ModuleBodies>>,
-    cfgs_cache: &mut Option<Arc<hir::cfg::ModuleCfgs>>,
 ) -> bool {
     let CallerId::Method(caller_local_id) = edge.caller else {
         return false;
     };
 
     let bodies = bodies_cache.get_or_insert_with(|| ctx.module_bodies()).clone();
-    let cfgs = cfgs_cache.get_or_insert_with(|| ctx.module_cfgs()).clone();
 
     let body = match bodies.body(caller_local_id) {
         Some(b) => b,
@@ -137,22 +133,22 @@ fn is_call_guarded(
         Some(s) => s,
         None => return false,
     };
-    let cfg = match cfgs.get(caller_local_id) {
-        Some(c) => c,
-        None => return false,
-    };
+    let cfg = ctx.method_cfg(hir::MethodId {
+        module: hir::ModuleId::new(ctx.file_id),
+        local_id: caller_local_id,
+    });
 
     let stmt_id = match find_stmt_containing(body, source_map, edge.range) {
         Some(s) => s,
         None => return false,
     };
 
-    is_stmt_guarded(cfg, body, stmt_id, registry)
+    is_stmt_guarded(&cfg, body, stmt_id, registry)
 }
 
 fn find_stmt_containing(
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: hir::SourceMapAt<'_>,
     target: TextRange,
 ) -> Option<hir::StmtId> {
     let mut best: Option<(hir::StmtId, TextRange)> = None;

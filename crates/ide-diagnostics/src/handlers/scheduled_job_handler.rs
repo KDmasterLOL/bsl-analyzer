@@ -137,7 +137,7 @@ fn check_method(
 
     struct Resolved {
         module_id: ModuleId,
-        local_id: u32,
+        local_id: hir::MethodKey,
         is_export: bool,
         params_empty: bool,
     }
@@ -213,7 +213,11 @@ fn check_method(
     }
 }
 
-fn is_empty_method(ctx: &DiagnosticsContext, module_id: ModuleId, local_id: u32) -> bool {
+fn is_empty_method(
+    ctx: &DiagnosticsContext,
+    module_id: ModuleId,
+    local_id: hir::MethodKey,
+) -> bool {
     let bodies = ctx.module_bodies_for(module_id);
     let Some(body) = bodies.body(local_id) else {
         return false;

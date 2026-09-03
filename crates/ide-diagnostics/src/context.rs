@@ -2,10 +2,32 @@ use crate::DiagnosticsConfig;
 use std::sync::Arc;
 use vfs::FileId;
 
-pub struct DiagnosticsContext<'a> {
+/// What a check may know about the file without reading its positions: the
+/// configuration, metadata, cross-file resolution, docs, the module's
+/// declarations and the per-method dataflow. A body check runs on this alone
+/// (see [`crate::BodyContext`]), so nothing it reads changes when the method
+/// it checks moves within the file. Cross-file lookups (`symbol_tree_for`,
+/// `module_bodies_for`) do carry positions of OTHER files; that is the same
+/// trade inference makes.
+pub struct AnalysisContext<'a> {
     pub config: &'a DiagnosticsConfig,
     pub file_id: FileId,
     provider: &'a dyn ide_db::AnalysisProvider,
+}
+
+/// The whole-file view: [`AnalysisContext`] plus the file's positional
+/// state (its parse, text, item tree, symbol tree, bodies, call summary).
+/// Only file-level checks and the assembly of a file's diagnostics see it.
+pub struct DiagnosticsContext<'a> {
+    analysis: AnalysisContext<'a>,
+}
+
+impl<'a> std::ops::Deref for DiagnosticsContext<'a> {
+    type Target = AnalysisContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.analysis
+    }
 }
 
 impl<'a> DiagnosticsContext<'a> {
@@ -14,7 +36,137 @@ impl<'a> DiagnosticsContext<'a> {
         file_id: FileId,
         provider: &'a dyn ide_db::AnalysisProvider,
     ) -> Self {
+        Self { analysis: AnalysisContext::new(config, file_id, provider) }
+    }
+
+    pub fn analysis(&self) -> &AnalysisContext<'a> {
+        &self.analysis
+    }
+
+    fn query<T>(&self, f: impl FnOnce(&dyn ide_db::AnalysisProvider) -> T) -> T {
+        f(self.analysis.provider)
+    }
+    pub fn parse(&self) -> syntax::Parse<syntax::SyntaxNode> {
+        self.query(|p| p.parse(self.file_id))
+    }
+
+    pub fn module_bodies(&self) -> Arc<hir::ModuleBodies> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.module_bodies(module_id))
+    }
+
+    pub fn infer(&self) -> Arc<hir::InferenceResult> {
+        self.query(|p| p.infer(self.file_id))
+    }
+
+    pub fn symbol_tree(&self) -> Arc<hir::SymbolTree> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.symbol_tree_for(module_id)
+    }
+
+    pub fn call_summary(&self, module_id: hir::ModuleId) -> Arc<hir::ModuleCallSummary> {
+        self.query(|p| p.call_summary(module_id))
+    }
+
+    pub fn item_tree(&self) -> Arc<hir::ItemTree> {
+        self.query(|p| p.item_tree(self.file_id))
+    }
+
+    pub fn file_text(&self) -> Arc<String> {
+        Arc::new(self.query(|p| p.file_text(self.file_id)))
+    }
+
+    pub fn line_index(&self) -> Arc<line_index::LineIndex> {
+        self.query(|p| p.line_index(self.file_id))
+    }
+
+    pub fn region_tree(&self) -> Arc<hir::RegionTree> {
+        self.query(|p| p.region_tree(self.file_id))
+    }
+
+    pub fn sdbl_hir_in_file(&self) -> ide_db::SdblHirEntries {
+        self.query(|p| p.sdbl_hir_in_file(self.file_id))
+    }
+
+    pub fn all_sdbl_in_file(&self) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
+        self.query(|p| p.all_sdbl_in_file(self.file_id))
+    }
+
+    pub fn file_external_refs(&self) -> std::sync::Arc<Vec<hir::ExternalRef>> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.file_external_refs(module_id))
+    }
+
+    pub fn module_bodies_for(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleBodies> {
+        self.query(|p| p.module_bodies(module_id))
+    }
+}
+
+impl<'a> AnalysisContext<'a> {
+    pub fn new(
+        config: &'a DiagnosticsConfig,
+        file_id: FileId,
+        provider: &'a dyn ide_db::AnalysisProvider,
+    ) -> Self {
         Self { config, file_id, provider }
+    }
+
+    pub(crate) fn provider(&self) -> &'a dyn ide_db::AnalysisProvider {
+        self.provider
+    }
+
+    /// One declaration of this file's module, by key.
+    pub fn interface_method(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDecl>> {
+        self.query(|p| p.interface_method(method_id))
+    }
+
+    /// The first method of this file's module named `name`.
+    pub fn interface_method_named(&self, name: &hir::Name) -> Option<Arc<hir::MethodDecl>> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.interface_method_named(module_id, name))
+    }
+
+    /// The first module variable of this file's module named `name`.
+    pub fn interface_variable_named(&self, name: &hir::Name) -> Option<Arc<hir::VariableDecl>> {
+        let module_id = hir::ModuleId::new(self.file_id);
+        self.query(|p| p.interface_variable_named(module_id, name))
+    }
+
+    pub fn infer_owner(&self, owner: hir::DefWithBodyId) -> hir::InferOwnerResult {
+        self.query(|p| p.infer_owner(self.file_id, owner))
+    }
+
+    pub fn arg_diagnostics_of(
+        &self,
+        owner: hir::DefWithBodyId,
+    ) -> Arc<Vec<hir::InferenceDiagnostic>> {
+        self.query(|p| p.arg_diagnostics_of(self.file_id, owner))
+    }
+
+    pub fn module_recursive_methods(&self) -> Arc<rustc_hash::FxHashSet<hir::MethodKey>> {
+        self.query(|p| p.module_recursive_methods(self.file_id))
+    }
+
+    pub fn module_level_cfg(&self) -> Arc<hir::cfg::ControlFlowGraph> {
+        self.query(|p| p.module_level_cfg(self.file_id))
+    }
+
+    pub fn module_code_reaching_definitions(
+        &self,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        self.query(|p| p.module_code_reaching_definitions(self.file_id))
+    }
+
+    /// Metrics of the module-level code, if it has any statements.
+    pub fn module_code_hir_metrics(&self) -> Option<Arc<hir::metrics::HirMethodMetrics>> {
+        self.query(|p| p.module_hir_metrics(self.file_id)).module_code()
+    }
+
+    pub fn module_code_security_state(
+        &self,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        self.query(|p| p.module_code_security_state(self.file_id))
     }
 
     pub fn locale(&self) -> base_db::Locale {
@@ -119,23 +271,6 @@ impl<'a> DiagnosticsContext<'a> {
         f(self.provider)
     }
 
-    pub fn parse(&self) -> syntax::Parse<syntax::SyntaxNode> {
-        self.query(|p| p.parse(self.file_id))
-    }
-
-    pub fn module_bodies(&self) -> Arc<hir::ModuleBodies> {
-        let module_id = hir::ModuleId::new(self.file_id);
-        self.query(|p| p.module_bodies(module_id))
-    }
-
-    pub fn infer(&self) -> Arc<hir::InferenceResult> {
-        self.query(|p| p.infer(self.file_id))
-    }
-
-    pub fn arg_diagnostics(&self) -> Arc<Vec<(hir::DefWithBodyId, hir::InferenceDiagnostic)>> {
-        self.query(|p| p.arg_diagnostics(self.file_id))
-    }
-
     pub fn module_metadata(&self) -> Arc<hir::ModuleMetadata> {
         let module_id = hir::ModuleId::new(self.file_id);
         self.query(|p| p.module_metadata(module_id))
@@ -145,29 +280,8 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_implicit_field_names(self.file_id))
     }
 
-    pub fn symbol_tree(&self) -> Arc<hir::SymbolTree> {
-        let module_id = hir::ModuleId::new(self.file_id);
-        self.symbol_tree_for(module_id)
-    }
-
     pub fn symbol_tree_for(&self, module_id: hir::ModuleId) -> Arc<hir::SymbolTree> {
         self.query(|p| p.symbol_tree(module_id))
-    }
-
-    pub fn call_summary(&self, module_id: hir::ModuleId) -> Arc<hir::ModuleCallSummary> {
-        self.query(|p| p.call_summary(module_id))
-    }
-
-    pub fn item_tree(&self) -> Arc<hir::ItemTree> {
-        self.query(|p| p.item_tree(self.file_id))
-    }
-
-    pub fn file_text(&self) -> Arc<String> {
-        Arc::new(self.query(|p| p.file_text(self.file_id)))
-    }
-
-    pub fn line_index(&self) -> Arc<line_index::LineIndex> {
-        self.query(|p| p.line_index(self.file_id))
     }
 
     pub fn source_root_id(&self) -> base_db::SourceRootId {
@@ -179,16 +293,23 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.module_index(source_root_id))
     }
 
-    pub fn module_cfgs(&self) -> Arc<hir::cfg::ModuleCfgs> {
-        self.query(|p| p.module_cfgs(self.file_id))
+    pub fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
+        self.query(|p| p.method_cfg(method_id))
     }
 
-    pub fn module_liveness(&self) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
-        self.query(|p| p.module_liveness_analysis(self.file_id))
+    pub fn method_path_terminates(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
+        self.query(|p| p.method_path_terminates(method_id))
     }
 
-    pub fn module_security_state(&self) -> Arc<ide_db::effects::ModuleSecurityState> {
-        self.query(|p| p.module_security_state(self.file_id))
+    pub fn method_security_state(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        self.query(|p| p.method_security_state(method_id))
     }
 
     pub fn method_effect_summary(
@@ -198,34 +319,16 @@ impl<'a> DiagnosticsContext<'a> {
         self.query(|p| p.method_effect_summary(method))
     }
 
-    pub fn module_hir_metrics(&self) -> Arc<ide_db::queries::ModuleHirMetrics> {
-        self.query(|p| p.module_hir_metrics(self.file_id))
-    }
-
-    pub fn module_cyclomatic(&self) -> Arc<ide_db::queries::ModuleCyclomatic> {
-        self.query(|p| p.module_cyclomatic(self.file_id))
-    }
-
-    pub fn module_reaching_defs(&self) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
-        self.query(|p| p.module_reaching_definitions(self.file_id))
-    }
-
-    pub fn module_path_terminates(
+    pub fn method_hir_metrics(
         &self,
-    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
-        self.query(|p| p.module_path_terminates(self.file_id))
+        method_id: hir::MethodId,
+    ) -> Arc<hir::metrics::HirMethodMetrics> {
+        self.query(|p| p.method_hir_metrics(method_id))
     }
 
-    pub fn region_tree(&self) -> Arc<hir::RegionTree> {
-        self.query(|p| p.region_tree(self.file_id))
-    }
-
-    pub fn sdbl_hir_in_file(&self) -> ide_db::SdblHirEntries {
-        self.query(|p| p.sdbl_hir_in_file(self.file_id))
-    }
-
-    pub fn all_sdbl_in_file(&self) -> Arc<Vec<(hir::SdblExprId, syntax::SdblQueryInfo)>> {
-        self.query(|p| p.all_sdbl_in_file(self.file_id))
+    /// Metrics of the module-level code, if it has any statements.
+    pub fn method_cyclomatic(&self, method_id: hir::MethodId) -> u32 {
+        self.query(|p| p.method_cyclomatic(method_id))
     }
 
     pub fn module_data(&self) -> Arc<hir::ModuleData> {
@@ -239,23 +342,6 @@ impl<'a> DiagnosticsContext<'a> {
 
     pub fn variable_docs(&self, variable_id: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
         self.query(|p| p.variable_docs(variable_id))
-    }
-
-    pub fn file_external_refs(&self) -> std::sync::Arc<Vec<hir::ExternalRef>> {
-        let module_id = hir::ModuleId::new(self.file_id);
-        self.query(|p| p.file_external_refs(module_id))
-    }
-
-    pub fn module_level_liveness_analysis(
-        &self,
-    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
-    {
-        let module_id = hir::ModuleId::new(self.file_id);
-        self.query(|p| p.module_level_liveness_analysis(module_id))
-    }
-
-    pub fn module_bodies_for(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleBodies> {
-        self.query(|p| p.module_bodies(module_id))
     }
 
     pub fn reaching_definitions(

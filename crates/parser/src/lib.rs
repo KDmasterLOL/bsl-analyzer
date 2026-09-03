@@ -6,6 +6,7 @@ mod event;
 #[macro_use]
 mod parser;
 pub mod grammar;
+pub mod reparse;
 mod sdbl_token_converter;
 mod sink;
 mod syntax_kind;
@@ -23,6 +24,23 @@ pub use crate::parser::input::Sig;
 /// `parser`: переезд нужен видимости `Sig::kind`, а не поверхности крейта.
 pub use crate::parser::token_set;
 pub use crate::parser::Parser;
+
+/// Токены текста с видами дерева, но без дерева. Вид берётся тем же
+/// отображением, что и в стоке при разборе, а лексер без состояния не
+/// зависит от того, где начинается текст, — поэтому на целых строках файла
+/// это ровно те токены, которые лежали бы в его дереве.
+pub fn line_tokens(text: &str) -> Vec<syntax::LineToken> {
+    tokenize(text)
+        .into_iter()
+        .map(|token| syntax::LineToken {
+            kind: syntax_kind::token_kind_to_syntax(token.kind),
+            range: syntax::TextRange::at(
+                syntax::TextSize::new(token.offset as u32),
+                syntax::TextSize::of(token.text.as_str()),
+            ),
+        })
+        .collect()
+}
 
 pub fn parse(input: &str) -> syntax::Parse<syntax::SyntaxNode> {
     let tokens = tokenize(input);

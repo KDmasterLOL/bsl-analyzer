@@ -4,7 +4,6 @@ use hir_def::hir::Stmt;
 use hir_def::StmtId;
 use la_arena::RawIdx;
 use petgraph::graph::NodeIndex;
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 use crate::{DataflowResult, DataflowSolver, Direction, Lattice, Transfer, DEFAULT_MAX_ITERATIONS};
@@ -123,44 +122,6 @@ pub fn analyze_path_terminates_default(
     cfg: &ControlFlowGraph,
 ) -> Option<PathTerminatesResult> {
     analyze_path_terminates(body, cfg, PathTerminatesConfig::default(), DEFAULT_MAX_ITERATIONS)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ModulePathTerminates {
-    results: FxHashMap<u32, Arc<PathTerminatesResult>>,
-}
-
-impl ModulePathTerminates {
-    pub fn new(results: FxHashMap<u32, Arc<PathTerminatesResult>>) -> Self {
-        Self { results }
-    }
-
-    pub fn get(&self, local_id: u32) -> Option<&Arc<PathTerminatesResult>> {
-        self.results.get(&local_id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &Arc<PathTerminatesResult>)> + '_ {
-        self.results.iter().map(|(&id, r)| (id, r))
-    }
-
-    pub fn len(&self) -> usize {
-        self.results.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.results.is_empty()
-    }
-
-    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
-    /// results table plus each owned [`PathTerminatesResult`].
-    pub fn estimated_heap(&self) -> usize {
-        let mut bytes =
-            crate::map_table_bytes::<u32, Arc<PathTerminatesResult>>(self.results.len());
-        for result in self.results.values() {
-            bytes += result.estimated_heap();
-        }
-        bytes
-    }
 }
 
 #[cfg(test)]
@@ -439,22 +400,5 @@ mod tests {
         assert_eq!(t.join(&f), f.join(&t));
         assert_eq!(t.join(&t), t);
         assert_eq!(f.join(&f), f);
-    }
-
-    #[test]
-    fn module_path_terminates_collection_basic() {
-        let mut results: FxHashMap<u32, Arc<PathTerminatesResult>> = FxHashMap::default();
-        let body = Body::new();
-        let mut cfg = ControlFlowGraph::new();
-        let entry = cfg.add_vertex(make_block(&[]));
-        cfg.set_entry_point(entry);
-        cfg.add_edge(entry, cfg.exit_point(), CfgEdgeType::Direct).unwrap();
-        let r = analyze_path_terminates_default(&body, &cfg).expect("converges");
-        results.insert(0, Arc::new(r));
-
-        let collection = ModulePathTerminates::new(results);
-        assert_eq!(collection.len(), 1);
-        assert!(collection.get(0).is_some());
-        assert!(collection.get(42).is_none());
     }
 }

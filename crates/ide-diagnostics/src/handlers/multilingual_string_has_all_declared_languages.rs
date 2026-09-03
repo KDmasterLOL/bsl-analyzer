@@ -4,7 +4,9 @@ use crate::utils::nstr::{
     extract_language_keys, get_assigned_variable_name, has_template_in_parents, is_nstr_call,
     is_variable_used_in_template, NstrConfig,
 };
-use crate::{sdbl_utils, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::BodyContext;
+use crate::{sdbl_utils, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -21,27 +23,20 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let _span = tracing::debug_span!("MultilingualStringHasAllDeclaredLanguages::check").entered();
 
     let code = DiagnosticCode::MultilingualStringHasAllDeclaredLanguages;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = NstrConfig::from_context(ctx, code);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
 
     let mut diagnostics = Vec::new();
 
-    for token in root.descendants_with_tokens() {
-        let tok = match token {
-            syntax::NodeOrToken::Token(t) => t,
-            _ => continue,
-        };
-
+    for tok in ctx.tokens() {
         if tok.kind() != SyntaxKind::IDENT || !is_nstr_call(tok.text()) {
             continue;
         }
@@ -65,7 +60,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         config.declared_languages.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                     severity: ctx.severity(code),
-                    range: call_expr.text_range(),
+                    range: LocalRange::of_detached_node(call_expr.text_range()),
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -94,7 +89,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         config.declared_languages.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                     severity: ctx.severity(code),
-                    range: call_expr.text_range(),
+                    range: LocalRange::of_detached_node(call_expr.text_range()),
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -128,7 +123,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 code,
                 message: format!("Добавьте строки для языков: [{}]", missing_str),
                 severity: ctx.severity(code),
-                range: call_expr.text_range(),
+                range: LocalRange::of_detached_node(call_expr.text_range()),
                 tags: ctx.tags(code),
                 fixes: vec![],
             });
@@ -140,13 +135,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MultilingualStringHasAllDeclaredLanguages diagnostics found"
     );
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::test_utils::{check_body_diagnostic_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -219,7 +214,7 @@ mod tests {
 КонецПроцелуры
 "#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MultilingualStringHasAllDeclaredLanguages @ 13:17..13:23
@@ -296,7 +291,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         let snapshot = format_diags(code, &diagnostics);
         expect![[r#"
@@ -342,7 +337,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -361,7 +356,7 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

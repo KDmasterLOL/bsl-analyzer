@@ -370,6 +370,15 @@ pub(crate) fn parse_detail(s: Option<&str>) -> Result<bool, String> {
     }
 }
 
+/// Whether `path` lies in an external object's root while the project has no base
+/// to resolve that object's calls against. Read from the registered roots, not
+/// from the disk: the external root carries no marker a walk could find.
+fn lacks_owning_configuration(db: &ide::RootDatabaseImpl, path: &Path) -> bool {
+    let snapshot = db.workspace_configs_snapshot();
+    !snapshot.has_base()
+        && matches!(snapshot.owner_kind_of_path(path), Some(ide::WorkspaceRootKind::External(_)))
+}
+
 /// Compute the `file` action's result body from the resident database: resolve the
 /// path to its FileId, run diagnostics, then filter (codes / range / floor), bucket
 /// severity, and shape findings + the full `counts` histogram + a content-hash
@@ -603,6 +612,12 @@ pub(crate) fn file_findings(
             !resident.path_in_scope(path),
             loc::ReasonCode::OutOfAnalysisScope,
             "file has no changed lines vs [analysis].diff_base and was not analyzed",
+        )
+        .when(
+            lacks_owning_configuration(analysis.database(), &resident.abs_path_for(path)),
+            loc::ReasonCode::OwningConfigurationMissing,
+            "the file belongs to an external data processor or report and the project \
+             declares no main configuration; calls into it are reported as unresolved",
         )
         // Author suppression narrows the analysed set exactly as `[analysis].diff_base`
         // does; leaving it out of the envelope would let a consumer that reads only the
@@ -1010,6 +1025,12 @@ pub(crate) fn workspace_findings(
             sweep.baseline.state == ide::diagnostics_baseline::DiagnosticsBaselineState::Error,
             loc::ReasonCode::ModalityDegraded,
             "the diagnostics baseline could not be read; the sweep produced no aggregates",
+        )
+        .when(
+            sweep.lacks_owning_configuration,
+            loc::ReasonCode::OwningConfigurationMissing,
+            "the project analyzes external data processors or reports and declares no main \
+             configuration; calls into it are counted as unresolved",
         );
     (body, completeness)
 }
@@ -1255,7 +1276,7 @@ fn schema_json() -> Value {
             "reload": "none | running | failed — background reload state",
             "elapsed_ms": "u64 — ms since the current build started (present while loading)",
             "error": "string — failure message (present when failed)",
-            "standalone_extension": "string — present when the workspace root is itself a configuration extension analyzed without its main configuration; calls into that configuration are reported unresolved",
+            "standalone_extension": "string — present when the project is analyzed without its main configuration: the workspace root is itself a configuration extension, or the project declares external data processors/reports (EPF/ERF) and no base; calls into that configuration are reported unresolved. Both conditions can hold at once, one line each",
             "owns_caches": "bool — false when a newer daemon generation owns this workspace's derived caches; this backend still answers from what it holds but produces no new derived state"
         },
         "catalog_entry": {
@@ -2604,6 +2625,7 @@ mod tests {
                 cancelled: false,
                 baseline: summary(state),
                 baseline_epoch: "e".to_owned(),
+                lacks_owning_configuration: false,
             };
 
             let (_, healthy) = workspace_findings(
@@ -2680,6 +2702,7 @@ mod tests {
                 cancelled: false,
                 baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary::disabled(),
                 baseline_epoch: "disabled".to_owned(),
+                lacks_owning_configuration: false,
             };
 
             let (unbudgeted, _) = workspace_findings(&sweep, 1, None);

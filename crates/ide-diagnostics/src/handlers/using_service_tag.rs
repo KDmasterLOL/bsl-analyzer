@@ -1,9 +1,13 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use regex::Regex;
+use std::sync::Arc;
+
+use crate::utils::regex_cache::cached_regex;
 use stdx::case::CaseExt;
-use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
+use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -77,25 +81,22 @@ fn check_default_tags(comment_text: &str) -> bool {
     false
 }
 
-fn build_custom_pattern(service_tags: &str) -> Regex {
+fn build_custom_pattern(service_tags: &str) -> Arc<Regex> {
     let pattern = format!(r"(?im)//\s*({service_tags})");
-    Regex::new(&pattern).unwrap_or_else(|_| Regex::new(r"(?i)//\s*(todo)").unwrap())
+    cached_regex(&pattern).unwrap_or_else(|| cached_regex(r"(?i)//\s*(todo)").unwrap())
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::UsingServiceTag;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let custom_pattern = ctx.config.get_string(code, "serviceTags").map(build_custom_pattern);
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
     let mut diagnostics = Vec::new();
 
-    for token in collect_comment_tokens(&root) {
+    for token in ctx.tokens().filter(|token| token.kind() == SyntaxKind::COMMENT) {
         let text = token.text();
 
         let is_match = match &custom_pattern {
@@ -108,7 +109,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 code,
                 message: format!("Обнаружен служебный тег \"{display_tag}\""),
-                range: token.text_range(),
+                range: LocalRange::of_detached_node(token.text_range()),
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
                 fixes: Vec::new(),
@@ -116,7 +117,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 fn extract_display_tag(comment_text: &str) -> &str {
@@ -138,22 +139,10 @@ fn extract_display_tag(comment_text: &str) -> &str {
     }
 }
 
-fn collect_comment_tokens(root: &SyntaxNode) -> Vec<syntax::SyntaxToken> {
-    let mut tokens = Vec::new();
-    for element in root.descendants_with_tokens() {
-        if let NodeOrToken::Token(token) = element {
-            if token.kind() == SyntaxKind::COMMENT {
-                tokens.push(token);
-            }
-        }
-    }
-    tokens
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
+    use super::check_body;
+    use crate::test_utils::{check_body_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -521,7 +510,7 @@ EndProcedure"#;
             .parameters
             .insert(DiagnosticCode::UsingServiceTag, serde_json::json!({"serviceTags": "todo"}));
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 2, "With only 'todo' tag, should have 2 diagnostics");
         crate::test_utils::assert_diagnostic_range(code, &diagnostics[0], 1, 0, 36);
         crate::test_utils::assert_diagnostic_range(code, &diagnostics[1], 21, 4, 29);

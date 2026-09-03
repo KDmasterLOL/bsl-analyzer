@@ -57,10 +57,8 @@ fn check_method(
     check_all_region: bool,
     code: DiagnosticCode,
 ) -> Option<Diagnostic> {
-    let (is_export, name_range, source_range) = item_tree
-        .top_level_items()
-        .get(method_id.local_id as usize)
-        .and_then(|item| match item {
+    let (is_export, name_range, source_range) =
+        item_tree.item_of(method_id.local_id).and_then(|item| match item {
             ModItem::Function(func_idx) => {
                 let func = item_tree.function(*func_idx);
                 Some((func.is_export, func.name_range, func.source_range))

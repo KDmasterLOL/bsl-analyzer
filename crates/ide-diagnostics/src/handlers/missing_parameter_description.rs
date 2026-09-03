@@ -52,18 +52,17 @@ fn check_method(
 ) -> Vec<Diagnostic> {
     let tree = ctx.item_tree();
 
-    let method_info =
-        tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
-            ModItem::Function(func_idx) if is_function => {
-                let func = tree.function(*func_idx);
-                Some((func.name_range, &func.params[..], func.is_export))
-            }
-            ModItem::Procedure(proc_idx) if !is_function => {
-                let proc = tree.procedure(*proc_idx);
-                Some((proc.name_range, &proc.params[..], proc.is_export))
-            }
-            _ => None,
-        });
+    let method_info = tree.item_of(method_id.local_id).and_then(|item| match item {
+        ModItem::Function(func_idx) if is_function => {
+            let func = tree.function(*func_idx);
+            Some((func.name_range, &func.params[..], func.is_export))
+        }
+        ModItem::Procedure(proc_idx) if !is_function => {
+            let proc = tree.procedure(*proc_idx);
+            Some((proc.name_range, &proc.params[..], proc.is_export))
+        }
+        _ => None,
+    });
 
     let (name_range, params, is_export) = match method_info {
         Some(info) => info,

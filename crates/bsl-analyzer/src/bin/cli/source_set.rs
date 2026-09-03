@@ -1,5 +1,6 @@
-//! CLI flags declaring the project source set — the main configuration root and
-//! the extensions analyzed alongside it.
+//! CLI flags declaring the project source set — the main configuration root,
+//! the extensions analyzed alongside it and the external objects analyzed
+//! against it.
 //!
 //! These mirror the `[source]` section of the config file one-to-one, so that a
 //! caller who cannot drop a config file into someone else's tree can still say
@@ -19,7 +20,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use clap::Args;
-use project_model::{ExtensionDecl, SourceSetOverride, StructuredExtensionDecl};
+use project_model::{ExtensionDecl, ExternalDecl, SourceSetOverride, StructuredExtensionDecl};
 use stdx::case::fold_lower_per_char;
 
 /// Source-set flags shared by every command that builds a project from argv.
@@ -47,6 +48,26 @@ pub struct SourceSetArgs {
     /// conventional `src/cfe/*` discovery.
     #[arg(long = "no-extensions", conflicts_with = "extensions")]
     pub no_extensions: bool,
+
+    /// External data processor or report (an EPF/ERF export) analyzed against
+    /// the main configuration: `NAME=PATH`, where PATH holds the export's
+    /// `<Name>.xml` beside its `<Name>/` directory. Repeat per object. Only the
+    /// named form exists, and nothing about a declared one is lenient.
+    #[arg(long = "external", value_name = "NAME=PATH")]
+    pub externals: Vec<String>,
+
+    /// Narrow an external object's view to the closure of these extensions:
+    /// `NAME=DEP[,DEP...]`, or `NAME=` for the base alone. Repeatable, and
+    /// repeats for the same owner accumulate. The owner is a name declared via
+    /// `--external NAME=PATH`, every DEP one declared via `--extension NAME=PATH`.
+    /// Without this flag an external object sees every extension.
+    #[arg(long = "external-depends-on", value_name = "NAME=DEP[,DEP...]")]
+    pub external_depends_on: Vec<String>,
+
+    /// Analyze no external objects at all, overriding both a configured list
+    /// and the conventional `src/epf/*`, `src/erf/*` discovery.
+    #[arg(long = "no-externals", conflicts_with = "externals")]
+    pub no_externals: bool,
 }
 
 pub enum SourceSetArgsError {
@@ -59,6 +80,11 @@ pub enum SourceSetArgsError {
     UnknownDependsOnTarget { owner: String, name: String },
     AmbiguousExtensionValue { value: String },
     EmptyDependsOnTarget { value: String },
+    MalformedExternal { value: String },
+    DuplicateExternalPath { first: String, second: String, path: PathBuf },
+    MalformedExternalDependsOn { value: String },
+    UnknownExternalDependsOnOwner { name: String },
+    UnknownExternalDependsOnTarget { owner: String, name: String },
 }
 
 impl fmt::Display for SourceSetArgsError {
@@ -100,6 +126,27 @@ impl fmt::Display for SourceSetArgsError {
             Self::EmptyDependsOnTarget { value } => {
                 write!(f, "--extension-depends-on {value}: a dependency name is empty")
             }
+            Self::MalformedExternal { value } => {
+                write!(f, "--external {value}: expected NAME=PATH with both parts non-empty")
+            }
+            Self::DuplicateExternalPath { first, second, path } => write!(
+                f,
+                "{first} and --external {second} name the same directory {}",
+                path.display()
+            ),
+            Self::MalformedExternalDependsOn { value } => write!(
+                f,
+                "--external-depends-on {value}: expected NAME=DEP[,DEP...], or NAME= for the \
+                 base alone; no name may be empty"
+            ),
+            Self::UnknownExternalDependsOnOwner { name } => write!(
+                f,
+                "--external-depends-on {name}=...: {name} is not declared by any --external NAME=PATH"
+            ),
+            Self::UnknownExternalDependsOnTarget { owner, name } => write!(
+                f,
+                "--external-depends-on {owner}={name}: {name} is not declared by any --extension NAME=PATH"
+            ),
         }
     }
 }
@@ -124,6 +171,9 @@ impl SourceSetArgs {
             && self.extensions.is_empty()
             && self.extension_depends_on.is_empty()
             && !self.no_extensions
+            && self.externals.is_empty()
+            && self.external_depends_on.is_empty()
+            && !self.no_externals
     }
 
     /// Re-emits the flags as argv, for handing this process's source set to a
@@ -149,6 +199,15 @@ impl SourceSetArgs {
         if self.no_extensions {
             out.push("--no-extensions".to_owned());
         }
+        for value in &self.externals {
+            out.push(format!("--external={value}"));
+        }
+        for value in &self.external_depends_on {
+            out.push(format!("--external-depends-on={value}"));
+        }
+        if self.no_externals {
+            out.push("--no-externals".to_owned());
+        }
         out
     }
 
@@ -159,13 +218,146 @@ impl SourceSetArgs {
         self.no_extensions || !self.extensions.is_empty()
     }
 
+    /// Whether `--external` or `--no-externals` claimed the external list.
+    pub fn declares_externals(&self) -> bool {
+        self.no_externals || !self.externals.is_empty()
+    }
+
     /// Validates the flags and turns them into an override applied to the
     /// project config. `root` is the project root the relative paths resolve
     /// against — the same base the config file's own paths use.
     pub fn resolve(&self, root: &Path) -> Result<SourceSetOverride, SourceSetArgsError> {
         let configuration_root = self.resolve_configuration_root(root)?;
         let extensions = self.resolve_extensions(root)?;
-        Ok(SourceSetOverride { configuration_root, extensions })
+        let externals = self.resolve_externals(root)?;
+        Ok(SourceSetOverride { configuration_root, extensions, externals })
+    }
+
+    /// `--external NAME=PATH` entries as declarations. `None` when neither
+    /// `--external` nor `--no-externals` was given, so the config file's list
+    /// (or discovery) stays.
+    ///
+    /// Only the split, the duplicate check and the `--external-depends-on`
+    /// binding live here. Whether PATH is one external object export is the
+    /// project model's verdict, reported through its own error when the project
+    /// is built.
+    fn resolve_externals(
+        &self,
+        root: &Path,
+    ) -> Result<Option<Vec<ExternalDecl>>, SourceSetArgsError> {
+        if !self.declares_externals() {
+            // Nothing here can own a dependency, as with extensions.
+            if let Some((owner, _)) = self.parse_external_dependencies()?.into_iter().next() {
+                return Err(SourceSetArgsError::UnknownExternalDependsOnOwner { name: owner });
+            }
+            return Ok(None);
+        }
+        if self.no_externals {
+            if let Some((owner, _)) = self.parse_external_dependencies()?.into_iter().next() {
+                return Err(SourceSetArgsError::UnknownExternalDependsOnOwner { name: owner });
+            }
+            return Ok(Some(Vec::new()));
+        }
+        // Canonical path → the flag spelling that claimed it, across BOTH lists:
+        // the same directory as an extension and as an external would be two
+        // roots for one tree.
+        let mut claimed: HashMap<PathBuf, String> = HashMap::new();
+        for value in &self.extensions {
+            let (_, path) = split_extension_value(value, root)?;
+            if !path.contains('*') {
+                let resolved = root.join(&path);
+                claimed.insert(
+                    std::fs::canonicalize(&resolved).unwrap_or(resolved),
+                    format!("--extension {value}"),
+                );
+            }
+        }
+        let mut decls = Vec::with_capacity(self.externals.len());
+        for value in &self.externals {
+            let Some((name, path)) = value.split_once('=') else {
+                return Err(SourceSetArgsError::MalformedExternal { value: value.clone() });
+            };
+            let name = name.trim();
+            if name.is_empty() || path.is_empty() {
+                return Err(SourceSetArgsError::MalformedExternal { value: value.clone() });
+            }
+            let resolved = root.join(path);
+            let canonical = std::fs::canonicalize(&resolved).unwrap_or(resolved);
+            if let Some(first) = claimed.get(&canonical) {
+                return Err(SourceSetArgsError::DuplicateExternalPath {
+                    first: first.clone(),
+                    second: value.clone(),
+                    path: canonical,
+                });
+            }
+            claimed.insert(canonical, format!("--external {value}"));
+            decls.push(ExternalDecl {
+                name: name.to_string(),
+                path: path.to_string(),
+                depends_on: None,
+            });
+        }
+
+        // Targets must be names of named extensions, as for extension edges:
+        // the topology would resolve a target against a bare entry's derived
+        // directory name, which this flag must not bind to.
+        let extension_names: std::collections::HashSet<String> = self
+            .extensions
+            .iter()
+            .filter_map(|value| split_extension_value(value, root).ok().and_then(|(name, _)| name))
+            .map(|name| fold_lower_per_char(&name))
+            .collect();
+        for (owner, targets) in self.parse_external_dependencies()? {
+            let key = fold_lower_per_char(&owner);
+            let Some(decl) = decls.iter_mut().find(|decl| fold_lower_per_char(&decl.name) == key)
+            else {
+                return Err(SourceSetArgsError::UnknownExternalDependsOnOwner { name: owner });
+            };
+            for target in &targets {
+                if !extension_names.contains(&fold_lower_per_char(target)) {
+                    return Err(SourceSetArgsError::UnknownExternalDependsOnTarget {
+                        owner,
+                        name: target.clone(),
+                    });
+                }
+            }
+            decl.depends_on.get_or_insert_with(Vec::new).extend(targets);
+        }
+        Ok(Some(decls))
+    }
+
+    /// Owner → declared targets of `--external-depends-on`, in declaration
+    /// order, repeats of one owner accumulated. `NAME=` yields an owner with no
+    /// targets: the base alone, which is not the same as no flag.
+    fn parse_external_dependencies(
+        &self,
+    ) -> Result<Vec<(String, Vec<String>)>, SourceSetArgsError> {
+        let mut owners: Vec<(String, Vec<String>)> = Vec::new();
+        for value in &self.external_depends_on {
+            let malformed =
+                || SourceSetArgsError::MalformedExternalDependsOn { value: value.clone() };
+            let (owner, targets) = value.split_once('=').ok_or_else(malformed)?;
+            let owner = owner.trim();
+            if owner.is_empty() {
+                return Err(malformed());
+            }
+            let mut parsed = Vec::new();
+            if !targets.trim().is_empty() {
+                for target in targets.split(',') {
+                    let target = target.trim();
+                    if target.is_empty() {
+                        return Err(malformed());
+                    }
+                    parsed.push(target.to_string());
+                }
+            }
+            let key = fold_lower_per_char(owner);
+            match owners.iter_mut().find(|(seen, _)| fold_lower_per_char(seen) == key) {
+                Some((_, existing)) => existing.extend(parsed),
+                None => owners.push((owner.to_string(), parsed)),
+            }
+        }
+        Ok(owners)
     }
 
     fn resolve_configuration_root(
@@ -425,8 +617,147 @@ pub fn extensions_provider(
     }
 }
 
+/// Provider of the external object list, decided by presence like the
+/// extension list: unset on both sides is the `src/epf/*`, `src/erf/*` search.
+pub fn externals_provider(
+    args: &SourceSetArgs,
+    config_externals: Option<&Vec<ExternalDecl>>,
+) -> SourceProvider {
+    if args.declares_externals() {
+        SourceProvider::Cli
+    } else if config_externals.is_some() {
+        SourceProvider::ConfigFile
+    } else {
+        SourceProvider::AutoDiscovery
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_external_flag_is_a_named_declaration_and_nothing_else() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = args(&["--external", "АРМ=src/epf/АРМ"]).resolve(dir.path()).unwrap();
+        assert_eq!(
+            resolved.externals,
+            Some(vec![ExternalDecl {
+                name: "АРМ".into(),
+                path: "src/epf/АРМ".into(),
+                depends_on: None
+            }])
+        );
+        assert_eq!(resolved.extensions, None, "an external flag must not claim the extension list");
+
+        assert!(args(&[]).resolve(dir.path()).unwrap().externals.is_none(), "unset stays unset");
+        for bad in ["src/epf/АРМ", "=src/epf/АРМ", "АРМ=", " =p"] {
+            let err = args(&["--external", bad]).resolve(dir.path()).unwrap_err();
+            assert!(matches!(err, SourceSetArgsError::MalformedExternal { .. }), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn the_same_directory_as_extension_and_external_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        extension_dir(dir.path(), "shared");
+        let err = args(&["--extension", "EXT=shared", "--external", "E=./shared"])
+            .resolve(dir.path())
+            .unwrap_err();
+        assert!(matches!(err, SourceSetArgsError::DuplicateExternalPath { .. }), "{err}");
+        let err = args(&["--external", "A=shared", "--external", "B=shared"])
+            .resolve(dir.path())
+            .unwrap_err();
+        assert!(matches!(err, SourceSetArgsError::DuplicateExternalPath { .. }), "{err}");
+    }
+
+    #[test]
+    fn external_flags_are_re_emitted_and_reported() {
+        let flags = args(&["--external", "АРМ=src/epf/АРМ", "--external-depends-on", "АРМ=A"]);
+        assert!(!flags.is_empty());
+        assert_eq!(flags.to_args(), ["--external=АРМ=src/epf/АРМ", "--external-depends-on=АРМ=A"]);
+        assert_eq!(externals_provider(&flags, None), SourceProvider::Cli);
+        let none = args(&["--no-externals"]);
+        assert!(!none.is_empty());
+        assert_eq!(none.to_args(), ["--no-externals"]);
+        assert_eq!(externals_provider(&none, None), SourceProvider::Cli);
+        let declared = vec![ExternalDecl { name: "X".into(), path: "x".into(), depends_on: None }];
+        assert_eq!(externals_provider(&args(&[]), Some(&declared)), SourceProvider::ConfigFile);
+        assert_eq!(externals_provider(&args(&[]), Some(&vec![])), SourceProvider::ConfigFile);
+        assert_eq!(externals_provider(&args(&[]), None), SourceProvider::AutoDiscovery);
+    }
+
+    #[test]
+    fn no_externals_is_an_explicit_empty_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = args(&["--no-externals"]).resolve(dir.path()).unwrap();
+        assert_eq!(resolved.externals, Some(vec![]));
+        assert_eq!(resolved.extensions, None, "the extension list is untouched");
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Harness {
+            #[command(flatten)]
+            source_set: SourceSetArgs,
+        }
+        assert!(
+            Harness::try_parse_from(["h", "--no-externals", "--external", "A=a"]).is_err(),
+            "the two flags conflict"
+        );
+    }
+
+    #[test]
+    fn external_depends_on_narrows_a_declared_external_to_named_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        extension_dir(dir.path(), "a");
+        extension_dir(dir.path(), "b");
+        let resolve = |flags: &[&str]| args(flags).resolve(dir.path());
+        let base = ["--extension", "A=a", "--extension", "B=b", "--external", "E=e"];
+        let with = |extra: &[&str]| {
+            let mut flags = base.to_vec();
+            flags.extend_from_slice(extra);
+            resolve(&flags)
+        };
+
+        let deps = |resolved: SourceSetOverride| resolved.externals.unwrap().remove(0).depends_on;
+        assert_eq!(deps(with(&[]).unwrap()), None, "no flag: every extension");
+        assert_eq!(
+            deps(with(&["--external-depends-on", "e=A", "--external-depends-on", "E=b"]).unwrap()),
+            Some(vec!["A".to_owned(), "b".to_owned()]),
+            "repeats accumulate, the owner matches case-insensitively"
+        );
+        assert_eq!(
+            deps(with(&["--external-depends-on", "E="]).unwrap()),
+            Some(vec![]),
+            "the base alone"
+        );
+
+        let err = with(&["--external-depends-on", "E=C"]).unwrap_err();
+        assert!(matches!(err, SourceSetArgsError::UnknownExternalDependsOnTarget { .. }), "{err}");
+        let err = with(&["--external-depends-on", "F=A"]).unwrap_err();
+        assert!(matches!(err, SourceSetArgsError::UnknownExternalDependsOnOwner { .. }), "{err}");
+        for bad in ["E", "=A", "E=A,,B", "E=,"] {
+            let err = with(&["--external-depends-on", bad]).unwrap_err();
+            assert!(
+                matches!(err, SourceSetArgsError::MalformedExternalDependsOn { .. }),
+                "{bad}: {err}"
+            );
+        }
+        // A bare extension's derived name is not a target.
+        let err =
+            resolve(&["--extension", "a", "--external", "E=e", "--external-depends-on", "E=a"])
+                .unwrap_err();
+        assert!(matches!(err, SourceSetArgsError::UnknownExternalDependsOnTarget { .. }), "{err}");
+        // Without an external list nothing owns the edge.
+        for flags in [
+            &["--external-depends-on", "E=A"][..],
+            &["--no-externals", "--external-depends-on", "E=A"][..],
+        ] {
+            let err = resolve(flags).unwrap_err();
+            assert!(
+                matches!(err, SourceSetArgsError::UnknownExternalDependsOnOwner { .. }),
+                "{err}"
+            );
+        }
+    }
+
     #[test]
     fn a_case_variant_configuration_xml_satisfies_root_probes() {
         let dir = tempfile::tempdir().unwrap();

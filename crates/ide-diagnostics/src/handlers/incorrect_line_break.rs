@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::slab::{self, Block};
+use crate::{AnalysisContext, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::LocalRange;
 use ide_db::TextRange;
-use line_index::LineIndex;
 use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -21,35 +22,36 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    slab::check_file_by_blocks(ctx, check_block)
+}
+
+pub fn check_block(ctx: &AnalysisContext, block: &Block) -> Vec<Diagnostic<LocalRange>> {
+    let _span = tracing::debug_span!("IncorrectLineBreak::check").entered();
     let code = DiagnosticCode::IncorrectLineBreak;
 
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
     }
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let text = root.text().to_string();
-    let line_index = LineIndex::new(&text);
+    let text = block.text;
     let lines: Vec<&str> = text.lines().collect();
 
     let mut diagnostics = Vec::new();
 
-    let mut line_tokens: Vec<Vec<(SyntaxKind, TextRange, String)>> = vec![Vec::new(); lines.len()];
+    let mut line_tokens: Vec<Vec<(SyntaxKind, TextRange, &str)>> = vec![Vec::new(); lines.len()];
 
-    for element in root.descendants_with_tokens() {
-        let Some(token) = element.as_token() else { continue };
-        let kind = token.kind();
+    for token in block.tokens {
+        let kind = token.kind;
 
         if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
             continue;
         }
 
-        let range = token.text_range();
-        let line = line_index.line_col(range.start()).line as usize;
+        let range = token.range;
+        let line = block.line_index.line_col(range.start()).line as usize;
 
         if line < lines.len() {
-            line_tokens[line].push((kind, range, token.text().to_string()));
+            line_tokens[line].push((kind, range, &text[range]));
         }
     }
 
@@ -57,7 +59,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         if tokens.is_empty() {
             continue;
         }
-        if let Some(diag) = check_line_end(tokens, line_idx, &lines, code, ctx) {
+        // За последней строкой блока продолжения литерала быть не может:
+        // строку, начатую `"` или `|`, парсер держит в узле своего выражения,
+        // и она лежит в том же блоке.
+        let next_line = lines.get(line_idx + 1).copied();
+        if let Some(diag) = check_line_end(tokens, next_line, code, ctx) {
             diagnostics.push(diag);
         }
     }
@@ -92,13 +98,12 @@ fn is_forbidden_at_line_start(kind: SyntaxKind) -> bool {
 }
 
 fn check_line_end(
-    tokens: &[(SyntaxKind, TextRange, String)],
-    line_idx: usize,
-    lines: &[&str],
+    tokens: &[(SyntaxKind, TextRange, &str)],
+    next_line: Option<&str>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    if let Some(next_line) = lines.get(line_idx + 1) {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
+    if let Some(next_line) = next_line {
         let trimmed = next_line.trim_start();
         if trimmed.starts_with('"') || trimmed.starts_with('|') {
             return None;
@@ -114,7 +119,7 @@ fn check_line_end(
             code,
             message: format!("Неправильный перенос строки: '{}' в конце строки", text.trim()),
             severity: ctx.severity(code),
-            range: *range,
+            range: LocalRange::of_detached_node(*range),
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -124,10 +129,10 @@ fn check_line_end(
 }
 
 fn check_line_start(
-    tokens: &[(SyntaxKind, TextRange, String)],
+    tokens: &[(SyntaxKind, TextRange, &str)],
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let (kind, range, text) = tokens.first()?;
 
     if is_forbidden_at_line_start(*kind) {
@@ -135,7 +140,7 @@ fn check_line_start(
             code,
             message: format!("Incorrect line break: '{}' at line start", text.trim()),
             severity: ctx.severity(code),
-            range: *range,
+            range: LocalRange::of_detached_node(*range),
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -152,7 +157,7 @@ fn check_line_start(
                 code,
                 message: "Incorrect line break: ',' at line start".to_string(),
                 severity: ctx.severity(code),
-                range: combined_range,
+                range: LocalRange::of_detached_node(combined_range),
                 tags: ctx.tags(code),
                 fixes: vec![],
             });

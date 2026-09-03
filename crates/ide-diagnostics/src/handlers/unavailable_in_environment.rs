@@ -1,9 +1,10 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use hir::execution_env::EnvFlags;
+use hir::LocalRange;
 use hir::{EnvMemberKind, Name};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -23,9 +24,9 @@ pub fn from_hir(
     name: &Name,
     member_kind: EnvMemberKind,
     missing: EnvFlags,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let (kind_ru, suffix_ru) = match member_kind {
         EnvMemberKind::Method => ("Метод", "недоступен"),
         EnvMemberKind::Property => ("Свойство", "недоступно"),

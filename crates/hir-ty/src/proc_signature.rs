@@ -33,8 +33,7 @@ pub fn proc_signature_query<'db>(
 ) -> Arc<ProcSignature> {
     let method_id = method_input.method_id(db);
 
-    let symbol_tree = db.symbol_tree_ref(method_id.module);
-    let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
+    let Some(method_symbol) = db.interface_method(method_id) else {
         return Arc::new(ProcSignature { params: Vec::new(), return_ty: db.unknown() });
     };
 

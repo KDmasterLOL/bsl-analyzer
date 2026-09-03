@@ -3,7 +3,9 @@
 //! SDBL lowering asks for metadata through [`QueryMetadataResolver`], and every existing
 //! implementation is anchored to a `FileId` — which root a query may see follows from which
 //! file it sits in. A query handed to a tool as bare text has no such anchor, so it gets the
-//! configurator's view instead: the base configuration plus every extension.
+//! configurator's view instead: the base configuration plus every extension. External
+//! objects stay outside it — SDBL names no external data processor or report, and the
+//! roots a tool reports as consulted are exactly these.
 
 use std::sync::Arc;
 
@@ -37,7 +39,7 @@ impl<'a> AcrossRootsQueryResolver<'a> {
 
 impl MetadataResolver for AcrossRootsQueryResolver<'_> {
     fn resolve_defined_type(&self, name: &str) -> Option<AttributeType> {
-        self.db.resolve_defined_type_across_roots(name)
+        self.db.resolve_defined_type_across_designer_roots(name)
     }
 }
 
@@ -47,10 +49,10 @@ impl QueryMetadataResolver for AcrossRootsQueryResolver<'_> {
         mdo_type: MdoType,
         name: &str,
     ) -> Option<Arc<MetadataObject>> {
-        self.db.resolve_metadata_object_across_roots(mdo_type, name)
+        self.db.resolve_metadata_object_across_designer_roots(mdo_type, name)
     }
 
     fn resolve_register(&self, mdo_type: MdoType, name: &str) -> Option<Arc<Register>> {
-        self.db.resolve_register_across_roots(mdo_type, name)
+        self.db.resolve_register_across_designer_roots(mdo_type, name)
     }
 }

@@ -1012,7 +1012,7 @@ impl McpServer {
             return Ok(tools::resident::status(
                 &diag.status_report(),
                 self.state.owns_caches(),
-                self.state.standalone_extension_notice().as_deref(),
+                self.state.standalone_notice().as_deref(),
             )
             .into());
         }
@@ -1179,7 +1179,9 @@ impl McpServer {
     async fn workspace_search(
         &self,
         params: Parameters<WorkspaceSearchParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
         match SearchCommand::from(params.0) {
             SearchCommand::Status => {
                 let engine = self.state.search_engine().clone();
@@ -1241,11 +1243,13 @@ impl McpServer {
                 // can mint form/file `graph_id`s with the same `src/cf/…` prefix the graph uses.
                 let graph_root = self.state.workspace_root().cloned();
                 let index_progress = self.state.index_progress().clone();
+                let retry_progress = index_progress.clone();
                 let workspace_lease = self.state.workspace_lease().clone();
-                tokio::task::spawn_blocking(move || {
+                let outcome = tools::search::search_call(ct, move |cancel| {
                     tools::search::hybrid_code_fenced(
                         &engine,
                         &workspace_lease,
+                        cancel,
                         &semantic_runtime,
                         workspace_search_mode,
                         configured_baseline.as_ref(),
@@ -1257,8 +1261,14 @@ impl McpServer {
                         max_output_tokens,
                     )
                 })
-                .await
-                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+                .await;
+                cancellable_answer(outcome, "search", started, || {
+                    tools::search::search_not_ready(
+                        "Search was cut short by an index rebuild; please retry.",
+                        &retry_progress,
+                        "search_code",
+                    )
+                })
             }
             SearchCommand::ListPlatform(params) => tools::platform::list_platform(
                 params.kind,
@@ -1287,31 +1297,37 @@ impl McpServer {
                 let baseline = self.state.reference_baseline_view();
                 let configured = baseline.configured;
                 let external = baseline.external;
-                tokio::task::spawn_blocking(move || {
+                let limit = limit.unwrap_or(10).min(50);
+                let max_output_tokens =
+                    max_output_tokens.unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS);
+                let outcome = tools::search::search_call(ct, move |cancel| {
                     if semantic {
                         tools::search::search_docs(
                             &engine,
+                            cancel,
                             configured.as_ref(),
                             external,
                             &query,
-                            limit.unwrap_or(10).min(50),
-                            max_output_tokens
-                                .unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+                            limit,
+                            max_output_tokens,
                         )
                     } else {
                         tools::search::find_docs(
                             &engine,
+                            cancel,
                             configured.as_ref(),
                             external,
                             &query,
-                            limit.unwrap_or(10).min(50),
-                            max_output_tokens
-                                .unwrap_or(tools::response::DEFAULT_OUTPUT_BUDGET_TOKENS),
+                            limit,
+                            max_output_tokens,
                         )
                     }
                 })
-                .await
-                .map_err(|error| McpError::internal_error(format!("Task error: {error}"), None))?
+                .await;
+                let action = if semantic { "search_docs" } else { "find_docs" };
+                cancellable_answer(outcome, "search", started, || {
+                    tools::search::docs_not_ready(action)
+                })
             }
         }
     }
@@ -2194,7 +2210,7 @@ impl McpServer {
                 Ok(tools::resident::status(
                     &diag.status_report(),
                     self.state.owns_caches(),
-                    self.state.standalone_extension_notice().as_deref(),
+                    self.state.standalone_notice().as_deref(),
                 )
                 .into())
             }
@@ -2470,7 +2486,9 @@ impl McpServer {
     async fn reference_search(
         &self,
         params: Parameters<ReferenceSearchParams>,
+        ct: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
         match SearchCommand::from(params.0) {
             SearchCommand::Status => {
                 let engine = self.state.search_engine().clone();
@@ -2520,10 +2538,11 @@ impl McpServer {
                 let baseline = self.state.baseline_view();
                 let configured_baseline = baseline.configured;
                 let external_baseline = baseline.external;
-                tokio::task::spawn_blocking(move || {
+                let outcome = tools::search::search_call(ct, move |cancel| {
                     if semantic {
                         tools::search::search_docs(
                             &engine,
+                            cancel,
                             configured_baseline.as_ref(),
                             external_baseline,
                             &query,
@@ -2533,6 +2552,7 @@ impl McpServer {
                     } else {
                         tools::search::find_docs(
                             &engine,
+                            cancel,
                             configured_baseline.as_ref(),
                             external_baseline,
                             &query,
@@ -2541,8 +2561,11 @@ impl McpServer {
                         )
                     }
                 })
-                .await
-                .map_err(|e| McpError::internal_error(format!("Task error: {e}"), None))?
+                .await;
+                let action = if semantic { "search_docs" } else { "find_docs" };
+                cancellable_answer(outcome, "search", started, || {
+                    tools::search::docs_not_ready(action)
+                })
             }
             SearchCommand::ListPlatform(params) => tools::platform::list_platform(
                 params.kind,
@@ -3708,6 +3731,104 @@ mod rescan_hatch_consultations {
             .await;
         assert_eq!(diag.forced_rescans(), before, "control: an answer that resolved does not");
 
+        server.shutdown();
+    }
+}
+
+/// The request's token reaches the search door from every handler cell.
+///
+/// The gates below the handlers drive the search functions directly and are green whatever
+/// the handler does with `ct` — a bare `spawn_blocking` left in one branch, or a fresh token
+/// handed to the door instead of the request's own, would pass them all. This is the one
+/// gate at the handler layer: the engine lock is held from outside, the request is already
+/// cancelled, and the answer must be the cancellation BEFORE the lock frees.
+#[cfg(test)]
+mod search_cancellation_matrix {
+    use super::*;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    const BOUND: Duration = Duration::from_millis(500);
+
+    fn cancelled_token() -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        token
+    }
+
+    /// Hold `engine`'s lock from a thread of its own until the returned handle is dropped.
+    /// A guard held in the async test itself would sit across the `await` (which clippy
+    /// rightly refuses); a holder thread is also the production shape — some other caller.
+    fn hold_lock(engine: &crate::state::SharedSearchEngine) -> std::sync::mpsc::Sender<()> {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let _guard = engine.lock().unwrap();
+            let _ = held_tx.send(());
+            let _ = release_rx.recv();
+        });
+        held_rx.recv().expect("the holder took the lock");
+        release_tx
+    }
+
+    fn assert_cancelled(answer: Result<CallToolResult, McpError>, elapsed: Duration, cell: &str) {
+        let error =
+            answer.err().unwrap_or_else(|| panic!("{cell}: a cancelled call produced a body"));
+        assert_eq!(error.message, "request cancelled", "{cell}: {error:?}");
+        assert!(
+            elapsed < BOUND,
+            "{cell}: answered only after {elapsed:?}, i.e. after the held lock"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_workspace_search_cell_answers_a_cancelled_request_before_the_lock_frees() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::graph::test_support::sample_workspace(root);
+        std::fs::write(root.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let state = SharedState::workspace(root.to_path_buf()).expect("valid workspace project");
+        let code_engine = state.search_engine().clone();
+        let docs_engine = state.reference_search_engine();
+        let server = McpServer::new(McpProfile::Workspace, state);
+
+        let cells = [
+            ("search_code", json!({"action": "search_code", "query": "Процедура"}), &code_engine),
+            ("find_docs", json!({"action": "find_docs", "query": "Массив"}), &docs_engine),
+            ("search_docs", json!({"action": "search_docs", "query": "Массив"}), &docs_engine),
+        ];
+        for (cell, arguments, engine) in cells {
+            let held = hold_lock(engine);
+            let params =
+                Parameters(serde_json::from_value::<WorkspaceSearchParams>(arguments).unwrap());
+            let started = Instant::now();
+            let answer = server.workspace_search(params, cancelled_token()).await;
+            assert_cancelled(answer, started.elapsed(), cell);
+            drop(held);
+        }
+        server.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn every_reference_search_cell_answers_a_cancelled_request_before_the_lock_frees() {
+        let state = SharedState::shared();
+        let engine = state.search_engine().clone();
+        let server = McpServer::new(McpProfile::Reference, state);
+
+        for action in ["find_docs", "search_docs"] {
+            let held = hold_lock(&engine);
+            let params = Parameters(
+                serde_json::from_value::<ReferenceSearchParams>(
+                    json!({"action": action, "query": "Массив"}),
+                )
+                .unwrap(),
+            );
+            let started = Instant::now();
+            let answer = server.reference_search(params, cancelled_token()).await;
+            assert_cancelled(answer, started.elapsed(), action);
+            drop(held);
+        }
         server.shutdown();
     }
 }

@@ -51,14 +51,13 @@ fn check_function_hir(
 ) -> Option<Diagnostic> {
     let tree = ctx.item_tree();
 
-    let func_info =
-        tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
-            ModItem::Function(func_idx) => {
-                let func = tree.function(*func_idx);
-                Some((func.is_export, func.name_range))
-            }
-            _ => None,
-        });
+    let func_info = tree.item_of(method_id.local_id).and_then(|item| match item {
+        ModItem::Function(func_idx) => {
+            let func = tree.function(*func_idx);
+            Some((func.is_export, func.name_range))
+        }
+        _ => None,
+    });
 
     let (is_export, name_range) = func_info?;
 
@@ -139,11 +138,10 @@ fn check_procedure_hir(
 ) -> Option<Diagnostic> {
     let tree = ctx.item_tree();
 
-    let name_range =
-        tree.top_level_items().get(method_id.local_id as usize).and_then(|item| match item {
-            ModItem::Procedure(proc_idx) => Some(tree.procedure(*proc_idx).name_range),
-            _ => None,
-        })?;
+    let name_range = tree.item_of(method_id.local_id).and_then(|item| match item {
+        ModItem::Procedure(proc_idx) => Some(tree.procedure(*proc_idx).name_range),
+        _ => None,
+    })?;
 
     let docs = ctx.method_docs(method_id)?;
 

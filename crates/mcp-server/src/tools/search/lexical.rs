@@ -5,27 +5,33 @@ use super::gating::{
 };
 use super::types::{
     direct_search_initial_window, direct_search_max_window, AcquireFailure, CodeHits, DirectResult,
-    DIRECT_SEARCH_MAX_REFILL_ROUNDS,
+    SearchFailure, DIRECT_SEARCH_MAX_REFILL_ROUNDS,
 };
-use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
+use crate::baseline::{BaselineCall, ConfiguredBaselineStatus, ExternalBaselineService};
 use crate::state::WorkspaceSearchMode;
 use bsl_search::{
-    merge_context_for_collection, merge_lexical, LexicalHit, SearchEngine, SearchError, SearchHit,
+    merge_context_for_collection, merge_lexical, LexicalHit, SearchEngine, SearchHit,
 };
 use rmcp::ErrorData as McpError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the lexical modality takes the tool-dispatch inputs plus the request's cancellation; a one-use context struct would only rename them"
+)]
 pub(super) fn lexical_code_hits_fenced(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     lease: &crate::workspace_lease::WorkspaceLease,
+    cancel: &CancellationToken,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
-) -> Result<CodeHits, McpError> {
+) -> Result<CodeHits, SearchFailure> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
         workspace_search_mode.clone(),
@@ -34,13 +40,14 @@ pub(super) fn lexical_code_hits_fenced(
     )?;
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
-    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
-    let guard = match try_acquire_engine(engine) {
+    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease, cancel)?;
+    let guard = match try_acquire_engine(engine, cancel) {
         Ok(g) => g,
-        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error().into()),
+        Err(AcquireFailure::Cancelled) => return Err(SearchFailure::Cancelled),
         Err(AcquireFailure::TimedOut) => {
             if let Some(source) = external_baseline {
-                match try_direct_lexical_code_no_overlay(&source, query, limit) {
+                match try_direct_lexical_code_no_overlay(&source, cancel, query, limit) {
                     DirectResult::Found(hits) => {
                         if hits.is_empty() {
                             return Ok(CodeHits::Pending(
@@ -55,8 +62,9 @@ pub(super) fn lexical_code_hits_fenced(
                         return Ok(CodeHits::Ready { hits, roots: None });
                     }
                     DirectResult::Terminal(error) => {
-                        return Err(external_baseline_mcp_error(&error));
+                        return Err(external_baseline_mcp_error(&error).into());
                     }
+                    DirectResult::Cancelled => return Err(SearchFailure::Cancelled),
                     DirectResult::Unavailable => {}
                 }
             }
@@ -71,7 +79,7 @@ pub(super) fn lexical_code_hits_fenced(
         match guard.as_ref() {
             Some(engine) => {
                 let direct_start = std::time::Instant::now();
-                let direct = try_direct_lexical_code(engine, &source, query, limit);
+                let direct = try_direct_lexical_code(engine, &source, cancel, query, limit);
                 tracing::debug!(
                     elapsed_ms = direct_start.elapsed().as_millis() as u64,
                     query_len = query.len(),
@@ -80,8 +88,9 @@ pub(super) fn lexical_code_hits_fenced(
                 match direct {
                     DirectResult::Found(hits) => hits,
                     DirectResult::Terminal(error) => {
-                        return Err(external_baseline_mcp_error(&error));
+                        return Err(external_baseline_mcp_error(&error).into());
                     }
+                    DirectResult::Cancelled => return Err(SearchFailure::Cancelled),
                     // Direct baseline serving is unavailable (snapshot, overlay, or a transient
                     // serving-table absence). Do NOT fall back to `resolve_workspace_view`:
                     // that loads the whole baseline corpus under the engine lock and stalls
@@ -120,11 +129,12 @@ pub(super) fn lexical_code_hits_fenced(
                     }
                 }
             }
-            None => match try_direct_lexical_code_no_overlay(&source, query, limit) {
+            None => match try_direct_lexical_code_no_overlay(&source, cancel, query, limit) {
                 DirectResult::Found(hits) => hits,
                 DirectResult::Terminal(error) => {
-                    return Err(external_baseline_mcp_error(&error));
+                    return Err(external_baseline_mcp_error(&error).into());
                 }
+                DirectResult::Cancelled => return Err(SearchFailure::Cancelled),
                 DirectResult::Unavailable => {
                     return Ok(CodeHits::Pending(
                         "Search index is being built, please try again in a moment.".to_owned(),
@@ -147,26 +157,41 @@ pub(super) fn lexical_code_hits_fenced(
     Ok(CodeHits::Ready { hits, roots })
 }
 
+/// The actor's snapshot answer as a direct-serving outcome; `Ok` carries the snapshot.
+fn resolved_snapshot(
+    resolution: Result<Option<(bsl_search::BaselineRef, bsl_search::Snapshot)>, BaselineCall>,
+    what: &str,
+) -> Result<bsl_search::Snapshot, DirectResult> {
+    match resolution {
+        Ok(Some((_, snapshot))) => Ok(snapshot),
+        Ok(None) => Err(DirectResult::Unavailable),
+        Err(BaselineCall::Withdrawn) => Err(DirectResult::Cancelled),
+        Err(BaselineCall::Failed(e)) => {
+            if e.is_terminal() {
+                warn!("{what}: terminal snapshot resolution error: {e}");
+                return Err(DirectResult::Terminal(e));
+            }
+            warn!("{what}: snapshot resolution failed: {e}");
+            Err(DirectResult::Unavailable)
+        }
+    }
+}
+
 fn try_direct_lexical_code_no_overlay(
     source: &ExternalBaselineService,
+    cancel: &CancellationToken,
     query: &str,
     limit: usize,
 ) -> DirectResult {
-    let snapshot = match source.resolve_snapshot() {
-        Ok(Some((_, s))) => s,
-        Ok(None) => return DirectResult::Unavailable,
-        Err(e) => {
-            if e.is_terminal() {
-                warn!("direct lexical (no overlay): terminal snapshot resolution error: {e}");
-                return DirectResult::Terminal(e);
-            }
-            warn!("direct lexical (no overlay): snapshot resolution failed: {e}");
-            return DirectResult::Unavailable;
-        }
-    };
-    match source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), limit) {
+    let snapshot =
+        match resolved_snapshot(source.resolve_snapshot(cancel), "direct lexical (no overlay)") {
+            Ok(snapshot) => snapshot,
+            Err(outcome) => return outcome,
+        };
+    match source.lexical_search(cancel, snapshot.id.0.as_str(), query, Some("code"), limit) {
         Ok(hits) => DirectResult::Found(hits.iter().map(SearchHit::from_lexical).collect()),
-        Err(e) => {
+        Err(BaselineCall::Withdrawn) => DirectResult::Cancelled,
+        Err(BaselineCall::Failed(e)) => {
             if e.is_terminal() {
                 warn!("direct lexical (no overlay): terminal serving query error: {e}");
                 return DirectResult::Terminal(e);
@@ -180,20 +205,13 @@ fn try_direct_lexical_code_no_overlay(
 fn try_direct_lexical_code(
     engine: &SearchEngine,
     source: &ExternalBaselineService,
+    cancel: &CancellationToken,
     query: &str,
     limit: usize,
 ) -> DirectResult {
-    let snapshot = match source.resolve_snapshot() {
-        Ok(Some((_, s))) => s,
-        Ok(None) => return DirectResult::Unavailable,
-        Err(e) => {
-            if e.is_terminal() {
-                warn!("direct lexical: terminal snapshot resolution error: {e}");
-                return DirectResult::Terminal(e);
-            }
-            warn!("direct lexical: snapshot resolution failed: {e}");
-            return DirectResult::Unavailable;
-        }
+    let snapshot = match resolved_snapshot(source.resolve_snapshot(cancel), "direct lexical") {
+        Ok(snapshot) => snapshot,
+        Err(outcome) => return outcome,
     };
     let (overlay_hits, hidden_paths) =
         match engine.workspace_overlay_lexical_hits_read_only(query, limit) {
@@ -204,19 +222,26 @@ fn try_direct_lexical_code(
             }
         };
     let overlay_lexical: Vec<LexicalHit> = overlay_hits.iter().map(SearchHit::to_lexical).collect();
-    merge_direct_lexical_with_refill(&overlay_lexical, &hidden_paths, limit, |fetch_limit| {
-        source.lexical_search(snapshot.id.0.as_str(), query, Some("code"), fetch_limit)
-    })
+    merge_direct_lexical_with_refill(
+        &overlay_lexical,
+        &hidden_paths,
+        cancel,
+        limit,
+        |fetch_limit| {
+            source.lexical_search(cancel, snapshot.id.0.as_str(), query, Some("code"), fetch_limit)
+        },
+    )
 }
 
 fn merge_direct_lexical_with_refill<F>(
     overlay_hits: &[LexicalHit],
     hidden_paths: &HashSet<bsl_search::FileKey>,
+    cancel: &CancellationToken,
     limit: usize,
     mut fetch_baseline: F,
 ) -> DirectResult
 where
-    F: FnMut(usize) -> Result<Vec<LexicalHit>, SearchError>,
+    F: FnMut(usize) -> Result<Vec<LexicalHit>, BaselineCall>,
 {
     let context = merge_context_for_collection(hidden_paths, "code");
     let mut fetch_limit = direct_search_initial_window(limit);
@@ -225,9 +250,15 @@ where
     let mut best = Vec::new();
 
     for _ in 0..DIRECT_SEARCH_MAX_REFILL_ROUNDS {
+        // Between rounds: the round itself waits on the actor under this token, so this
+        // only covers a cancellation that landed while the last answer was being merged.
+        if cancel.is_cancelled() {
+            return DirectResult::Cancelled;
+        }
         let baseline_hits = match fetch_baseline(fetch_limit) {
             Ok(hits) => hits,
-            Err(e) => {
+            Err(BaselineCall::Withdrawn) => return DirectResult::Cancelled,
+            Err(BaselineCall::Failed(e)) => {
                 if e.is_terminal() {
                     warn!("direct lexical: terminal serving query error: {e}");
                     return DirectResult::Terminal(e);
@@ -305,10 +336,16 @@ mod tests {
         ];
         let mut requested_limits = Vec::new();
 
-        let result = merge_direct_lexical_with_refill(&[], &hidden_paths, 3, |fetch_limit| {
-            requested_limits.push(fetch_limit);
-            Ok(baseline.iter().take(fetch_limit).cloned().collect())
-        });
+        let result = merge_direct_lexical_with_refill(
+            &[],
+            &hidden_paths,
+            &tokio_util::sync::CancellationToken::new(),
+            3,
+            |fetch_limit| {
+                requested_limits.push(fetch_limit);
+                Ok(baseline.iter().take(fetch_limit).cloned().collect())
+            },
+        );
 
         let DirectResult::Found(hits) = result else {
             panic!("expected lexical refill to produce hits");

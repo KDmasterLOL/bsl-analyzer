@@ -1,3 +1,5 @@
+mod body;
+mod body_context;
 mod code;
 mod config;
 mod context;
@@ -11,6 +13,7 @@ mod query;
 mod runner;
 mod scope_gate;
 mod single_pass;
+pub mod slab;
 mod standalone_query;
 mod standards;
 mod suppression;
@@ -24,15 +27,20 @@ pub mod utils;
 #[cfg(test)]
 pub mod test_utils;
 
+pub use body_context::BodyContext;
 pub use code::DiagnosticCode;
 pub use config::{DiagnosticsConfig, EffectiveMetadata, MetadataOverride};
-pub use context::DiagnosticsContext;
+pub use context::{AnalysisContext, DiagnosticsContext};
 pub use handlers::get_metadata;
 pub use metadata::{
     CleanCodeAttribute, DiagnosticCompatibilityMode, DiagnosticMetadata, DiagnosticScope,
     DiagnosticSeverityLevel, DiagnosticType, Impact, ImpactSeverity, MetadataTag, SoftwareQuality,
 };
-pub use query::file_diagnostics_query;
+pub use query::{
+    file_diagnostics_query, method_diagnostics_query, method_line_diagnostics_query,
+    module_code_diagnostics_query, set_diagnostics_lru_sweep_mode,
+};
+pub use slab::slab_verify_mismatches;
 pub use standalone_query::{sdbl_query_codes, validate_query_text, METADATA_DEPENDENT_CODES};
 pub use standards::{message_with_standards, standard_url, standards};
 pub use types::{Diagnostic, DiagnosticOutput, DiagnosticTag, Fix, Severity, TextEdit};
@@ -42,12 +50,12 @@ pub fn all_diagnostic_codes() -> impl Iterator<Item = DiagnosticCode> {
     DiagnosticCode::iter()
 }
 
-pub fn simple_hir_diagnostic(
+pub fn simple_hir_diagnostic<R>(
     code: DiagnosticCode,
     message: impl Into<String>,
-    range: ide_db::TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: R,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<R>> {
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
@@ -61,8 +69,8 @@ pub fn simple_hir_diagnostic(
     })
 }
 
-use hir_dispatch::collect_hir_diagnostics;
-use hir_inference_dispatch::{collect_arg_diagnostics, collect_inference_diagnostics};
+use hir_dispatch::collect_module_hir_diagnostics;
+use hir_inference_dispatch::collect_inference_diagnostics;
 use metadata_dispatch::collect_metadata_diagnostics;
 use runner::{
     collect_configuration_diagnostics, collect_dataflow_diagnostics, collect_item_tree_diagnostics,
@@ -79,6 +87,17 @@ use runner::{
 /// would be irreversible in exactly the case where the merge revises the winner — the
 /// loser is already gone and nothing can bring it back — so the pipeline exit does it.
 pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let mut result = safe_collect("bodies", || body::bodies_via_provider(ctx));
+    result.extend(safe_collect("slab", || slab::collect_slab_diagnostics(ctx)));
+    result.extend(module_diagnostics(ctx));
+    normalize_diagnostics(&mut result);
+    result
+}
+
+/// The file-level checks: everything that reads the file's positional state
+/// or more than one body at once. Recomputed with every revision of the
+/// file, unlike the per-body checks it is assembled with.
+pub(crate) fn module_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let mut result = Vec::new();
 
     result.extend(safe_collect("line", || collect_line_diagnostics(ctx)));
@@ -92,17 +111,11 @@ pub fn diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     result.extend(safe_collect("sdbl_hir", || collect_sdbl_hir_diagnostics(ctx)));
 
-    result.extend(safe_collect("hir", || collect_hir_diagnostics(ctx)));
-
-    result.extend(safe_collect("hir_inference", || collect_inference_diagnostics(ctx)));
-
-    result.extend(safe_collect("hir_arg_inference", || collect_arg_diagnostics(ctx)));
+    result.extend(safe_collect("hir", || collect_module_hir_diagnostics(ctx)));
 
     result.extend(safe_collect("dataflow", || collect_dataflow_diagnostics(ctx)));
 
     result.extend(safe_collect("metadata", || collect_metadata_diagnostics(ctx)));
-
-    normalize_diagnostics(&mut result);
 
     result
 }
@@ -122,13 +135,9 @@ pub fn file_diagnostics(
     file_id: vfs::FileId,
     config: &DiagnosticsConfig,
 ) -> Vec<Diagnostic> {
-    if !scope_gate::file_in_scope(db, None, file_id, config) {
-        return Vec::new();
-    }
-    let config_path_input = ide_db::configuration_path_for_file(db, file_id);
-    let provider = ide_db::SalsaProvider::new(db, config_path_input);
-    let standalone = diagnostics(&DiagnosticsContext::new(config, file_id, &provider));
-    apply_extension_merge(db, file_id, config, config_path_input, None, standalone)
+    use base_db::{DiagnosticsConfigId, FileIdInput};
+    let config_id = DiagnosticsConfigId::new(db, config.to_input());
+    file_diagnostics_query(db, FileIdInput::new(db, file_id), config_id).as_ref().clone()
 }
 
 /// Augment a file's already-computed standalone diagnostics with the configuration-extension
@@ -320,7 +329,7 @@ fn supersede_dominated(diagnostics: &mut Vec<Diagnostic>) {
     }
 }
 
-fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
+pub(crate) fn normalize_diagnostics(diagnostics: &mut Vec<Diagnostic>) {
     let dedupe_codes = [DiagnosticCode::UnreachableCode];
 
     let (mut to_dedupe, mut keep): (Vec<_>, Vec<_>) =

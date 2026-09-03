@@ -51,7 +51,10 @@ pub(crate) fn metadata_kind_to_prefix_and_mdo(
         MetadataKind::CalculationRegisterRecordSet | MetadataKind::CalculationRegisterRecord => {
             MdoType::CalculationRegister
         }
-        MetadataKind::InformationRegisterRef
+        // The external kinds have no prefix; `?` above already answered for them.
+        MetadataKind::ExternalDataProcessorObject
+        | MetadataKind::ExternalReportObject
+        | MetadataKind::InformationRegisterRef
         | MetadataKind::AccumulationRegisterRef
         | MetadataKind::AccountingRegisterRef
         | MetadataKind::CalculationRegisterRef

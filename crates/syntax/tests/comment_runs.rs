@@ -31,7 +31,7 @@ fn run_lines(code: &str) -> Vec<(usize, usize)> {
 fn owned_lines(code: &str, run: &CommentRun) -> Vec<(usize, bool)> {
     run.lines()
         .iter()
-        .map(|line| (line_at(code, line.token.text_range().start().into()), line.owns_line))
+        .map(|line| (line_at(code, line.range.start().into()), line.owns_line))
         .collect()
 }
 
@@ -141,4 +141,66 @@ fn indented_comments_own_their_lines() {
 
     assert_eq!(runs.len(), 1);
     assert_eq!(owned_lines(code, &runs[0]), vec![(0, true), (1, true)]);
+}
+
+/// Комментарий как текст строки решается лексически — между частями одного
+/// литерала, — и одинаково по дереву и по токенам текста.
+mod string_text {
+    use syntax::{comment_runs, comment_runs_of};
+
+    const MODULE: &str = include_str!("../../parser/tests/fixtures/Module.bsl");
+
+    fn line_at(code: &str, offset: usize) -> usize {
+        code[..offset].matches('\n').count()
+    }
+
+    fn by_tree(code: &str) -> Vec<(usize, usize)> {
+        comment_runs(&parser::parse(code).syntax_node())
+            .iter()
+            .map(|run| {
+                (line_at(code, run.range().start().into()), line_at(code, run.range().end().into()))
+            })
+            .collect()
+    }
+
+    fn by_tokens(code: &str) -> Vec<(usize, usize)> {
+        comment_runs_of(&parser::line_tokens(code))
+            .iter()
+            .map(|run| {
+                (line_at(code, run.range().start().into()), line_at(code, run.range().end().into()))
+            })
+            .collect()
+    }
+
+    /// Вход и ожидаемые серии: между открытием и продолжением — текст строки;
+    /// между двумя закрытыми литералами, после хвоста, за оборванной строкой
+    /// и перед не-строковым токеном — комментарий; голые продолжения без
+    /// открытия продолжают друг друга.
+    const CASES: &[(&str, &[(usize, usize)])] = &[
+        ("Т = \"ВЫБРАТЬ *\n // Сообщить(1);\n // Возврат;\n |ИЗ Т\";\n", &[]),
+        ("Т = \"а\"\n// между\n\"б\";\n", &[(1, 1)]),
+        ("Т = \"а\n|б\"\n// после хвоста\nХ = 1;\n", &[(2, 2)]),
+        ("Т = \"открыта\n// комментарий\nХ = 1;\n", &[(1, 1)]),
+        ("Т = \"открыта\n// комментарий\n\"закрыта\";\n", &[(1, 1)]),
+        ("|голая часть\n// между голыми\n|ещё\n", &[]),
+        ("Т = \"а\n// первый\n// второй\n|б\";\n// после\n", &[(4, 4)]),
+        ("Т = \"а\n|б\n// между частями\n|в\";\n", &[]),
+        ("Т = \"открыта\n// в конце файла", &[(1, 1)]),
+        ("// один\n\n// два\nА = 1; // хвост\n// своя\n", &[(0, 0), (2, 4)]),
+    ];
+
+    #[test]
+    fn string_text_is_decided_between_literal_parts() {
+        for (code, expected) in CASES {
+            assert_eq!(by_tokens(code), *expected, "по токенам:\n{code}");
+            assert_eq!(by_tree(code), *expected, "по дереву:\n{code}");
+        }
+    }
+
+    #[test]
+    fn tree_and_token_runs_agree_on_the_fixture() {
+        let tree = by_tree(MODULE);
+        assert_eq!(by_tokens(MODULE), tree);
+        assert!(tree.len() > 100, "фикстура без серий ничего не сторожит: {}", tree.len());
+    }
 }

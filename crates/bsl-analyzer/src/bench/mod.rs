@@ -323,6 +323,37 @@ mod tests {
         assert_eq!(phases.after_edit_ns, r.cold_ns);
     }
 
+    #[test]
+    fn edit_burst_applies_every_patch_through_ranged_did_change() {
+        // Two insertions at the same body offset: the second lands before the
+        // first, so a mis-converted LSP column would put the text elsewhere
+        // and trip the runner's applied-text check.
+        let at = off("Сообщить(Локальная);");
+        let r = run_one(
+            FeatureSpec::EditBurst {
+                patches: vec![
+                    EditPatch {
+                        range: OffsetRange { start: at, end: at },
+                        new_text: "Первая = 1;\n\t".to_string(),
+                    },
+                    EditPatch {
+                        range: OffsetRange { start: at, end: at },
+                        new_text: "Вторая = 2;\n\t".to_string(),
+                    },
+                ],
+                edit_kind: EditKind::Body,
+                followup: Box::new(FeatureSpec::DiagnosticsPush),
+            },
+            Expect::NonEmpty,
+        )
+        .unwrap();
+        assert_measured(&r);
+        assert_eq!(r.feature, "edit_burst");
+        let phases = r.edit.expect("edit burst reports phases");
+        assert_eq!(phases.burst_len, Some(2));
+        assert!(phases.edit_apply_ns.expect("mode A reports the summed apply time") > 0);
+    }
+
     fn body_edit_spec() -> FeatureSpec {
         let end = FIXTURE.len() as u32;
         FeatureSpec::Edit {
@@ -332,6 +363,21 @@ mod tests {
             },
             edit_kind: EditKind::Body,
             followup: Box::new(FeatureSpec::Hover { offset: off("Сообщить") }),
+        }
+    }
+
+    fn method_edit_spec() -> FeatureSpec {
+        // A whole procedure in front of the first one: every existing method
+        // moves one top-level position down, so the followup cannot be
+        // positional.
+        let first = off("Процедура Внутренняя");
+        FeatureSpec::Edit {
+            patch: EditPatch {
+                range: OffsetRange { start: first, end: first },
+                new_text: "Процедура Новая()\nКонецПроцедуры\n\n".to_string(),
+            },
+            edit_kind: EditKind::Method,
+            followup: Box::new(FeatureSpec::DiagnosticsPush),
         }
     }
 
@@ -350,13 +396,17 @@ mod tests {
     }
 
     #[test]
-    fn recompute_mode_reports_churn_for_both_edit_kinds() {
+    fn recompute_mode_reports_churn_for_every_edit_kind() {
         // The event callback is installed at database construction; the flag
         // must be visible before boot. Process-global and never unset — other
         // tests at most gain inert counters.
         std::env::set_var("BSL_SALSA_EVENTS", "1");
 
-        for (spec, kind) in [(body_edit_spec(), "body"), (signature_edit_spec(), "signature")] {
+        for (spec, kind) in [
+            (body_edit_spec(), "body"),
+            (signature_edit_spec(), "signature"),
+            (method_edit_spec(), "method"),
+        ] {
             let r = run_one_mode(spec, Expect::NonEmpty, RunMode::Recompute).unwrap();
             assert_eq!(r.mode, "recompute");
             let churn = r.recompute.as_ref().expect("mode B must attach a recompute report");

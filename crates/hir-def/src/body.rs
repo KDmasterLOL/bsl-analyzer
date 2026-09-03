@@ -11,7 +11,7 @@ use text_size::TextRange;
 use crate::hir::{Binding, BindingIdx, Expr, ExprIdx, Stmt, StmtIdx};
 use crate::Name;
 
-use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
+use cfg_types::{BindingId, ExprId, IdConversion, LocalRange, MethodOffset, StmtId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Body {
@@ -21,7 +21,7 @@ pub struct Body {
     pub(crate) params: Box<[BindingIdx]>,
     pub(crate) body_stmts: Box<[StmtIdx]>,
 
-    pub(crate) sdbl_exprs: Vec<(ExprIdx, syntax::SdblQueryInfo)>,
+    pub(crate) sdbl_exprs: Vec<(ExprIdx, LocalRange, syntax::SdblQuery)>,
 
     pub(crate) recovered_exprs: FxHashSet<ExprIdx>,
 }
@@ -123,8 +123,9 @@ impl Body {
         self.bindings.iter().map(|(idx, binding)| (BindingId::from_idx(idx), binding))
     }
 
-    pub fn sdbl_exprs(&self) -> impl Iterator<Item = (ExprId, &syntax::SdblQueryInfo)> {
-        self.sdbl_exprs.iter().map(|(idx, info)| (ExprId::from_idx(*idx), info))
+    /// Query literals of the body with the literal's range, method-relative.
+    pub fn sdbl_exprs(&self) -> impl Iterator<Item = (ExprId, LocalRange, &syntax::SdblQuery)> {
+        self.sdbl_exprs.iter().map(|(idx, range, query)| (ExprId::from_idx(*idx), *range, query))
     }
 
     pub fn enclosing_stmt(&self, target: ExprId) -> Option<StmtId> {
@@ -241,15 +242,17 @@ fn expr_contains(body: &Body, root: ExprIdx, target: ExprIdx) -> bool {
     }
 }
 
+/// Ranges of the lowered nodes, relative to the method's own root. A file
+/// position enters or leaves only through [`SourceMapAt`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct BodySourceMap {
-    expr_ranges: Vec<Option<TextRange>>,
-    stmt_ranges: Vec<Option<TextRange>>,
-    binding_ranges: Vec<Option<TextRange>>,
+    expr_ranges: Vec<Option<LocalRange>>,
+    stmt_ranges: Vec<Option<LocalRange>>,
+    binding_ranges: Vec<Option<LocalRange>>,
 
-    range_to_expr: FxHashMap<TextRange, ExprId>,
-    range_to_stmt: FxHashMap<TextRange, StmtId>,
-    range_to_binding: FxHashMap<TextRange, BindingId>,
+    range_to_expr: FxHashMap<LocalRange, ExprId>,
+    range_to_stmt: FxHashMap<LocalRange, StmtId>,
+    range_to_binding: FxHashMap<LocalRange, BindingId>,
 }
 
 impl BodySourceMap {
@@ -257,7 +260,7 @@ impl BodySourceMap {
         Self::default()
     }
 
-    pub(crate) fn record_expr(&mut self, id: ExprIdx, range: TextRange) {
+    pub(crate) fn record_expr(&mut self, id: ExprIdx, range: LocalRange) {
         let opaque_id = ExprId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.expr_ranges.len() {
@@ -267,7 +270,7 @@ impl BodySourceMap {
         self.range_to_expr.insert(range, opaque_id);
     }
 
-    pub(crate) fn record_stmt(&mut self, id: StmtIdx, range: TextRange) {
+    pub(crate) fn record_stmt(&mut self, id: StmtIdx, range: LocalRange) {
         let opaque_id = StmtId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.stmt_ranges.len() {
@@ -277,7 +280,7 @@ impl BodySourceMap {
         self.range_to_stmt.insert(range, opaque_id);
     }
 
-    pub(crate) fn record_binding(&mut self, id: BindingIdx, range: TextRange) {
+    pub(crate) fn record_binding(&mut self, id: BindingIdx, range: LocalRange) {
         let opaque_id = BindingId::from_idx(id);
         let idx = id.into_raw().into_u32() as usize;
         if idx >= self.binding_ranges.len() {
@@ -287,31 +290,77 @@ impl BodySourceMap {
         self.range_to_binding.insert(range, opaque_id);
     }
 
-    pub fn expr_range(&self, id: ExprId) -> Option<TextRange> {
+    pub fn expr_range(&self, id: ExprId) -> Option<LocalRange> {
         let idx = id.into_raw().into_u32() as usize;
         self.expr_ranges.get(idx).copied().flatten()
     }
 
-    pub fn stmt_range(&self, id: StmtId) -> Option<TextRange> {
+    pub fn stmt_range(&self, id: StmtId) -> Option<LocalRange> {
         let idx = id.into_raw().into_u32() as usize;
         self.stmt_ranges.get(idx).copied().flatten()
     }
 
-    pub fn binding_range(&self, id: BindingId) -> Option<TextRange> {
+    pub fn binding_range(&self, id: BindingId) -> Option<LocalRange> {
         let idx = id.into_raw().into_u32() as usize;
         self.binding_ranges.get(idx).copied().flatten()
     }
 
-    pub fn expr_at_range(&self, range: TextRange) -> Option<ExprId> {
+    pub fn expr_at_range(&self, range: LocalRange) -> Option<ExprId> {
         self.range_to_expr.get(&range).copied()
     }
 
-    pub fn stmt_at_range(&self, range: TextRange) -> Option<StmtId> {
+    pub fn stmt_at_range(&self, range: LocalRange) -> Option<StmtId> {
         self.range_to_stmt.get(&range).copied()
     }
 
-    pub fn binding_at_range(&self, range: TextRange) -> Option<BindingId> {
+    pub fn binding_at_range(&self, range: LocalRange) -> Option<BindingId> {
         self.range_to_binding.get(&range).copied()
+    }
+}
+
+/// A body's source map placed in its file: the lift and the lookup are the
+/// two directions of the same [`MethodOffset`].
+#[derive(Debug, Clone, Copy)]
+pub struct SourceMapAt<'a> {
+    map: &'a BodySourceMap,
+    base: MethodOffset,
+}
+
+impl<'a> SourceMapAt<'a> {
+    pub fn new(map: &'a BodySourceMap, base: MethodOffset) -> Self {
+        Self { map, base }
+    }
+
+    pub fn local(&self) -> &'a BodySourceMap {
+        self.map
+    }
+
+    pub fn base(&self) -> MethodOffset {
+        self.base
+    }
+
+    pub fn expr_range(&self, id: ExprId) -> Option<TextRange> {
+        self.map.expr_range(id).map(|r| r.lift(self.base))
+    }
+
+    pub fn stmt_range(&self, id: StmtId) -> Option<TextRange> {
+        self.map.stmt_range(id).map(|r| r.lift(self.base))
+    }
+
+    pub fn binding_range(&self, id: BindingId) -> Option<TextRange> {
+        self.map.binding_range(id).map(|r| r.lift(self.base))
+    }
+
+    pub fn expr_at_range(&self, range: TextRange) -> Option<ExprId> {
+        self.map.expr_at_range(self.base.lower(range)?)
+    }
+
+    pub fn stmt_at_range(&self, range: TextRange) -> Option<StmtId> {
+        self.map.stmt_at_range(self.base.lower(range)?)
+    }
+
+    pub fn binding_at_range(&self, range: TextRange) -> Option<BindingId> {
+        self.map.binding_at_range(self.base.lower(range)?)
     }
 }
 
@@ -337,7 +386,7 @@ pub(crate) fn body_heap(body: &Body) -> usize {
     // Body-level boxed index lists and side tables.
     bytes += vec_bytes::<BindingIdx>(body.params.len());
     bytes += vec_bytes::<StmtIdx>(body.body_stmts.len());
-    bytes += vec_bytes::<(ExprIdx, syntax::SdblQueryInfo)>(body.sdbl_exprs.len());
+    bytes += vec_bytes::<(ExprIdx, LocalRange, syntax::SdblQuery)>(body.sdbl_exprs.len());
     bytes += map_table_bytes::<ExprIdx, ()>(body.recovered_exprs.len());
 
     for binding in body.bindings.values() {
@@ -411,40 +460,53 @@ pub(crate) fn body_heap(body: &Body) -> usize {
 
 /// Rough live bytes of a [`BodySourceMap`]: the three id-keyed range vectors and
 /// the three range-keyed lookup maps. Used together with [`body_heap`] to size
-/// the `method_body_with_source_map` memo.
+/// the `method_lower_query` memo.
 pub(crate) fn source_map_heap(map: &BodySourceMap) -> usize {
     use std::mem::size_of;
 
     use crate::heap_estimate::{map_table_bytes, vec_bytes};
 
     size_of::<BodySourceMap>()
-        + vec_bytes::<Option<TextRange>>(map.expr_ranges.len())
-        + vec_bytes::<Option<TextRange>>(map.stmt_ranges.len())
-        + vec_bytes::<Option<TextRange>>(map.binding_ranges.len())
-        + map_table_bytes::<TextRange, ExprId>(map.range_to_expr.len())
-        + map_table_bytes::<TextRange, StmtId>(map.range_to_stmt.len())
-        + map_table_bytes::<TextRange, BindingId>(map.range_to_binding.len())
+        + vec_bytes::<Option<LocalRange>>(map.expr_ranges.len())
+        + vec_bytes::<Option<LocalRange>>(map.stmt_ranges.len())
+        + vec_bytes::<Option<LocalRange>>(map.binding_ranges.len())
+        + map_table_bytes::<LocalRange, ExprId>(map.range_to_expr.len())
+        + map_table_bytes::<LocalRange, StmtId>(map.range_to_stmt.len())
+        + map_table_bytes::<LocalRange, BindingId>(map.range_to_binding.len())
 }
 
-/// `heap_size` hook for `method_body_query` (returns `Arc<Body>`).
-pub(crate) fn body_arc_heap(v: &Arc<Body>) -> usize {
-    body_heap(v)
+/// `heap_size` hook for `method_body_query`: its `Arc<Body>` is the one
+/// `method_lower_query` already counts, so the projection reports nothing
+/// beyond the (already-counted) pointer. The two memos have independent LRU
+/// queues, so when the lowering memo is evicted first the body goes
+/// unreported; counting it here instead would report it twice while both
+/// live, which is the common state. An estimate, deliberately on the low side.
+pub(crate) fn body_arc_heap(_v: &Arc<Body>) -> usize {
+    0
 }
 
-/// `heap_size` hook for `method_body_with_source_map_query`
-/// (returns `Arc<(Body, BodySourceMap)>`).
-pub(crate) fn body_with_source_map_heap(v: &Arc<(Body, BodySourceMap)>) -> usize {
-    let (body, source_map) = &**v;
-    body_heap(body) + source_map_heap(source_map)
+/// `heap_size` hook for `method_lower_query`: the body and its source map,
+/// the diagnostics and the external-ref side tables.
+pub(crate) fn lower_result_heap(v: &Option<Arc<LowerResult>>) -> usize {
+    use crate::heap_estimate::{map_table_bytes, vec_bytes};
+    let Some(r) = v else { return 0 };
+    body_heap(&r.body)
+        + source_map_heap(&r.source_map)
+        + vec_bytes::<BodyDiagnostic<LocalRange>>(r.diagnostics.len())
+        + map_table_bytes::<NormName, ()>(r.referenced_externals.len())
+        + vec_bytes::<ExternalRef<LocalRange>>(r.external_refs.len())
 }
 
+/// Everything lowering produces for one method (or for the module code).
+/// Positions in it are relative to the lowered root; see [`SourceMapAt`] and
+/// [`BodyDiagnostic::lift`] for placing them in the file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LowerResult {
-    pub body: Body,
+    pub body: Arc<Body>,
     pub source_map: BodySourceMap,
-    pub diagnostics: Vec<BodyDiagnostic>,
+    pub diagnostics: Vec<BodyDiagnostic<LocalRange>>,
     pub referenced_externals: rustc_hash::FxHashSet<NormName>,
-    pub external_refs: Vec<ExternalRef>,
+    pub external_refs: Vec<ExternalRef<LocalRange>>,
     pub size_lines: u32,
 }
 
@@ -455,60 +517,60 @@ pub enum ExistingBindingKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BodyDiagnostic {
+pub enum BodyDiagnostic<R = TextRange> {
     MissingReturn {
-        range: TextRange,
+        range: R,
     },
 
     EmptyCodeBlock {
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedMethod {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedCurrentDate {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedFind {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedMessage {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedTypeManagedForm {
         type_name: String,
-        range: TextRange,
+        range: R,
     },
 
     MagicNumber {
         value: String,
-        range: TextRange,
+        range: R,
         context: MagicNumberContext,
     },
 
     SelfAssign {
-        range: TextRange,
+        range: R,
     },
 
     FunctionShouldHaveReturn {
-        range: TextRange,
+        range: R,
     },
 
     BeginTransactionBeforeTryCatch {
-        range: TextRange,
+        range: R,
     },
 
     MisplacedLoopControl {
-        range: TextRange,
+        range: R,
         is_continue: bool,
     },
 
@@ -518,243 +580,243 @@ pub enum BodyDiagnostic {
         mdo_type: Option<String>,
         mdo_name: Option<String>,
         args: Vec<bool>,
-        range: TextRange,
+        range: R,
     },
 
     IfElseDuplicatedCodeBlock {
-        range: TextRange,
+        range: R,
     },
 
     CodeAfterAsyncCall {
         method_name: String,
-        range: TextRange,
+        range: R,
     },
 
     CommitTransactionOutsideTryCatch {
-        range: TextRange,
+        range: R,
     },
 
     CommonModuleAssign {
         variable_name: String,
-        range: TextRange,
+        range: R,
         existing_binding_kind: Option<ExistingBindingKind>,
     },
 
     MissingCommonModuleMethod {
         module: String,
         method: String,
-        range: TextRange,
+        range: R,
     },
 
     RewriteMethodParameter {
         param_id: BindingId,
         stmt_id: StmtId,
-        stmt_range: TextRange,
-        ident_range: TextRange,
+        stmt_range: R,
+        ident_range: R,
     },
 
     CreateQueryInCycle {
-        range: TextRange,
+        range: R,
     },
 
     DeletingCollectionItem {
         collection_text: String,
-        range: TextRange,
+        range: R,
     },
 
     SelfInsertion {
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedAttribute8312 {
         name: String,
         kind: DeprecatedKind8312,
-        range: TextRange,
+        range: R,
     },
 
     ExecuteExternalCode {
-        range: TextRange,
+        range: R,
     },
 
     ExtraCommas {
-        range: TextRange,
+        range: R,
     },
 
     FileSystemAccess {
-        range: TextRange,
+        range: R,
     },
 
     FormDataToValue {
-        range: TextRange,
+        range: R,
     },
 
     FunctionNameStartsWithGet {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     FunctionOutParameter {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     FunctionReturnsSamePrimitive {
-        range: TextRange,
+        range: R,
     },
 
     GetFormMethod {
         method_name: String,
-        range: TextRange,
+        range: R,
     },
 
     GlobalContextMethodCollision8312 {
         method_name: String,
-        range: TextRange,
+        range: R,
     },
 
     EmptyStatement {
-        range: TextRange,
+        range: R,
     },
 
     MissingSemicolon {
-        range: TextRange,
+        range: R,
     },
 
     IfElseDuplicatedCondition {
         first_occurrence_index: usize,
-        range: TextRange,
+        range: R,
     },
 
     IfElseIfEndsWithElse {
-        range: TextRange,
+        range: R,
     },
 
     IncorrectUseOfStrTemplate {
-        range: TextRange,
+        range: R,
     },
 
     OneStatementPerLine {
-        range: TextRange,
+        range: R,
     },
 
     OSUsersMethod {
-        range: TextRange,
+        range: R,
     },
 
     ProcedureReturnsValue {
-        range: TextRange,
+        range: R,
     },
 
     ReservedWordAsMethodName {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     RedundantAccessToObject {
         kind: RedundantAccessKind,
-        range: TextRange,
+        range: R,
     },
 
     StyleElementConstructors {
         type_name: String,
-        range: TextRange,
+        range: R,
     },
 
     TempFilesDir {
         name: String,
-        range: TextRange,
+        range: R,
     },
 
     TernaryOperatorUsage {
-        range: TextRange,
+        range: R,
     },
 
     TooManyReturns {
         method_name: String,
-        method_name_range: TextRange,
-        returns: Vec<TextRange>,
+        method_name_range: R,
+        returns: Vec<R>,
     },
 
     UnaryPlusInConcatenation {
-        range: TextRange,
+        range: R,
     },
 
     UseSystemInformation {
-        range: TextRange,
+        range: R,
     },
 
     UsingCancelParameter {
-        range: TextRange,
+        range: R,
     },
 
     UsingExternalCodeTools {
-        range: TextRange,
+        range: R,
     },
 
     UsingFindElementByString {
-        range: TextRange,
+        range: R,
     },
 
     UsingGoto {
-        range: TextRange,
+        range: R,
     },
 
     UsingModalWindows {
         method_name: String,
         replacement: String,
-        range: TextRange,
+        range: R,
     },
 
     UsingSynchronousCalls {
         method_name: String,
         replacement: String,
-        range: TextRange,
+        range: R,
     },
 
     UsingThisForm {
-        range: TextRange,
+        range: R,
     },
 
     WrongUseFunctionProceedWithCall {
-        range: TextRange,
+        range: R,
     },
 
     WrongUseOfRollbackTransactionMethod {
-        range: TextRange,
+        range: R,
     },
 
     DeprecatedMethodCall {
         callee: String,
         module: Option<String>,
-        range: TextRange,
+        range: R,
     },
 
     ThisObjectAssign {
-        range: TextRange,
+        range: R,
     },
 
     TryNumber {
-        range: TextRange,
+        range: R,
     },
 
     UsingObjectNotAvailableUnix {
         type_name: String,
-        range: TextRange,
+        range: R,
     },
 
     UnsafeSafeModeMethodCall {
-        range: TextRange,
+        range: R,
     },
 
     UselessForEach {
         iterator_name: String,
-        range: TextRange,
+        range: R,
     },
 
     UnsafeFindByCode {
         manager_name: String,
         object_name: String,
-        range: TextRange,
+        range: R,
     },
 
     UsageWriteLogEvent {
@@ -765,8 +827,261 @@ pub enum BodyDiagnostic {
         has_error_log_level: bool,
         has_detail_error_description: bool,
         except_has_raise: bool,
-        range: TextRange,
+        range: R,
     },
+}
+
+impl<R> BodyDiagnostic<R> {
+    /// The same diagnostic with every range passed through `f`. Exhaustive by
+    /// construction: a new variant that carries a range fails to compile here
+    /// until it is lifted too.
+    pub fn map_range<T>(self, f: impl Fn(R) -> T) -> BodyDiagnostic<T> {
+        match self {
+            BodyDiagnostic::MissingReturn { range } => {
+                BodyDiagnostic::MissingReturn { range: f(range) }
+            }
+            BodyDiagnostic::EmptyCodeBlock { range } => {
+                BodyDiagnostic::EmptyCodeBlock { range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedMethod { name, range } => {
+                BodyDiagnostic::DeprecatedMethod { name, range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedCurrentDate { name, range } => {
+                BodyDiagnostic::DeprecatedCurrentDate { name, range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedFind { name, range } => {
+                BodyDiagnostic::DeprecatedFind { name, range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedMessage { name, range } => {
+                BodyDiagnostic::DeprecatedMessage { name, range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range } => {
+                BodyDiagnostic::DeprecatedTypeManagedForm { type_name, range: f(range) }
+            }
+            BodyDiagnostic::MagicNumber { value, range, context } => {
+                BodyDiagnostic::MagicNumber { value, range: f(range), context }
+            }
+            BodyDiagnostic::SelfAssign { range } => BodyDiagnostic::SelfAssign { range: f(range) },
+            BodyDiagnostic::FunctionShouldHaveReturn { range } => {
+                BodyDiagnostic::FunctionShouldHaveReturn { range: f(range) }
+            }
+            BodyDiagnostic::BeginTransactionBeforeTryCatch { range } => {
+                BodyDiagnostic::BeginTransactionBeforeTryCatch { range: f(range) }
+            }
+            BodyDiagnostic::MisplacedLoopControl { range, is_continue } => {
+                BodyDiagnostic::MisplacedLoopControl { range: f(range), is_continue }
+            }
+            BodyDiagnostic::MissedRequiredParameter {
+                callee,
+                module,
+                mdo_type,
+                mdo_name,
+                args,
+                range,
+            } => BodyDiagnostic::MissedRequiredParameter {
+                callee,
+                module,
+                mdo_type,
+                mdo_name,
+                args,
+                range: f(range),
+            },
+            BodyDiagnostic::IfElseDuplicatedCodeBlock { range } => {
+                BodyDiagnostic::IfElseDuplicatedCodeBlock { range: f(range) }
+            }
+            BodyDiagnostic::CodeAfterAsyncCall { method_name, range } => {
+                BodyDiagnostic::CodeAfterAsyncCall { method_name, range: f(range) }
+            }
+            BodyDiagnostic::CommitTransactionOutsideTryCatch { range } => {
+                BodyDiagnostic::CommitTransactionOutsideTryCatch { range: f(range) }
+            }
+            BodyDiagnostic::CommonModuleAssign { variable_name, range, existing_binding_kind } => {
+                BodyDiagnostic::CommonModuleAssign {
+                    variable_name,
+                    range: f(range),
+                    existing_binding_kind,
+                }
+            }
+            BodyDiagnostic::MissingCommonModuleMethod { module, method, range } => {
+                BodyDiagnostic::MissingCommonModuleMethod { module, method, range: f(range) }
+            }
+            BodyDiagnostic::RewriteMethodParameter {
+                param_id,
+                stmt_id,
+                stmt_range,
+                ident_range,
+            } => BodyDiagnostic::RewriteMethodParameter {
+                param_id,
+                stmt_id,
+                stmt_range: f(stmt_range),
+                ident_range: f(ident_range),
+            },
+            BodyDiagnostic::CreateQueryInCycle { range } => {
+                BodyDiagnostic::CreateQueryInCycle { range: f(range) }
+            }
+            BodyDiagnostic::DeletingCollectionItem { collection_text, range } => {
+                BodyDiagnostic::DeletingCollectionItem { collection_text, range: f(range) }
+            }
+            BodyDiagnostic::SelfInsertion { range } => {
+                BodyDiagnostic::SelfInsertion { range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range } => {
+                BodyDiagnostic::DeprecatedAttribute8312 { name, kind, range: f(range) }
+            }
+            BodyDiagnostic::ExecuteExternalCode { range } => {
+                BodyDiagnostic::ExecuteExternalCode { range: f(range) }
+            }
+            BodyDiagnostic::ExtraCommas { range } => {
+                BodyDiagnostic::ExtraCommas { range: f(range) }
+            }
+            BodyDiagnostic::FileSystemAccess { range } => {
+                BodyDiagnostic::FileSystemAccess { range: f(range) }
+            }
+            BodyDiagnostic::FormDataToValue { range } => {
+                BodyDiagnostic::FormDataToValue { range: f(range) }
+            }
+            BodyDiagnostic::FunctionNameStartsWithGet { name, range } => {
+                BodyDiagnostic::FunctionNameStartsWithGet { name, range: f(range) }
+            }
+            BodyDiagnostic::FunctionOutParameter { name, range } => {
+                BodyDiagnostic::FunctionOutParameter { name, range: f(range) }
+            }
+            BodyDiagnostic::FunctionReturnsSamePrimitive { range } => {
+                BodyDiagnostic::FunctionReturnsSamePrimitive { range: f(range) }
+            }
+            BodyDiagnostic::GetFormMethod { method_name, range } => {
+                BodyDiagnostic::GetFormMethod { method_name, range: f(range) }
+            }
+            BodyDiagnostic::GlobalContextMethodCollision8312 { method_name, range } => {
+                BodyDiagnostic::GlobalContextMethodCollision8312 { method_name, range: f(range) }
+            }
+            BodyDiagnostic::EmptyStatement { range } => {
+                BodyDiagnostic::EmptyStatement { range: f(range) }
+            }
+            BodyDiagnostic::MissingSemicolon { range } => {
+                BodyDiagnostic::MissingSemicolon { range: f(range) }
+            }
+            BodyDiagnostic::IfElseDuplicatedCondition { first_occurrence_index, range } => {
+                BodyDiagnostic::IfElseDuplicatedCondition {
+                    first_occurrence_index,
+                    range: f(range),
+                }
+            }
+            BodyDiagnostic::IfElseIfEndsWithElse { range } => {
+                BodyDiagnostic::IfElseIfEndsWithElse { range: f(range) }
+            }
+            BodyDiagnostic::IncorrectUseOfStrTemplate { range } => {
+                BodyDiagnostic::IncorrectUseOfStrTemplate { range: f(range) }
+            }
+            BodyDiagnostic::OneStatementPerLine { range } => {
+                BodyDiagnostic::OneStatementPerLine { range: f(range) }
+            }
+            BodyDiagnostic::OSUsersMethod { range } => {
+                BodyDiagnostic::OSUsersMethod { range: f(range) }
+            }
+            BodyDiagnostic::ProcedureReturnsValue { range } => {
+                BodyDiagnostic::ProcedureReturnsValue { range: f(range) }
+            }
+            BodyDiagnostic::ReservedWordAsMethodName { name, range } => {
+                BodyDiagnostic::ReservedWordAsMethodName { name, range: f(range) }
+            }
+            BodyDiagnostic::RedundantAccessToObject { kind, range } => {
+                BodyDiagnostic::RedundantAccessToObject { kind, range: f(range) }
+            }
+            BodyDiagnostic::StyleElementConstructors { type_name, range } => {
+                BodyDiagnostic::StyleElementConstructors { type_name, range: f(range) }
+            }
+            BodyDiagnostic::TempFilesDir { name, range } => {
+                BodyDiagnostic::TempFilesDir { name, range: f(range) }
+            }
+            BodyDiagnostic::TernaryOperatorUsage { range } => {
+                BodyDiagnostic::TernaryOperatorUsage { range: f(range) }
+            }
+            BodyDiagnostic::TooManyReturns { method_name, method_name_range, returns } => {
+                BodyDiagnostic::TooManyReturns {
+                    method_name,
+                    method_name_range: f(method_name_range),
+                    returns: returns.into_iter().map(&f).collect(),
+                }
+            }
+            BodyDiagnostic::UnaryPlusInConcatenation { range } => {
+                BodyDiagnostic::UnaryPlusInConcatenation { range: f(range) }
+            }
+            BodyDiagnostic::UseSystemInformation { range } => {
+                BodyDiagnostic::UseSystemInformation { range: f(range) }
+            }
+            BodyDiagnostic::UsingCancelParameter { range } => {
+                BodyDiagnostic::UsingCancelParameter { range: f(range) }
+            }
+            BodyDiagnostic::UsingExternalCodeTools { range } => {
+                BodyDiagnostic::UsingExternalCodeTools { range: f(range) }
+            }
+            BodyDiagnostic::UsingFindElementByString { range } => {
+                BodyDiagnostic::UsingFindElementByString { range: f(range) }
+            }
+            BodyDiagnostic::UsingGoto { range } => BodyDiagnostic::UsingGoto { range: f(range) },
+            BodyDiagnostic::UsingModalWindows { method_name, replacement, range } => {
+                BodyDiagnostic::UsingModalWindows { method_name, replacement, range: f(range) }
+            }
+            BodyDiagnostic::UsingSynchronousCalls { method_name, replacement, range } => {
+                BodyDiagnostic::UsingSynchronousCalls { method_name, replacement, range: f(range) }
+            }
+            BodyDiagnostic::UsingThisForm { range } => {
+                BodyDiagnostic::UsingThisForm { range: f(range) }
+            }
+            BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => {
+                BodyDiagnostic::WrongUseFunctionProceedWithCall { range: f(range) }
+            }
+            BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range } => {
+                BodyDiagnostic::WrongUseOfRollbackTransactionMethod { range: f(range) }
+            }
+            BodyDiagnostic::DeprecatedMethodCall { callee, module, range } => {
+                BodyDiagnostic::DeprecatedMethodCall { callee, module, range: f(range) }
+            }
+            BodyDiagnostic::ThisObjectAssign { range } => {
+                BodyDiagnostic::ThisObjectAssign { range: f(range) }
+            }
+            BodyDiagnostic::TryNumber { range } => BodyDiagnostic::TryNumber { range: f(range) },
+            BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range } => {
+                BodyDiagnostic::UsingObjectNotAvailableUnix { type_name, range: f(range) }
+            }
+            BodyDiagnostic::UnsafeSafeModeMethodCall { range } => {
+                BodyDiagnostic::UnsafeSafeModeMethodCall { range: f(range) }
+            }
+            BodyDiagnostic::UselessForEach { iterator_name, range } => {
+                BodyDiagnostic::UselessForEach { iterator_name, range: f(range) }
+            }
+            BodyDiagnostic::UnsafeFindByCode { manager_name, object_name, range } => {
+                BodyDiagnostic::UnsafeFindByCode { manager_name, object_name, range: f(range) }
+            }
+            BodyDiagnostic::UsageWriteLogEvent {
+                in_except_block,
+                arg_count,
+                log_level_empty,
+                comment_empty,
+                has_error_log_level,
+                has_detail_error_description,
+                except_has_raise,
+                range,
+            } => BodyDiagnostic::UsageWriteLogEvent {
+                in_except_block,
+                arg_count,
+                log_level_empty,
+                comment_empty,
+                has_error_log_level,
+                has_detail_error_description,
+                except_has_raise,
+                range: f(range),
+            },
+        }
+    }
+}
+
+impl BodyDiagnostic<LocalRange> {
+    /// The diagnostic placed in its file.
+    pub fn lift(self, base: MethodOffset) -> BodyDiagnostic {
+        self.map_range(|range| range.lift(base))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -804,19 +1119,29 @@ pub enum RedundantAccessKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ExternalRef {
-    QualifiedCall {
-        receiver: Name,
-        method: Name,
-        range: TextRange,
-    },
+pub enum ExternalRef<R = TextRange> {
+    QualifiedCall { receiver: Name, method: Name, range: R },
 
-    ManagerAccess {
-        manager_type: ManagerType,
-        object_name: Name,
-        method: Option<Name>,
-        range: TextRange,
-    },
+    ManagerAccess { manager_type: ManagerType, object_name: Name, method: Option<Name>, range: R },
+}
+
+impl<R> ExternalRef<R> {
+    pub fn map_range<T>(self, f: impl Fn(R) -> T) -> ExternalRef<T> {
+        match self {
+            ExternalRef::QualifiedCall { receiver, method, range } => {
+                ExternalRef::QualifiedCall { receiver, method, range: f(range) }
+            }
+            ExternalRef::ManagerAccess { manager_type, object_name, method, range } => {
+                ExternalRef::ManagerAccess { manager_type, object_name, method, range: f(range) }
+            }
+        }
+    }
+}
+
+impl ExternalRef<LocalRange> {
+    pub fn lift(self, base: MethodOffset) -> ExternalRef {
+        self.map_range(|range| range.lift(base))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -913,7 +1238,11 @@ impl ManagerType {
             MdoType::ExchangePlan => Some(Self::ExchangePlans),
             MdoType::ExternalDataSource => Some(Self::ExternalDataSources),
             MdoType::Constant => Some(Self::Constants),
-            MdoType::CommonModule
+            // External objects have no collection: `ВнешниеОбработки` is the
+            // platform's manager, not a directory of the dump.
+            MdoType::ExternalDataProcessor
+            | MdoType::ExternalReport
+            | MdoType::CommonModule
             | MdoType::EventSubscription
             | MdoType::Subsystem
             | MdoType::Role => None,
@@ -944,8 +1273,8 @@ impl ManagerType {
     }
 }
 
-impl BodyDiagnostic {
-    pub fn range(&self) -> TextRange {
+impl<R: Copy> BodyDiagnostic<R> {
+    pub fn range(&self) -> R {
         match self {
             BodyDiagnostic::MissingReturn { range } => *range,
             BodyDiagnostic::EmptyCodeBlock { range } => *range,
@@ -1016,6 +1345,8 @@ impl BodyDiagnostic {
     }
 }
 
+/// Lower one method taken from any tree; see [`lower::lower_method`] — the
+/// node is re-rooted, so the result's positions are method-relative.
 pub fn lower_method(method_node: &SyntaxNode, is_function: bool) -> LowerResult {
     lower::lower_method(method_node, is_function)
 }
@@ -1180,7 +1511,7 @@ mod tests {
         let mut source_map = BodySourceMap::new();
 
         let expr_id = body.exprs.alloc(Expr::Literal(Literal::Number(NotNan::new(42.0).unwrap())));
-        let range = TextRange::new(0.into(), 2.into());
+        let range = LocalRange::of_detached_node(TextRange::new(0.into(), 2.into()));
 
         source_map.record_expr(expr_id, range);
 
@@ -1194,12 +1525,12 @@ mod tests {
         let mut source_map = BodySourceMap::new();
 
         let binding_id = body.bindings.alloc(Binding::var(Name::new("Запись")));
-        let range = TextRange::new(10.into(), 16.into());
+        let range = LocalRange::of_detached_node(TextRange::new(10.into(), 16.into()));
         source_map.record_binding(binding_id, range);
 
         assert_eq!(source_map.binding_range(BindingId::from_idx(binding_id)), Some(range));
         assert_eq!(source_map.binding_at_range(range), Some(BindingId::from_idx(binding_id)));
-        let other = TextRange::new(20.into(), 24.into());
+        let other = LocalRange::of_detached_node(TextRange::new(20.into(), 24.into()));
         assert_eq!(source_map.binding_at_range(other), None);
     }
 

@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use regex::Regex;
 use std::sync::OnceLock;
 use syntax::{SyntaxKind, SyntaxNode, TextRange};
@@ -84,21 +85,19 @@ fn check_if_statement_optimized(
     None
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::ExcessiveAutoTestCheck;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
     let mut if_stmts = Vec::new();
     let mut return_stmts_by_parent = std::collections::HashMap::new();
 
-    for node in root.descendants() {
+    for node in ctx.nodes() {
         match node.kind() {
             SyntaxKind::IF_STMT => {
                 if_stmts.push(node);
@@ -121,19 +120,19 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 code,
                 message: "Избыточная проверка устаревшего параметра 'АвтоТест'".to_string(),
                 severity: ctx.severity(code),
-                range,
+                range: LocalRange::of_detached_node(range),
                 tags: ctx.tags(code),
                 fixes: vec![],
             });
         }
     }
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::check_body;
     use crate::test_utils::*;
     #[test]
     fn test_russian_property_with_blank_lines() {
@@ -148,7 +147,7 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -164,7 +163,7 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -181,7 +180,7 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -201,7 +200,7 @@ mod tests {
 
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements in body");
     }
 
@@ -217,7 +216,7 @@ Procedure OnCreateAtServer()
 
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -232,7 +231,7 @@ Procedure Filling()
 
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -249,7 +248,7 @@ Procedure Check(List)
 
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -267,7 +266,7 @@ Procedure NoError(List)
 
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements");
     }
 
@@ -280,7 +279,7 @@ EndProcedure
 
 КонецЕсли;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Top-level if without AutoTest should not flag");
     }
 
@@ -293,7 +292,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -306,7 +305,7 @@ Procedure Test()
     EndIf;
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -319,7 +318,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -332,7 +331,7 @@ Procedure Test()
     EndIf;
 EndProcedure
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic");
     }
 
@@ -346,7 +345,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Should NOT flag when multiple statements");
     }
 
@@ -359,7 +358,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Should NOT flag when no return");
     }
 
@@ -372,7 +371,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Should NOT flag without AutoTest");
     }
 }

@@ -13,7 +13,6 @@ use syntax::{Parse, SyntaxNode};
 use vfs::{FileId, VfsPath};
 
 use crate::{
-    effects::ModuleSecurityState,
     queries::{ModuleCyclomatic, ModuleHirMetrics},
     SdblHirEntries,
 };
@@ -262,12 +261,85 @@ pub trait AnalysisProvider {
 
     fn module_bodies(&self, module_id: ModuleId) -> Arc<ModuleBodies>;
 
-    fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
-        Arc::new(InferenceResult::default())
+    /// The module's declarations without their positions: what a body check
+    /// may read about the file it lives in.
+    fn module_interface(&self, module_id: ModuleId) -> Arc<hir::ModuleInterface>;
+
+    /// One declaration of the module, by key. A per-method check reads its
+    /// own declaration and its callees' through these three, not the whole
+    /// interface, so an edit of another declaration leaves its memo valid.
+    fn interface_method(&self, method_id: MethodId) -> Option<Arc<hir::MethodDecl>> {
+        self.module_interface(method_id.module).find_method_by_id_shared(method_id).cloned()
     }
 
-    fn arg_diagnostics(&self, _file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>> {
+    /// The first declaration of `name` in the module — what a bare call
+    /// resolves to.
+    fn interface_method_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::MethodDecl>> {
+        self.module_interface(module_id)
+            .find_method_shared(intern::NormName::intern(name.as_str()))
+            .cloned()
+    }
+
+    /// The first module variable named `name`.
+    fn interface_variable_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::VariableDecl>> {
+        self.module_interface(module_id)
+            .find_variable_shared(intern::NormName::intern(name.as_str()))
+            .cloned()
+    }
+
+    /// The method's syntax detached from the file (offsets start at zero).
+    fn method_syntax(&self, _method_id: MethodId) -> Option<SyntaxNode> {
+        None
+    }
+
+    fn infer_owner(&self, _file_id: FileId, owner: DefWithBodyId) -> hir::InferOwnerResult {
+        match owner {
+            DefWithBodyId::Method(_) => {
+                hir::InferOwnerResult::Method(Arc::new(hir::BodyInferenceResult::empty_for(owner)))
+            }
+            DefWithBodyId::ModuleCode => hir::InferOwnerResult::ModuleCode(Arc::new(
+                hir::ModuleCodeInferenceResult::default(),
+            )),
+        }
+    }
+
+    fn arg_diagnostics_of(
+        &self,
+        _file_id: FileId,
+        _owner: DefWithBodyId,
+    ) -> Arc<Vec<InferenceDiagnostic>> {
         Arc::new(Vec::new())
+    }
+
+    /// Local ids of the module's recursive methods; position-free.
+    fn module_recursive_methods(
+        &self,
+        _file_id: FileId,
+    ) -> Arc<rustc_hash::FxHashSet<hir::MethodKey>> {
+        Arc::new(rustc_hash::FxHashSet::default())
+    }
+
+    fn module_level_cfg(&self, _file_id: FileId) -> Arc<hir::cfg::ControlFlowGraph> {
+        Arc::new(hir::cfg::ControlFlowGraph::new())
+    }
+
+    fn module_code_reaching_definitions(
+        &self,
+        _file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        None
+    }
+
+    fn infer(&self, _file_id: FileId) -> Arc<InferenceResult> {
+        Arc::new(InferenceResult::default())
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<ModuleMetadata>;
@@ -295,22 +367,16 @@ pub trait AnalysisProvider {
 
     fn variable_docs(&self, variable_id: VariableId) -> Option<Arc<VariableDocs>>;
 
-    fn module_cfgs(&self, file_id: FileId) -> Arc<hir::cfg::ModuleCfgs>;
+    fn method_cfg(&self, _method_id: MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
+        Arc::new(hir::cfg::ControlFlowGraph::new())
+    }
 
-    fn module_liveness_analysis(
+    fn method_path_terminates(
         &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::liveness::ModuleLiveness>;
-
-    fn module_reaching_definitions(
-        &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
-
-    fn module_path_terminates(
-        &self,
-        file_id: FileId,
-    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
+        _method_id: MethodId,
+    ) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
+        None
+    }
 
     fn reaching_definitions(
         &self,
@@ -318,11 +384,6 @@ pub trait AnalysisProvider {
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
     fn file_external_refs(&self, module_id: ModuleId) -> Arc<Vec<hir::ExternalRef>>;
-
-    fn module_level_liveness_analysis(
-        &self,
-        module_id: ModuleId,
-    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
 
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
 
@@ -346,8 +407,20 @@ pub trait AnalysisProvider {
         Arc::new(EffectSummary::EMPTY)
     }
 
-    fn module_security_state(&self, _file_id: FileId) -> Arc<ModuleSecurityState> {
-        Arc::new(ModuleSecurityState::default())
+    fn method_security_state(
+        &self,
+        _method: MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        None
+    }
+
+    fn module_code_security_state(
+        &self,
+        _file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        None
     }
 
     fn method_hir_metrics(&self, _method: MethodId) -> Arc<hir::metrics::HirMethodMetrics> {

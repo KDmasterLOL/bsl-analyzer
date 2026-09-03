@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -17,7 +19,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &BodyContext) -> Option<Diagnostic<LocalRange>> {
     let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::SelfAssign,
         "Присваивание переменной самой себе",
@@ -28,11 +30,11 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
     // A self-assignment is a no-op, so the fix removes its whole line — but only when the
     // line holds nothing else (no trailing comment or statement to preserve). Deletion is
     // opt-in, never an unattended `source.fixAll` edit.
-    let text = ctx.file_text();
-    if let Some(line) = self_assign_line_to_delete(&text, range) {
+    let text = ctx.root().text().to_string();
+    if let Some(line) = self_assign_line_to_delete(&text, range.in_root()) {
         diagnostic.fixes = vec![Fix::manual(
             "Удалить самоприсваивание",
-            vec![TextEdit { range: line, new_text: String::new() }],
+            vec![TextEdit { range: LocalRange::of_detached_node(line), new_text: String::new() }],
         )];
     }
 

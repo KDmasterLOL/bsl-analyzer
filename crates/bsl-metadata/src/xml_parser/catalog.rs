@@ -64,11 +64,36 @@ pub fn parse_report_xml(xml: &str) -> Result<MetadataObject> {
     parse_metadata_object_xml(xml, MdoType::Report)
 }
 
+pub fn parse_external_data_processor_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_external_data_processor_xml").entered();
+    parse_metadata_object_xml(xml, MdoType::ExternalDataProcessor)
+}
+
+pub fn parse_external_report_xml(xml: &str) -> Result<MetadataObject> {
+    let _span = tracing::debug_span!("parse_external_report_xml").entered();
+    parse_metadata_object_xml(xml, MdoType::ExternalReport)
+}
+
 fn parse_metadata_object_xml(xml: &str, mdo_type: MdoType) -> Result<MetadataObject> {
     let doc = parse_xml(xml)?;
 
     let mdo_node = find_mdo_element(&doc)
         .ok_or_else(|| MetadataError::InvalidFormat("No MDO element found".to_string()))?;
+
+    // Inside a configuration dump the collection directory vouches for the kind,
+    // so the element is not checked. An export root has no such directory: the
+    // element is the only thing that says what the export is, and reading an
+    // internal object's export — or the other external kind — as this kind
+    // would mint an object of a type the file never declared.
+    if let Some(kind) = crate::external_object::ExternalObjectKind::of_mdo_type(mdo_type) {
+        let element = mdo_node.tag_name().name();
+        if element != kind.element_name() {
+            return Err(MetadataError::InvalidFormat(format!(
+                "expected <{}>, found <{element}>",
+                kind.element_name()
+            )));
+        }
+    }
 
     let props_node = find_child(mdo_node, "Properties")
         .ok_or_else(|| MetadataError::InvalidFormat("No Properties element found".to_string()))?;

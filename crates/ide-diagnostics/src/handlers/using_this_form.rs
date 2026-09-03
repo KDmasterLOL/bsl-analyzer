@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
-use ide_db::TextRange;
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -17,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &BodyContext) -> Option<Diagnostic<LocalRange>> {
     let mut diagnostic = crate::simple_hir_diagnostic(
         DiagnosticCode::UsingThisForm,
         "Вместо устаревшего свойства \"ЭтаФорма\" следует использовать \"ЭтотОбъект\"",
@@ -28,8 +29,8 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
     // Keep the replacement in the same language as the source: `ЭтаФорма`/`ThisForm`
     // is written either in Russian or English, and the canonical replacement must
     // match so it does not inject Cyrillic into an English-styled module.
-    let text = ctx.file_text();
-    if let Some(slice) = text.get(range.start().into()..range.end().into()) {
+    {
+        let slice = ctx.text_of(range);
         let replacement = if slice.is_ascii() { "ThisObject" } else { "ЭтотОбъект" };
         diagnostic.fixes = vec![Fix::safe(
             format!("Заменить на \"{}\"", replacement),

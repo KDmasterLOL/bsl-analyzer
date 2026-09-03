@@ -7,7 +7,7 @@ use syntax::{Parse, SyntaxNode, TextRange};
 use vfs::{FileId, VfsPath};
 
 use crate::input::{content_revision, FileIdInput, SourceRootInput};
-use crate::SourceDatabase;
+use crate::{ParseOutcome, ParseSnapshot, SourceDatabase};
 
 /// Read a file's text from disk verbatim — no BOM stripping, no normalization.
 ///
@@ -37,30 +37,17 @@ pub fn decode_disk_bytes(bytes: &[u8]) -> Option<String> {
 /// Heap-size estimators for Salsa's `memory_usage` introspection.
 pub(crate) mod heap_estimate {
     use std::collections::HashMap;
-    use std::mem::{size_of, size_of_val};
+    use std::mem::size_of_val;
     use std::sync::Arc;
-    use syntax::{NodeOrToken, Parse, SyntaxNode, TextRange};
+    use syntax::{Parse, SyntaxNode, TextRange};
 
-    /// Rough live bytes of a parse result's rowan green tree, walked once.
-    ///
-    /// Green nodes expose no byte API, so we sum each token's owned text plus a
-    /// small fixed per-element bookkeeping cost (child-slot + kind/len). Green
-    /// nodes are interned and shared across identical subtrees, so this
+    /// Rough live bytes of a parse result's rowan green tree: each token's owned
+    /// text plus a small fixed per-element bookkeeping cost (child-slot +
+    /// kind/len), counted by the builder while the tree is built. Green nodes
+    /// are interned and shared across identical subtrees, so this
     /// **over-counts** deduplicated structure — an acceptable rough upper bound.
     pub(crate) fn parse_heap(parse: &Parse<SyntaxNode>) -> usize {
-        // Two `usize`s per element approximate rowan's child-slot pointer plus
-        // its packed kind/text-len header.
-        const PER_ELEMENT: usize = size_of::<usize>() * 2;
-
-        let mut bytes = 0usize;
-        for element in parse.syntax_node().descendants_with_tokens() {
-            bytes += PER_ELEMENT;
-            if let NodeOrToken::Token(token) = element {
-                bytes += token.text().len();
-            }
-        }
-        bytes += size_of_val(parse.errors());
-        bytes
+        parse.heap_bytes() + size_of_val(parse.errors())
     }
 
     /// Heap of a memoised file text: the `Arc<str>` payload bytes.
@@ -106,7 +93,70 @@ pub fn parse_query<'db>(db: &'db dyn SourceDatabase, input: FileIdInput<'db>) ->
     let _span = tracing::info_span!("parse").entered();
 
     let text = file_text_query(db, input);
-    parser::parse_with_shared_cache(text)
+    let file_id = input.file_id(db);
+    // Снимок есть только у оверлея (открытый документ, фикстура). Проверка
+    // идёт мимо salsa: она решает, как получить значение, а не какое.
+    let overlay = db.try_file_text_input(file_id).is_some();
+    let parse = match overlay.then(|| db.parse_snapshot(file_id)).flatten() {
+        Some(snapshot) => reparse_or_full(db, &snapshot, text),
+        None => {
+            db.count_parse(ParseOutcome::Full);
+            parser::parse_with_shared_cache(text)
+        }
+    };
+    if overlay {
+        db.store_parse_snapshot(
+            file_id,
+            ParseSnapshot { text: text.clone(), parse: parse.clone() },
+        );
+    }
+    parse
+}
+
+/// Разбор нового текста по снимку предыдущего: фрагмент метода, если правка
+/// целиком внутри одного метода, иначе файл целиком. Значение от выбора не
+/// зависит — за это отвечают гарды переразбора; под `BSL_REPARSE_VERIFY=1`
+/// вклейка сверяется с полным разбором на месте, и расхождение — ошибка в
+/// журнале плюс счётчик, а в значение уходит полный разбор.
+fn reparse_or_full(
+    db: &dyn SourceDatabase,
+    snapshot: &ParseSnapshot,
+    text: &Arc<str>,
+) -> Parse<SyntaxNode> {
+    let Some(edit) = parser::reparse::edit_between(&snapshot.text, text) else {
+        // Тот же текст под новой ревизией (переоткрытие): дерево уже есть.
+        db.count_parse(ParseOutcome::Full);
+        return snapshot.parse.clone();
+    };
+    match parser::reparse::reparse_method(&snapshot.parse, &snapshot.text, text, edit) {
+        Ok(spliced) => {
+            if reparse_verify_enabled() {
+                let full = parser::parse_with_shared_cache(text);
+                if spliced != full {
+                    tracing::error!(
+                        old_len = snapshot.text.len(),
+                        new_len = text.len(),
+                        ?edit,
+                        "reparse: вклейка разошлась с полным разбором"
+                    );
+                    db.count_parse(ParseOutcome::Mismatched);
+                    return full;
+                }
+            }
+            db.count_parse(ParseOutcome::Spliced);
+            spliced
+        }
+        Err(refusal) => {
+            tracing::debug!(?refusal, "reparse: фрагмент не вклеен, файл разобран целиком");
+            db.count_parse(ParseOutcome::Refused(refusal));
+            parser::parse_with_shared_cache(text)
+        }
+    }
+}
+
+fn reparse_verify_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("BSL_REPARSE_VERIFY").is_some_and(|v| v == "1"))
 }
 
 /// Switch [`parse_query`]'s LRU cap between the interactive profile and a small

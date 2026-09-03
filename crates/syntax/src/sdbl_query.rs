@@ -15,7 +15,42 @@ pub struct SdblQueryInfo {
     pub error_ranges_in_bsl: Vec<(TextRange, ParseError)>,
 }
 
+/// The parsed query of one string literal without the literal's position —
+/// what a lowered body stores, so that the body stays equal when the literal
+/// moves. [`SdblQueryInfo`] is the same payload placed in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdblQuery {
+    pub query_text: String,
+
+    pub query_ast: Option<Parse<SyntaxNode>>,
+
+    pub quote_corrections: Vec<(usize, usize)>,
+
+    /// Parse errors in the coordinates of the literal text.
+    pub error_ranges_in_bsl: Vec<(TextRange, ParseError)>,
+}
+
+impl SdblQuery {
+    pub fn is_valid(&self) -> bool {
+        self.query_ast.as_ref().map(|p| !p.has_errors()).unwrap_or(false)
+    }
+
+    pub fn syntax_node(&self) -> Option<SyntaxNode> {
+        self.query_ast.as_ref().map(|p| p.syntax_node())
+    }
+}
+
 impl SdblQueryInfo {
+    pub fn from_query(bsl_literal_range: TextRange, query: &SdblQuery) -> Self {
+        Self {
+            bsl_literal_range,
+            query_text: query.query_text.clone(),
+            query_ast: query.query_ast.clone(),
+            quote_corrections: query.quote_corrections.clone(),
+            error_ranges_in_bsl: query.error_ranges_in_bsl.clone(),
+        }
+    }
+
     pub fn new(
         bsl_literal_range: TextRange,
         query_text: String,

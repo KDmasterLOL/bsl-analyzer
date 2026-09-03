@@ -45,6 +45,10 @@ pub(crate) struct WorkspaceSweep {
     /// Identity of the baseline files the classification read, folded into the
     /// result id so a baseline edit alone changes it.
     pub baseline_epoch: String,
+    /// The project analyzes external objects with no base to resolve their calls
+    /// against, so every call into the owner is reported as unresolved. Recorded
+    /// on the sweep so its envelope can say so without a separate status call.
+    pub lacks_owning_configuration: bool,
 }
 
 impl WorkspaceSweep {
@@ -55,6 +59,7 @@ impl WorkspaceSweep {
         files_unread: usize,
         baseline: ide::diagnostics_baseline::DiagnosticsBaselineSummary,
         baseline_epoch: String,
+        lacks_owning_configuration: bool,
     ) -> Self {
         Self {
             aggregates: Vec::new(),
@@ -68,6 +73,7 @@ impl WorkspaceSweep {
             cancelled: true,
             baseline,
             baseline_epoch,
+            lacks_owning_configuration,
         }
     }
 }

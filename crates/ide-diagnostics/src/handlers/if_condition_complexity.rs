@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::BodySourceMap;
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -18,58 +20,29 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_IF_CONDITION_COMPLEXITY: i64 = 3;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::IfConditionComplexity;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let max_complexity =
         ctx.config_int(code, "maxIfConditionComplexity", DEFAULT_MAX_IF_CONDITION_COMPLEXITY)
             as u32;
-
-    let module_metrics = ctx.module_hir_metrics();
-    if module_metrics.is_empty() {
-        return Vec::new();
+    let metrics = ctx.hir_metrics();
+    if metrics.if_conditions.is_empty() {
+        return;
     }
-    let module_bodies = ctx.module_bodies();
-
-    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
-    local_ids.sort_unstable();
-
-    let mut out = Vec::new();
-    for local_id in local_ids {
-        let Some(metrics) = module_metrics.get(local_id) else { continue };
-        if metrics.if_conditions.is_empty() {
-            continue;
-        }
-        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        emit_conditions(ctx, code, &metrics, source_map, max_complexity, &mut out);
-    }
-    if let Some(metrics) = module_metrics.module_code() {
-        if !metrics.if_conditions.is_empty() {
-            if let Some(lower_result) = module_bodies.module_code_result() {
-                emit_conditions(
-                    ctx,
-                    code,
-                    &metrics,
-                    &lower_result.source_map,
-                    max_complexity,
-                    &mut out,
-                );
-            }
-        }
-    }
-    out
+    emit_conditions(ctx, code, &metrics, ctx.source_map(), max_complexity, acc);
 }
 
 fn emit_conditions(
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
     code: DiagnosticCode,
     metrics: &hir::metrics::HirMethodMetrics,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     max_complexity: u32,
-    out: &mut Vec<Diagnostic>,
+    out: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for cond in metrics.if_conditions.iter() {
         let complexity = cond.logical_op_count + 1;

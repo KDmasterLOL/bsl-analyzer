@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use syntax::{SyntaxKind, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -33,7 +35,7 @@ fn replace_yo(text: &str) -> String {
 }
 
 #[inline]
-pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::YoLetterUsage;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -48,7 +50,7 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
         return;
     }
 
-    let range = token.text_range();
+    let range = LocalRange::of_detached_node(token.text_range());
     acc.push(Diagnostic {
         code,
         message: "В текстах модулей не допускается использовать букву \"Ё\".".into(),
@@ -63,20 +65,6 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
             vec![TextEdit { range, new_text: replace_yo(token.text()) }],
         )],
     });
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            check_token(&token, &mut diagnostics, ctx);
-        }
-    }
-
-    diagnostics
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{BindingId, ExprId, IdConversion, StmtId};
-use ide_db::TextRange;
 use stdx::case::{eq_ignore_case, CaseExt};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -22,29 +23,23 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(
     param_id: BindingId,
     _stmt_id: StmtId,
-    stmt_range: TextRange,
-    ident_range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    stmt_range: LocalRange,
+    ident_range: LocalRange,
+    ctx: &BodyContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::RewriteMethodParameter;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let module_bodies = ctx.module_bodies();
-
-    let (local_id, body, source_map) = module_bodies
-        .method_bodies()
-        .find(|(_local_id, _body, source_map)| source_map.stmt_at_range(stmt_range).is_some())?;
-
-    let stmt_id = source_map.stmt_at_range(stmt_range)?;
+    let body = ctx.body();
+    let stmt_id = ctx.source_map().stmt_at_range(stmt_range)?;
 
     let param = body.binding(param_id);
     let param_name = param.name.as_str();
 
-    let module_reaching_defs = ctx.module_reaching_defs();
-    let reaching_defs_result = module_reaching_defs.get(local_id)?;
+    let reaching_defs_result = ctx.reaching_definitions()?;
 
     let reaching_defs_set = reaching_defs_result.defs_before_stmt(stmt_id)?;
 

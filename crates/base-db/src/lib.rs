@@ -1,4 +1,5 @@
 use std::hash::BuildHasherDefault;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -74,6 +75,62 @@ pub trait SourceDatabase: salsa::Database {
     fn set_source_root(&mut self, source_root_id: SourceRootId, source_root: SourceRoot);
 
     fn resolve_vfs_path(&self, source_root_id: SourceRootId, vfs_path: &VfsPath) -> Option<FileId>;
+
+    /// Предыдущий разбор файла, если он открыт. См. [`Files::parse_snapshot`].
+    fn parse_snapshot(&self, file_id: FileId) -> Option<ParseSnapshot>;
+
+    /// Запомнить разбор открытого файла как подсказку следующему. См.
+    /// [`Files::store_parse_snapshot`].
+    fn store_parse_snapshot(&self, file_id: FileId, snapshot: ParseSnapshot);
+
+    /// Учесть исход одного исполнения `parse_query`.
+    fn count_parse(&self, outcome: ParseOutcome);
+
+    /// Счётчики исходов `parse_query` этой базы. См. [`ParseStats`].
+    fn parse_stats(&self) -> ParseStats;
+}
+
+/// Предыдущий разбор открытого файла и текст, из которого он получен —
+/// подсказка `parse_query`, чтобы правку внутри метода разобрать фрагментом.
+/// На значение запроса не влияет, только на цену его получения.
+#[derive(Debug, Clone)]
+pub struct ParseSnapshot {
+    pub text: Arc<str>,
+    pub parse: syntax::Parse<syntax::SyntaxNode>,
+}
+
+/// Чем кончилось одно исполнение `parse_query`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParseOutcome {
+    /// Файл разобран целиком: снимка не было или тексты равны.
+    Full,
+    /// Фрагмент метода разобран и вклеен в старое дерево.
+    Spliced,
+    /// Снимок был, но гард отверг вклейку — файл разобран целиком.
+    Refused(parser::reparse::Refusal),
+    /// Проверка под `BSL_REPARSE_VERIFY` нашла расхождение вклейки с полным
+    /// разбором; в значение ушёл полный разбор.
+    Mismatched,
+}
+
+/// Счётчики исходов `parse_query` — на базу, а не на процесс: тесты одного
+/// бинаря идут параллельно и делить счётчик не могут.
+#[derive(Debug, Default)]
+struct ParseCounters {
+    full: AtomicU64,
+    spliced: AtomicU64,
+    mismatched: AtomicU64,
+    refused: [AtomicU64; parser::reparse::Refusal::ALL.len()],
+}
+
+/// Снимок [`ParseCounters`]; `refused` индексируется
+/// [`Refusal::index`](parser::reparse::Refusal::index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ParseStats {
+    pub full: u64,
+    pub spliced: u64,
+    pub mismatched: u64,
+    pub refused: [u64; parser::reparse::Refusal::ALL.len()],
 }
 
 #[salsa::db]
@@ -99,6 +156,8 @@ pub struct Files {
     file_revisions: Arc<DashMap<FileId, FileRevisionInput, BuildHasherDefault<FxHasher>>>,
     source_roots: Arc<DashMap<SourceRootId, SourceRootInput, BuildHasherDefault<FxHasher>>>,
     file_source_roots: Arc<DashMap<FileId, FileSourceRootInput, BuildHasherDefault<FxHasher>>>,
+    parse_snapshots: Arc<DashMap<FileId, ParseSnapshot, BuildHasherDefault<FxHasher>>>,
+    parse_counters: Arc<ParseCounters>,
 }
 
 impl Files {
@@ -115,6 +174,42 @@ impl Files {
 
     pub fn try_file_text(&self, file_id: FileId) -> Option<FileTextInput> {
         self.file_texts.get(&file_id).map(|entry| *entry.value())
+    }
+
+    /// Предыдущий разбор файла. Есть только у файла с оверлеем: снимок
+    /// пришпиливает дерево и текст, и для каждого разобранного файла с диска
+    /// это была бы вторая копия рабочего множества.
+    pub fn parse_snapshot(&self, file_id: FileId) -> Option<ParseSnapshot> {
+        self.parse_snapshots.get(&file_id).map(|entry| entry.value().clone())
+    }
+
+    pub fn store_parse_snapshot(&self, file_id: FileId, snapshot: ParseSnapshot) {
+        self.parse_snapshots.insert(file_id, snapshot);
+    }
+
+    pub fn count_parse(&self, outcome: ParseOutcome) {
+        let counters = &self.parse_counters;
+        let cell = match outcome {
+            ParseOutcome::Full => &counters.full,
+            ParseOutcome::Spliced => &counters.spliced,
+            ParseOutcome::Mismatched => &counters.mismatched,
+            ParseOutcome::Refused(refusal) => &counters.refused[refusal.index()],
+        };
+        cell.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn parse_stats(&self) -> ParseStats {
+        let counters = &self.parse_counters;
+        let mut refused = [0u64; parser::reparse::Refusal::ALL.len()];
+        for (slot, cell) in refused.iter_mut().zip(&counters.refused) {
+            *slot = cell.load(Ordering::Relaxed);
+        }
+        ParseStats {
+            full: counters.full.load(Ordering::Relaxed),
+            spliced: counters.spliced.load(Ordering::Relaxed),
+            mismatched: counters.mismatched.load(Ordering::Relaxed),
+            refused,
+        }
     }
 
     pub fn set_file_text(&self, db: &mut dyn SourceDatabase, file_id: FileId, text: &str) {
@@ -204,6 +299,7 @@ impl Files {
         revision: u64,
     ) {
         self.file_texts.remove(&file_id);
+        self.parse_snapshots.remove(&file_id);
         let durability = self.durability_for_file(db, file_id).unwrap_or(salsa::Durability::LOW);
         self.set_file_revision_with_durability(db, file_id, revision, durability, false);
     }
@@ -241,7 +337,13 @@ impl Files {
         match existing {
             Some(input) => {
                 input.set_revision(db).with_durability(durability).to(revision);
-                input.set_unreadable(db).with_durability(durability).to(unreadable);
+                // An input write is a change to salsa whatever the value, and a
+                // memo that read the flag directly — cross-module resolution asks
+                // it for every candidate body — would be re-run by every edit of
+                // that file. Write it only when the answer actually flips.
+                if input.unreadable(db) != unreadable {
+                    input.set_unreadable(db).with_durability(durability).to(unreadable);
+                }
             }
             None => {
                 let input =
@@ -358,6 +460,11 @@ impl Files {
             .unwrap_or(salsa::Durability::LOW);
         let existing = self.file_source_roots.get(&file_id).map(|e| *e.value());
         match existing {
+            // The host re-registers a file's root on every change to it, and an
+            // input write is a change to salsa whatever the value: every memo
+            // that read the file's root directly — path resolution under
+            // inference does — would re-run per edit. Write only what changed.
+            Some(input) if input.source_root_id(db) == source_root_id => {}
             Some(input) => {
                 input.set_source_root_id(db).with_durability(durability).to(source_root_id);
             }
@@ -450,6 +557,22 @@ mod tests {
 
         fn file_is_unread(&self, file_id: FileId) -> bool {
             self.files.file_is_unread(self, file_id)
+        }
+
+        fn parse_snapshot(&self, file_id: FileId) -> Option<ParseSnapshot> {
+            self.files.parse_snapshot(file_id)
+        }
+
+        fn store_parse_snapshot(&self, file_id: FileId, snapshot: ParseSnapshot) {
+            self.files.store_parse_snapshot(file_id, snapshot);
+        }
+
+        fn count_parse(&self, outcome: ParseOutcome) {
+            self.files.count_parse(outcome);
+        }
+
+        fn parse_stats(&self) -> ParseStats {
+            self.files.parse_stats()
         }
 
         fn source_root_input(&self, source_root_id: SourceRootId) -> SourceRootInput {
@@ -625,6 +748,89 @@ mod tests {
             2,
             "another file's mark is not this memo's business"
         );
+    }
+
+    /// A text edit re-registers the file, and re-registration carries the
+    /// unreadable flag. Writing the flag when it did not change would re-run
+    /// every memo that read it — cross-module resolution reads it for each
+    /// candidate body — on every edit of that file.
+    // Its own probe and counter: the tests run in parallel, and a counter shared
+    // with `a_memo_reading_unreadability_is_recomputed_only_for_its_own_file`
+    // would count that test's runs here.
+    static EDIT_PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[salsa::tracked(returns(copy))]
+    fn edit_probe_query<'db>(db: &'db dyn SourceDatabase, file_id_input: FileIdInput<'db>) -> bool {
+        EDIT_PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        db.file_is_unread(file_id_input.file_id(db))
+    }
+
+    #[test]
+    fn a_text_edit_does_not_touch_the_unreadable_mark() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+        let mut file_set = FileSet::new();
+        file_set.insert(file_id, VfsPath::new("/Edited.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+        db.set_file_source_root(file_id, SourceRootId(0));
+        db.set_file_text(file_id, "Процедура П() КонецПроцедуры");
+
+        let probe = |db: &TestDatabase| edit_probe_query(db, FileIdInput::new(db, file_id));
+        EDIT_PROBE_RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert!(!probe(&db));
+
+        db.set_file_text(file_id, "Процедура П() Х = 1; КонецПроцедуры");
+        assert!(!probe(&db));
+        assert_eq!(
+            EDIT_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "an edit that leaves the file readable must not re-run the reader"
+        );
+
+        // Positive control: the mark itself still moves the memo.
+        db.set_file_unreadable(file_id);
+        assert!(probe(&db));
+        assert_eq!(EDIT_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    static ROOT_PROBE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    #[salsa::tracked(returns(copy))]
+    fn root_probe_query<'db>(db: &'db dyn SourceDatabase, file_id_input: FileIdInput<'db>) -> u32 {
+        ROOT_PROBE_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        db.file_source_root_input(file_id_input.file_id(db)).source_root_id(db).0
+    }
+
+    /// The host re-registers a changed file's root on every change. Path
+    /// resolution under inference reads the root input directly, so a write
+    /// that changes nothing would re-run inference for every method that
+    /// resolved a path.
+    #[test]
+    fn re_registering_the_same_source_root_is_not_a_write() {
+        let mut db = TestDatabase::default();
+        let file_id = FileId(0);
+        let mut set0 = FileSet::new();
+        set0.insert(file_id, VfsPath::new("/Same.bsl"));
+        db.set_source_root(SourceRootId(0), SourceRoot::new_local(set0));
+        db.set_source_root(SourceRootId(1), SourceRoot::new_local(FileSet::new()));
+        db.set_file_source_root(file_id, SourceRootId(0));
+
+        let probe = |db: &TestDatabase| root_probe_query(db, FileIdInput::new(db, file_id));
+        ROOT_PROBE_RUNS.store(0, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(probe(&db), 0);
+
+        db.set_file_source_root(file_id, SourceRootId(0));
+        assert_eq!(probe(&db), 0);
+        assert_eq!(
+            ROOT_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the same root again must leave the reader's memo standing"
+        );
+
+        // Positive control: a real move re-runs the reader.
+        db.set_file_source_root(file_id, SourceRootId(1));
+        assert_eq!(probe(&db), 1);
+        assert_eq!(ROOT_PROBE_RUNS.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

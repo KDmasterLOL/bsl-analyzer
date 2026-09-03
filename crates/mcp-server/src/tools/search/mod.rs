@@ -1,6 +1,9 @@
 //! Search tool execution paths and stable public entrypoints.
 
 mod acquire;
+mod call;
+#[cfg(test)]
+mod cancel_tests;
 mod docs;
 mod gating;
 mod hybrid;
@@ -11,10 +14,14 @@ mod status;
 #[cfg(test)]
 mod test_support;
 mod types;
-pub(crate) use types::search_output_schema;
+mod wait;
+pub(crate) use acquire::try_acquire_engine;
+pub(crate) use call::search_call;
+pub(crate) use types::{search_output_schema, AcquireFailure};
+pub(crate) use wait::{await_reply, Withdrawn, REPLY_POLL};
 
 pub use docs::{find_docs, search_docs};
 #[allow(unused_imports)]
 pub use hybrid::{hybrid_code, hybrid_code_fenced};
-pub(crate) use status::baseline_warming_not_ready;
 pub use status::search_status;
+pub(crate) use status::{baseline_warming_not_ready, docs_not_ready, search_not_ready};

@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use ide_db::TextRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
@@ -26,20 +27,19 @@ const MESSAGE: &str = "Инструкция препроцессора разо�
 /// однозначна. Грамматика о переводе строки внутри инструкции не ветвится
 /// вовсе, и норма на это счёт объявлена в
 /// `docs/architecture/adr/ADR-02-line-sensitivity.md`.
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let _span = tracing::debug_span!("MultilinePreprocessorInstruction::check").entered();
 
     let code = DiagnosticCode::MultilinePreprocessorInstruction;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let root = ctx.parse().syntax_node();
     let line_index = ctx.line_index();
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
+    for node in ctx.nodes() {
         let header = match node.kind() {
             SyntaxKind::PRE_IF_DIR | SyntaxKind::PRE_ELSIF_CLAUSE => instruction_header(&node),
             SyntaxKind::PRE_REGION_DIR => region_header(&node),
@@ -58,7 +58,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             code,
             message: MESSAGE.to_string(),
             severity: ctx.severity(code),
-            range: header,
+            range: LocalRange::of_detached_node(header),
             tags: ctx.tags(code),
             fixes: vec![],
         });
@@ -69,7 +69,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "MultilinePreprocessorInstruction diagnostics found"
     );
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 /// Диапазон самой инструкции — от её слова до закрывающего `Тогда`.
@@ -152,8 +152,8 @@ fn region_header(node: &SyntaxNode) -> Option<TextRange> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use super::check_body;
+    use crate::test_utils::{check_body_diagnostic, format_diags};
     use expect_test::expect;
 
     /// Контроль: то же самое в одну строку молчит. Без него утверждения ниже
@@ -161,14 +161,14 @@ mod tests {
     #[test]
     fn an_instruction_on_one_line_is_silent() {
         let code = "#Если Сервер И Клиент Тогда\n#ИначеЕсли Клиент Тогда\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn a_condition_carried_to_the_next_line_is_reported() {
         let code = "#Если\nСервер Тогда\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:13
               message: Инструкция препроцессора разорвана переводом строки
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn an_operand_carried_to_the_next_line_is_reported() {
         let code = "#Если Сервер\nИ Клиент Тогда\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:15
               message: Инструкция препроцессора разорвана переводом строки
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn a_then_carried_to_the_next_line_is_reported() {
         let code = "#Если Сервер\nТогда\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:6
               message: Инструкция препроцессора разорвана переводом строки
@@ -201,7 +201,7 @@ mod tests {
     #[test]
     fn an_elsif_carried_to_the_next_line_is_reported() {
         let code = "#Если Сервер Тогда\n#ИначеЕсли\nКлиент Тогда\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 2:1..3:13
               message: Инструкция препроцессора разорвана переводом строки
@@ -214,14 +214,14 @@ mod tests {
     #[test]
     fn line_breaks_in_the_body_are_not_a_break_of_the_instruction() {
         let code = "#Если Сервер Тогда\n\tА = 1;\n\tБ = 2;\n#КонецЕсли\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]
     fn a_region_name_carried_to_the_next_line_is_reported() {
         let code = "#Область\nСлужебные\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:10
               message: Инструкция препроцессора разорвана переводом строки
@@ -232,7 +232,7 @@ mod tests {
     #[test]
     fn a_region_name_on_its_own_line_is_silent() {
         let code = "#Область Служебные\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn a_statement_after_a_nameless_region_is_not_a_carried_name() {
         let code = "#Область\nА = 1;\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn a_semicolon_of_the_next_statement_does_not_belong_to_the_carried_name() {
         let code = "#Область\nСлужебные\nА = 1;\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:10
               message: Инструкция препроцессора разорвана переводом строки
@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn the_same_holds_inside_a_procedure() {
         let code = "Процедура П()\n#Область\nСлужебные\nМетод();\n#КонецОбласти\nКонецПроцедуры\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 2:1..3:10
               message: Инструкция препроцессора разорвана переводом строки
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn a_parenless_call_after_the_carried_name_does_not_silence_it() {
         let code = "#Область\nСлужебные\nМетод;\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MultilinePreprocessorInstruction @ 1:1..2:10
               message: Инструкция препроцессора разорвана переводом строки
@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn an_unterminated_statement_after_a_nameless_region_is_not_a_carried_name() {
         let code = "#Область\nА = 1\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn a_terminated_word_after_a_nameless_region_is_not_a_carried_name() {
         let code = "#Область\nМетод;\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn a_stray_word_after_a_named_region_is_not_a_carried_name() {
         let code = "#Область Имя\nСлужебные\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn a_region_with_no_name_at_all_is_silent() {
         let code = "#Область\n#КонецОбласти\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

@@ -1,7 +1,10 @@
-use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{
+    handlers, AnalysisContext, BodyContext, Diagnostic, DiagnosticCode, DiagnosticsContext,
+};
 use bsl_platform::security::Category as SecurityCategory;
-use hir::{BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, RedundantAccessKind};
-use ide_db::TextRange;
+use hir::{
+    BodySourceMap, DefWithBodyId, ExprId, InferenceDiagnostic, LocalRange, RedundantAccessKind,
+};
 
 pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::UnresolvedName,
@@ -21,68 +24,80 @@ pub(crate) const INFERENCE_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::FileSystemAccess,
 ];
 
+/// The body's own inference diagnostics, in the body's coordinates.
+pub fn collect_body_inference_diagnostics(
+    ctx: &BodyContext,
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+) {
+    if !ctx.config.any_enabled(INFERENCE_DIAGNOSTICS) {
+        return;
+    }
+    let infer = ctx.infer();
+    dispatch_local(ctx, ctx.source_map(), infer.diagnostics(), acc);
+}
+
+pub fn collect_body_arg_diagnostics(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
+    if !ctx.config.any_enabled(ARG_DIAGNOSTICS) {
+        return;
+    }
+    let arg_diags = ctx.arg_diagnostics();
+    dispatch_local(ctx, ctx.source_map(), &arg_diags, acc);
+}
+
+const ARG_DIAGNOSTICS: &[DiagnosticCode] = &[
+    DiagnosticCode::MismatchedArgCount,
+    DiagnosticCode::TypeMismatch,
+    DiagnosticCode::TypeMismatchByDocComment,
+];
+
+/// The base-aware passes of the extension merge re-infer a whole module
+/// through a weaving or effective provider; their diagnostics come as a file
+/// fold and are placed body by body through the fold's own source maps.
 pub fn collect_inference_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     if !ctx.config.any_enabled(INFERENCE_DIAGNOSTICS) {
         return Vec::new();
     }
-
     let infer = ctx.infer();
     if infer.diagnostics.is_empty() {
         return Vec::new();
     }
-
-    dispatch_pairs(ctx, &infer.diagnostics)
-}
-
-pub fn collect_arg_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    if !ctx.config.any_enabled(&[
-        DiagnosticCode::MismatchedArgCount,
-        DiagnosticCode::TypeMismatch,
-        DiagnosticCode::TypeMismatchByDocComment,
-    ]) {
-        return Vec::new();
-    }
-
-    let arg_diags = ctx.arg_diagnostics();
-    if arg_diags.is_empty() {
-        return Vec::new();
-    }
-
-    dispatch_pairs(ctx, &arg_diags)
-}
-
-fn dispatch_pairs(
-    ctx: &DiagnosticsContext,
-    pairs: &[(DefWithBodyId, InferenceDiagnostic)],
-) -> Vec<Diagnostic> {
     let module_bodies = ctx.module_bodies();
     let mut diagnostics = Vec::new();
-
-    for (owner, diag) in pairs {
-        let source_map = match owner {
-            DefWithBodyId::Method(local_id) => module_bodies.source_map(*local_id),
-            DefWithBodyId::ModuleCode => module_bodies.module_code_result().map(|r| &r.source_map),
+    for (owner, diag) in &infer.diagnostics {
+        let lower = match owner {
+            DefWithBodyId::Method(local_id) => module_bodies.lower_result(*local_id),
+            DefWithBodyId::ModuleCode => module_bodies.module_code_result(),
         };
-        let Some(source_map) = source_map else {
+        let Some(lower) = lower else {
             tracing::debug!(
                 ?owner,
                 ?diag,
-                "dropping inference diagnostic: owning body has no source map"
+                "dropping inference diagnostic: owning body has no lowering"
             );
             continue;
         };
+        let mut local = Vec::new();
+        dispatch_local(ctx, lower.source_map().local(), std::slice::from_ref(diag), &mut local);
+        diagnostics.extend(local.into_iter().map(|d| d.lift(lower.base)));
+    }
+    diagnostics
+}
 
-        let Some(range) = diagnostic_range(source_map, diag) else {
-            tracing::debug!(?owner, ?diag, "dropping inference diagnostic: ExprId has no range");
+fn dispatch_local(
+    ctx: &AnalysisContext,
+    source_map: &BodySourceMap,
+    diags: &[InferenceDiagnostic],
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+) {
+    for diag in diags {
+        let Some(range) = source_map.expr_range(diagnostic_expr(diag)) else {
+            tracing::debug!(?diag, "dropping inference diagnostic: ExprId has no range");
             continue;
         };
-
         if let Some(d) = dispatch_inference_diagnostic(diag, range, ctx) {
-            diagnostics.push(d);
+            acc.push(d);
         }
     }
-
-    diagnostics
 }
 
 fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
@@ -105,15 +120,11 @@ fn diagnostic_expr(diag: &InferenceDiagnostic) -> ExprId {
     }
 }
 
-fn diagnostic_range(source_map: &BodySourceMap, diag: &InferenceDiagnostic) -> Option<TextRange> {
-    source_map.expr_range(diagnostic_expr(diag))
-}
-
 fn dispatch_inference_diagnostic(
     diag: &InferenceDiagnostic,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     match diag {
         InferenceDiagnostic::UnresolvedName { name, .. } => {
             handlers::unresolved_name::from_hir(name, range, ctx)

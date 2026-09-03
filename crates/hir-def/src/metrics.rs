@@ -403,7 +403,7 @@ mod tests {
             .expect("Should have a method");
         let is_function = method_node.kind() == SyntaxKind::FUNCTION_DEF;
         let result = lower_method(&method_node, is_function);
-        result.body
+        std::sync::Arc::unwrap_or_clone(result.body)
     }
 
     #[test]

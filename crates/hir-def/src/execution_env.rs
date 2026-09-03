@@ -370,18 +370,18 @@ pub fn directive_env(
 /// see `SeveralCompilerDirectives`).
 pub fn body_env(
     metadata: &ModuleMetadata,
-    annotations: &[Annotation],
+    annotations: &[AnnotationKind],
     opts: &EnvOptions,
 ) -> EnvFlags {
     let base = module_base_env(metadata, opts);
     if base.is_empty() {
         return EnvFlags::EMPTY;
     }
-    let directive = annotations.iter().map(|a| a.kind).find(is_compilation_directive);
+    let directive = annotations.iter().copied().find(is_compilation_directive);
     // A weaving-only interceptor (`&Вместо("…")` with no directive of its
     // own) inherits the intercepted method's directive, which is unknowable
     // here — so it must not fall into the form-module `&НаСервере` default.
-    if directive.is_none() && annotations.iter().any(|a| !is_compilation_directive(&a.kind)) {
+    if directive.is_none() && annotations.iter().any(|a| !is_compilation_directive(a)) {
         return base;
     }
     base & directive_env(directive, metadata.module_type, opts)
@@ -393,35 +393,25 @@ pub fn module_code_env(metadata: &ModuleMetadata, opts: &EnvOptions) -> EnvFlags
     module_base_env(metadata, opts)
 }
 
-/// [`body_env`] for a method addressed by its item-tree `local_id` (the
-/// index of the method among the module's top-level items).
+/// [`body_env`] for a method of the item tree.
 pub fn method_env(
     item_tree: &crate::item_tree::ItemTree,
-    local_id: u32,
+    key: crate::MethodKey,
     metadata: &ModuleMetadata,
     opts: &EnvOptions,
 ) -> EnvFlags {
-    use crate::item_tree::ModItem;
-    let annotations: &[Annotation] = match item_tree.top_level_items().get(local_id as usize) {
-        Some(ModItem::Procedure(idx)) => &item_tree.procedure(*idx).annotations,
-        Some(ModItem::Function(idx)) => &item_tree.function(*idx).annotations,
-        Some(ModItem::Variable(_)) | None => &[],
-    };
-    body_env(metadata, annotations, opts)
+    let annotations: &[Annotation] = item_tree.method(key).map_or(&[], |m| m.annotations());
+    let kinds: Vec<AnnotationKind> = annotations.iter().map(|a| a.kind).collect();
+    body_env(metadata, &kinds, opts)
 }
 
-/// Full source range of a method addressed by its item-tree `local_id`, for
-/// locating the method inside item-level preprocessor regions.
+/// Full source range of a method of the item tree, for locating it inside
+/// item-level preprocessor regions.
 pub fn method_source_range(
     item_tree: &crate::item_tree::ItemTree,
-    local_id: u32,
+    key: crate::MethodKey,
 ) -> Option<text_size::TextRange> {
-    use crate::item_tree::ModItem;
-    match item_tree.top_level_items().get(local_id as usize)? {
-        ModItem::Procedure(idx) => Some(item_tree.procedure(*idx).source_range),
-        ModItem::Function(idx) => Some(item_tree.function(*idx).source_range),
-        ModItem::Variable(_) => None,
-    }
+    Some(item_tree.method(key)?.source_range())
 }
 
 /// Environment mask claimed by the `#Если` branches enclosing `range`, relative
@@ -518,11 +508,6 @@ fn is_compilation_directive(kind: &AnnotationKind) -> bool {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use text_size::TextRange;
-
-    fn ann(kind: AnnotationKind) -> Annotation {
-        Annotation { kind, range: TextRange::default() }
-    }
 
     fn form_metadata() -> ModuleMetadata {
         ModuleMetadata::unknown(ModuleType::FormModule)
@@ -544,18 +529,15 @@ mod tests {
         let opts = EnvOptions::default();
         let md = form_metadata();
 
-        assert_eq!(body_env(&md, &[ann(AnnotationKind::AtClient)], &opts), CLIENTS);
-        assert_eq!(body_env(&md, &[ann(AnnotationKind::AtServer)], &opts), EnvFlags::SERVER);
+        assert_eq!(body_env(&md, &[AnnotationKind::AtClient], &opts), CLIENTS);
+        assert_eq!(body_env(&md, &[AnnotationKind::AtServer], &opts), EnvFlags::SERVER);
+        assert_eq!(body_env(&md, &[AnnotationKind::AtServerNoContext], &opts), EnvFlags::SERVER);
         assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::AtServerNoContext)], &opts),
-            EnvFlags::SERVER
-        );
-        assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::AtClientAtServer)], &opts),
+            body_env(&md, &[AnnotationKind::AtClientAtServer], &opts),
             CLIENTS | EnvFlags::SERVER
         );
         assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::AtClientAtServerNoContext)], &opts),
+            body_env(&md, &[AnnotationKind::AtClientAtServerNoContext], &opts),
             CLIENTS | EnvFlags::SERVER
         );
     }
@@ -574,15 +556,12 @@ mod tests {
         let opts = EnvOptions::default();
         let md = form_metadata();
         assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::Before), ann(AnnotationKind::AtClient)], &opts),
+            body_env(&md, &[AnnotationKind::Before, AnnotationKind::AtClient], &opts),
             CLIENTS
         );
         // Weaving-only: the interceptor inherits the base method's directive,
         // so nothing narrows — the whole module base stays.
-        assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::Instead)], &opts),
-            CLIENTS | EnvFlags::SERVER
-        );
+        assert_eq!(body_env(&md, &[AnnotationKind::Instead], &opts), CLIENTS | EnvFlags::SERVER);
     }
 
     #[test]
@@ -663,7 +642,7 @@ mod tests {
         let opts = EnvOptions::default();
         let cm = bsl_metadata::CommonModuleBuilder::default().server(true).build();
         let md = common_metadata(cm);
-        assert_eq!(body_env(&md, &[ann(AnnotationKind::AtClient)], &opts), EnvFlags::EMPTY);
+        assert_eq!(body_env(&md, &[AnnotationKind::AtClient], &opts), EnvFlags::EMPTY);
     }
 
     #[test]
@@ -764,7 +743,7 @@ mod tests {
         assert_eq!(opts.client_envs(), EnvFlags::THIN_CLIENT);
 
         let md = form_metadata();
-        assert_eq!(body_env(&md, &[ann(AnnotationKind::AtClient)], &opts), EnvFlags::THIN_CLIENT);
+        assert_eq!(body_env(&md, &[AnnotationKind::AtClient], &opts), EnvFlags::THIN_CLIENT);
     }
 
     #[test]
@@ -778,7 +757,7 @@ mod tests {
         };
         let md = form_metadata();
         assert_eq!(
-            body_env(&md, &[ann(AnnotationKind::AtClient)], &opts),
+            body_env(&md, &[AnnotationKind::AtClient], &opts),
             CLIENTS | EnvFlags::MOBILE_CLIENT
         );
     }
@@ -826,17 +805,19 @@ mod tests {
         let item_tree = crate::item_tree::ItemTree::from_parse(&parse);
         let opts = EnvOptions::default();
         let md = form_metadata();
-        assert_eq!(method_env(&item_tree, 0, &md, &opts), CLIENTS);
-        assert_eq!(method_env(&item_tree, 1, &md, &opts), EnvFlags::SERVER);
-        // Out-of-range local_id behaves like "no directive".
-        assert_eq!(method_env(&item_tree, 99, &md, &opts), EnvFlags::SERVER);
+        let key = crate::MethodKey::first;
+        assert_eq!(method_env(&item_tree, key("Клиентская"), &md, &opts), CLIENTS);
+        assert_eq!(method_env(&item_tree, key("Серверная"), &md, &opts), EnvFlags::SERVER);
+        // An unknown method behaves like "no directive".
+        assert_eq!(method_env(&item_tree, key("Нет"), &md, &opts), EnvFlags::SERVER);
     }
 
     fn conditional_env_for(source: &str, method_idx: u32) -> EnvFlags {
         let parse = parser::parse(source);
         let item_tree = crate::item_tree::ItemTree::from_parse(&parse);
         let tree = crate::conditional_tree::lower_conditionals(&parse.syntax_node());
-        let range = method_source_range(&item_tree, method_idx).expect("method must exist");
+        let key = item_tree.methods().nth(method_idx as usize).expect("method must exist").key();
+        let range = method_source_range(&item_tree, key).expect("method must exist");
         conditional_env(&tree, range)
     }
 

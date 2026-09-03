@@ -454,8 +454,8 @@ impl<L: Lattice> DataflowResult<L> {
     /// per-block lattice maps (`block_in`/`block_out`). `value_heap` supplies the
     /// heap owned by each lattice value (e.g. a bitset's words) — the generic `L`
     /// cannot report it here. The shared `Arc<ControlFlowGraph>` is counted as the
-    /// pointer only (its payload is owned by `module_cfgs`), so it is omitted; the
-    /// HIR `Body` is not retained here (callers re-source it from `module_bodies`).
+    /// pointer only (its payload is owned by the CFG memo), so it is omitted; the
+    /// HIR `Body` is not retained here (callers re-source it from the body memo).
     pub fn estimated_heap_with(&self, value_heap: impl Fn(&L) -> usize) -> usize {
         let mut bytes = map_table_bytes::<NodeIndex, L>(self.block_in.len());
         for v in self.block_in.values() {

@@ -112,6 +112,19 @@ pub enum FeatureSpec {
         edit_kind: EditKind,
         followup: Box<FeatureSpec>,
     },
+    /// A typing burst: every patch goes through its own `didChange`, then
+    /// `followup` runs once. This is the shape the server sees when edits
+    /// arrive faster than diagnostics can start — the main loop drains the
+    /// channel and schedules one pass for the last revision — so the point
+    /// measures "catch up with the latest text", not N separate edits.
+    /// Each patch is addressed in the coordinates of the text *after* the
+    /// patches before it. `followup` offsets must lie strictly before every
+    /// patch start, as for [`FeatureSpec::Edit`].
+    EditBurst {
+        patches: Vec<EditPatch>,
+        edit_kind: EditKind,
+        followup: Box<FeatureSpec>,
+    },
     /// Sequential post-`didOpen` request batch (core cost, no task pool).
     Burst {
         sequence: Vec<FeatureSpec>,
@@ -138,6 +151,9 @@ pub struct EditPatch {
 pub enum EditKind {
     Body,
     Signature,
+    /// A whole method appears or disappears: the module interface changes and
+    /// every method after the edit point moves to another top-level position.
+    Method,
 }
 
 impl EditKind {
@@ -145,6 +161,7 @@ impl EditKind {
         match self {
             EditKind::Body => "body",
             EditKind::Signature => "signature",
+            EditKind::Method => "method",
         }
     }
 }
@@ -214,8 +231,15 @@ impl FeatureSpec {
             FeatureSpec::WorkspaceSymbol { .. } => "workspace_symbol",
             FeatureSpec::SignatureHelp { .. } => "signature_help",
             FeatureSpec::Edit { .. } => "edit",
+            FeatureSpec::EditBurst { .. } => "edit_burst",
             FeatureSpec::Burst { .. } => "burst",
         }
+    }
+
+    /// Whether the spec applies edits itself (`Edit` / `EditBurst`); such specs
+    /// run through the edit runner and may not nest inside another spec.
+    pub fn is_edit(&self) -> bool {
+        matches!(self, FeatureSpec::Edit { .. } | FeatureSpec::EditBurst { .. })
     }
 
     /// The smallest offset the spec dereferences, if any — used by the edit
@@ -242,7 +266,9 @@ impl FeatureSpec {
             | FeatureSpec::DiagnosticsPull
             | FeatureSpec::WorkspaceSymbol { .. }
             | FeatureSpec::CallHierarchyIndexBuild { .. } => None,
-            FeatureSpec::Edit { .. } | FeatureSpec::Burst { .. } => None,
+            FeatureSpec::Edit { .. }
+            | FeatureSpec::EditBurst { .. }
+            | FeatureSpec::Burst { .. } => None,
         }
     }
 }
@@ -335,39 +361,57 @@ fn validate_spec(id: &str, spec: &FeatureSpec, errors: &mut Vec<String>) {
             errors.push(format!("{id}: range start {} > end {}", r.start, r.end));
         }
         FeatureSpec::Edit { patch, followup, .. } => {
-            if patch.range.start > patch.range.end {
-                errors.push(format!(
-                    "{id}: patch range start {} > end {}",
-                    patch.range.start, patch.range.end
-                ));
+            validate_edit(id, std::slice::from_ref(patch), followup, errors);
+        }
+        FeatureSpec::EditBurst { patches, followup, .. } => {
+            if patches.is_empty() {
+                errors.push(format!("{id}: edit_burst has no patches"));
             }
-            match followup.as_ref() {
-                FeatureSpec::Edit { .. } | FeatureSpec::Burst { .. } => {
-                    errors.push(format!("{id}: edit followup must be a plain feature"));
-                }
-                inner => match inner.max_offset() {
-                    Some(max) if max >= patch.range.start => {
-                        errors.push(format!(
-                            "{id}: followup offset {max} not strictly before patch start {} — \
-                             position would shift with the edit",
-                            patch.range.start
-                        ));
-                    }
-                    _ => {}
-                },
-            }
+            validate_edit(id, patches, followup, errors);
         }
         FeatureSpec::Burst { sequence } => {
             if sequence.is_empty() {
                 errors.push(format!("{id}: burst sequence is empty"));
             }
             for inner in sequence {
-                if matches!(inner, FeatureSpec::Edit { .. } | FeatureSpec::Burst { .. }) {
+                if inner.is_edit() || matches!(inner, FeatureSpec::Burst { .. }) {
                     errors.push(format!("{id}: burst must not nest edit/burst"));
                 }
             }
         }
         _ => {}
+    }
+}
+
+/// Shared rules of `Edit` and `EditBurst`: well-formed patch ranges, a plain
+/// followup, and followup offsets strictly before every patch start so they
+/// stay valid before and after the edits.
+fn validate_edit(
+    id: &str,
+    patches: &[EditPatch],
+    followup: &FeatureSpec,
+    errors: &mut Vec<String>,
+) {
+    for patch in patches {
+        if patch.range.start > patch.range.end {
+            errors.push(format!(
+                "{id}: patch range start {} > end {}",
+                patch.range.start, patch.range.end
+            ));
+        }
+    }
+    if followup.is_edit() || matches!(followup, FeatureSpec::Burst { .. }) {
+        errors.push(format!("{id}: edit followup must be a plain feature"));
+        return;
+    }
+    let Some(first_start) = patches.iter().map(|p| p.range.start).min() else { return };
+    if let Some(max) = followup.max_offset() {
+        if max >= first_start {
+            errors.push(format!(
+                "{id}: followup offset {max} not strictly before patch start {first_start} — \
+                 position would shift with the edit"
+            ));
+        }
     }
 }
 
@@ -434,6 +478,20 @@ mod tests {
                 },
                 edit_kind: EditKind::Body,
                 followup: Box::new(FeatureSpec::Hover { offset: 1 }),
+            },
+            FeatureSpec::EditBurst {
+                patches: vec![
+                    EditPatch {
+                        range: OffsetRange { start: 10, end: 10 },
+                        new_text: "Х = 1;".to_string(),
+                    },
+                    EditPatch {
+                        range: OffsetRange { start: 16, end: 16 },
+                        new_text: "Х = 2;".to_string(),
+                    },
+                ],
+                edit_kind: EditKind::Body,
+                followup: Box::new(FeatureSpec::DiagnosticsPush),
             },
             FeatureSpec::Burst { sequence: vec![FeatureSpec::DocumentSymbol] },
         ];
@@ -542,6 +600,65 @@ mod tests {
         let err = validate(&m).unwrap_err();
         assert!(err.contains("must not nest"), "{err}");
         assert!(err.contains("sequence is empty"), "{err}");
+    }
+
+    #[test]
+    fn edit_burst_shares_the_edit_rules() {
+        let patch = |start: u32| EditPatch {
+            range: OffsetRange { start, end: start },
+            new_text: "Х = 1;".to_string(),
+        };
+        // Followup offsets must precede the *earliest* patch: later patches
+        // are addressed in shifted coordinates, and only offsets before all
+        // of them survive every shift.
+        let too_late = manifest(vec![target(
+            "eb",
+            FeatureSpec::EditBurst {
+                patches: vec![patch(20), patch(10)],
+                edit_kind: EditKind::Body,
+                followup: Box::new(FeatureSpec::Hover { offset: 10 }),
+            },
+            Expect::NonEmpty,
+        )]);
+        let err = validate(&too_late).unwrap_err();
+        assert!(err.contains("not strictly before patch start 10"), "{err}");
+
+        let nested = manifest(vec![
+            target(
+                "eb-empty",
+                FeatureSpec::EditBurst {
+                    patches: vec![],
+                    edit_kind: EditKind::Body,
+                    followup: Box::new(FeatureSpec::DiagnosticsPush),
+                },
+                Expect::NonEmpty,
+            ),
+            target(
+                "eb-nested",
+                FeatureSpec::Burst {
+                    sequence: vec![FeatureSpec::EditBurst {
+                        patches: vec![patch(5)],
+                        edit_kind: EditKind::Body,
+                        followup: Box::new(FeatureSpec::DiagnosticsPush),
+                    }],
+                },
+                Expect::NonEmpty,
+            ),
+        ]);
+        let err = validate(&nested).unwrap_err();
+        assert!(err.contains("edit_burst has no patches"), "{err}");
+        assert!(err.contains("must not nest"), "{err}");
+
+        let ok = manifest(vec![target(
+            "eb-ok",
+            FeatureSpec::EditBurst {
+                patches: vec![patch(20), patch(10)],
+                edit_kind: EditKind::Body,
+                followup: Box::new(FeatureSpec::Hover { offset: 9 }),
+            },
+            Expect::NonEmpty,
+        )]);
+        validate(&ok).unwrap();
     }
 
     #[test]

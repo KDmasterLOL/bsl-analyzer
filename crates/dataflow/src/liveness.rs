@@ -506,51 +506,6 @@ pub fn liveness_analysis_direct(
     solver.solve()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleLiveness {
-    results: rustc_hash::FxHashMap<u32, std::sync::Arc<crate::DataflowResult<Liveness>>>,
-}
-
-impl ModuleLiveness {
-    pub fn new(
-        results: rustc_hash::FxHashMap<u32, std::sync::Arc<crate::DataflowResult<Liveness>>>,
-    ) -> Self {
-        Self { results }
-    }
-
-    pub fn get(&self, local_id: u32) -> Option<&std::sync::Arc<crate::DataflowResult<Liveness>>> {
-        self.results.get(&local_id)
-    }
-
-    pub fn len(&self) -> usize {
-        self.results.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.results.is_empty()
-    }
-
-    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
-    /// results table plus each owned [`DataflowResult<Liveness>`]. `ModuleLiveness`
-    /// is the owning store; the per-method `liveness_analysis` accessor query returns
-    /// clones of these same `Arc`s and reports zero to avoid double counting.
-    pub fn estimated_heap(&self) -> usize {
-        let mut bytes = crate::map_table_bytes::<
-            u32,
-            std::sync::Arc<crate::DataflowResult<Liveness>>,
-        >(self.results.len());
-        for result in self.results.values() {
-            bytes += liveness_result_heap(result);
-        }
-        bytes
-    }
-}
-
-/// Heap of a single liveness [`DataflowResult`], summing per-block bitset words.
-pub fn liveness_result_heap(result: &crate::DataflowResult<Liveness>) -> usize {
-    result.estimated_heap_with(|l| l.estimated_heap())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

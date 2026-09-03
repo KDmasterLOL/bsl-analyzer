@@ -7,7 +7,7 @@
 //! drifts from the diagnostic's verdict, which is how the shadowed-global
 //! suggestions kept coming back.
 
-use hir_def::item_tree::{ItemTree, ModItem};
+use hir_def::item_tree::{ItemTree, MethodItem};
 use hir_ty::db::HirDatabase;
 use syntax::{SyntaxNode, TextSize};
 use vfs::FileId;
@@ -20,23 +20,12 @@ use crate::{
 /// The top-level method whose source range contains `offset`. Inclusive end:
 /// while an unfinished method is being typed at the end of the file, the
 /// cursor commonly sits exactly at the method's current end — it still
-/// belongs to that method, not to module code. The returned index is the
-/// module-wide top-level item index — the same numbering `ModuleBodies` uses
-/// for its per-method lower results.
-pub fn method_item_at(item_tree: &ItemTree, offset: TextSize) -> Option<(u32, &ModItem)> {
-    item_tree
-        .top_level_items()
-        .iter()
-        .enumerate()
-        .find(|(_, item)| {
-            let range = match item {
-                ModItem::Procedure(idx) => item_tree.procedure(*idx).source_range,
-                ModItem::Function(idx) => item_tree.function(*idx).source_range,
-                ModItem::Variable(_) => return false,
-            };
-            range.contains(offset) || range.end() == offset
-        })
-        .map(|(local_id, item)| (local_id as u32, item))
+/// belongs to that method, not to module code.
+pub fn method_item_at(item_tree: &ItemTree, offset: TextSize) -> Option<MethodItem<'_>> {
+    item_tree.methods().find(|method| {
+        let range = method.source_range();
+        range.contains(offset) || range.end() == offset
+    })
 }
 
 /// The user symbol claiming `name` at this read, plus the body owner needed to
@@ -53,14 +42,14 @@ pub fn claim_at<DB: HirDatabase>(
     let item_tree = db.item_tree(file_id);
     let module_bodies = db.module_bodies_ref(module_id);
     let (owner, lower_result) = match method_item_at(&item_tree, offset) {
-        Some((local_id, _)) => {
-            (DefWithBodyId::Method(local_id), module_bodies.lower_result(local_id))
+        Some(method) => {
+            (DefWithBodyId::Method(method.key()), module_bodies.lower_result(method.key()))
         }
         None => (DefWithBodyId::ModuleCode, module_bodies.module_code_result()),
     };
     let scope = lower_result.map(|r| BodyShadowScope {
-        body: &r.body,
-        source_map: &r.source_map,
+        body: r.body(),
+        source_map: r.source_map(),
         read_offset,
     });
     let resolver = Resolver::with_builtins_and_workspace(module_id);

@@ -1,6 +1,6 @@
 use cfg::{CfgBuilder, ControlFlowGraph};
 use expect_test::{expect, Expect};
-use hir_def::{hir::PreprocIfStmt, Body, Expr, Literal, Stmt};
+use hir_def::{hir::PreprocIfStmt, Body, Expr, Literal, LocalRange, Stmt};
 use syntax::{SyntaxKind, TextRange, TextSize};
 
 fn snapshot(cfg: ControlFlowGraph, expect: Expect) {
@@ -8,11 +8,11 @@ fn snapshot(cfg: ControlFlowGraph, expect: Expect) {
 }
 
 fn build(body: &Body) -> ControlFlowGraph {
-    CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None)
+    CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body)
 }
 
-fn range(start: u32, end: u32) -> TextRange {
-    TextRange::new(TextSize::new(start), TextSize::new(end))
+fn range(start: u32, end: u32) -> LocalRange {
+    LocalRange::of_detached_node(TextRange::new(TextSize::new(start), TextSize::new(end)))
 }
 
 #[test]

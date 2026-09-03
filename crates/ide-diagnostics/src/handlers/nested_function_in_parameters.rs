@@ -1,10 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Name};
 use line_index::LineIndex;
 use stdx::case::CaseExt;
-use syntax::{SyntaxKind, SyntaxNode, SyntaxToken, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -30,7 +31,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let code = DiagnosticCode::NestedFunctionInParameters;
 
         let allow_oneliner =
@@ -62,39 +63,37 @@ impl Config {
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::NestedFunctionInParameters;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = Config::from_context(ctx);
 
-    let line_index = ctx.line_index();
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body(body, source_map, diags, &config, &line_index, &root, code, ctx);
-    });
-
-    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
-
-    diagnostics
+    check_body_calls(
+        ctx.body(),
+        ctx.source_map(),
+        acc,
+        &config,
+        ctx.line_index(),
+        ctx.root(),
+        code,
+        ctx,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_body(
+fn check_body_calls(
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
         match expr {
@@ -148,14 +147,15 @@ fn check_body(
     }
 }
 
-fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange {
+fn find_name_token_range(expr_local: LocalRange, root: &SyntaxNode) -> LocalRange {
+    let expr_range = expr_local.in_root();
     let covering = root.covering_element(expr_range);
 
     let start_node = match covering {
         syntax::NodeOrToken::Node(node) => node,
         syntax::NodeOrToken::Token(token) => match token.parent() {
             Some(parent) => parent,
-            None => return expr_range,
+            None => return expr_local,
         },
     };
 
@@ -172,12 +172,12 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
                             if let Some(name_token) =
                                 find_last_ident_before_node(&ancestor, &arg_list)
                             {
-                                return name_token.text_range();
+                                return LocalRange::of_detached_node(name_token.text_range());
                             }
                         }
                         SyntaxKind::NEW_EXPR => {
                             if let Some(name_token) = find_type_name_or_new_keyword(&ancestor) {
-                                return name_token.text_range();
+                                return LocalRange::of_detached_node(name_token.text_range());
                             }
                         }
                         _ => {}
@@ -190,12 +190,12 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
         match ancestor.kind() {
             SyntaxKind::CALL_EXPR | SyntaxKind::CALL_STMT => {
                 if let Some(name_token) = find_last_ident_before_arg_list(&ancestor) {
-                    return name_token.text_range();
+                    return LocalRange::of_detached_node(name_token.text_range());
                 }
             }
             SyntaxKind::NEW_EXPR => {
                 if let Some(name_token) = find_type_name_or_new_keyword(&ancestor) {
-                    return name_token.text_range();
+                    return LocalRange::of_detached_node(name_token.text_range());
                 }
             }
             _ => {}
@@ -205,11 +205,11 @@ fn find_name_token_range(expr_range: TextRange, root: &SyntaxNode) -> TextRange 
     let start_offset = expr_range.start();
     for token in root.token_at_offset(start_offset) {
         if token.kind() == SyntaxKind::IDENT {
-            return token.text_range();
+            return LocalRange::of_detached_node(token.text_range());
         }
     }
 
-    expr_range
+    expr_local
 }
 
 fn find_last_ident_before_node(parent: &SyntaxNode, target: &SyntaxNode) -> Option<SyntaxToken> {
@@ -291,12 +291,12 @@ fn check_call_expr(
     args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     if args.is_empty() {
         return;
@@ -306,8 +306,8 @@ fn check_call_expr(
         return;
     };
 
-    let start_line = line_index.line_col(range.start()).line;
-    let end_line = line_index.line_col(range.end()).line;
+    let start_line = line_index.line_col(range.in_root().start()).line;
+    let end_line = line_index.line_col(range.in_root().end()).line;
     if start_line == end_line {
         return;
     }
@@ -348,12 +348,12 @@ fn check_method_call_expr(
     args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     if args.is_empty() {
         return;
@@ -363,8 +363,8 @@ fn check_method_call_expr(
         return;
     };
 
-    let start_line = line_index.line_col(range.start()).line;
-    let end_line = line_index.line_col(range.end()).line;
+    let start_line = line_index.line_col(range.in_root().start()).line;
+    let end_line = line_index.line_col(range.in_root().end()).line;
     if start_line == end_line {
         return;
     }
@@ -399,12 +399,12 @@ fn check_new_expr(
     args: &[ExprIdx],
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     config: &Config,
     line_index: &LineIndex,
     root: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     if args.is_empty() {
         return;
@@ -414,8 +414,8 @@ fn check_new_expr(
         return;
     };
 
-    let start_line = line_index.line_col(range.start()).line;
-    let end_line = line_index.line_col(range.end()).line;
+    let start_line = line_index.line_col(range.in_root().start()).line;
+    let end_line = line_index.line_col(range.in_root().end()).line;
     if start_line == end_line {
         return;
     }
@@ -492,8 +492,8 @@ fn has_multiline_param_hir(
             continue;
         };
 
-        let start_line = line_index.line_col(range.start()).line;
-        let end_line = line_index.line_col(range.end()).line;
+        let start_line = line_index.line_col(range.in_root().start()).line;
+        let end_line = line_index.line_col(range.in_root().end()).line;
         if end_line > start_line {
             return true;
         }
@@ -503,14 +503,16 @@ fn has_multiline_param_hir(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
+    use super::check_body;
+    use crate::test_utils::{
+        check_body_diagnostic, check_body_diagnostic_with_config, format_diags,
+    };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
     fn test_no_diagnostic_single_line() {
         let code = r#"Сообщить(СуммаСтрокой("7"), СуммаСтрокой(СуммаНДС(Перечисление.Сумма)));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -518,7 +520,7 @@ mod tests {
     fn test_no_diagnostic_multiline_but_single_line_params() {
         let code = r#"Сообщить(СуммаСтрокой("77"),
     СуммаСтрокой(СуммаНДС(Перечисление.ВтораяСумма)));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -528,7 +530,7 @@ mod tests {
     ВложенныйМетод(
         Параметр
     ));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             NestedFunctionInParameters @ 1:1..1:6
               message: Убрать инициализацию параметров метода 'Метод' вложенными методами
@@ -545,7 +547,7 @@ mod tests {
     ,
     ПодробноеПредставлениеОшибки(ИнформацияОбОшибке())
 );"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -557,7 +559,7 @@ mod tests {
             DiagnosticCode::NestedFunctionInParameters,
             serde_json::json!({"allowOneliner": false}),
         );
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -565,7 +567,7 @@ mod tests {
     fn test_no_diagnostic_empty_params() {
         let code = r#"А = Новый Массив;
 Сообщить();"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -573,7 +575,7 @@ mod tests {
     fn test_no_diagnostic_new_expr_single_line_params() {
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура(), Новый Структура("Параметр3", Новый Массив()));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -583,7 +585,7 @@ mod tests {
             Новый Структура(
                 "ВложенныйПараметр"
             ));"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             NestedFunctionInParameters @ 1:19..1:28
               message: Убрать инициализацию параметров конструктора 'Структура' вложенными методами
@@ -595,7 +597,7 @@ mod tests {
     fn test_no_diagnostic_new_expr_without_init() {
         let code = r#"Структура = Новый Структура("Параметр1, Параметр2",
             Новый Структура, Новый Массив);"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -688,7 +690,7 @@ mod tests {
 
     #[test]
     fn test_comprehensive() {
-        let diagnostics = check_ast_diagnostic(FIXTURE, check);
+        let diagnostics = check_body_diagnostic(FIXTURE, check_body);
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31
@@ -710,7 +712,7 @@ mod tests {
             DiagnosticCode::NestedFunctionInParameters,
             serde_json::json!({"allowOneliner": false}),
         );
-        let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
+        let diagnostics = check_body_diagnostic_with_config(FIXTURE, config, check_body);
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31
@@ -761,7 +763,7 @@ mod tests {
                 "allowOneliner": false
             }),
         );
-        let diagnostics = check_ast_diagnostic_with_config(FIXTURE, config, check);
+        let diagnostics = check_body_diagnostic_with_config(FIXTURE, config, check_body);
 
         expect![[r#"
             NestedFunctionInParameters @ 2:23..2:31

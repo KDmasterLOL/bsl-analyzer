@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::utils::regex_cache::cached_regex;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion, Literal, Stmt};
 use regex::Regex;
 use stdx::case::CaseExt;
@@ -59,34 +61,29 @@ fn extract_string_content(s: &str) -> String {
     s.replace(['"', ' '], "")
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::UsingHardcodeSecretInformation;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let search_words_str =
         ctx.config.get_string(code, "searchWords").unwrap_or(DEFAULT_SEARCH_WORDS);
 
-    let search_words = Regex::new(&format!("(?i)^({})$", search_words_str))
-        .unwrap_or_else(|_| Regex::new(&format!("(?i)^({})$", DEFAULT_SEARCH_WORDS)).unwrap());
+    let search_words = cached_regex(&format!("(?i)^({})$", search_words_str))
+        .unwrap_or_else(|| cached_regex(&format!("(?i)^({})$", DEFAULT_SEARCH_WORDS)).unwrap());
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body(body, source_map, &search_words, code, ctx, diags);
-    });
-
-    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
-    diagnostics
+    check_body_exprs(ctx.body(), ctx.source_map(), &search_words, code, ctx, acc);
 }
 
-fn check_body(
+fn check_body_exprs(
     body: &Body,
     source_map: &BodySourceMap,
     search_words: &Regex,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for (stmt_id, stmt) in body.stmts_iter() {
         let Stmt::Assign { target, value } = stmt else {
@@ -216,8 +213,8 @@ fn check_insert_call(
     expr_id: ExprId,
     search_words: &Regex,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     if args.len() < 2 {
         return;
@@ -281,7 +278,7 @@ fn find_containing_statement_range(
     body: &Body,
     source_map: &BodySourceMap,
     expr_id: ExprId,
-) -> Option<ide_db::TextRange> {
+) -> Option<LocalRange> {
     let target_idx: ExprIdx = expr_id.to_idx();
 
     for (stmt_id, stmt) in body.stmts_iter() {
@@ -304,8 +301,8 @@ fn stmt_contains_expr_idx(stmt: &Stmt, target_idx: ExprIdx) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
+    use super::check_body;
+    use crate::test_utils::{check_body_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -610,7 +607,7 @@ Password = "";
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 1, "Should only match 'Password' with custom config");
     }
 

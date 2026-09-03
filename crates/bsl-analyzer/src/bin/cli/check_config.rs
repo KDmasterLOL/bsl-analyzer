@@ -1,7 +1,8 @@
 use std::{error::Error, fmt::Write as _, io};
 
 use super::source_set::{
-    configuration_root_provider, extensions_provider, SourceProvider, SourceSetArgs,
+    configuration_root_provider, extensions_provider, externals_provider, SourceProvider,
+    SourceSetArgs,
 };
 
 pub fn check_config(
@@ -34,6 +35,7 @@ pub fn check_config(
             project_root,
         ),
         extensions: extensions_provider(&source_set, project_config.extensions.as_ref()),
+        externals: externals_provider(&source_set, project_config.externals.as_ref()),
     };
     source_set.resolve(project_root)?.apply_to(&mut project_config);
 
@@ -196,6 +198,7 @@ fn baseline_diagnostics_have_issues(
 struct SourceProviders {
     configuration_root: SourceProvider,
     extensions: SourceProvider,
+    externals: SourceProvider,
 }
 
 fn build_check_config_report(
@@ -280,8 +283,33 @@ fn build_check_config_report(
         }
     );
     let _ = writeln!(out, "  Extensions from: {}", providers.extensions.label(config_path));
+    let _ = writeln!(
+        out,
+        "  Externals:   {} [from: {}]",
+        match &project_config.externals {
+            None => "auto-discovery (src/epf/*, src/erf/*)".to_owned(),
+            Some(list) if list.is_empty() => "none".to_owned(),
+            Some(list) => list
+                .iter()
+                .map(|decl| match &decl.depends_on {
+                    None => format!("{} ({})", decl.name, decl.path),
+                    Some(deps) => format!(
+                        "{} ({}, dependsOn: {})",
+                        decl.name,
+                        decl.path,
+                        if deps.is_empty() { "none".to_owned() } else { deps.join(", ") }
+                    ),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        },
+        providers.externals.label(config_path)
+    );
     if let Ok(project) = project {
-        if let Some(notice) = project.standalone_extension_notice() {
+        for notice in [project.standalone_extension_notice(), project.standalone_external_notice()]
+            .into_iter()
+            .flatten()
+        {
             let _ = writeln!(out, "  WARNING: {notice}");
         }
     }
@@ -310,7 +338,9 @@ fn build_check_config_report(
                 let _ = writeln!(out, "  no extensions resolved");
             } else {
                 for node in topology.nodes() {
-                    let deps = if node.depends_on().is_empty() {
+                    let deps = if let project_model::NodeKind::External(kind) = node.kind() {
+                        format!("external {}", kind.element_name())
+                    } else if node.depends_on().is_empty() {
                         "independent".to_owned()
                     } else {
                         format!(
@@ -615,6 +645,7 @@ backend = "postgres"
             &SourceProviders {
                 configuration_root: SourceProvider::ConfigFile,
                 extensions: SourceProvider::ConfigFile,
+                externals: SourceProvider::AutoDiscovery,
             },
         );
         assert!(report.contains("Baseline:   ERROR: invalid file"));
@@ -668,8 +699,69 @@ backend = "postgres"
             &SourceProviders {
                 configuration_root: SourceProvider::Cli,
                 extensions: SourceProvider::Cli,
+                externals: SourceProvider::AutoDiscovery,
             },
         )
+    }
+
+    #[test]
+    fn report_lists_declared_externals_with_their_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        configuration_dir(dir.path(), "cf", false);
+        let mut project_config = project_model::ProjectConfig {
+            configuration_root: Some("cf".to_string()),
+            extensions: Some(Vec::new()),
+            ..Default::default()
+        };
+        project_config.externals = Some(vec![
+            project_model::ExternalDecl { name: "A".into(), path: "a".into(), depends_on: None },
+            project_model::ExternalDecl {
+                name: "B".into(),
+                path: "b".into(),
+                depends_on: Some(vec!["X".into(), "Y".into()]),
+            },
+            project_model::ExternalDecl {
+                name: "C".into(),
+                path: "c".into(),
+                depends_on: Some(vec![]),
+            },
+        ]);
+        let project = project_model::Project::with_config(dir.path(), project_config.clone());
+        let diagnostics_baseline = inspect_diagnostics_baseline(&project);
+        let report = build_check_config_report(
+            &dir.path().join("bsl-analyzer.toml"),
+            &project_config,
+            &project,
+            &diagnostics_config_from_project(&project_config).unwrap(),
+            &mcp_server::resolve_project_baseline_diagnostics(Some(dir.path()), &project_config),
+            &diagnostics_baseline,
+            &SourceProviders {
+                configuration_root: SourceProvider::Cli,
+                extensions: SourceProvider::Cli,
+                externals: SourceProvider::ConfigFile,
+            },
+        );
+        assert!(
+            report.contains("Externals:   A (a), B (b, dependsOn: X, Y), C (c, dependsOn: none)"),
+            "{report}"
+        );
+        project_config.externals = Some(Vec::new());
+        let project = project_model::Project::with_config(dir.path(), project_config.clone());
+        let diagnostics_baseline = inspect_diagnostics_baseline(&project);
+        let report = build_check_config_report(
+            &dir.path().join("bsl-analyzer.toml"),
+            &project_config,
+            &project,
+            &diagnostics_config_from_project(&project_config).unwrap(),
+            &mcp_server::resolve_project_baseline_diagnostics(Some(dir.path()), &project_config),
+            &diagnostics_baseline,
+            &SourceProviders {
+                configuration_root: SourceProvider::Cli,
+                extensions: SourceProvider::Cli,
+                externals: SourceProvider::Cli,
+            },
+        );
+        assert!(report.contains("Externals:   none [from: cli]"), "{report}");
     }
 
     #[test]
@@ -744,6 +836,7 @@ backend = "postgres"
             &SourceProviders {
                 configuration_root: SourceProvider::ConfigFile,
                 extensions: SourceProvider::ConfigFile,
+                externals: SourceProvider::AutoDiscovery,
             },
         );
 
@@ -751,6 +844,12 @@ backend = "postgres"
         assert!(report.contains("Project:"));
         assert!(report.contains("Source root: src/cf"));
         assert!(report.contains("Extensions:  src/cfe/ExtA"));
+        assert!(
+            report.contains(
+                "Externals:   auto-discovery (src/epf/*, src/erf/*) [from: auto-discovery]"
+            ),
+            "{report}"
+        );
         assert!(report.contains("Diff base:   vendor"));
         assert!(report.contains("Ignored authors: Фирма 1С"));
         assert!(report.contains("ordinaryAppSupport: true"));

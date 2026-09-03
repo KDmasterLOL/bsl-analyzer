@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::TypeId;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,9 +22,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(
     expected: TypeId,
     actual: TypeId,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let locale = ctx.locale();
     let expected_label = ctx.kernel_type_display(expected, locale);
     let actual_label = ctx.kernel_type_display(actual, locale);

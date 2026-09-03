@@ -33,12 +33,12 @@ struct ServerCallFinding {
 
 fn bfs_find_server_calls(
     summary: &hir::ModuleCallSummary,
-    start_local_id: u32,
+    start_local_id: hir::MethodKey,
     ctx: &DiagnosticsContext,
 ) -> Vec<ServerCallFinding> {
     let mut results = Vec::new();
-    let mut visited: FxHashSet<(vfs::FileId, u32)> = FxHashSet::default();
-    let mut queue: VecDeque<(vfs::FileId, u32, bool)> = VecDeque::new();
+    let mut visited: FxHashSet<(vfs::FileId, hir::MethodKey)> = FxHashSet::default();
+    let mut queue: VecDeque<(vfs::FileId, hir::MethodKey, bool)> = VecDeque::new();
 
     let file_id = ctx.file_id;
     queue.push_back((file_id, start_local_id, false));

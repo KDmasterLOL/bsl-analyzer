@@ -59,18 +59,18 @@ pub use hir::ModuleId;
 pub use hir::{call_hierarchy_method_digest, MethodCallDigest};
 pub use ide_assists::{Assist, AssistId, SourceChange};
 pub use ide_db::base_db::Locale;
-pub use ide_db::metadata::WorkspaceConfigsSnapshot;
+pub use ide_db::metadata::{RootKind as WorkspaceRootKind, WorkspaceConfigsSnapshot};
 pub use ide_db::query_resolver::AcrossRootsQueryResolver;
 pub use ide_db::{
     CommonModuleBodies, GraphConfigCache, RootDatabase, RootDatabaseImpl, SymbolKind, TextRange,
 };
 pub use ide_diagnostics::{
     all_diagnostic_codes, apply_extension_merge, diagnostics as compute_diagnostics, docs,
-    file_diagnostics, file_diagnostics_query, get_metadata, message_with_standards, standard_url,
-    standards, validate_query_text, CleanCodeAttribute, Diagnostic, DiagnosticCode,
-    DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag, DiagnosticType, DiagnosticsConfig,
-    DiagnosticsContext, Fix, ImpactSeverity, MetadataTag, Severity, SoftwareQuality, TextEdit,
-    METADATA_DEPENDENT_CODES,
+    file_diagnostics, file_diagnostics_query, get_metadata, message_with_standards,
+    slab_verify_mismatches, standard_url, standards, validate_query_text, CleanCodeAttribute,
+    Diagnostic, DiagnosticCode, DiagnosticOutput, DiagnosticSeverityLevel, DiagnosticTag,
+    DiagnosticType, DiagnosticsConfig, DiagnosticsContext, Fix, ImpactSeverity, MetadataTag,
+    Severity, SoftwareQuality, TextEdit, METADATA_DEPENDENT_CODES,
 };
 pub use inlay_hints::{InlayHint, InlayHintKind};
 pub use name_lookup::{
@@ -100,6 +100,16 @@ use std::sync::Arc;
 use syntax::TextSize;
 use vfs::FileId;
 
+/// One deep eviction pass on the small sweep caps of every per-method
+/// chain — lowering, dataflow and diagnostics — then back to the interactive
+/// caps. The diagnostics memos live above `ide_db`, so their cap is switched
+/// here, around the database's own switch.
+pub fn sweep_lru_deep(db: &mut RootDatabaseImpl) {
+    ide_diagnostics::set_diagnostics_lru_sweep_mode(db, true);
+    db.enforce_lru_deep();
+    ide_diagnostics::set_diagnostics_lru_sweep_mode(db, false);
+}
+
 pub struct Analysis {
     db: RootDatabaseImpl,
 }
@@ -115,6 +125,25 @@ impl Analysis {
 
     pub fn database(&self) -> &RootDatabaseImpl {
         &self.db
+    }
+
+    /// Run `f` with this handle attached to the current thread for the whole call,
+    /// so a cancellation of the handle's token survives until a checkpoint sees it.
+    ///
+    /// Salsa keeps a handle's local cancellation token only for the OUTERMOST attach
+    /// scope on a thread and resets it when that scope exits. Every tracked-fn body is
+    /// an attach scope, so a query called from plain code is its own outermost one: a
+    /// cancel that lands while it runs is wiped on its way out unless a nested checkpoint
+    /// saw it first, and the next `unwind_if_revision_cancelled` reads a clear token.
+    /// Held around the whole unit of cancellation — an LSP request, an MCP call — this
+    /// scope makes every query inside a nested one, and the cancel keeps from the moment
+    /// it arrives until a checkpoint unwinds with `Cancelled::Local`.
+    ///
+    /// Inside `f` the thread may query only THIS handle: a second database handle on
+    /// the same thread makes salsa panic with «Cannot change database mid-query».
+    /// Nesting on the same handle is free.
+    pub fn attached<T>(&self, f: impl FnOnce(&Analysis) -> T) -> T {
+        salsa::attach(&self.db, || f(self))
     }
 
     pub fn diagnostics(&self, file_id: FileId, config: &DiagnosticsConfig) -> Vec<Diagnostic> {
@@ -586,6 +615,61 @@ const _: fn() = || {
 /// In-code suppression directives must be honoured by the two entry points the LSP server and
 /// the MCP server use — both route through `ide_diagnostics::file_diagnostics`, one directly and
 /// one through the salsa-tracked `file_diagnostics_query`.
+#[cfg(test)]
+mod attached_scope_tests {
+    use super::Analysis;
+    use salsa::Database as _;
+    use std::panic::AssertUnwindSafe;
+
+    /// Salsa's own contract, stated so the door's test below is known to measure the
+    /// door and not a changed salsa: a cancel that lands inside an OUTERMOST attach
+    /// scope — which is what every tracked-fn body called from plain code is — is
+    /// wiped when that scope exits.
+    #[test]
+    fn salsa_wipes_a_cancel_on_the_way_out_of_an_outermost_scope() {
+        let analysis = Analysis::new();
+        let token = analysis.database().cancellation_token();
+        analysis.database().attach(|_| token.cancel());
+        assert!(!token.is_cancelled(), "a cancel survived the exit of an outermost scope");
+    }
+
+    /// The same cancel, landing inside a query body that returns normally, is still
+    /// there for the next checkpoint when the whole call is one attach scope.
+    #[test]
+    fn a_cancel_landing_inside_a_query_survives_to_the_next_checkpoint_under_the_door() {
+        let analysis = Analysis::new();
+        let token = analysis.database().cancellation_token();
+        let outcome = salsa::Cancelled::catch(AssertUnwindSafe(|| {
+            analysis.attached(|analysis| {
+                let db = analysis.database();
+                // The notification lands while a query body is on the stack.
+                db.attach(|_| token.cancel());
+                db.unwind_if_revision_cancelled();
+                "walked to the end"
+            })
+        }));
+        assert!(
+            matches!(outcome, Err(salsa::Cancelled::Local)),
+            "the cancel was wiped before the checkpoint: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn the_door_nests_on_the_same_handle() {
+        let analysis = Analysis::new();
+        assert_eq!(analysis.attached(|outer| outer.attached(|_| 7)), 7);
+    }
+
+    /// The contract the door imposes on its body: one database per thread.
+    #[test]
+    #[should_panic(expected = "Cannot change database mid-query")]
+    fn a_second_handle_inside_the_door_is_refused() {
+        let analysis = Analysis::new();
+        let other = Analysis::new();
+        analysis.attached(|_| other.attached(|_| ()));
+    }
+}
+
 #[cfg(test)]
 mod suppression_surface_tests {
     use super::*;

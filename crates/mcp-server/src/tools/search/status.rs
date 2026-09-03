@@ -42,7 +42,7 @@ const SEARCH_NOT_READY_RETRY_MS: u64 = 1500;
 /// while `active`, because [`IndexProgress`] is never `reset()` — an inactive object can
 /// still hold stale totals from a finished or failed attempt, and reporting those as
 /// current progress would mislead. The pretty-JSON text mirror keeps the response readable.
-pub(super) fn search_not_ready(
+pub(crate) fn search_not_ready(
     detail: &str,
     progress: &IndexProgress,
     action: &str,
@@ -79,7 +79,7 @@ pub(super) const DOCS_INDEX_BUILDING_TEXT: &str =
 /// result" from a field instead of matching the sentence — the same distinction `search_code`
 /// gets from [`search_not_ready`]. No progress counters: this path holds no [`IndexProgress`]
 /// handle, and inventing zeros would read as a stalled build.
-pub(super) fn docs_not_ready(action: &str) -> CallToolResult {
+pub(crate) fn docs_not_ready(action: &str) -> CallToolResult {
     crate::tools::response::structured_with_text(
         DOCS_INDEX_BUILDING_TEXT.to_owned(),
         json!({
@@ -165,14 +165,16 @@ pub(super) fn search_status_with_cap(
     // Cap the wait so status never hangs to the MCP client timeout while the overlay warmup or a
     // peer search holds the engine. On a genuine stall we still report the baseline + runtime
     // sections (which need no engine lock) and note the local index as busy.
+    // A status probe answers whoever asks, with no request of its own to be cancelled by.
     let guard = match acquire_engine_within(
         engine,
+        &tokio_util::sync::CancellationToken::new(),
         engine_acquire_cap,
         std::time::Duration::from_millis(25),
     ) {
         Ok(g) => Some(g),
         Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
-        Err(AcquireFailure::TimedOut) => None,
+        Err(AcquireFailure::TimedOut | AcquireFailure::Cancelled) => None,
     };
     // Measure how long the engine lock is held across the status build so a future stall is
     // diagnosable from `BSL_LOG=debug` alone (the release binary cannot be stack-traced).

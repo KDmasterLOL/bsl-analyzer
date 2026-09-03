@@ -1,9 +1,10 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
+use hir::LocalRange;
 use hir::{AssignmentResolution, ExistingBindingKind};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,10 +22,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 pub fn from_hir(
     variable_name: &str,
-    range: TextRange,
+    range: LocalRange,
     existing_binding_kind: Option<ExistingBindingKind>,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::CommonModuleAssign;
 
     if ctx.is_disabled_with_metadata(code) {

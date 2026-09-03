@@ -32,7 +32,7 @@ pub fn method_return_type_query<'db>(
     let _span = tracing::info_span!(
         "method_return_type",
         file_id = mid.module.file_id.0,
-        local_id = mid.local_id,
+        local_id = ?mid.local_id,
     )
     .entered();
 
@@ -117,7 +117,7 @@ pub fn infer_method_query<'db>(
     let _span = tracing::info_span!(
         "infer_method",
         file_id = mid.module.file_id.0,
-        local_id = mid.local_id,
+        local_id = ?mid.local_id,
     )
     .entered();
 

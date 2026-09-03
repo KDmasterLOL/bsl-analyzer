@@ -436,11 +436,13 @@ pub struct ReachingDefsResult {
 
     block_stmts: rustc_hash::FxHashMap<petgraph::graph::NodeIndex, Vec<la_arena::RawIdx>>,
 
-    body: Body,
+    /// Shared with the lowering memo: a retained result must not carry its
+    /// own copy of the body.
+    body: Arc<Body>,
 }
 
 impl ReachingDefsResult {
-    pub fn new(dataflow: crate::DataflowResult<ReachingDefs>, body: Body) -> Self {
+    pub fn new(dataflow: crate::DataflowResult<ReachingDefs>, body: Arc<Body>) -> Self {
         use cfg::CfgVertex;
 
         let mut stmt_to_block = rustc_hash::FxHashMap::default();
@@ -525,9 +527,9 @@ impl ReachingDefsResult {
 
     /// Approximate live heap bytes for Salsa's `memory_usage` report: the four
     /// per-block hashbrown tables (including each `ReachingDefs` bitset and the
-    /// `block_stmts` index vectors) plus the owned [`Body`] clone. Shared
-    /// `Arc<DefinitionIndex>` payloads behind each `ReachingDefs` are counted as the
-    /// pointer only.
+    /// `block_stmts` index vectors). The shared [`Body`] and the shared
+    /// `Arc<DefinitionIndex>` payloads behind each `ReachingDefs` are counted
+    /// as the pointer only — their owners count the rest.
     pub fn estimated_heap(&self) -> usize {
         use petgraph::graph::NodeIndex;
 
@@ -544,7 +546,8 @@ impl ReachingDefsResult {
         for stmts in self.block_stmts.values() {
             bytes += crate::vec_bytes::<la_arena::RawIdx>(stmts.len());
         }
-        bytes += self.body.estimated_heap();
+        // The body is the lowering memo's `Arc`, counted there; only the pointer
+        // is this result's own.
         bytes
     }
 }
@@ -591,54 +594,6 @@ impl Transfer<ReachingDefs> for ReachingDefsTransfer {
         }
 
         new_state
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModuleReachingDefs {
-    results: rustc_hash::FxHashMap<u32, std::sync::Arc<ReachingDefsResult>>,
-    module_code: Option<std::sync::Arc<ReachingDefsResult>>,
-}
-
-impl ModuleReachingDefs {
-    pub fn new(
-        results: rustc_hash::FxHashMap<u32, std::sync::Arc<ReachingDefsResult>>,
-        module_code: Option<std::sync::Arc<ReachingDefsResult>>,
-    ) -> Self {
-        Self { results, module_code }
-    }
-
-    pub fn get(&self, local_id: u32) -> Option<&std::sync::Arc<ReachingDefsResult>> {
-        self.results.get(&local_id)
-    }
-
-    pub fn module_code(&self) -> Option<&std::sync::Arc<ReachingDefsResult>> {
-        self.module_code.as_ref()
-    }
-
-    pub fn len(&self) -> usize {
-        self.results.len() + usize::from(self.module_code.is_some())
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.results.is_empty() && self.module_code.is_none()
-    }
-
-    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
-    /// results table plus each owned [`ReachingDefsResult`]. `ModuleReachingDefs` is
-    /// the owning store; the per-method `reaching_definitions` accessor query returns
-    /// clones of these same `Arc`s and reports zero to avoid double counting.
-    pub fn estimated_heap(&self) -> usize {
-        let mut bytes =
-            crate::map_table_bytes::<u32, std::sync::Arc<ReachingDefsResult>>(self.results.len());
-        for result in self.results.values() {
-            bytes += result.estimated_heap();
-        }
-        if let Some(result) = &self.module_code {
-            bytes +=
-                std::mem::size_of::<std::sync::Arc<ReachingDefsResult>>() + result.estimated_heap();
-        }
-        bytes
     }
 }
 

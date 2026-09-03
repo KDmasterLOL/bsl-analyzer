@@ -206,10 +206,10 @@ pub trait ConfigsDatabase: DefDatabase {
     /// last). Never includes an unrelated sibling extension.
     fn configurations(&self, file_id: FileId) -> Vec<VisibleConfig>;
 
-    /// EVERY configured root (base + all extensions) — the inventory view for
-    /// index/graph builders covering the whole workspace. Deliberately ignores
-    /// per-file dependency-scoped visibility; semantic resolution must use
-    /// [`Self::configurations`].
+    /// EVERY registered root (base, all extensions, then the external objects)
+    /// — the inventory view for index/graph builders covering the whole
+    /// workspace. Deliberately ignores per-file dependency-scoped visibility;
+    /// semantic resolution must use [`Self::configurations`].
     fn configurations_inventory(&self) -> Vec<VisibleConfig>;
 
     /// Load, on the CALLING thread, every configuration root `modules` can reach,

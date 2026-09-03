@@ -45,6 +45,12 @@ pub enum MetadataKind {
     BusinessProcessObject,
     DataProcessorObject,
     ReportObject,
+    /// `ВнешняяОбработкаОбъект.<Имя>`: the object of an EPF export. Its members
+    /// come from the export's own metadata; its platform methods and properties
+    /// from the bare platform type `ВнешняяОбработка`, not from a manager prefix.
+    ExternalDataProcessorObject,
+    /// `ВнешнийОтчетОбъект.<Имя>`: the ERF counterpart.
+    ExternalReportObject,
     ExchangePlanRef,
     ExchangePlanObject,
     ChartOfAccountsRef,
@@ -57,12 +63,24 @@ pub enum MetadataKind {
     AccumulationRegisterRef,
     AccountingRegisterRef,
     CalculationRegisterRef,
-    RegisterDimension { parent: MdoType },
-    RegisterResource { parent: MdoType },
-    RegisterAttribute { parent: MdoType },
-    RegisterFilter { parent: MdoType },
-    TabularSection { parent: MdoType },
-    TabularSectionRow { parent: MdoType },
+    RegisterDimension {
+        parent: MdoType,
+    },
+    RegisterResource {
+        parent: MdoType,
+    },
+    RegisterAttribute {
+        parent: MdoType,
+    },
+    RegisterFilter {
+        parent: MdoType,
+    },
+    TabularSection {
+        parent: MdoType,
+    },
+    TabularSectionRow {
+        parent: MdoType,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -156,6 +174,8 @@ impl MetadataKind {
             MdoType::BusinessProcess => Some(MetadataKind::BusinessProcessObject),
             MdoType::DataProcessor => Some(MetadataKind::DataProcessorObject),
             MdoType::Report => Some(MetadataKind::ReportObject),
+            MdoType::ExternalDataProcessor => Some(MetadataKind::ExternalDataProcessorObject),
+            MdoType::ExternalReport => Some(MetadataKind::ExternalReportObject),
             MdoType::ChartOfCharacteristicTypes => {
                 Some(MetadataKind::ChartOfCharacteristicTypesObject)
             }
@@ -244,7 +264,11 @@ impl MetadataKind {
             Self::AccumulationRegisterRecord => Some("AccumulationRegisterRecord"),
             Self::AccountingRegisterRecord => Some("AccountingRegisterRecord"),
             Self::CalculationRegisterRecord => Some("CalculationRegisterRecord"),
-            Self::InformationRegisterRef
+            // The platform corpus keys an external object's members under the bare
+            // type, not under a dotted `<Kind>.<Name>` prefix: see `bare_platform_type`.
+            Self::ExternalDataProcessorObject
+            | Self::ExternalReportObject
+            | Self::InformationRegisterRef
             | Self::AccumulationRegisterRef
             | Self::AccountingRegisterRef
             | Self::CalculationRegisterRef
@@ -254,6 +278,25 @@ impl MetadataKind {
             | Self::RegisterFilter { .. }
             | Self::TabularSection { .. }
             | Self::TabularSectionRow { .. } => None,
+        }
+    }
+
+    /// The platform type whose methods and properties this kind carries when it
+    /// has no manager prefix. An external object's corpus entries have a bare
+    /// `type_name` (`ExternalDataProcessor`), so the prefix index never lists them.
+    pub fn bare_platform_type(self) -> Option<&'static str> {
+        self.bare_platform_type_names().map(|(_, en)| en)
+    }
+
+    /// Both spellings of [`Self::bare_platform_type`]: what the corpus writes as
+    /// the type of that type's own self-returning members (`ЭтотОбъект`).
+    pub fn bare_platform_type_names(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::ExternalDataProcessorObject => {
+                Some(("ВнешняяОбработка", "ExternalDataProcessor"))
+            }
+            Self::ExternalReportObject => Some(("ВнешнийОтчет", "ExternalReport")),
+            _ => None,
         }
     }
 
@@ -289,6 +332,10 @@ impl MetadataKind {
             (Self::DataProcessorObject, true) => "DataProcessorObject",
             (Self::ReportObject, false) => "ОтчётОбъект",
             (Self::ReportObject, true) => "ReportObject",
+            (Self::ExternalDataProcessorObject, false) => "ВнешняяОбработкаОбъект",
+            (Self::ExternalDataProcessorObject, true) => "ExternalDataProcessorObject",
+            (Self::ExternalReportObject, false) => "ВнешнийОтчётОбъект",
+            (Self::ExternalReportObject, true) => "ExternalReportObject",
             (Self::ExchangePlanRef, false) => "ПланОбменаСсылка",
             (Self::ExchangePlanRef, true) => "ExchangePlanRef",
             (Self::ExchangePlanObject, false) => "ПланОбменаОбъект",

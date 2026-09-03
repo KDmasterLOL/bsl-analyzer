@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{AnalysisContext, BodyContext, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::LocalRange;
 use ide_db::TextRange;
 use std::collections::HashMap;
 use stdx::case::CaseExt;
@@ -20,7 +21,21 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
+/// Файловый вход: только свод по файлу (`analyzeFile=true`). Область по
+/// умолчанию — метод, и её считает [`check_body`] по отсоединённому корню:
+/// файловая проверка при `analyzeFile=false` молчит, иначе находки
+/// удвоились бы.
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    let code = DiagnosticCode::DuplicateStringLiteral;
+    if ctx.is_disabled_with_metadata(code) || !Config::from_context(ctx).analyze_file {
+        return Vec::new();
+    }
+    check_file(ctx)
+}
+
+/// Прежний файловый алгоритм в обоих режимах: эталон для проверки сборки
+/// по методам и тело файлового входа при `analyzeFile=true`.
+pub(crate) fn check_file(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let _span = tracing::debug_span!("DuplicateStringLiteral::check").entered();
     let code = DiagnosticCode::DuplicateStringLiteral;
 
@@ -38,11 +53,28 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     for scope in scopes {
         let groups = collect_strings(&scope, &config);
-        diagnostics.extend(report_duplicates(groups, &config, code, ctx));
+        diagnostics.extend(report_duplicates(groups, &config, code, ctx, |range| range));
     }
 
     tracing::debug!(count = diagnostics.len(), "DuplicateStringLiteral diagnostics found");
     diagnostics
+}
+
+/// Область по умолчанию — метод: литералы тела и их вызовы-исключения лежат
+/// в узле метода, позиций проверка не читает, так что отсоединённый корень
+/// даёт ровно то, что дал бы обход файла по этому методу. Модульный код в
+/// этом режиме не судится, а при `analyzeFile=true` свод делает файл.
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
+    let code = DiagnosticCode::DuplicateStringLiteral;
+    if ctx.is_module_code() || ctx.is_disabled_with_metadata(code) {
+        return;
+    }
+    let config = Config::from_context(ctx);
+    if config.analyze_file {
+        return;
+    }
+    let groups = collect_strings(ctx.root(), &config);
+    acc.extend(report_duplicates(groups, &config, code, ctx, LocalRange::of_detached_node));
 }
 
 #[derive(Debug, Clone)]
@@ -55,7 +87,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &AnalysisContext) -> Self {
         let code = DiagnosticCode::DuplicateStringLiteral;
 
         let mut allowed = ctx.config_int(code, "allowedNumberCopies", 2) as usize;
@@ -174,12 +206,13 @@ fn collect_strings(
     groups
 }
 
-fn report_duplicates(
+fn report_duplicates<R: Copy>(
     groups: HashMap<String, Vec<(String, TextRange)>>,
     config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Vec<Diagnostic> {
+    ctx: &AnalysisContext,
+    range: impl Fn(TextRange) -> R,
+) -> Vec<Diagnostic<R>> {
     let mut diagnostics = Vec::new();
 
     for (_, occurrences) in groups {
@@ -191,22 +224,25 @@ fn report_duplicates(
                 first_text
             );
 
-            diagnostics.push(Diagnostic {
-                code,
-                message,
-                severity: ctx.severity(code),
-                range: *first_range,
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
+            diagnostics.push((
+                *first_range,
+                Diagnostic {
+                    code,
+                    message,
+                    severity: ctx.severity(code),
+                    range: range(*first_range),
+                    tags: ctx.tags(code),
+                    fixes: vec![],
+                },
+            ));
         }
     }
 
     // The groups map iterates in hash order, which varies run to run; emit in source
     // order (position of each literal's first occurrence) so the output is stable.
-    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+    diagnostics.sort_by_key(|(range, _)| (range.start(), range.end()));
 
-    diagnostics
+    diagnostics.into_iter().map(|(_, diagnostic)| diagnostic).collect()
 }
 
 fn is_excluded_call_argument(literal: &SyntaxNode, excluded: &[String]) -> bool {
@@ -258,7 +294,7 @@ mod tests {
         Ф = НРег("Строка2");
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicateStringLiteral @ 2:9..2:18
               message: Необходимо избавиться от многократного использования строкового литерала ""Строка2""
@@ -276,7 +312,7 @@ mod tests {
         Ф2 = ("Строка3" + "Строка4" + "СтрОкА22");
     КонецЕсли;
 КонецПроцедуры"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicateStringLiteral @ 2:10..2:20
               message: Необходимо избавиться от многократного использования строкового литерала ""Строка22""
@@ -293,7 +329,7 @@ mod tests {
     В = "ОШИБКА";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicateStringLiteral @ 3:9..3:17
               message: Необходимо избавиться от многократного использования строкового литерала ""Ошибка""
@@ -309,7 +345,7 @@ mod tests {
     В = "OK";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -321,7 +357,7 @@ mod tests {
     Б = "Текст1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -334,7 +370,7 @@ mod tests {
     В = "Текст1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicateStringLiteral @ 3:9..3:17
               message: Необходимо избавиться от многократного использования строкового литерала ""Текст1""
@@ -350,7 +386,7 @@ mod tests {
     В = Тип("СправочникСсылка.Товары");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -363,7 +399,7 @@ mod tests {
     В = Type("CatalogRef.Goods");
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -378,7 +414,7 @@ mod tests {
     Д = "СправочникСсылка.Товары";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicateStringLiteral @ 5:9..5:34
               message: Необходимо избавиться от многократного использования строкового литерала ""СправочникСсылка.Товары""
@@ -394,7 +430,7 @@ mod tests {
     ТаблицаДанных.Колонки.Добавить("Разница", Новый ОписаниеТипов("Число", , , Новый КвалификаторыЧисла(10, 3)));
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -410,7 +446,7 @@ mod tests {
     Е = "Второй литерал";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 2);
         assert!(diagnostics[0].message.contains("Первый литерал"));
         assert!(diagnostics[1].message.contains("Второй литерал"));
@@ -429,7 +465,28 @@ mod tests {
     Г = "Текст1";
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// Свод по файлу: одинаковые литералы двух методов считаются вместе и
+    /// отмечаются по первому вхождению; в режиме по умолчанию тот же текст
+    /// молчит на файловом входе — область там метод.
+    #[test]
+    fn file_mode_counts_across_methods() {
+        let code = "Процедура А()\n\tХ = \"Строка\";\n\tУ = \"Строка\";\nКонецПроцедуры\nПроцедура Б()\n\tЗ = \"Строка\";\nКонецПроцедуры\n";
+        let mut config = crate::DiagnosticsConfig::all_enabled();
+        config.parameters.insert(
+            DiagnosticCode::DuplicateStringLiteral,
+            serde_json::json!({"analyzeFile": true}),
+        );
+        let file = check_ast_diagnostic_with_config(code, config.clone(), check);
+        assert_eq!(file.len(), 1, "{file:?}");
+        assert_eq!(u32::from(file[0].range.start()), 30, "первое вхождение — в А");
+        let bodies = check_body_diagnostic_with_config(code, config, check_body);
+        assert!(bodies.is_empty(), "в режиме файла тела молчат");
+
+        let default_file = check_ast_diagnostic(code, check);
+        assert!(default_file.is_empty(), "в режиме метода файловый вход молчит");
     }
 }

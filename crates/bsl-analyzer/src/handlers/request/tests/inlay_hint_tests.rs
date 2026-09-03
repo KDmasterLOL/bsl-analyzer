@@ -18,7 +18,7 @@ fn inlay_hints_preserve_repeated_nested_receiver_labels_at_lsp_positions() {
         },
     };
 
-    let hints = handle_inlay_hint(latency_ctx(&state), params).unwrap().unwrap();
+    let hints = handle_inlay_hint(&latency_ctx(&state), params).unwrap().unwrap();
     let rendered: Vec<(String, Position)> = hints
         .into_iter()
         .map(|hint| {

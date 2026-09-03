@@ -292,6 +292,10 @@ reason_code! {
     OutOfAnalysisScope => "out_of_analysis_scope";
     /// A modality or subsystem the answer would normally use was unavailable.
     ModalityDegraded => "modality_degraded";
+    /// The file belongs to an external data processor or report analyzed without
+    /// the configuration it was written for: its calls into that configuration
+    /// are reported as unresolved.
+    OwningConfigurationMissing => "owning_configuration_missing";
 }
 
 /// The accepted values of one field, `a | b | c`, for a tool's `schema` action to publish.

@@ -16,7 +16,9 @@ use crate::call_resolution::CallCandidateSet;
 use crate::method_lookup::{
     build_tabular_section_method_info, platform_type_key_id, to_method_info, MethodInfo,
 };
-use crate::platform_manager_lookup::{build_resolution, metadata_kind_to_prefix_and_mdo};
+use crate::platform_manager_lookup::{
+    build_resolution, metadata_kind_to_prefix_and_mdo, object_kind_to_parent_mdo,
+};
 
 #[derive(Debug, Clone)]
 pub struct PlatformMethodHandle {
@@ -201,6 +203,24 @@ fn resolve_metadata_ref(
             return_ty: info.return_ty,
             candidates: info.candidates,
             env: info.env,
+        });
+    }
+
+    // An external object's methods live under its bare platform type, which the
+    // prefix index of dotted `type_name`s never sees; inference takes the same
+    // detour, and navigation must land on the same method.
+    if let Some(type_name) = kind.bare_platform_type() {
+        let parent_mdo = object_kind_to_parent_mdo(kind)?;
+        let method = lookup_scalar(salsa_db, type_name, method_name.as_str())?;
+        let resolution = build_resolution(kernel_db, method, parent_mdo, mdo_name);
+        return Some(ResolvedPlatformMethod {
+            handle: PlatformMethodHandle {
+                method_id: method.id,
+                origin: PlatformMethodOrigin::Scalar { type_name: SmolStr::from(type_name) },
+            },
+            return_ty: resolution.return_ty,
+            candidates: resolution.candidates,
+            env: resolution.env,
         });
     }
 

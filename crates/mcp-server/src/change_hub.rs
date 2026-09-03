@@ -4453,6 +4453,7 @@ mod tests {
     /// is the pre-canonical one. A filter built on the canonical spelling alone matches
     /// nothing on Windows (`\\?\C:\...` against `C:\...`) while staying green anywhere
     /// the two happen to coincide; a symlinked root is the same defect, reproducible here.
+    #[cfg(unix)]
     #[test]
     fn the_excluded_root_is_recognised_under_either_spelling() {
         let real = tempdir().unwrap();

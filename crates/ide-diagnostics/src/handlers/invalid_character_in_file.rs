@@ -1,7 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -29,11 +29,11 @@ enum InvalidCharType {
 }
 
 fn create_diagnostic(
-    range: TextRange,
+    range: LocalRange,
     char_type: InvalidCharType,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     let message = match char_type {
         InvalidCharType::IllegalDash => "Нужно исправить на правильный символ \"-\"",
         InvalidCharType::IllegalSpace => {
@@ -51,19 +51,17 @@ fn create_diagnostic(
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::InvalidCharacterInFile;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.as_token() {
+    for token in ctx.tokens() {
+        {
             let should_check = matches!(
                 token.kind(),
                 SyntaxKind::STRING
@@ -88,13 +86,18 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         InvalidCharType::IllegalDash
                     };
 
-                    diagnostics.push(create_diagnostic(token.text_range(), char_type, code, ctx));
+                    diagnostics.push(create_diagnostic(
+                        LocalRange::of_detached_node(token.text_range()),
+                        char_type,
+                        code,
+                        ctx,
+                    ));
                 }
             }
         }
     }
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 #[cfg(test)]

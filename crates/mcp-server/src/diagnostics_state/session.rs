@@ -88,21 +88,11 @@ impl ResidentSession {
             // The clone is a local: it cannot outlive this closure, and an unwind
             // through it drops it just the same. A clone that escaped would park the
             // next `set_file_text_source` on salsa's `while *clones != 1`.
-            // The handle lives INSIDE the `Analysis`, so it does not move for the rest
-            // of the read: `attach` remembers a raw pointer to the database, and a
-            // handle that moved (or a second clone made downstream) would be a
-            // different database to salsa — «Cannot change database mid-query».
             let analysis = ide::Analysis::from_database(resident.db().clone());
-            let db = analysis.database();
-            self.cancel.register(salsa::Database::cancellation_token(db));
-            // Attached for the WHOLE body, and this is what makes the token durable.
-            // Salsa resets a handle's local token when the OUTERMOST attach scope
-            // exits, and every query called from plain code is its own outermost
-            // scope: a cancel arriving while one of them runs is wiped on its way
-            // out, and the next file-boundary checkpoint reads a clear token. Holding
-            // the outermost scope here makes every query inside a nested one, so the
-            // cancel survives from the moment it arrives until a checkpoint sees it.
-            salsa::Database::attach(db, |_| f(resident, &analysis, generation))
+            self.cancel.register(salsa::Database::cancellation_token(analysis.database()));
+            // Attached for the WHOLE body: that is what keeps a cancel landing inside a
+            // query alive for the next file-boundary checkpoint (`Analysis::attached`).
+            analysis.attached(|analysis| f(resident, analysis, generation))
         })
     }
 
@@ -140,9 +130,8 @@ impl ResidentSession {
             std::panic::resume_unwind(Box::new(salsa::Cancelled::Local));
         }
         let analysis = ide::Analysis::new();
-        let db = analysis.database();
-        self.cancel.register(salsa::Database::cancellation_token(db));
-        salsa::Database::attach(db, |_| f(&analysis))
+        self.cancel.register(salsa::Database::cancellation_token(analysis.database()));
+        analysis.attached(f)
     }
 
     /// Cheap check for loops between salsa queries, where there is nothing to unwind
@@ -236,7 +225,7 @@ where
         }
     });
 
-    match join_unless_cancelled(ct, cancel, join).await {
+    match join_unless_cancelled(ct, || cancel.cancel_all(), join).await {
         // Per the MCP cancellation spec the client ignores any response after its
         // `notifications/cancelled`, so there is nothing to wait for and nothing to
         // publish; the detached body unwinds and logs on its own.

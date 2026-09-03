@@ -4,12 +4,13 @@ use stdx::case::CaseExt;
 use syntax::{TextRange, TextSize};
 
 use crate::{
-    body::{Body, BodySourceMap, ManagerType},
+    body::{Body, ManagerType},
     hir::{Expr, ExprIdx, Literal},
-    item_tree::{AnnotationKind, ItemTree, ModItem},
+    item_tree::{AnnotationKind, ItemTree},
     name::Name,
-    MethodId, ModuleBodies, ModuleId,
+    MethodId, MethodKey, ModuleBodies, ModuleId,
 };
+use intern::NormName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleCallSummary {
@@ -26,7 +27,7 @@ pub struct ModuleCallSummary {
     /// literal covers all those shapes without cross-module flow analysis, at the
     /// cost of also matching string *data* that coincides with a method name.
     /// Sorted and deduplicated.
-    pub name_literal_refs: Vec<u32>,
+    pub name_literal_refs: Vec<MethodKey>,
     pub form_entries: Vec<FormEventEntry>,
 }
 
@@ -100,7 +101,7 @@ impl ModuleCallSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodSummary {
-    pub local_id: u32,
+    pub local_id: MethodKey,
     pub name: Name,
     pub dispatch: MethodDispatch,
     pub is_export: bool,
@@ -113,7 +114,7 @@ pub struct MethodSummary {
 /// must not force the heavy body HIR that the per-module edge projection does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphMethodEntry {
-    pub local_id: u32,
+    pub local_id: MethodKey,
     pub name: Name,
     pub is_export: bool,
     pub dispatch: MethodDispatch,
@@ -281,7 +282,7 @@ pub enum EdgeKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallTarget {
     Local {
-        callee_local_id: u32,
+        callee_local_id: MethodKey,
     },
     QualifiedModule {
         module_name: Name,
@@ -306,7 +307,7 @@ pub enum CallTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallerId {
-    Method(u32),
+    Method(MethodKey),
     ModuleCode,
 }
 
@@ -659,48 +660,24 @@ pub(crate) fn workspace_call_graph_heap(v: &std::sync::Arc<WorkspaceCallGraph>) 
     bytes
 }
 
-/// Enumerate a module's methods from the item tree, in top-level declaration
-/// order (so the index is each method's `local_id`). Reads declarations only and
-/// never lowers bodies — cheap enough to run over a whole configuration without
-/// the RAM cost of body HIR.
+/// Enumerate a module's methods from the item tree, in declaration order.
+/// Reads declarations only and never lowers bodies — cheap enough to run over
+/// a whole configuration without the RAM cost of body HIR.
 pub fn extract_graph_methods(item_tree: &ItemTree) -> Vec<GraphMethodEntry> {
-    let mut methods = Vec::new();
-    for (top_level_idx, item) in item_tree.top_level_items().iter().enumerate() {
-        let local_id = top_level_idx as u32;
-        let entry = match item {
-            ModItem::Procedure(idx) => {
-                let proc = item_tree.procedure(*idx);
-                GraphMethodEntry {
-                    local_id,
-                    name: proc.name.clone(),
-                    is_export: proc.is_export,
-                    dispatch: MethodDispatch::from_annotation(
-                        proc.annotations.first().map(|a| &a.kind),
-                    ),
-                    name_range: proc.name_range,
-                    sig_end: proc.sig_end,
-                    source_range: proc.source_range,
-                }
-            }
-            ModItem::Function(idx) => {
-                let func = item_tree.function(*idx);
-                GraphMethodEntry {
-                    local_id,
-                    name: func.name.clone(),
-                    is_export: func.is_export,
-                    dispatch: MethodDispatch::from_annotation(
-                        func.annotations.first().map(|a| &a.kind),
-                    ),
-                    name_range: func.name_range,
-                    sig_end: func.sig_end,
-                    source_range: func.source_range,
-                }
-            }
-            ModItem::Variable(_) => continue,
-        };
-        methods.push(entry);
-    }
-    methods
+    item_tree
+        .methods()
+        .map(|method| GraphMethodEntry {
+            local_id: method.key(),
+            name: method.name().clone(),
+            is_export: method.is_export(),
+            dispatch: MethodDispatch::from_annotation(
+                method.annotations().first().map(|a| &a.kind),
+            ),
+            name_range: method.name_range(),
+            sig_end: method.sig_end(),
+            source_range: method.source_range(),
+        })
+        .collect()
 }
 
 pub fn extract_call_summary(
@@ -712,10 +689,10 @@ pub fn extract_call_summary(
     // build. The `local_method_ids` map (lowercased name → first local id) is what
     // body extraction uses to bind local calls.
     let graph_methods = extract_graph_methods(item_tree);
-    let mut local_method_ids: FxHashMap<String, u32> = FxHashMap::default();
+    let mut local_method_ids: FxHashMap<NormName, MethodKey> = FxHashMap::default();
     let mut methods = Vec::with_capacity(graph_methods.len());
     for method in &graph_methods {
-        local_method_ids.entry(method.name.as_str().fold_lower()).or_insert(method.local_id);
+        local_method_ids.entry(method.local_id.name).or_insert(method.local_id);
         methods.push(MethodSummary {
             local_id: method.local_id,
             name: method.name.clone(),
@@ -728,19 +705,13 @@ pub fn extract_call_summary(
     let mut notify_regs = Vec::new();
     let mut idle_handler_regs = Vec::new();
     let mut set_action_regs = Vec::new();
-    let mut name_literals: FxHashSet<u32> = FxHashSet::default();
+    let mut name_literals: FxHashSet<MethodKey> = FxHashSet::default();
 
-    let mut sorted_ids: Vec<u32> = module_bodies.iter_lower_results().map(|(id, _)| id).collect();
-    sorted_ids.sort_unstable();
-
-    for local_id in sorted_ids {
-        let lower_result = match module_bodies.lower_result(local_id) {
-            Some(lr) => lr,
-            None => continue,
-        };
+    // Bodies come in item order, which is deterministic.
+    for (local_id, lower_result) in module_bodies.iter_lower_results() {
         extract_from_body(
-            &lower_result.body,
-            &lower_result.source_map,
+            lower_result.body(),
+            lower_result.source_map(),
             CallerId::Method(local_id),
             &local_method_ids,
             &mut call_edges,
@@ -753,8 +724,8 @@ pub fn extract_call_summary(
 
     if let Some(module_code) = module_bodies.module_code_result() {
         extract_from_body(
-            &module_code.body,
-            &module_code.source_map,
+            module_code.body(),
+            module_code.source_map(),
             CallerId::ModuleCode,
             &local_method_ids,
             &mut call_edges,
@@ -765,7 +736,7 @@ pub fn extract_call_summary(
         );
     }
 
-    let mut name_literal_refs: Vec<u32> = name_literals.into_iter().collect();
+    let mut name_literal_refs: Vec<MethodKey> = name_literals.into_iter().collect();
     name_literal_refs.sort_unstable();
 
     let form_entries = form_event_handlers
@@ -793,20 +764,20 @@ pub fn extract_call_summary(
 #[allow(clippy::too_many_arguments)]
 fn extract_from_body(
     body: &Body,
-    source_map: &BodySourceMap,
+    source_map: crate::body::SourceMapAt<'_>,
     caller: CallerId,
-    local_method_ids: &FxHashMap<String, u32>,
+    local_method_ids: &FxHashMap<NormName, MethodKey>,
     call_edges: &mut Vec<CallEdge>,
     notify_regs: &mut Vec<NotifyReg>,
     idle_handler_regs: &mut Vec<IdleReg>,
     set_action_regs: &mut Vec<SetActionReg>,
-    name_literals: &mut FxHashSet<u32>,
+    name_literals: &mut FxHashSet<MethodKey>,
 ) {
     let common_bindings = crate::common_module_ref::common_module_var_bindings(body);
     for (expr_id, expr) in body.exprs_iter() {
         match expr {
             Expr::Literal(Literal::String(s)) if is_identifier_like(s) => {
-                if let Some(&local_id) = local_method_ids.get(&s.fold_lower()) {
+                if let Some(&local_id) = local_method_ids.get(&NormName::intern(s)) {
                     name_literals.insert(local_id);
                 }
             }
@@ -822,7 +793,9 @@ fn extract_from_body(
                             if let Some(reg) = extract_idle_reg(body, caller, args, range) {
                                 idle_handler_regs.push(reg);
                             }
-                        } else if let Some(&callee_local_id) = local_method_ids.get(&name_lower) {
+                        } else if let Some(&callee_local_id) =
+                            local_method_ids.get(&NormName::intern(name.as_str()))
+                        {
                             call_edges.push(CallEdge {
                                 caller,
                                 target: CallTarget::Local { callee_local_id },
@@ -1041,24 +1014,24 @@ fn field_callee_to_edge(
     field_base: ExprIdx,
     field: &Name,
     range: TextRange,
-    local_method_ids: &FxHashMap<String, u32>,
+    local_method_ids: &FxHashMap<NormName, MethodKey>,
     common_bindings: &FxHashMap<String, Name>,
 ) -> Option<CallEdge> {
     match body.expr_idx(field_base) {
         Expr::Path(module_name) => {
             let module_name_lower = module_name.as_str().fold_lower();
             if is_this_object(&module_name_lower) {
-                let method_name_lower = field.as_str().fold_lower();
-                let target =
-                    if let Some(&callee_local_id) = local_method_ids.get(&method_name_lower) {
-                        CallTarget::Local { callee_local_id }
-                    } else {
-                        tracing::debug!(
-                            method_name = field.as_str(),
-                            "Unresolved this-object method call in call graph extraction"
-                        );
-                        CallTarget::ThisObjectMethod { method_name: field.clone() }
-                    };
+                let target = if let Some(&callee_local_id) =
+                    local_method_ids.get(&NormName::intern(field.as_str()))
+                {
+                    CallTarget::Local { callee_local_id }
+                } else {
+                    tracing::debug!(
+                        method_name = field.as_str(),
+                        "Unresolved this-object method call in call graph extraction"
+                    );
+                    CallTarget::ThisObjectMethod { method_name: field.clone() }
+                };
                 Some(CallEdge { caller, target, kind: EdgeKind::DirectLocal, range })
             } else {
                 // A receiver bound to `ОбщегоНазначения.ОбщийМодуль("Имя")` is the named
@@ -1189,23 +1162,33 @@ mod tests {
         };
         let summary = ModuleCallSummary {
             methods: vec![MethodSummary {
-                local_id: 0,
+                local_id: MethodKey::first("Главная"),
                 name: Name::new("Главная"),
                 dispatch: MethodDispatch::from_annotation(None),
                 is_export: true,
             }],
             call_edges: vec![
                 edge(
-                    CallerId::Method(0),
-                    CallTarget::Local { callee_local_id: 1 },
+                    CallerId::Method(MethodKey::first("Главная")),
+                    CallTarget::Local { callee_local_id: MethodKey::first("М1") },
                     EdgeKind::DirectLocal,
                     0,
                 ),
-                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 10),
-                // A repeated call site: same fact, different range.
-                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 20),
                 edge(
-                    CallerId::Method(0),
+                    CallerId::Method(MethodKey::first("Главная")),
+                    qualified(),
+                    EdgeKind::DirectQualifiedModule,
+                    10,
+                ),
+                // A repeated call site: same fact, different range.
+                edge(
+                    CallerId::Method(MethodKey::first("Главная")),
+                    qualified(),
+                    EdgeKind::DirectQualifiedModule,
+                    20,
+                ),
+                edge(
+                    CallerId::Method(MethodKey::first("Главная")),
                     CallTarget::ManagerAccess {
                         manager_type: ManagerType::Catalogs,
                         object_name: Name::new("Контрагенты"),
@@ -1217,12 +1200,12 @@ mod tests {
                 // Dropped: module-code caller, method-less manager touch, movement.
                 edge(
                     CallerId::ModuleCode,
-                    CallTarget::Local { callee_local_id: 1 },
+                    CallTarget::Local { callee_local_id: MethodKey::first("М1") },
                     EdgeKind::DirectLocal,
                     40,
                 ),
                 edge(
-                    CallerId::Method(0),
+                    CallerId::Method(MethodKey::first("Главная")),
                     CallTarget::ManagerAccess {
                         manager_type: ManagerType::Catalogs,
                         object_name: Name::new("Контрагенты"),
@@ -1232,7 +1215,7 @@ mod tests {
                     50,
                 ),
                 edge(
-                    CallerId::Method(0),
+                    CallerId::Method(MethodKey::first("Главная")),
                     CallTarget::RegisterMovement { register_name: Name::new("Продажи") },
                     EdgeKind::RegisterMovement,
                     60,
@@ -1240,13 +1223,13 @@ mod tests {
             ],
             notify_regs: vec![
                 NotifyReg {
-                    caller: CallerId::Method(0),
+                    caller: CallerId::Method(MethodKey::first("Главная")),
                     callback_name: Name::new("Обработчик"),
                     target: NotifyTarget::ThisObject,
                     range: range(70),
                 },
                 NotifyReg {
-                    caller: CallerId::Method(0),
+                    caller: CallerId::Method(MethodKey::first("Главная")),
                     callback_name: Name::new("Обработчик"),
                     target: NotifyTarget::Unsupported,
                     range: range(80),
@@ -1254,25 +1237,25 @@ mod tests {
             ],
             idle_handler_regs: vec![
                 IdleReg {
-                    caller: CallerId::Method(0),
+                    caller: CallerId::Method(MethodKey::first("Главная")),
                     handler_name: Name::new("ОбновитьЭкран"),
                     one_shot: true,
                     range: range(90),
                 },
                 // A duplicate that differs only in one_shot/range: same resolved pair.
                 IdleReg {
-                    caller: CallerId::Method(0),
+                    caller: CallerId::Method(MethodKey::first("Главная")),
                     handler_name: Name::new("ОбновитьЭкран"),
                     one_shot: false,
                     range: range(100),
                 },
             ],
             set_action_regs: vec![SetActionReg {
-                caller: CallerId::Method(0),
+                caller: CallerId::Method(MethodKey::first("Главная")),
                 handler_name: Name::new("ОбработчикДействия"),
                 range: range(110),
             }],
-            name_literal_refs: vec![1],
+            name_literal_refs: vec![MethodKey::first("М1")],
             form_entries: Vec::new(),
         };
 
@@ -1286,14 +1269,19 @@ mod tests {
             subset.call_edges,
             vec![
                 edge(
-                    CallerId::Method(0),
-                    CallTarget::Local { callee_local_id: 1 },
+                    CallerId::Method(MethodKey::first("Главная")),
+                    CallTarget::Local { callee_local_id: MethodKey::first("М1") },
                     EdgeKind::DirectLocal,
                     0
                 ),
-                edge(CallerId::Method(0), qualified(), EdgeKind::DirectQualifiedModule, 0),
                 edge(
-                    CallerId::Method(0),
+                    CallerId::Method(MethodKey::first("Главная")),
+                    qualified(),
+                    EdgeKind::DirectQualifiedModule,
+                    0
+                ),
+                edge(
+                    CallerId::Method(MethodKey::first("Главная")),
                     CallTarget::ManagerAccess {
                         manager_type: ManagerType::Catalogs,
                         object_name: Name::new("Контрагенты"),
@@ -1310,7 +1298,7 @@ mod tests {
         assert_eq!(
             subset.notify_regs,
             vec![NotifyReg {
-                caller: CallerId::Method(0),
+                caller: CallerId::Method(MethodKey::first("Главная")),
                 callback_name: Name::new("Обработчик"),
                 target: NotifyTarget::ThisObject,
                 range: zero,
@@ -1319,7 +1307,7 @@ mod tests {
         assert_eq!(
             subset.idle_handler_regs,
             vec![IdleReg {
-                caller: CallerId::Method(0),
+                caller: CallerId::Method(MethodKey::first("Главная")),
                 handler_name: Name::new("ОбновитьЭкран"),
                 one_shot: false,
                 range: zero,
@@ -1441,7 +1429,7 @@ mod tests {
         assert_eq!(methods.len(), 2);
 
         let read = &methods[0];
-        assert_eq!(read.local_id, 0);
+        assert_eq!(read.local_id, MethodKey::first("Считать"));
         assert_eq!(read.name.as_str(), "Считать");
         assert!(read.is_export);
         assert!(read.dispatch.is_server_only());
@@ -1530,8 +1518,7 @@ mod tests {
     ) -> ModuleCallSummary {
         let parse = parser::parse(code);
         let item_tree = ItemTree::from_parse(&parse);
-        let module_id = crate::ModuleId::new(vfs::FileId(0));
-        let module_bodies = ModuleBodies::from_parse(&parse, module_id);
+        let module_bodies = ModuleBodies::from_parse(&parse);
         extract_call_summary(&item_tree, &module_bodies, handlers)
     }
 
@@ -1563,11 +1550,12 @@ mod tests {
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
         assert_eq!(local_edges.len(), 2);
 
-        assert_eq!(local_edges[0].caller, CallerId::Method(0));
-        assert!(matches!(&local_edges[0].target, CallTarget::Local { callee_local_id: 1 }));
+        let key = |i: usize| summary.methods[i].local_id;
+        assert_eq!(local_edges[0].caller, CallerId::Method(key(0)));
+        assert_eq!(local_edges[0].target, CallTarget::Local { callee_local_id: key(1) });
 
-        assert_eq!(local_edges[1].caller, CallerId::Method(1));
-        assert!(matches!(&local_edges[1].target, CallTarget::Local { callee_local_id: 2 }));
+        assert_eq!(local_edges[1].caller, CallerId::Method(key(1)));
+        assert_eq!(local_edges[1].target, CallTarget::Local { callee_local_id: key(2) });
     }
 
     #[test]
@@ -1780,7 +1768,7 @@ EndProcedure
         let summary = parse_and_extract(code);
 
         assert_eq!(summary.notify_regs.len(), 1);
-        assert_eq!(summary.notify_regs[0].caller, CallerId::Method(0));
+        assert_eq!(summary.notify_regs[0].caller, CallerId::Method(MethodKey::first("Test")));
         assert_eq!(summary.notify_regs[0].callback_name, Name::new("HandleResult"));
         assert_eq!(summary.notify_regs[0].target, NotifyTarget::ThisObject);
     }
@@ -2040,7 +2028,10 @@ EndProcedure
         assert_eq!(summary.idle_handler_regs.len(), 1);
         assert_eq!(summary.idle_handler_regs[0].handler_name, Name::new("Обновить"));
         assert!(summary.idle_handler_regs[0].one_shot);
-        assert_eq!(summary.idle_handler_regs[0].caller, CallerId::Method(0));
+        assert_eq!(
+            summary.idle_handler_regs[0].caller,
+            CallerId::Method(MethodKey::first("ПриОткрытии"))
+        );
 
         let local_edges: Vec<_> =
             summary.call_edges.iter().filter(|e| e.kind == EdgeKind::DirectLocal).collect();
@@ -2063,7 +2054,10 @@ EndProcedure
 
         assert_eq!(summary.set_action_regs.len(), 1);
         assert_eq!(summary.set_action_regs[0].handler_name, Name::new("ВалютаПриИзменении"));
-        assert_eq!(summary.set_action_regs[0].caller, CallerId::Method(0));
+        assert_eq!(
+            summary.set_action_regs[0].caller,
+            CallerId::Method(summary.methods[0].local_id)
+        );
     }
 
     #[test]
@@ -2257,7 +2251,7 @@ EndProcedure
         // spelling exceeds the SmolStr inline cap (so its `Name` heap is nonzero),
         // plus a dispatch entry for that same method.
         let module = ModuleId::new(vfs::FileId(0));
-        let method = GraphNode::Method(MethodId { module, local_id: 0 });
+        let method = GraphNode::Method(MethodId { module, local_id: MethodKey::first("М0") });
         let long_object_name = "ОченьДлинноеИмяСправочникаБольше23Символов";
         let object_name_heap = long_object_name.len();
         let mdo =

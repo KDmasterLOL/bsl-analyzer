@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{BinaryOp, Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, UnaryOp};
 use std::collections::HashSet;
 use stdx::case::CaseExt;
@@ -20,22 +21,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::IdenticalExpressions;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body(body, source_map, diags, code, ctx);
-    });
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    check_preprocessor_split_expressions(&root, &mut diagnostics, code, ctx);
-
-    diagnostics
+    check_body_exprs(ctx.body(), ctx.source_map(), acc, code, ctx);
+    check_preprocessor_split_expressions(ctx, acc, code);
 }
 
 fn are_exprs_semantically_equal(lhs_id: ExprId, rhs_id: ExprId, body: &Body) -> bool {
@@ -281,12 +275,12 @@ fn is_statement_expr(expr_id: ExprId, body: &Body, _source_map: &BodySourceMap) 
     false
 }
 
-fn check_body(
+fn check_body_exprs(
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
         if let Expr::BinaryOp { lhs, rhs, op } = expr {
@@ -313,9 +307,9 @@ fn check_binary_expr_hir(
     op: BinaryOp,
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     if op == BinaryOp::Eq && is_statement_expr(expr_id, body, source_map) {
         return;
@@ -370,7 +364,7 @@ fn check_binary_expr_hir(
     }
 }
 
-fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &DiagnosticsContext) -> bool {
+fn is_popular_division_hir(expr_id: ExprId, body: &Body, ctx: &BodyContext) -> bool {
     let popular_divisors = ctx
         .config
         .get_string_param(DiagnosticCode::IdenticalExpressions, "popularDivisors")
@@ -412,9 +406,9 @@ fn check_logical_chain_hir(
     chain_op: BinaryOp,
     body: &Body,
     source_map: &BodySourceMap,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     let mut operands = Vec::new();
     collect_logical_chain_hir(root_expr_id, chain_op, body, &mut operands);
@@ -500,12 +494,11 @@ fn normalize_text(text: &str) -> String {
 }
 
 fn check_preprocessor_split_expressions(
-    root: &SyntaxNode,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
 ) {
-    for node in root.descendants() {
+    for node in ctx.nodes() {
         if node.kind() != SyntaxKind::ASSIGN_STMT {
             continue;
         }
@@ -568,7 +561,7 @@ fn check_preprocessor_split_expressions(
                         operand
                     ),
                     severity: ctx.severity(code),
-                    range: node.text_range(),
+                    range: ctx.range_of(&node),
                     tags: ctx.tags(code),
                     fixes: vec![],
                 });
@@ -637,8 +630,8 @@ fn extract_preprocessor_operands(prep_dir: &SyntaxNode) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::check_ast_diagnostic;
+    use super::check_body;
+    use crate::test_utils::check_body_diagnostic;
     #[test]
     fn test_identical_comparison() {
         let code = r#"
@@ -650,7 +643,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Expected 1 diagnostic, found {}", diagnostics.len());
         assert!(diagnostics[0].message.contains("x"));
     }
@@ -666,7 +659,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -678,7 +671,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("-"));
     }
@@ -692,7 +685,7 @@ mod tests {
 КонецПроцедуры
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -707,7 +700,7 @@ mod tests {
         let code = "Функция Тест()\n    \
                     Возврат Справочники.Товары.Найти() = сПРАВОЧНИКИ.тОВАРЫ.нАЙТИ();\n\
                     КонецФункции\n";
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "same expression on both sides: {diagnostics:#?}");
 
         // Контроль: РАЗНЫЕ имена по-прежнему разные, иначе проверка выше зелена сама
@@ -715,7 +708,7 @@ mod tests {
         let distinct = "Функция Тест()\n    \
                         Возврат Справочники.Товары.Найти() = Справочники.Услуги.Найти();\n\
                         КонецФункции\n";
-        assert!(check_ast_diagnostic(distinct, check).is_empty());
+        assert!(check_body_diagnostic(distinct, check_body).is_empty());
     }
 
     #[test]
@@ -726,7 +719,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -746,7 +739,7 @@ mod tests {
     Возврат Истина;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "Self-assignment should not be flagged");
     }
 
@@ -759,7 +752,7 @@ mod tests {
     Возврат Ложь;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Identical <> should trigger");
         assert!(diagnostics[0].message.contains("<>"));
     }
@@ -770,7 +763,7 @@ mod tests {
     Возврат Перем3 > Перем3;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Identical > should trigger");
     }
 
@@ -781,7 +774,7 @@ mod tests {
     Перем6 = Перем7 / Перем7;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "/ triggers, + does not");
         assert!(diagnostics[0].message.contains("/"));
     }
@@ -795,7 +788,7 @@ mod tests {
     Возврат Ложь;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Identical complex expressions should trigger");
     }
 
@@ -805,7 +798,7 @@ mod tests {
     Возврат Перем11 <> Перем11;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Identical <> in return should trigger");
     }
 
@@ -818,7 +811,7 @@ mod tests {
     Возврат Ложь;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate in OR chain should trigger");
     }
 
@@ -828,7 +821,7 @@ mod tests {
     Возврат Перем12 < Перем12;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Identical < should trigger");
     }
 
@@ -841,7 +834,7 @@ mod tests {
     Возврат Ложь;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate in AND chain should trigger");
     }
 
@@ -851,7 +844,7 @@ mod tests {
     Возврат Перем14 И Перем15 И Перем15;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate И in return chain should trigger");
     }
 
@@ -862,7 +855,7 @@ mod tests {
     Результат = Результат * Результат;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "- triggers, * does not");
         assert!(diagnostics[0].message.contains("-"));
     }
@@ -873,7 +866,7 @@ mod tests {
     Возврат Перем18 И Перем19 ИЛИ Перем18 И Перем20;
 КонецФункции
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "No duplicates in mixed И/ИЛИ chain");
     }
 
@@ -883,7 +876,7 @@ mod tests {
 Б = 0;
 С = (А = 1) И (Б = 1) ИЛИ (А = 1) И (Б = 1);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate AND in OR chain at module level");
     }
 
@@ -894,7 +887,7 @@ mod tests {
     Б = 1;
 КонецЕсли;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate А = 1 in module-level OR");
     }
 
@@ -904,7 +897,7 @@ mod tests {
 ИначеЕсли 1 = А ИЛИ А = 1 Тогда
     Б = 11;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Transitive 1=А vs А=1 in OR chain");
     }
 
@@ -913,7 +906,7 @@ mod tests {
         let code = r#"
 Б = А = 12 ИЛИ А = 13 ИЛИ А = 12;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate А = 12 in chained OR");
     }
 
@@ -925,7 +918,7 @@ mod tests {
  ИЛИ Истина;
 #КонецОбласти
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Duplicate across #Область should trigger");
     }
 
@@ -940,7 +933,7 @@ mod tests {
 #КонецЕсли
  ИЛИ Истина;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Истина repeated across #Если should trigger");
     }
 
@@ -955,7 +948,7 @@ mod tests {
 #КонецЕсли
  ИЛИ Истина;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 0, "No duplicates across #Если");
     }
 
@@ -969,7 +962,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -988,7 +981,7 @@ mod tests {
 КонецФункции
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -1003,7 +996,7 @@ mod tests {
 С = (А = 1) И (Б = 1) ИЛИ (А = 1) И (Б = 1);
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(diagnostics.len(), 1, "Should find duplicate AND sub-expression in OR chain");
     }
 
@@ -1013,7 +1006,7 @@ mod tests {
 Б = А = 12 ИЛИ А = 13 ИЛИ А = 12;
 "#;
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             1,
@@ -1030,7 +1023,7 @@ mod tests {
 #КонецОбласти
 "#;
 
-        let _diagnostics = check_ast_diagnostic(code, check);
+        let _diagnostics = check_body_diagnostic(code, check_body);
     }
 
     #[test]
@@ -1045,6 +1038,6 @@ mod tests {
  ИЛИ Истина;
 "#;
 
-        let _diagnostics = check_ast_diagnostic(code, check);
+        let _diagnostics = check_body_diagnostic(code, check_body);
     }
 }

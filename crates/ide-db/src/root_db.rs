@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base_db::{FileIdInput, RootQueryDb, SourceDatabase};
+use base_db::{RootQueryDb, SourceDatabase};
 use hir::DefDatabase;
 use vfs::FileId;
 
@@ -22,16 +22,35 @@ pub trait RootDatabase:
         file_id: FileId,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
 
-    /// EVERY configured root (base + all extensions), regardless of any file's
-    /// visibility — the inventory view for index/graph builders that need the
-    /// whole workspace. Semantic per-file resolution must use
+    /// EVERY registered root — the base, all extensions, then the external
+    /// objects — regardless of any file's visibility: the inventory view for
+    /// index/graph builders that need the whole workspace, keyed by kind and
+    /// name. Semantic per-file resolution must use
     /// [`Self::get_all_configurations`] instead: this union deliberately ignores
     /// dependency-scoped visibility.
     fn all_configurations_inventory(
         &self,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)>;
 
+    /// Every registered root: the base, the extensions and the external objects.
+    /// What scanning, watching and the metadata substrate enumerate.
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
+
+    /// The external root owning `path`, when the file lies in an EPF/ERF export:
+    /// the root's configured and canonical spellings and the export's kind.
+    fn external_root_of_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, std::path::PathBuf, bsl_metadata::ExternalObjectKind)>;
+
+    /// The base and its extensions only, in topological order: the designer's
+    /// view of the project. External objects are leaves outside it: code sees
+    /// them from their own files alone, so module pairing, override order and
+    /// the semantic inventory of configurations leave them out. A consumer
+    /// keyed by `(kind, name)` — the name dictionary, navigation to an object's
+    /// XML — reads [`Self::all_config_paths`] instead: an external kind never
+    /// names a designer object, so its roots add entries without shadowing any.
+    fn designer_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)>;
 
     /// Topological rank and extension label of the root owning `file_id`, using
     /// the same configured/canonical longest-prefix rule as visibility.
@@ -93,41 +112,29 @@ pub trait RootDatabase:
 
     fn sdbl_hir_in_file(&self, file_id: FileId) -> SdblHirEntries;
 
-    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs>;
-
-    fn module_reaching_definitions(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs>;
-
-    fn module_path_terminates(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates>;
-
-    fn module_liveness_analysis(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::liveness::ModuleLiveness>;
-
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
     ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>>;
 
-    fn liveness_analysis(
+    fn method_path_terminates(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
+    ) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>>;
+
+    fn method_security_state(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>;
+
+    fn module_code_security_state(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>;
 
     fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph>;
 
     fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<hir::cfg::ControlFlowGraph>;
-
-    fn module_level_liveness_analysis(
-        &self,
-        module_id: hir::ModuleId,
-    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>;
 
     fn line_index(&self, file_id_input: base_db::FileIdInput) -> Arc<line_index::LineIndex>;
 

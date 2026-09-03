@@ -57,6 +57,7 @@ fn setup() -> (RootDatabaseImpl, Files) {
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     // `tests` (slot 2) depends on `yaxunit` (slot 1); everything else is independent.
     let snapshot = WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],

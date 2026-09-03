@@ -46,6 +46,7 @@ fn plan(selection: DiagnosticsBaselineSelection) -> DiagnosticsBaselinePartition
                 path: "ext".to_owned(),
                 depends_on: vec![],
             }],
+            externals: vec![],
         },
         project_scope_fingerprint: "a".repeat(64),
         selection_fingerprint: match selection {

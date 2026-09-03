@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::MagicNumberContext;
-use ide_db::TextRange;
 use std::collections::HashSet;
 use stdx::case::CaseExt;
 
@@ -22,10 +23,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 pub fn from_hir(
     value: &str,
-    range: TextRange,
+    range: LocalRange,
     context: &MagicNumberContext,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::MagicNumber;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -88,7 +89,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &AnalysisContext) -> Self {
         let authorized_str = ctx.config_string(
             DiagnosticCode::MagicNumber,
             "authorizedNumbers",

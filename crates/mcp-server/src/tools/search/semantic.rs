@@ -5,9 +5,11 @@ use super::gating::{
 };
 use super::types::{
     direct_search_initial_window, direct_search_max_window, AcquireFailure, CodeHits,
-    DirectResolve, DirectResult, SemanticUnavailable, DIRECT_SEARCH_MAX_REFILL_ROUNDS,
+    DirectResolve, DirectResult, SearchFailure, SemanticUnavailable,
+    DIRECT_SEARCH_MAX_REFILL_ROUNDS,
 };
-use crate::baseline::{ConfiguredBaselineStatus, ExternalBaselineService};
+use super::wait::{embed_unless_cancelled, Withdrawn};
+use crate::baseline::{BaselineCall, ConfiguredBaselineStatus, ExternalBaselineService};
 use crate::state::{SemanticRuntimeStatus, WorkspaceSearchMode};
 use bsl_search::{
     merge_context_for_collection, merge_semantic, SearchEngine, SearchError, SearchHit, SemanticHit,
@@ -15,6 +17,7 @@ use bsl_search::{
 use rmcp::ErrorData as McpError;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 /// Produce semantic (pgvector) code hits, separated from presentation. Hard policy/terminal
@@ -27,13 +30,14 @@ use tracing::warn;
 pub(super) fn semantic_code_hits_fenced(
     engine: &Arc<Mutex<Option<SearchEngine>>>,
     lease: &crate::workspace_lease::WorkspaceLease,
+    cancel: &CancellationToken,
     semantic_runtime: &Arc<Mutex<SemanticRuntimeStatus>>,
     workspace_search_mode: WorkspaceSearchMode,
     configured_baseline: Option<&ConfiguredBaselineStatus>,
     external_baseline: Option<Arc<ExternalBaselineService>>,
     query: &str,
     limit: usize,
-) -> Result<CodeHits, McpError> {
+) -> Result<CodeHits, SearchFailure> {
     ensure_workspace_search_allowed(configured_baseline)?;
     ensure_workspace_baseline_runtime_ready(
         workspace_search_mode.clone(),
@@ -46,10 +50,11 @@ pub(super) fn semantic_code_hits_fenced(
         .clone();
     // Reindex dirty overlay paths from the shared resident parse before serving. Runs OFF the
     // engine lock and no-ops when the resident is unavailable.
-    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease);
-    let guard = match try_acquire_engine(engine) {
+    crate::state::SharedState::prefetch_resident_overlay_fenced(engine, lease, cancel)?;
+    let guard = match try_acquire_engine(engine, cancel) {
         Ok(g) => g,
-        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error().into()),
+        Err(AcquireFailure::Cancelled) => return Err(SearchFailure::Cancelled),
         Err(AcquireFailure::TimedOut) => {
             return Ok(CodeHits::Pending(
                 "Semantic search is busy (a long operation is holding the index). Lexical search is available in the meantime."
@@ -88,9 +93,10 @@ pub(super) fn semantic_code_hits_fenced(
         // match, so checking it here (cheap) avoids paying for a wasted ~1.4s query embed. On a
         // mismatch, name the exact reason (and the knobs to fix it) instead of silently returning
         // lexical-only. A baseline with no recorded identity, or a read error, falls through to the
-        // existing behavior rather than hard-failing.
+        // existing behavior rather than hard-failing. A cancelled wait is the one answer that
+        // does NOT fall through: the caller is gone, and the guard goes with it.
         if let Some(source) = external_baseline.as_ref() {
-            match source.embedding_identity() {
+            match source.embedding_identity(cancel) {
                 Ok(Some((baseline_model, baseline_dim))) => {
                     let reader_model = engine.embedding_model().unwrap_or("unset");
                     let reader_dim = engine.embedding_dimension();
@@ -111,7 +117,8 @@ pub(super) fn semantic_code_hits_fenced(
                     }
                 }
                 Ok(None) => {}
-                Err(error) => {
+                Err(BaselineCall::Withdrawn) => return Err(SearchFailure::Cancelled),
+                Err(BaselineCall::Failed(error)) => {
                     tracing::debug!(
                         "failed to read baseline embedding identity for validation: {error}"
                     );
@@ -153,13 +160,14 @@ pub(super) fn semantic_code_hits_fenced(
     // correct BaselineNotReady). `resolve_direct_semantic` uses the model_id/dim captured above.
     let resolved_baseline: Option<DirectResolve> = if let Some(ref source) = external_baseline {
         let resolve_start = std::time::Instant::now();
-        let r = resolve_direct_semantic(source, model_id.as_deref(), dim);
+        let r = resolve_direct_semantic(source, cancel, model_id.as_deref(), dim);
         tracing::debug!(
             elapsed_ms = resolve_start.elapsed().as_millis() as u64,
             "search.code: resolve_direct_semantic"
         );
         match r {
-            DirectResolve::Terminal(e) => return Err(external_baseline_mcp_error(&e)),
+            DirectResolve::Terminal(e) => return Err(external_baseline_mcp_error(&e).into()),
+            DirectResolve::Cancelled => return Err(SearchFailure::Cancelled),
             DirectResolve::Unavailable => {
                 // Baseline not ready: the PostgresRemoteOverlay mode has no local fallback.
                 if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
@@ -179,7 +187,10 @@ pub(super) fn semantic_code_hits_fenced(
 
     // Embed lock-free now that readiness is confirmed (either baseline Ready or local path).
     let embed_start = std::time::Instant::now();
-    let embed_result = embedder.embed(query);
+    let embed_result = match embed_unless_cancelled(embedder, query, cancel) {
+        Ok(result) => result,
+        Err(Withdrawn) => return Err(SearchFailure::Cancelled),
+    };
     tracing::debug!(
         elapsed_ms = embed_start.elapsed().as_millis() as u64,
         query_len = query.len(),
@@ -195,14 +206,15 @@ pub(super) fn semantic_code_hits_fenced(
             warn!("semantic: query embed failed, degrading to lexical: {detail}");
             return Ok(CodeHits::Unavailable(SemanticUnavailable::EmbedderUnavailable(detail)));
         }
-        Err(e) => return Err(McpError::internal_error(format!("search error: {e}"), None)),
+        Err(e) => return Err(McpError::internal_error(format!("search error: {e}"), None).into()),
     };
 
     // Re-acquire the lock for the now-fast search. The engine may have changed while unlocked, so
     // re-check the readiness conditions that gate a semantic search.
-    let guard = match try_acquire_engine(engine) {
+    let guard = match try_acquire_engine(engine, cancel) {
         Ok(g) => g,
-        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error()),
+        Err(AcquireFailure::Poisoned) => return Err(engine_lock_poisoned_error().into()),
+        Err(AcquireFailure::Cancelled) => return Err(SearchFailure::Cancelled),
         Err(AcquireFailure::TimedOut) => {
             return Ok(CodeHits::Pending(
                 "Semantic search is busy (a long operation is holding the index). Lexical search is available in the meantime."
@@ -225,7 +237,7 @@ pub(super) fn semantic_code_hits_fenced(
         let source = external_baseline.as_ref().expect("resolved_baseline=Some implies Some");
         let direct_start = std::time::Instant::now();
         let direct =
-            run_direct_semantic(engine, source, &snapshot, mid, d, &query_embedding, limit);
+            run_direct_semantic(engine, source, cancel, &snapshot, mid, d, &query_embedding, limit);
         tracing::debug!(
             elapsed_ms = direct_start.elapsed().as_millis() as u64,
             "search.code: run_direct_semantic (under lock)"
@@ -235,8 +247,9 @@ pub(super) fn semantic_code_hits_fenced(
                 return Ok(CodeHits::Ready { hits, roots });
             }
             DirectResult::Terminal(error) => {
-                return Err(external_baseline_mcp_error(&error));
+                return Err(external_baseline_mcp_error(&error).into());
             }
+            DirectResult::Cancelled => return Err(SearchFailure::Cancelled),
             DirectResult::Unavailable => {
                 if matches!(workspace_search_mode, WorkspaceSearchMode::PostgresRemoteOverlay) {
                     return Ok(CodeHits::Unavailable(SemanticUnavailable::BaselineNotReady));
@@ -252,7 +265,7 @@ pub(super) fn semantic_code_hits_fenced(
 
     match engine.search_with_embedding_read_only(&query_embedding, limit, Some("code")) {
         Ok(hits) => Ok(CodeHits::Ready { hits, roots }),
-        Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None)),
+        Err(e) => Err(McpError::internal_error(format!("search error: {e}"), None).into()),
     }
 }
 
@@ -262,13 +275,15 @@ pub(super) fn semantic_code_hits_fenced(
 /// not-ready baseline aborts before the ~1.4s query embed fires.
 fn resolve_direct_semantic(
     source: &ExternalBaselineService,
+    cancel: &CancellationToken,
     model_id: Option<&str>,
     dim: Option<usize>,
 ) -> DirectResolve {
-    let snapshot = match source.resolve_snapshot() {
+    let snapshot = match source.resolve_snapshot(cancel) {
         Ok(Some((_, s))) => s,
         Ok(None) => return DirectResolve::Unavailable,
-        Err(e) => {
+        Err(BaselineCall::Withdrawn) => return DirectResolve::Cancelled,
+        Err(BaselineCall::Failed(e)) => {
             if e.is_terminal() {
                 warn!("direct semantic: terminal snapshot resolution error: {e}");
                 return DirectResolve::Terminal(e);
@@ -291,9 +306,14 @@ fn resolve_direct_semantic(
 /// Called under the engine lock after [`resolve_direct_semantic`] confirmed readiness and the
 /// embed completed. The snapshot and model identity were resolved in the lock-free phase and are
 /// passed in directly; no second `resolve_snapshot` call is made.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the resolved identity travels as the separate values the actor call takes"
+)]
 fn run_direct_semantic(
     engine: &SearchEngine,
     source: &ExternalBaselineService,
+    cancel: &CancellationToken,
     snapshot: &bsl_search::Snapshot,
     model_id: &str,
     dim: usize,
@@ -311,26 +331,34 @@ fn run_direct_semantic(
     };
     let overlay_semantic: Vec<SemanticHit> =
         overlay_hits.iter().map(SearchHit::to_semantic).collect();
-    merge_direct_semantic_with_refill(&overlay_semantic, &hidden_paths, limit, |fetch_limit| {
-        source.semantic_search(
-            snapshot.id.0.as_str(),
-            query_embedding,
-            model_id,
-            dim,
-            Some("code"),
-            fetch_limit,
-        )
-    })
+    merge_direct_semantic_with_refill(
+        &overlay_semantic,
+        &hidden_paths,
+        cancel,
+        limit,
+        |fetch_limit| {
+            source.semantic_search(
+                cancel,
+                snapshot.id.0.as_str(),
+                query_embedding,
+                model_id,
+                dim,
+                Some("code"),
+                fetch_limit,
+            )
+        },
+    )
 }
 
 fn merge_direct_semantic_with_refill<F>(
     overlay_hits: &[SemanticHit],
     hidden_paths: &HashSet<bsl_search::FileKey>,
+    cancel: &CancellationToken,
     limit: usize,
     mut fetch_baseline: F,
 ) -> DirectResult
 where
-    F: FnMut(usize) -> Result<Vec<SemanticHit>, SearchError>,
+    F: FnMut(usize) -> Result<Vec<SemanticHit>, BaselineCall>,
 {
     let context = merge_context_for_collection(hidden_paths, "code");
     let mut fetch_limit = direct_search_initial_window(limit);
@@ -339,9 +367,15 @@ where
     let mut best = Vec::new();
 
     for _ in 0..DIRECT_SEARCH_MAX_REFILL_ROUNDS {
+        // Between rounds: the round itself waits on the actor under this token, so this
+        // only covers a cancellation that landed while the last answer was being merged.
+        if cancel.is_cancelled() {
+            return DirectResult::Cancelled;
+        }
         let baseline_hits = match fetch_baseline(fetch_limit) {
             Ok(hits) => hits,
-            Err(e) => {
+            Err(BaselineCall::Withdrawn) => return DirectResult::Cancelled,
+            Err(BaselineCall::Failed(e)) => {
                 if e.is_terminal() {
                     warn!("direct semantic: terminal serving query error: {e}");
                     return DirectResult::Terminal(e);
@@ -420,10 +454,16 @@ mod tests {
         ];
         let mut requested_limits = Vec::new();
 
-        let result = merge_direct_semantic_with_refill(&[], &hidden_paths, 3, |fetch_limit| {
-            requested_limits.push(fetch_limit);
-            Ok(baseline.iter().take(fetch_limit).cloned().collect())
-        });
+        let result = merge_direct_semantic_with_refill(
+            &[],
+            &hidden_paths,
+            &tokio_util::sync::CancellationToken::new(),
+            3,
+            |fetch_limit| {
+                requested_limits.push(fetch_limit);
+                Ok(baseline.iter().take(fetch_limit).cloned().collect())
+            },
+        );
 
         let DirectResult::Found(hits) = result else {
             panic!("expected semantic refill to produce hits");
@@ -444,6 +484,7 @@ mod tests {
         let outcome = semantic_code_hits_fenced(
             &engine,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &tokio_util::sync::CancellationToken::new(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Failed("overlay sync failed".to_owned()))),
             WorkspaceSearchMode::SqliteLocal,
             None,
@@ -464,6 +505,7 @@ mod tests {
         let outcome = semantic_code_hits_fenced(
             &engine,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &tokio_util::sync::CancellationToken::new(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Indexing)),
             WorkspaceSearchMode::SqliteLocal,
             None,
@@ -494,6 +536,7 @@ mod tests {
         let outcome = semantic_code_hits_fenced(
             &engine,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
+            &tokio_util::sync::CancellationToken::new(),
             &Arc::new(Mutex::new(SemanticRuntimeStatus::Ready)),
             WorkspaceSearchMode::SqliteLocal,
             None,

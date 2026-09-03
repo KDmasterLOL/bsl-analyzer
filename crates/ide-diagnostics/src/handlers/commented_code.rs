@@ -1,9 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::slab::{self, Block};
+use crate::{AnalysisContext, Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use hir::LocalRange;
 use ide_db::TextRange;
 use lexer::{tokenize, Token, TokenKind};
-use syntax::{CommentRun, SyntaxToken};
+use syntax::{CommentLine, CommentRun};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -25,7 +27,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &AnalysisContext) -> Self {
         let exclusion_prefixes_str =
             ctx.config_string(DiagnosticCode::CommentedCode, "exclusionPrefixes", "");
 
@@ -40,6 +42,11 @@ impl Config {
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    slab::check_file_by_blocks(ctx, check_block)
+}
+
+pub fn check_block(ctx: &AnalysisContext, block: &Block) -> Vec<Diagnostic<LocalRange>> {
+    let _span = tracing::debug_span!("CommentedCode::check").entered();
     let code = DiagnosticCode::CommentedCode;
     if ctx.is_disabled_with_metadata(code) {
         return Vec::new();
@@ -47,24 +54,24 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
     let config = Config::from_context(ctx);
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let file_text = ctx.file_text();
+    let text = block.text;
 
     // Владения строкой диагностика не требует: комментарий за кодом — такой же
     // кандидат в закомментированный код, как стоящий на своей строке.
-    for run in syntax::comment_runs(&root) {
-        if is_commented_code(&run, &config) {
+    for run in syntax::comment_runs_of(block.tokens) {
+        if is_commented_code(&run, text, &config) {
             // Deleting commented-out code is destructive and easy to regret, so it is an
             // opt-in quick fix, never part of an unattended `source.fixAll` sweep. The whole
             // commented line(s) are removed, but only when they hold nothing but the
             // comments (no real code shares them — see `deletable_lines_range`).
-            let fixes = deletable_lines_range(&file_text, &run)
+            let fixes = deletable_lines_range(text, &run)
                 .map(|delete_range| {
                     Fix::manual(
                         "Удалить закомментированный код",
-                        vec![TextEdit { range: delete_range, new_text: String::new() }],
+                        vec![TextEdit {
+                            range: LocalRange::of_detached_node(delete_range),
+                            new_text: String::new(),
+                        }],
                     )
                 })
                 .into_iter()
@@ -72,7 +79,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::CommentedCode,
                 message: message_ru(),
-                range: run.range(),
+                range: LocalRange::of_detached_node(run.range()),
                 severity: ctx.severity(code),
                 tags: ctx.tags(code),
                 fixes,
@@ -95,11 +102,11 @@ fn deletable_lines_range(text: &str, run: &CommentRun) -> Option<TextRange> {
     // Everything in the region that is not a comment token must be whitespace.
     let mut cursor = line_start;
     for line in run.lines() {
-        let token_start: usize = line.token.text_range().start().into();
+        let token_start: usize = line.range.start().into();
         if !text[cursor..token_start].trim().is_empty() {
             return None;
         }
-        cursor = line.token.text_range().end().into();
+        cursor = line.range.end().into();
     }
     if !text[cursor..line_end].trim().is_empty() {
         return None;
@@ -108,9 +115,9 @@ fn deletable_lines_range(text: &str, run: &CommentRun) -> Option<TextRange> {
     Some(TextRange::new((line_start as u32).into(), (line_end as u32).into()))
 }
 
-/// Strips the leading `//` markers from a single comment token's text.
-fn comment_body(token: &SyntaxToken) -> &str {
-    token.text().trim_start_matches('/')
+/// Strips the leading `//` markers from a single comment line's text.
+fn comment_body<'a>(text: &'a str, line: &CommentLine) -> &'a str {
+    text[line.range].trim_start_matches('/')
 }
 
 fn message_ru() -> String {
@@ -124,7 +131,7 @@ fn message_ru() -> String {
 /// a BSL statement and the group does not carry a recognised documentation
 /// marker. Reporting the whole group range keeps a single finding aligned with
 /// the block a developer would delete.
-fn is_commented_code(run: &CommentRun, config: &Config) -> bool {
+fn is_commented_code(run: &CommentRun, text: &str, config: &Config) -> bool {
     if run.lines().is_empty() {
         return false;
     }
@@ -132,7 +139,7 @@ fn is_commented_code(run: &CommentRun, config: &Config) -> bool {
     // Documentation blocks (`Параметры:`, `Возвращаемое значение:`, …) describe
     // an API; the structured parameter lines below such markers frequently end
     // in `;` and read like code without being executable.
-    if is_documentation_block(run) {
+    if is_documentation_block(run, text) {
         return false;
     }
 
@@ -140,17 +147,16 @@ fn is_commented_code(run: &CommentRun, config: &Config) -> bool {
     // where data lines form the majority is a commented-out data block, not
     // commented-out code.  The first-line guard prevents a group that opens with
     // a real assignment and continues with HTML fragments from being suppressed.
-    if group_is_commented_data(run) {
+    if group_is_commented_data(run, text) {
         return false;
     }
 
     // The SQL text-block continuation prefix (`|`) only marks code when the same
     // group also opens a real query (`ВЫБРАТЬ`, `SELECT`, …); a lone `| прозаичный
     // хвост` is just a boxed comment, not a commented-out query.
-    let group_has_query =
-        run.lines().iter().any(|line| line_opens_query(comment_body(&line.token)));
+    let group_has_query = run.lines().iter().any(|line| line_opens_query(comment_body(text, line)));
 
-    run.lines().iter().any(|line| line_is_code(comment_body(&line.token), config, group_has_query))
+    run.lines().iter().any(|line| line_is_code(comment_body(text, line), config, group_has_query))
 }
 
 const DOC_MARKERS: &[&str] = &[
@@ -166,9 +172,9 @@ const DOC_MARKERS: &[&str] = &[
     "description:",
 ];
 
-fn is_documentation_block(run: &CommentRun) -> bool {
+fn is_documentation_block(run: &CommentRun, text: &str) -> bool {
     run.lines().iter().any(|line| {
-        let lowered = comment_body(&line.token).trim().to_lowercase();
+        let lowered = comment_body(text, line).trim().to_lowercase();
         DOC_MARKERS.iter().any(|marker| lowered.starts_with(marker))
     })
 }
@@ -178,11 +184,11 @@ fn is_documentation_block(run: &CommentRun) -> bool {
 ///   1. The first non-empty comment line is itself data (so a group that opens
 ///      with a real statement and continues with HTML fragments is not skipped).
 ///   2. Data lines form a strict majority (> half) of all non-empty lines.
-fn group_is_commented_data(run: &CommentRun) -> bool {
+fn group_is_commented_data(run: &CommentRun, text: &str) -> bool {
     let bodies: Vec<&str> = run
         .lines()
         .iter()
-        .map(|line| comment_body(&line.token).trim())
+        .map(|line| comment_body(text, line).trim())
         .filter(|s| !s.is_empty())
         .collect();
 

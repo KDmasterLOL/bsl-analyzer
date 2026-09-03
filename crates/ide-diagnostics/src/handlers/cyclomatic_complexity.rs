@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -16,58 +17,37 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    use hir::ModItem;
-
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::CyclomaticComplexity;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let threshold = ctx.config_int(code, "complexityThreshold", 20) as u32;
-    let module_cyclomatic = ctx.module_cyclomatic();
-    if module_cyclomatic.is_empty() {
-        return Vec::new();
+    let (Some(decl), Some(complexity), Some(name_range)) =
+        (ctx.decl(), ctx.cyclomatic(), ctx.method_name_range())
+    else {
+        return;
+    };
+    if complexity <= threshold {
+        return;
     }
-    let module_bodies = ctx.module_bodies();
-    let item_tree = ctx.item_tree();
-
-    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
-    local_ids.sort_unstable();
-
-    let mut out = Vec::new();
-    for local_id in local_ids {
-        let complexity = module_cyclomatic.get(local_id);
-        if complexity <= threshold {
-            continue;
-        }
-        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
-        let (name, name_range, is_function) = match item {
-            ModItem::Procedure(idx) => {
-                let p = item_tree.procedure(*idx);
-                (p.name.as_str().to_string(), p.name_range, false)
-            }
-            ModItem::Function(idx) => {
-                let f = item_tree.function(*idx);
-                (f.name.as_str().to_string(), f.name_range, true)
-            }
-            ModItem::Variable(_) => continue,
-        };
-        let method_type = if is_function { "Функция" } else { "Процедура" };
-        out.push(Diagnostic {
-            code,
-            message: format!(
-                "{} '{}' имеет цикломатическую сложность {} (максимум: {}). \
-                 Рассмотрите возможность упрощения или разбиения на более мелкие функции",
-                method_type, name, complexity, threshold
-            ),
-            severity: ctx.severity(code),
-            range: name_range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
-    out
+    let method_type = if decl.is_function { "Функция" } else { "Процедура" };
+    acc.push(Diagnostic {
+        code,
+        message: format!(
+            "{} '{}' имеет цикломатическую сложность {} (максимум: {}). \
+             Рассмотрите возможность упрощения или разбиения на более мелкие функции",
+            method_type,
+            decl.name.as_str(),
+            complexity,
+            threshold
+        ),
+        severity: ctx.severity(code),
+        range: name_range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
 }
 
 #[cfg(test)]
@@ -252,10 +232,9 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let module_bodies = db.module_bodies(module_id);
 
-        let body = module_bodies.body(0).expect("Should have first method body");
+        let (_, body) = module_bodies.iter_bodies().next().expect("Should have first method body");
 
-        let cfg =
-            hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None);
+        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body);
         let complexity = hir::cfg::cyclomatic_complexity(&cfg);
         assert_eq!(complexity, 14, "РассчитатьМаршрут CFG-based cyclomatic should be 14");
 

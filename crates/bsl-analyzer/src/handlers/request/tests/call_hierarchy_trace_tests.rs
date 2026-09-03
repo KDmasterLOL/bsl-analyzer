@@ -143,7 +143,7 @@ fn call_hierarchy_prepare_then_incoming_traces_index_only_serving() {
             crate::call_hierarchy_index_state::CallHierarchyIndexSnapshotId(generation),
         ));
         assert!(state.call_hierarchy_index.publish(source_root, generation, index));
-        let calls = handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item))
+        let calls = handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(item))
             .expect("incoming request")
             .expect("published index serves callers");
 

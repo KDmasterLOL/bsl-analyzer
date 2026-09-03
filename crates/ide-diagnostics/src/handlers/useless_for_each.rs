@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::Name;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -20,16 +21,15 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 pub fn from_hir(
     iterator_name: &str,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::UseLessForEach;
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let symbol_tree = ctx.symbol_tree();
-    if symbol_tree.find_variable(&Name::new(iterator_name)).is_some() {
+    if ctx.interface_variable_named(&Name::new(iterator_name)).is_some() {
         return None;
     }
 

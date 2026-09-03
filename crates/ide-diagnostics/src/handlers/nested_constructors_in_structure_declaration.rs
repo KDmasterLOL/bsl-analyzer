@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Name};
 use stdx::case::CaseExt;
 
@@ -18,28 +19,22 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::NestedConstructorsInStructureDeclaration;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body(body, source_map, code, ctx, diags);
-    });
-
-    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
-
-    diagnostics
+    check_body_exprs(ctx.body(), ctx.source_map(), code, ctx, acc);
 }
 
-fn check_body(
+fn check_body_exprs(
     body: &Body,
     source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
         let Expr::New { type_name, args } = expr else {

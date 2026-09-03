@@ -65,7 +65,7 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
                 && !is_call_expr_callee(node)
                 && !is_field_access_field(node)
             {
-                ctx.diagnostics.push(BodyDiagnostic::UsingThisForm { range });
+                ctx.emit(BodyDiagnostic::UsingThisForm { range });
             }
 
             Expr::Path(Name::new(&text))
@@ -95,8 +95,12 @@ fn lower_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> ExprIdx {
     if let Some(idx) =
         ctx.pending_sdbl.iter().position(|(literal_range, _)| *literal_range == range)
     {
-        let (_literal_range, query_info) = ctx.pending_sdbl.remove(idx);
-        ctx.body.sdbl_exprs.push((expr_id, query_info));
+        let (literal_range, query) = ctx.pending_sdbl.remove(idx);
+        ctx.body.sdbl_exprs.push((
+            expr_id,
+            cfg_types::LocalRange::of_detached_node(literal_range),
+            query,
+        ));
     }
 
     expr_id
@@ -160,15 +164,14 @@ fn lower_literal(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                         })
                         .collect();
 
-                let query_info = syntax::SdblQueryInfo::new(
-                    node.text_range(),
-                    sdbl_text,
-                    Some(sdbl_ast),
+                let query = syntax::SdblQuery {
+                    query_text: sdbl_text,
+                    query_ast: Some(sdbl_ast),
                     quote_corrections,
                     error_ranges_in_bsl,
-                );
+                };
 
-                ctx.pending_sdbl.push((node.text_range(), query_info));
+                ctx.pending_sdbl.push((node.text_range(), query));
             }
 
             Literal::String(value)
@@ -355,7 +358,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_deprecated_global_method_8312;
 
         if is_deprecated_global_method_8312(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+            ctx.emit(BodyDiagnostic::DeprecatedAttribute8312 {
                 name: name.clone(),
                 kind: crate::body::DeprecatedKind8312::GlobalMethod,
                 range: actual_callee.text_range(),
@@ -365,7 +368,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_deprecated_current_date;
 
         if is_deprecated_current_date(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedCurrentDate {
+            ctx.emit(BodyDiagnostic::DeprecatedCurrentDate {
                 name: name.clone(),
                 range: actual_callee.text_range(),
             });
@@ -374,7 +377,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_deprecated_find;
 
         if is_deprecated_find(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedFind {
+            ctx.emit(BodyDiagnostic::DeprecatedFind {
                 name: name.clone(),
                 range: actual_callee.text_range(),
             });
@@ -383,7 +386,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_deprecated_message;
 
         if is_deprecated_message(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedMessage {
+            ctx.emit(BodyDiagnostic::DeprecatedMessage {
                 name: name.clone(),
                 range: actual_callee.text_range(),
             });
@@ -392,7 +395,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_temp_files_dir;
 
         if is_temp_files_dir(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::TempFilesDir {
+            ctx.emit(BodyDiagnostic::TempFilesDir {
                 name: name.clone(),
                 range: actual_callee.text_range(),
             });
@@ -414,7 +417,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                             let content = inner.replace("\"\"", "\"");
 
                             if is_deprecated_managed_form(&content) {
-                                ctx.diagnostics.push(BodyDiagnostic::DeprecatedTypeManagedForm {
+                                ctx.emit(BodyDiagnostic::DeprecatedTypeManagedForm {
                                     type_name: content,
                                     range: string_token.text_range(),
                                 });
@@ -427,17 +430,16 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         let name_lower = name.fold_lower();
         if (name_lower == "eval" || name_lower == "вычислить") && !ctx.is_client_only {
-            ctx.diagnostics.push(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
+            ctx.emit(BodyDiagnostic::ExecuteExternalCode { range: node.text_range() });
         }
 
         if is_os_users_method(&name) {
-            ctx.diagnostics
-                .push(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
+            ctx.emit(BodyDiagnostic::OSUsersMethod { range: actual_callee.text_range() });
         }
 
         use super::diagnostics::check_try_number_call;
         if let Some(range) = check_try_number_call(node) {
-            ctx.diagnostics.push(BodyDiagnostic::TryNumber { range });
+            ctx.emit(BodyDiagnostic::TryNumber { range });
         }
 
         if is_write_log_event_method(&name) {
@@ -445,19 +447,18 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
 
         if is_form_data_to_value_global_method(&name) && !ctx.has_no_context_annotation {
-            ctx.diagnostics
-                .push(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
+            ctx.emit(BodyDiagnostic::FormDataToValue { range: actual_callee.text_range() });
         }
 
         if is_get_form_global_method(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
+            ctx.emit(BodyDiagnostic::GetFormMethod {
                 method_name: name.clone(),
                 range: actual_callee.text_range(),
             });
         }
 
         if is_proceed_with_call_method(&name_lower) && !ctx.is_instead_method {
-            ctx.diagnostics.push(BodyDiagnostic::WrongUseFunctionProceedWithCall {
+            ctx.emit(BodyDiagnostic::WrongUseFunctionProceedWithCall {
                 range: actual_callee.text_range(),
             });
         }
@@ -467,7 +468,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         }
 
         if is_deprecated_method(&name) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethod {
+            ctx.emit(BodyDiagnostic::DeprecatedMethod {
                 name: name.clone(),
                 range: node.text_range(),
             });
@@ -475,7 +476,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         let name_norm = NormName::intern(&name);
         if !ctx.local_vars.contains_key(&name_norm) && !ctx.param_names.contains(&name_norm) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
+            ctx.emit(BodyDiagnostic::DeprecatedMethodCall {
                 callee: name,
                 module: None,
                 range: actual_callee.text_range(),
@@ -484,7 +485,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         use super::diagnostics::get_modal_method_replacement;
         if let Some(replacement) = get_modal_method_replacement(&name_lower) {
-            ctx.diagnostics.push(BodyDiagnostic::UsingModalWindows {
+            ctx.emit(BodyDiagnostic::UsingModalWindows {
                 method_name: actual_callee.text().to_string(),
                 replacement: replacement.to_string(),
                 range: node.text_range(),
@@ -493,7 +494,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
         use super::diagnostics::get_synchronous_call_replacement;
         if let Some(replacement) = get_synchronous_call_replacement(&name_lower) {
-            ctx.diagnostics.push(BodyDiagnostic::UsingSynchronousCalls {
+            ctx.emit(BodyDiagnostic::UsingSynchronousCalls {
                 method_name: actual_callee.text().to_string(),
                 replacement: replacement.to_string(),
                 range: node.text_range(),
@@ -524,7 +525,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                     range: actual_callee.text_range(),
                 });
 
-                ctx.diagnostics.push(BodyDiagnostic::DeprecatedMethodCall {
+                ctx.emit(BodyDiagnostic::DeprecatedMethodCall {
                     callee: method_name_str.to_string(),
                     module: Some(module_name.to_string()),
                     range: idents[1].text_range(),
@@ -536,7 +537,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             let method_name = method_token.text();
 
             if is_get_form_method(method_name) {
-                ctx.diagnostics.push(BodyDiagnostic::GetFormMethod {
+                ctx.emit(BodyDiagnostic::GetFormMethod {
                     method_name: method_name.to_string(),
                     range: method_token.text_range(),
                 });
@@ -567,7 +568,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
                         .count();
 
                     if is_wrong_str_template(&template_string, param_count) {
-                        ctx.diagnostics.push(BodyDiagnostic::IncorrectUseOfStrTemplate {
+                        ctx.emit(BodyDiagnostic::IncorrectUseOfStrTemplate {
                             range: node.text_range(),
                         });
                     }
@@ -637,7 +638,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
             if let Some(kind) =
                 is_deprecated_attribute_8312(&object_name, method_token.text(), true)
             {
-                ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+                ctx.emit(BodyDiagnostic::DeprecatedAttribute8312 {
                     name: method_token.text().to_string(),
                     kind,
                     range: method_token.text_range(),
@@ -776,7 +777,7 @@ fn lower_call_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         if !is_local {
             let arg_presence = arg_list_node.as_ref().map(extract_arg_presence).unwrap_or_default();
 
-            ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+            ctx.emit(BodyDiagnostic::MissedRequiredParameter {
                 callee: callee_name,
                 module: None,
                 mdo_type: None,
@@ -821,7 +822,7 @@ fn record_qualified_call_facts(
             };
 
             if is_this_object {
-                ctx.diagnostics.push(BodyDiagnostic::MissedRequiredParameter {
+                ctx.emit(BodyDiagnostic::MissedRequiredParameter {
                     callee: field_name.as_str().to_string(),
                     module: None,
                     mdo_type: None,
@@ -854,7 +855,7 @@ fn record_qualified_call_facts(
 
 fn lower_arg_list(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Vec<ExprIdx> {
     if let Some(comma_range) = find_trailing_comma(node) {
-        ctx.diagnostics.push(BodyDiagnostic::ExtraCommas { range: comma_range });
+        ctx.emit(BodyDiagnostic::ExtraCommas { range: comma_range });
     }
 
     let mut args = Vec::new();
@@ -984,7 +985,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         use super::diagnostics::is_deprecated_attribute_8312;
 
         if let Some(kind) = is_deprecated_attribute_8312(object_name, field_tok.text(), false) {
-            ctx.diagnostics.push(BodyDiagnostic::DeprecatedAttribute8312 {
+            ctx.emit(BodyDiagnostic::DeprecatedAttribute8312 {
                 name: field_tok.text().to_string(),
                 kind,
                 range: field_tok.text_range(),
@@ -1007,7 +1008,7 @@ fn lower_field_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     if let Some(ref base_name) = direct_base_name {
         let lower = base_name.fold_lower();
         if lower == "этотобъект" || lower == "thisobject" {
-            ctx.diagnostics.push(BodyDiagnostic::RedundantAccessToObject {
+            ctx.emit(BodyDiagnostic::RedundantAccessToObject {
                 kind: RedundantAccessKind::ThisObject { prefix: base_name.clone() },
                 range: node.text_range(),
             });
@@ -1109,7 +1110,7 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
 
     if let Some(ref name) = type_name {
         if is_file_system_type(name.as_str()) {
-            ctx.diagnostics.push(BodyDiagnostic::FileSystemAccess { range: node.text_range() });
+            ctx.emit(BodyDiagnostic::FileSystemAccess { range: node.text_range() });
         }
     }
 
@@ -1124,7 +1125,7 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     };
 
     if let Some(style_name) = style_type_name {
-        ctx.diagnostics.push(BodyDiagnostic::StyleElementConstructors {
+        ctx.emit(BodyDiagnostic::StyleElementConstructors {
             type_name: style_name,
             range: node.text_range(),
         });
@@ -1139,7 +1140,7 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
     };
 
     if is_system_info {
-        ctx.diagnostics.push(BodyDiagnostic::UseSystemInformation { range: node.text_range() });
+        ctx.emit(BodyDiagnostic::UseSystemInformation { range: node.text_range() });
     }
 
     if !ctx.in_platform_guard {
@@ -1150,7 +1151,7 @@ fn lower_new_expr(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Expr {
         };
 
         if let Some(type_name_str) = unix_unavailable_type {
-            ctx.diagnostics.push(BodyDiagnostic::UsingObjectNotAvailableUnix {
+            ctx.emit(BodyDiagnostic::UsingObjectNotAvailableUnix {
                 type_name: type_name_str,
                 range: node.text_range(),
             });
@@ -1245,7 +1246,7 @@ fn check_write_log_event_call(ctx: &mut LoweringCtx, node: &SyntaxNode) {
         has_detail_error_description
     };
 
-    ctx.diagnostics.push(BodyDiagnostic::UsageWriteLogEvent {
+    ctx.emit(BodyDiagnostic::UsageWriteLogEvent {
         in_except_block: ctx.in_except_block,
         arg_count,
         log_level_empty,
@@ -1403,8 +1404,7 @@ fn check_using_external_code_tools(
         && is_external_code_tools_name(receiver_name)
         && is_external_code_tools_method(method_name)
     {
-        ctx.diagnostics
-            .push(BodyDiagnostic::UsingExternalCodeTools { range: call_node.text_range() });
+        ctx.emit(BodyDiagnostic::UsingExternalCodeTools { range: call_node.text_range() });
     }
 }
 

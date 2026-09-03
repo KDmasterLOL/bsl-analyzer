@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use syntax::{SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -17,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::NestedTernaryOperator;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -46,28 +47,6 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let _span = tracing::debug_span!("NestedTernaryOperator::check").entered();
-
-    let code = DiagnosticCode::NestedTernaryOperator;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for node in root.descendants() {
-        check_node(&node, &mut diagnostics, ctx);
-    }
-
-    tracing::debug!(count = diagnostics.len(), "NestedTernaryOperator diagnostics found");
-
-    diagnostics
-}
-
 fn find_if_condition(if_stmt: &SyntaxNode) -> Option<SyntaxNode> {
     if_stmt.children().find(|n| n.kind() == SyntaxKind::EXPR)
 }
@@ -79,8 +58,8 @@ fn find_elsif_condition(elsif_clause: &SyntaxNode) -> Option<SyntaxNode> {
 fn find_and_report_ternaries(
     condition: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for node in condition.descendants() {
         if node.kind() == SyntaxKind::TERNARY_EXPR {
@@ -92,13 +71,13 @@ fn find_and_report_ternaries(
 fn make_diagnostic(
     node: &SyntaxNode,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: "Не рекомендуется использовать вложенный тернарный оператор".to_string(),
         severity: ctx.severity(code),
-        range: node.text_range(),
+        range: LocalRange::of_detached_node(node.text_range()),
         tags: ctx.tags(code),
         fixes: vec![],
     }
@@ -106,8 +85,9 @@ fn make_diagnostic(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic, check_ast_diagnostic_with_config, format_diags};
+    use crate::test_utils::{
+        check_diagnostics_for, check_diagnostics_for_with_config, format_diags,
+    };
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -138,7 +118,7 @@ mod tests {
       );
 
 КонецЕсли;"#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::NestedTernaryOperator);
 
         expect![[r#"
             NestedTernaryOperator @ 3:14..9:15
@@ -161,7 +141,7 @@ mod tests {
         let code = r#"
 Результат = ?(Условие, Истина, Ложь);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::NestedTernaryOperator);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -170,7 +150,7 @@ mod tests {
         let code = r#"
 Результат = ?(Условие1, ?(Условие2, 1, 2), 3);
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::NestedTernaryOperator);
         expect![[r#"
             NestedTernaryOperator @ 2:25..2:42
               message: Не рекомендуется использовать вложенный тернарный оператор
@@ -185,7 +165,7 @@ mod tests {
     Х = 1;
 КонецЕсли;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::NestedTernaryOperator);
         expect![[r#"
             NestedTernaryOperator @ 2:6..2:16
               message: Не рекомендуется использовать вложенный тернарный оператор
@@ -202,7 +182,7 @@ mod tests {
     Х = 2;
 КонецЕсли;
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_diagnostics_for(code, DiagnosticCode::NestedTernaryOperator);
         expect![[r#"
             NestedTernaryOperator @ 4:11..4:21
               message: Не рекомендуется использовать вложенный тернарный оператор
@@ -218,7 +198,8 @@ mod tests {
         let mut config = DiagnosticsConfig::default();
         config.disabled.push(DiagnosticCode::NestedTernaryOperator);
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics =
+            check_diagnostics_for_with_config(code, config, DiagnosticCode::NestedTernaryOperator);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 }

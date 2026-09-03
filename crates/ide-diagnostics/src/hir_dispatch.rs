@@ -1,5 +1,5 @@
-use crate::{handlers, Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::BodyDiagnostic;
+use crate::{handlers, BodyContext, Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::{BodyDiagnostic, DefWithBodyId, LocalRange, MethodId, ModuleId};
 
 pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::AllFunctionPathMustHaveReturn,
@@ -64,29 +64,61 @@ pub(crate) const HIR_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::WrongUseOfRollbackTransactionMethod,
 ];
 
-pub fn collect_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+/// The body's own lowering diagnostics, judged in the body's coordinates.
+pub fn collect_body_hir_diagnostics(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     if !ctx.config.any_enabled(HIR_DIAGNOSTICS) {
-        return Vec::new();
+        return;
     }
-
-    let module_bodies = ctx.module_bodies();
-
-    let mut diagnostics = Vec::new();
-
-    for (method_id, body_diag) in module_bodies.all_diagnostics() {
+    let method_id = dispatch_method_id(ctx.owner(), ctx.module_id());
+    for body_diag in &ctx.lower().diagnostics {
         if let Some(diag) = dispatch_hir_diagnostic(body_diag, method_id, ctx) {
-            diagnostics.push(diag);
+            acc.push(diag);
         }
     }
+}
 
-    diagnostics
+/// `UsingSynchronousCalls` asks the module's call summary whether the caller
+/// is a handler — a file-wide, positional question — so it is the one lowering
+/// diagnostic dispatched from the file view rather than per body.
+pub fn collect_module_hir_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    if ctx.config.is_disabled(DiagnosticCode::UsingSynchronousCalls) {
+        return Vec::new();
+    }
+    let module_bodies = ctx.module_bodies();
+    module_bodies
+        .all_diagnostics()
+        .iter()
+        .filter_map(|(owner, body_diag)| match body_diag {
+            BodyDiagnostic::UsingSynchronousCalls { method_name, replacement, range } => {
+                handlers::using_synchronous_calls::from_hir(
+                    handlers::using_synchronous_calls::SyncCallCandidate {
+                        method_id: dispatch_method_id(*owner, ModuleId::new(ctx.file_id)),
+                        method_name,
+                        replacement,
+                        range: *range,
+                    },
+                    ctx,
+                )
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The method whose lowering diagnostics these are; `None` for module code,
+/// which has no declaration to ask about.
+fn dispatch_method_id(owner: DefWithBodyId, module: ModuleId) -> Option<MethodId> {
+    match owner {
+        DefWithBodyId::Method(local_id) => Some(MethodId { module, local_id }),
+        DefWithBodyId::ModuleCode => None,
+    }
 }
 
 pub fn dispatch_hir_diagnostic(
-    body_diag: &BodyDiagnostic,
-    method_id: &hir::MethodId,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    body_diag: &BodyDiagnostic<LocalRange>,
+    method_id: Option<MethodId>,
+    ctx: &BodyContext,
+) -> Option<Diagnostic<LocalRange>> {
     match body_diag {
         BodyDiagnostic::FunctionShouldHaveReturn { range } => {
             handlers::function_should_have_return::from_hir(*range, ctx)
@@ -99,7 +131,7 @@ pub fn dispatch_hir_diagnostic(
         }
         BodyDiagnostic::SelfAssign { range } => handlers::self_assign::from_hir(*range, ctx),
         BodyDiagnostic::MissingReturn { range } => {
-            handlers::all_function_path_must_have_return::from_hir(*range, method_id, ctx)
+            handlers::all_function_path_must_have_return::from_hir(*range, &method_id?, ctx)
         }
         BodyDiagnostic::DeprecatedMethod { name, range } => {
             handlers::deprecated_method::from_hir(name, *range, ctx)
@@ -261,17 +293,8 @@ pub fn dispatch_hir_diagnostic(
         BodyDiagnostic::UsingModalWindows { method_name, replacement, range } => {
             handlers::using_modal_windows::from_hir(method_name, replacement, *range, ctx)
         }
-        BodyDiagnostic::UsingSynchronousCalls { method_name, replacement, range } => {
-            handlers::using_synchronous_calls::from_hir(
-                handlers::using_synchronous_calls::SyncCallCandidate {
-                    method_id,
-                    method_name,
-                    replacement,
-                    range: *range,
-                },
-                ctx,
-            )
-        }
+        // Dispatched from the file view: see `collect_module_hir_diagnostics`.
+        BodyDiagnostic::UsingSynchronousCalls { .. } => None,
         BodyDiagnostic::UsingThisForm { range } => handlers::using_this_form::from_hir(*range, ctx),
         BodyDiagnostic::WrongUseFunctionProceedWithCall { range } => {
             handlers::wrong_use_function_proceed_with_call::from_hir(*range, ctx)

@@ -27,7 +27,12 @@ pub fn load_from_directory(path: impl AsRef<Path>) -> Result<Configuration> {
     }
 
     let loaded = off_exclusive_pool(|| load_all_metadata_parallel(path));
-    let config = build_configuration(loaded);
+    let mut config = build_configuration(loaded);
+    // An export root holds no collection at all; its one object is the whole
+    // configuration this root contributes to a visibility chain.
+    if let Some(external) = crate::external_object::load_external_object(path) {
+        config.add_metadata_object(external);
+    }
 
     tracing::info!(
         common_modules = config.common_modules().len(),
@@ -689,6 +694,8 @@ fn metadata_object_parser(mdo_type: MdoType) -> Option<fn(&str) -> Result<Metada
         MdoType::ChartOfAccounts => parse_chart_of_accounts_xml,
         MdoType::DataProcessor => parse_data_processor_xml,
         MdoType::Report => parse_report_xml,
+        MdoType::ExternalDataProcessor => parse_external_data_processor_xml,
+        MdoType::ExternalReport => parse_external_report_xml,
         MdoType::Enum => parse_enum_xml,
         MdoType::Constant => parse_constant_xml,
         _ => return None,

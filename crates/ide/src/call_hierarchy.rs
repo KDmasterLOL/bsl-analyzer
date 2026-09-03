@@ -289,23 +289,27 @@ mod tests {
         assert_eq!(second.ranges.len(), 2);
     }
 
+    /// A method's identity is its name, so an index survives declarations
+    /// added above the methods — and knows nothing about a method once it is
+    /// renamed.
     #[test]
-    fn incoming_rejects_an_index_after_a_method_layout_change() {
-        // Given: an index built before a top-level declaration shifts method IDs.
+    fn incoming_keeps_an_index_across_a_variable_above_and_drops_it_after_a_rename() {
         let (mut db, file_id) = single_file(MODULE);
         let target = method_id(&db, file_id, MODULE, "Помощник");
-        let stale_index = reverse_index(
+        let index = reverse_index(
             target,
             [method_id(&db, file_id, MODULE, "Первый"), method_id(&db, file_id, MODULE, "Второй")],
         );
+
         let shifted = format!("Перем Сдвиг;\n{MODULE}");
         db.set_file_text(file_id, &shifted);
+        let calls = incoming_calls(&db, file_id, offset_of(&shifted, "Помощник"), &index)
+            .expect("a variable above moves no method's identity");
+        assert_eq!(calls.len(), 2);
 
-        // When: the request resolves the post-layout-change target.
-        let calls = incoming_calls(&db, file_id, offset_of(&shifted, "Помощник"), &stale_index);
-
-        // Then: stale durable IDs do not produce a caller response.
-        assert!(calls.is_none());
+        let renamed = MODULE.replace("Помощник", "Помощница");
+        db.set_file_text(file_id, &renamed);
+        assert!(incoming_calls(&db, file_id, offset_of(&renamed, "Помощница"), &index).is_none());
     }
 
     #[test]

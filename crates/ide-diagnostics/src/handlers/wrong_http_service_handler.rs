@@ -118,8 +118,8 @@ pub fn from_metadata(
     diagnostics
 }
 
-fn get_method_name_range(item_tree: &hir::ItemTree, local_id: u32) -> Option<TextRange> {
-    let item = item_tree.top_level_items().get(local_id as usize)?;
+fn get_method_name_range(item_tree: &hir::ItemTree, local_id: hir::MethodKey) -> Option<TextRange> {
+    let item = item_tree.item_of(local_id)?;
     match item {
         ModItem::Function(func_idx) => Some(item_tree.function(*func_idx).name_range),
         ModItem::Procedure(proc_idx) => Some(item_tree.procedure(*proc_idx).name_range),

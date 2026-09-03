@@ -1,9 +1,10 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_platform::deprecation::{self, DeprecationEntry, DisplayKind, ElementKind, Lookup};
+use hir::LocalRange;
 use hir::Name;
-use ide_db::TextRange;
 use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -24,9 +25,9 @@ pub fn from_hir(
     type_name: &Name,
     member_name: &Name,
     is_property: bool,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::DeprecatedPlatformApi;
     if ctx.is_disabled_with_metadata(code) {
         return None;

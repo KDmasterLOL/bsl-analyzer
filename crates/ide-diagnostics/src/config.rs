@@ -5,7 +5,7 @@ use base_db::{DiagnosticsConfigInput, Locale};
 use std::collections::HashMap;
 use stdx::case::CaseExt;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MetadataOverride {
     pub severity: Option<DiagnosticSeverityLevel>,
     pub diagnostic_type: Option<DiagnosticType>,
@@ -46,7 +46,7 @@ fn parse_severity(s: &str) -> Severity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiagnosticsConfig {
     pub disabled: Vec<DiagnosticCode>,
     pub enabled: Vec<DiagnosticCode>,
@@ -65,6 +65,10 @@ pub struct DiagnosticsConfig {
     /// from the `[diagnostics]` project config.
     pub scope: Option<std::sync::Arc<base_db::AnalysisScope>>,
 }
+
+/// `serde_json::Value` is only `PartialEq` (floats); a configuration is still
+/// a value with a total identity for memoisation.
+impl Eq for DiagnosticsConfig {}
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
@@ -349,12 +353,46 @@ impl DiagnosticsConfig {
             parameters,
             ordinary_app_support: input.ordinary_app_support,
             dataflow_max_iterations: input.dataflow_max_iterations,
-            metadata_overrides: HashMap::new(),
-            only_enabled: None,
+            metadata_overrides: input
+                .metadata_overrides
+                .iter()
+                .filter_map(|(code_str, json_str)| {
+                    let code: DiagnosticCode = code_str.parse().ok()?;
+                    let value: MetadataOverride = serde_json::from_str(json_str).ok()?;
+                    Some((code, value))
+                })
+                .collect(),
+            only_enabled: input
+                .only_enabled
+                .as_ref()
+                .map(|codes| codes.iter().filter_map(|s| s.parse().ok()).collect()),
             locale: input.locale,
             bslls_suppression_compat: input.bslls_suppression_compat,
             scope: input.scope.clone(),
         }
+    }
+
+    /// The interned form of this configuration: the key the memoised
+    /// diagnostics are stored under. `from_input` restores every field that
+    /// influences a diagnostic, so a configuration and its input agree on the
+    /// result (`config_survives_the_interned_round_trip`).
+    pub fn to_input(&self) -> DiagnosticsConfigInput {
+        DiagnosticsConfigInput::from_raw(
+            self.disabled.iter().map(|c| c.as_str().to_owned()),
+            self.enabled.iter().map(|c| c.as_str().to_owned()),
+            self.parameters.iter().map(|(c, v)| (c.as_str().to_owned(), v.to_string())),
+            self.ordinary_app_support,
+            self.dataflow_max_iterations,
+            self.locale,
+            self.bslls_suppression_compat,
+        )
+        .with_filters(
+            self.only_enabled.as_ref().map(|codes| codes.iter().map(|c| c.as_str().to_owned())),
+            self.metadata_overrides.iter().map(|(c, o)| {
+                (c.as_str().to_owned(), serde_json::to_string(o).expect("plain enums serialize"))
+            }),
+        )
+        .with_scope(self.scope.clone())
     }
 
     pub fn apply_cli_filters(&mut self, only_diagnostic: &[String], disable_diagnostic: &[String]) {
@@ -475,5 +513,44 @@ mod tests {
         assert!(config.disabled.is_empty());
         assert!(config.enabled.is_empty());
         assert_eq!(config.locale, Locale::Ru);
+    }
+}
+
+#[cfg(test)]
+mod interned_round_trip {
+    use super::*;
+
+    /// A configuration and the input it interns to must agree on every
+    /// field that influences a diagnostic: the memoised checks run under
+    /// `from_input(to_input(config))`, the caller under `config`.
+    #[test]
+    fn config_survives_the_interned_round_trip() {
+        let mut config = DiagnosticsConfig::all_enabled();
+        config.disabled = vec![DiagnosticCode::LineLength];
+        config
+            .parameters
+            .insert(DiagnosticCode::MethodSize, serde_json::json!({ "maxMethodSize": 10 }));
+        config.only_enabled =
+            Some(vec![DiagnosticCode::MethodSize, DiagnosticCode::UnusedLocalVariable]);
+        config.metadata_overrides.insert(
+            DiagnosticCode::MethodSize,
+            MetadataOverride {
+                severity: Some(DiagnosticSeverityLevel::Blocker),
+                diagnostic_type: Some(DiagnosticType::Vulnerability),
+                tags: Some(vec![MetadataTag::Performance]),
+                lsp_severity: Some("Error".to_owned()),
+            },
+        );
+        config.dataflow_max_iterations = 7;
+        config.bslls_suppression_compat = false;
+
+        let restored = DiagnosticsConfig::from_input(&config.to_input());
+        assert_eq!(restored, config);
+
+        // The round trip is not vacuous: a configuration that differs in a
+        // filter interns to a different key.
+        let mut other = config.clone();
+        other.only_enabled = None;
+        assert_ne!(other.to_input(), config.to_input());
     }
 }

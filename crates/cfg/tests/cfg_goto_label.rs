@@ -7,7 +7,7 @@ fn snapshot(cfg: ControlFlowGraph, expect: Expect) {
 }
 
 fn build(body: &Body) -> ControlFlowGraph {
-    CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, None)
+    CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body)
 }
 
 #[test]

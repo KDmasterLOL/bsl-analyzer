@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::BodySourceMap;
+use hir::LocalRange;
 use syntax::{NodeOrToken, SyntaxKind, SyntaxNode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -20,68 +22,38 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 const DEFAULT_MAX_ALLOWED_LEVEL: i64 = 4;
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::NestedStatements;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let max_allowed_level =
         ctx.config_int(code, "maxAllowedLevel", DEFAULT_MAX_ALLOWED_LEVEL) as u32;
-
-    let module_metrics = ctx.module_hir_metrics();
-    if module_metrics.is_empty() {
-        return Vec::new();
+    let metrics = ctx.hir_metrics();
+    if metrics.nesting_leaves.is_empty() {
+        return;
     }
-    let module_bodies = ctx.module_bodies();
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
-    local_ids.sort_unstable();
-
-    let mut out = Vec::new();
-    for local_id in local_ids {
-        let Some(metrics) = module_metrics.get(local_id) else { continue };
-        if metrics.nesting_leaves.is_empty() {
-            continue;
-        }
-        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        emit_leaves(ctx, code, &metrics, source_map, &root, max_allowed_level, &mut out);
-    }
-    if let Some(metrics) = module_metrics.module_code() {
-        if !metrics.nesting_leaves.is_empty() {
-            if let Some(lower_result) = module_bodies.module_code_result() {
-                emit_leaves(
-                    ctx,
-                    code,
-                    &metrics,
-                    &lower_result.source_map,
-                    &root,
-                    max_allowed_level,
-                    &mut out,
-                );
-            }
-        }
-    }
-    out
+    emit_leaves(ctx, code, &metrics, ctx.source_map(), ctx.root(), max_allowed_level, acc);
 }
 
 fn emit_leaves(
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
     code: DiagnosticCode,
     metrics: &hir::metrics::HirMethodMetrics,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     root: &SyntaxNode,
     max_allowed_level: u32,
-    out: &mut Vec<Diagnostic>,
+    out: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for leaf in metrics.nesting_leaves.iter() {
         if leaf.depth <= max_allowed_level {
             continue;
         }
         let Some(stmt_range) = source_map.stmt_range(leaf.stmt) else { continue };
-        let keyword_range = first_nesting_keyword(root, stmt_range).unwrap_or(stmt_range);
+        let keyword_range = first_nesting_keyword(root, stmt_range.in_root())
+            .map(LocalRange::of_detached_node)
+            .unwrap_or(stmt_range);
         out.push(Diagnostic {
             code,
             message: "Управляющие конструкции не должны быть вложены слишком глубоко".to_string(),

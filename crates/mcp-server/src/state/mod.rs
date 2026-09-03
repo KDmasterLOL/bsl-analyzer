@@ -166,6 +166,20 @@ impl SharedState {
                 ));
             }
         };
+        Self::apply_to_engine(&mut guard, lease, apply)
+    }
+
+    /// The lease-gated write against a guard the caller already holds. Background writers
+    /// take the guard with a plain `lock()` above; a request path takes it through the
+    /// cancellable acquire and applies here, so the two differ only in how they waited.
+    pub(super) fn apply_to_engine<T>(
+        guard: &mut std::sync::MutexGuard<'_, Option<bsl_search::SearchEngine>>,
+        lease: &crate::workspace_lease::WorkspaceLease,
+        apply: impl FnOnce(
+            &mut bsl_search::SearchEngine,
+            &mut dyn FnMut() -> std::ops::ControlFlow<()>,
+        ) -> std::ops::ControlFlow<(), Result<T, bsl_search::SearchError>>,
+    ) -> WorkspaceSearchApply<T, bsl_search::SearchError> {
         let Some(engine) = guard.as_mut() else {
             return WorkspaceSearchApply::OperationError(bsl_search::SearchError::Index(
                 "workspace search engine is not published".to_owned(),
@@ -193,17 +207,23 @@ impl SharedState {
     /// [`crate::workspace_lease`]). Such a backend still serves everything it holds, but it
     /// produces no new derived state — so once its last session leaves there is nothing left
     /// to stay warm for.
-    /// Set when the resolved configuration root is itself an extension analyzed
-    /// without the main configuration it extends — the state in which valid
-    /// calls into that configuration are reported as unresolved.
+    /// Every "analyzed without its main configuration" advisory the project
+    /// carries, joined for one status line — the state in which valid calls into
+    /// that configuration are reported as unresolved. An extension's and an
+    /// external object's are distinct conditions and both can hold at once.
     /// Derived from the project as it is now, not from the root captured at
     /// bootstrap: a config edit can move the resolved root between a main
     /// configuration and an extension, and everything else — diagnostics, graph,
     /// drift — already rebuilds through `crate::project::at` when it does.
-    pub(crate) fn standalone_extension_notice(&self) -> Option<String> {
+    pub(crate) fn standalone_notice(&self) -> Option<String> {
         let root = self.workspace_root.as_deref()?;
         let project = crate::project::at(root).ok()?;
-        project.standalone_extension_notice()
+        let notices: Vec<String> =
+            [project.standalone_extension_notice(), project.standalone_external_notice()]
+                .into_iter()
+                .flatten()
+                .collect();
+        (!notices.is_empty()).then(|| notices.join("\n"))
     }
 
     pub(crate) fn superseded(&self) -> bool {
@@ -386,11 +406,16 @@ impl SharedState {
     /// lock that only touches the overlay cache (never the resident). A resident that is
     /// absent/loading, or a path it cannot serve, is simply missing from the map and the
     /// reindex disk-reads it — so search never regresses when the resident is unavailable.
+    ///
+    /// Runs on behalf of one request: both engine-lock acquisitions and the per-path
+    /// resident reads observe `cancel`, and a cancelled request withdraws with whatever
+    /// remains left dirty, exactly as the per-query cap leaves it.
     pub(crate) fn prefetch_resident_overlay_fenced(
         engine: &SharedSearchEngine,
         lease: &crate::workspace_lease::WorkspaceLease,
-    ) {
-        sync::prefetch_resident_overlay(engine, lease);
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<(), crate::tools::search::Withdrawn> {
+        sync::prefetch_resident_overlay(engine, lease, cancel)
     }
 }
 
@@ -567,18 +592,18 @@ mod standalone_extension_tests {
         std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
 
         let state = SharedState::workspace(root.to_path_buf()).unwrap();
-        assert!(state.standalone_extension_notice().is_none(), "a main configuration stays silent");
+        assert!(state.standalone_notice().is_none(), "a main configuration stays silent");
 
         // Everything else — diagnostics, graph, drift — rebuilds through
         // `crate::project::at` after a config edit, so a notice read from the
         // root captured at bootstrap would describe a project no longer in use.
         std::fs::write(&config, "[source]\nroot = \"ext\"\nextensions = []\n").unwrap();
         assert!(
-            state.standalone_extension_notice().is_some(),
+            state.standalone_notice().is_some(),
             "the root is now an extension and the notice must follow"
         );
 
         std::fs::write(&config, "[source]\nroot = \"cf\"\nextensions = []\n").unwrap();
-        assert!(state.standalone_extension_notice().is_none(), "and must go away again");
+        assert!(state.standalone_notice().is_none(), "and must go away again");
     }
 }

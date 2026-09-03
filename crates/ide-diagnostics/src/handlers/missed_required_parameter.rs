@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{MethodSymbol, ModuleId, Name};
-use ide_db::TextRange;
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
+use hir::{ModuleId, Name};
 use vfs::FileId;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -25,9 +26,9 @@ pub fn from_hir(
     mdo_type: Option<&str>,
     mdo_name: Option<&str>,
     args: &[bool],
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::MissedRequiredParameter;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -67,19 +68,16 @@ pub fn from_hir(
 }
 
 fn check_local_call(
-    ctx: &DiagnosticsContext,
+    ctx: &AnalysisContext,
     method_name: &str,
     args: &[bool],
 ) -> Option<Vec<String>> {
-    let symbol_tree = ctx.symbol_tree();
-    let name = Name::new(method_name);
-
-    let method = symbol_tree.find_method(&name)?;
-    Some(check_missing_params(method, args))
+    let method = ctx.interface_method_named(&Name::new(method_name))?;
+    Some(check_missing_params(&method, args))
 }
 
 fn check_qualified_call(
-    ctx: &DiagnosticsContext,
+    ctx: &AnalysisContext,
     module_name: &str,
     method_name: &str,
     args: &[bool],
@@ -119,7 +117,7 @@ fn check_qualified_call(
 }
 
 fn check_manager_module_call(
-    ctx: &DiagnosticsContext,
+    ctx: &AnalysisContext,
     mdo_type_keyword: &str,
     mdo_name: &str,
     method_name: &str,
@@ -171,7 +169,7 @@ fn check_manager_module_call(
 }
 
 fn find_manager_module_file(
-    ctx: &DiagnosticsContext,
+    ctx: &AnalysisContext,
     mdo_type: bsl_metadata::MdoType,
     mdo_name: &str,
 ) -> Option<FileId> {
@@ -227,7 +225,7 @@ fn find_manager_module_file(
     None
 }
 
-fn check_missing_params(method: &MethodSymbol, provided_args: &[bool]) -> Vec<String> {
+fn check_missing_params(method: &hir::MethodDecl, provided_args: &[bool]) -> Vec<String> {
     let mut missing = Vec::new();
 
     for (i, param) in method.params.iter().enumerate() {

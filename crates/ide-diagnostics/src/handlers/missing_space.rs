@@ -1,9 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::slab::{self, Block};
+use crate::{AnalysisContext, Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use hir::LocalRange;
 use ide_db::TextRange;
 use std::collections::HashSet;
-use syntax::{SyntaxKind, SyntaxToken};
+use syntax::{LineToken, SyntaxKind, TextSize};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -53,7 +55,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &AnalysisContext) -> Self {
         let code = DiagnosticCode::MissingSpace;
 
         let left_symbols: HashSet<String> = ctx
@@ -109,24 +111,24 @@ impl Config {
     }
 }
 
-fn is_trivia(token: &SyntaxToken) -> bool {
-    token.kind().is_trivia()
+fn is_trivia(token: &LineToken) -> bool {
+    token.kind.is_trivia()
 }
 
-fn is_keyword_with_left_right_space(token: &SyntaxToken) -> bool {
+fn is_keyword_with_left_right_space(token: &LineToken) -> bool {
     matches!(
-        token.kind(),
+        token.kind,
         SyntaxKind::KW_OR | SyntaxKind::KW_AND | SyntaxKind::KW_IN | SyntaxKind::KW_TO
     )
 }
 
-fn is_keyword_with_left_space(token: &SyntaxToken) -> bool {
-    matches!(token.kind(), SyntaxKind::KW_EXPORT | SyntaxKind::KW_THEN | SyntaxKind::KW_DO)
+fn is_keyword_with_left_space(token: &LineToken) -> bool {
+    matches!(token.kind, SyntaxKind::KW_EXPORT | SyntaxKind::KW_THEN | SyntaxKind::KW_DO)
 }
 
-fn is_keyword_with_right_space(token: &SyntaxToken) -> bool {
+fn is_keyword_with_right_space(token: &LineToken) -> bool {
     matches!(
-        token.kind(),
+        token.kind,
         SyntaxKind::KW_IF
             | SyntaxKind::KW_ELSIF
             | SyntaxKind::KW_WHILE
@@ -136,43 +138,53 @@ fn is_keyword_with_right_space(token: &SyntaxToken) -> bool {
     )
 }
 
-fn is_unary_operator(tokens: &[SyntaxToken], current_index: usize) -> bool {
+/// Знак унарный, если ближайший значимый токен слева открывает выражение.
+/// Слева от первого значимого токена блока стоит его сосед из контекста —
+/// или ничего, если блок начинает файл.
+fn is_unary_operator(block: &Block, current_index: usize) -> bool {
+    let tokens = block.tokens;
     let mut prev_index = current_index;
     loop {
         if prev_index == 0 {
-            return true;
+            return block
+                .prev_significant()
+                .is_none_or(|kind| UNARY_CONTEXT_TOKENS.contains(&kind));
         }
         prev_index -= 1;
 
         if !is_trivia(&tokens[prev_index]) {
-            return UNARY_CONTEXT_TOKENS.contains(&tokens[prev_index].kind());
+            return UNARY_CONTEXT_TOKENS.contains(&tokens[prev_index].kind);
         }
     }
 }
 
-fn should_check_left(token: &SyntaxToken, config: &Config) -> bool {
-    let text = token.text();
+fn should_check_left(token: &LineToken, text: &str, config: &Config) -> bool {
     config.left_symbols.contains(text) || is_keyword_with_left_space(token)
 }
 
-fn should_check_right(token: &SyntaxToken, config: &Config) -> bool {
-    let text = token.text();
+fn should_check_right(token: &LineToken, text: &str, config: &Config) -> bool {
     config.right_symbols.contains(text) || is_keyword_with_right_space(token)
 }
 
-fn should_check_left_right(token: &SyntaxToken, config: &Config) -> bool {
-    let text = token.text();
+fn should_check_left_right(token: &LineToken, text: &str, config: &Config) -> bool {
     config.left_right_symbols.contains(text) || is_keyword_with_left_right_space(token)
 }
 
+fn insert_at(offset: TextSize) -> TextEdit<LocalRange> {
+    TextEdit {
+        range: LocalRange::of_detached_node(TextRange::new(offset, offset)),
+        new_text: " ".to_string(),
+    }
+}
+
 fn check_left_space(
-    tokens: &[SyntaxToken],
+    block: &Block,
     index: usize,
-    token: &SyntaxToken,
-    _config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
+    let tokens = block.tokens;
+    let token = &tokens[index];
     if index == 0 {
         return None;
     }
@@ -190,7 +202,7 @@ fn check_left_space(
 
     let prev_token = &tokens[prev_index];
 
-    if prev_token.kind() == SyntaxKind::L_PAREN {
+    if prev_token.kind == SyntaxKind::L_PAREN {
         return None;
     }
 
@@ -198,32 +210,33 @@ fn check_left_space(
         return None;
     }
 
-    let range = token.text_range();
-    let insert = range.start();
+    let text = &block.text[token.range];
+    let range = token.range;
     Some(Diagnostic {
         code,
-        message: format!("Отсутствует пробел слева от '{}'", token.text()),
+        message: format!("Отсутствует пробел слева от '{text}'"),
         severity: ctx.severity(code),
-        range,
+        range: LocalRange::of_detached_node(range),
         tags: ctx.tags(code),
         fixes: vec![Fix::safe(
-            format!("Добавить пробел слева от '{}'", token.text()),
-            vec![TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() }],
+            format!("Добавить пробел слева от '{text}'"),
+            vec![insert_at(range.start())],
         )],
     })
 }
 
 fn check_right_space(
-    tokens: &[SyntaxToken],
+    block: &Block,
     index: usize,
-    token: &SyntaxToken,
     config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
+    let tokens = block.tokens;
+    let token = &tokens[index];
     if !config.check_space_to_right_of_unary
-        && matches!(token.kind(), SyntaxKind::PLUS | SyntaxKind::MINUS)
-        && is_unary_operator(tokens, index)
+        && matches!(token.kind, SyntaxKind::PLUS | SyntaxKind::MINUS)
+        && is_unary_operator(block, index)
     {
         return None;
     }
@@ -246,8 +259,8 @@ fn check_right_space(
     let next_token = &tokens[next_index];
 
     if config.allow_multiple_commas
-        && token.kind() == SyntaxKind::COMMA
-        && next_token.kind() == SyntaxKind::COMMA
+        && token.kind == SyntaxKind::COMMA
+        && next_token.kind == SyntaxKind::COMMA
     {
         return None;
     }
@@ -256,74 +269,77 @@ fn check_right_space(
         return None;
     }
 
-    let range = token.text_range();
-    let insert = range.end();
+    let text = &block.text[token.range];
+    let range = token.range;
     Some(Diagnostic {
         code,
-        message: format!("Отсутствует пробел справа от '{}'", token.text()),
+        message: format!("Отсутствует пробел справа от '{text}'"),
         severity: ctx.severity(code),
-        range,
+        range: LocalRange::of_detached_node(range),
         tags: ctx.tags(code),
         fixes: vec![Fix::safe(
-            format!("Добавить пробел справа от '{}'", token.text()),
-            vec![TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() }],
+            format!("Добавить пробел справа от '{text}'"),
+            vec![insert_at(range.end())],
         )],
     })
 }
 
 fn check_left_right_space(
-    tokens: &[SyntaxToken],
+    block: &Block,
     index: usize,
-    token: &SyntaxToken,
     config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
-    let missing_left = check_left_space(tokens, index, token, config, code, ctx).is_some();
-    let missing_right = check_right_space(tokens, index, token, config, code, ctx).is_some();
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
+    let token = &block.tokens[index];
+    let missing_left = check_left_space(block, index, code, ctx).is_some();
+    let missing_right = check_right_space(block, index, config, code, ctx).is_some();
 
     if !missing_left && !missing_right {
         return None;
     }
 
+    let text = &block.text[token.range];
     let message = if missing_left && missing_right {
-        format!("Отсутствует пробел слева и справа от '{}'", token.text())
+        format!("Отсутствует пробел слева и справа от '{text}'")
     } else if missing_left {
-        format!("Отсутствует пробел слева от '{}'", token.text())
+        format!("Отсутствует пробел слева от '{text}'")
     } else {
-        format!("Отсутствует пробел справа от '{}'", token.text())
+        format!("Отсутствует пробел справа от '{text}'")
     };
 
-    let range = token.text_range();
+    let range = token.range;
     let mut edits = Vec::new();
     if missing_left {
-        let insert = range.start();
-        edits.push(TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() });
+        edits.push(insert_at(range.start()));
     }
     if missing_right {
-        let insert = range.end();
-        edits.push(TextEdit { range: TextRange::new(insert, insert), new_text: " ".to_string() });
+        edits.push(insert_at(range.end()));
     }
 
     let label = if missing_left && missing_right {
-        format!("Добавить пробелы вокруг '{}'", token.text())
+        format!("Добавить пробелы вокруг '{text}'")
     } else if missing_left {
-        format!("Добавить пробел слева от '{}'", token.text())
+        format!("Добавить пробел слева от '{text}'")
     } else {
-        format!("Добавить пробел справа от '{}'", token.text())
+        format!("Добавить пробел справа от '{text}'")
     };
 
     Some(Diagnostic {
         code,
         message,
         severity: ctx.severity(code),
-        range,
+        range: LocalRange::of_detached_node(range),
         tags: ctx.tags(code),
         fixes: vec![Fix::safe(label, edits)],
     })
 }
 
 pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+    slab::check_file_by_blocks(ctx, check_block)
+}
+
+pub fn check_block(ctx: &AnalysisContext, block: &Block) -> Vec<Diagnostic<LocalRange>> {
     let _span = tracing::debug_span!("MissingSpace::check").entered();
     let code = DiagnosticCode::MissingSpace;
 
@@ -332,32 +348,28 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     }
 
     let config = Config::from_context(ctx);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-
-    let tokens: Vec<_> = root.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-
     let mut diagnostics = Vec::new();
 
-    for (index, token) in tokens.iter().enumerate() {
+    for (index, token) in block.tokens.iter().enumerate() {
         if is_trivia(token) {
             continue;
         }
+        let text = &block.text[token.range];
 
-        if should_check_left(token, &config) {
-            if let Some(diag) = check_left_space(&tokens, index, token, &config, code, ctx) {
+        if should_check_left(token, text, &config) {
+            if let Some(diag) = check_left_space(block, index, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
-        if should_check_right(token, &config) {
-            if let Some(diag) = check_right_space(&tokens, index, token, &config, code, ctx) {
+        if should_check_right(token, text, &config) {
+            if let Some(diag) = check_right_space(block, index, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }
 
-        if should_check_left_right(token, &config) {
-            if let Some(diag) = check_left_right_space(&tokens, index, token, &config, code, ctx) {
+        if should_check_left_right(token, text, &config) {
+            if let Some(diag) = check_left_right_space(block, index, &config, code, ctx) {
                 diagnostics.push(diag);
             }
         }

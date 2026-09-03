@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -19,10 +20,10 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(
-    range: TextRange,
+    range: LocalRange,
     is_continue: bool,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::MisplacedLoopControl;
 
     if ctx.is_disabled_with_metadata(code) {

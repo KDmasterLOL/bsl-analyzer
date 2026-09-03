@@ -4,7 +4,7 @@ use bsl_types::facet::{ArgArity, FunctionFacet};
 use bsl_types::intern::TypeKernelDb;
 use bsl_types::kind::TypeId;
 use hir_def::execution_env::EnvFlags;
-use hir_def::symbol_tree::MethodSymbol;
+use hir_def::module_interface::MethodDecl;
 use hir_def::ty::FunctionSignature;
 
 use super::{
@@ -73,7 +73,7 @@ impl CallCandidateSet {
 
 impl CallSignature {
     pub(crate) fn from_user_method(
-        method: &MethodSymbol,
+        method: &MethodDecl,
         signature: &FunctionSignature,
         return_ty: TypeId,
         environment: EnvFlags,

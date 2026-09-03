@@ -20,6 +20,11 @@ pub(super) fn russian_plural(mdo_type: MdoType) -> &'static str {
         ExchangePlan => "ПланыОбмена",
         ExternalDataSource => "ВнешниеИсточникиДанных",
         Constant => "Константы",
-        CommonModule | EventSubscription | Subsystem | Role => "",
+        ExternalDataProcessor
+        | ExternalReport
+        | CommonModule
+        | EventSubscription
+        | Subsystem
+        | Role => "",
     }
 }

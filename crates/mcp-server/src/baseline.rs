@@ -357,8 +357,54 @@ struct StatusProbeState {
     closed: AtomicBool,
 }
 
+/// How a call to the baseline actor ended short of an answer.
+///
+/// Cancellation has a variant of its own rather than a [`bsl_search::SearchError`]: every
+/// caller classifies a search error as terminal or transient and answers a transient one
+/// with a fallback or a retry envelope — work and a body that a cancelled call must not
+/// produce. An exhaustive match on this enum is what keeps `Withdrawn` out of those arms.
 #[derive(Debug)]
-enum BaselineServiceRequest {
+pub(crate) enum BaselineCall {
+    /// The caller's request was cancelled while it waited for the actor. The actor was
+    /// not interrupted: a request still queued is skipped, one in flight completes and
+    /// answers into a receiver nobody holds.
+    Withdrawn,
+    /// The actor answered with a failure.
+    Failed(bsl_search::SearchError),
+}
+
+impl BaselineCall {
+    /// The failure, for a caller that cannot be cancelled (a background pass holding a
+    /// never-cancelled token). `Withdrawn` is unreachable for such a caller and is worded
+    /// as the service refusing, so a misuse surfaces as an error rather than a silent skip.
+    pub(crate) fn into_error(self) -> bsl_search::SearchError {
+        match self {
+            Self::Failed(error) => error,
+            Self::Withdrawn => bsl_search::SearchError::Index(
+                "baseline call withdrawn by a caller that cannot be cancelled".to_owned(),
+            ),
+        }
+    }
+}
+
+/// The token of a caller that has no request to be cancelled by — bootstrap and the
+/// background passes. Never cancelled, so such a caller only ever sees the actor's own
+/// answer.
+pub(crate) fn uncancellable() -> tokio_util::sync::CancellationToken {
+    tokio_util::sync::CancellationToken::new()
+}
+
+/// One request to the actor, carrying the token of the caller that queued it: the worker
+/// skips a request whose caller has already gone, so a cancelled search does not delay the
+/// queue behind it with a query nobody will read.
+#[derive(Debug)]
+struct BaselineServiceRequest {
+    cancel: tokio_util::sync::CancellationToken,
+    kind: BaselineRequestKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum BaselineRequestKind {
     ResolveSnapshot {
         reply: mpsc::Sender<
             Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError>,
@@ -597,106 +643,187 @@ impl ExternalBaselineService {
         source: Arc<RefreshableExternalBaselineSource>,
         receiver: mpsc::Receiver<BaselineServiceRequest>,
     ) {
-        while let Ok(request) = receiver.recv() {
-            match request {
-                BaselineServiceRequest::ResolveSnapshot { reply } => {
-                    let _ = reply.send(source.resolve_snapshot());
-                }
-                BaselineServiceRequest::LexicalSearch {
-                    snapshot_id,
-                    query,
-                    collection,
-                    limit,
-                    reply,
-                } => {
-                    let result =
-                        source.lexical_search(&snapshot_id, &query, collection.as_deref(), limit);
-                    let _ = reply.send(result);
-                }
-                BaselineServiceRequest::SemanticSearch {
-                    snapshot_id,
-                    query_embedding,
-                    model_id,
-                    dimension,
-                    collection,
-                    limit,
-                    reply,
-                } => {
-                    let result = source.semantic_search(
-                        &snapshot_id,
-                        &query_embedding,
-                        &model_id,
-                        dimension,
-                        collection.as_deref(),
-                        limit,
-                    );
-                    let _ = reply.send(result);
-                }
-                BaselineServiceRequest::LoadReferenceSnapshotDocuments {
-                    model_id,
-                    dimension,
-                    reply,
-                } => {
-                    let result =
-                        source.load_reference_snapshot_documents(model_id.as_deref(), dimension);
-                    let _ = reply.send(result);
-                }
-                BaselineServiceRequest::LoadBaselineManifest { snapshot_id, reply } => {
-                    let result = source.load_baseline_manifest(&snapshot_id);
-                    let _ = reply.send(result);
-                }
-                BaselineServiceRequest::EmbeddingIdentity { reply } => {
-                    let _ = reply.send(source.embedding_identity());
-                }
-                BaselineServiceRequest::Shutdown { reply } => {
-                    let _ = reply.send(());
-                    break;
-                }
+        Self::serve(receiver, |kind| Self::dispatch(&source, kind));
+    }
+
+    /// The actor loop proper: one request at a time, in queue order, each handed to
+    /// `handle` — the real dispatch in production, a scripted one in tests. A request
+    /// whose caller has already been cancelled is skipped here, before any work: the
+    /// answer would land on a receiver nobody holds, and the callers queued behind it
+    /// would wait for nothing. A request already in `handle` is never interrupted.
+    fn serve(
+        receiver: mpsc::Receiver<BaselineServiceRequest>,
+        mut handle: impl FnMut(BaselineRequestKind) -> std::ops::ControlFlow<()>,
+    ) {
+        while let Ok(BaselineServiceRequest { cancel, kind }) = receiver.recv() {
+            if cancel.is_cancelled() && !matches!(kind, BaselineRequestKind::Shutdown { .. }) {
+                continue;
+            }
+            if handle(kind).is_break() {
+                break;
             }
         }
     }
 
+    fn dispatch(
+        source: &RefreshableExternalBaselineSource,
+        kind: BaselineRequestKind,
+    ) -> std::ops::ControlFlow<()> {
+        match kind {
+            BaselineRequestKind::ResolveSnapshot { reply } => {
+                let _ = reply.send(source.resolve_snapshot());
+            }
+            BaselineRequestKind::LexicalSearch { snapshot_id, query, collection, limit, reply } => {
+                let result =
+                    source.lexical_search(&snapshot_id, &query, collection.as_deref(), limit);
+                let _ = reply.send(result);
+            }
+            BaselineRequestKind::SemanticSearch {
+                snapshot_id,
+                query_embedding,
+                model_id,
+                dimension,
+                collection,
+                limit,
+                reply,
+            } => {
+                let result = source.semantic_search(
+                    &snapshot_id,
+                    &query_embedding,
+                    &model_id,
+                    dimension,
+                    collection.as_deref(),
+                    limit,
+                );
+                let _ = reply.send(result);
+            }
+            BaselineRequestKind::LoadReferenceSnapshotDocuments { model_id, dimension, reply } => {
+                let result =
+                    source.load_reference_snapshot_documents(model_id.as_deref(), dimension);
+                let _ = reply.send(result);
+            }
+            BaselineRequestKind::LoadBaselineManifest { snapshot_id, reply } => {
+                let result = source.load_baseline_manifest(&snapshot_id);
+                let _ = reply.send(result);
+            }
+            BaselineRequestKind::EmbeddingIdentity { reply } => {
+                let _ = reply.send(source.embedding_identity());
+            }
+            BaselineRequestKind::Shutdown { reply } => {
+                let _ = reply.send(());
+                return std::ops::ControlFlow::Break(());
+            }
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+
+    /// A service whose actor runs `handle` instead of the PostgreSQL source, through the
+    /// SAME `serve` loop as production — so a test that scripts the answers (or latches
+    /// them) exercises the real queue discipline, cancelled-request skipping included.
+    #[cfg(test)]
+    pub(crate) fn with_worker_for_test(
+        handle: impl FnMut(BaselineRequestKind) -> std::ops::ControlFlow<()> + Send + 'static,
+    ) -> Arc<Self> {
+        let source = RefreshableExternalBaselineSource::for_test(
+            bsl_search::ExternalBaselineConfig::postgres("postgres://127.0.0.1:1"),
+            BaselineRef {
+                corpus: CorpusId::WorkspaceCode,
+                snapshot_id: None,
+                branch: Some("main".to_owned()),
+                commit: None,
+            },
+        )
+        .expect("a test source builds without connecting");
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("baseline-service-test".to_owned())
+            .spawn(move || Self::serve(receiver, handle))
+            .expect("failed to spawn the test baseline worker");
+        Arc::new(Self {
+            corpus: CorpusId::WorkspaceCode,
+            schema: "test".to_owned(),
+            selection: "test".to_owned(),
+            local_reference_fingerprint: None,
+            sender,
+            worker: StdMutex::new(Some(worker)),
+            closed: AtomicBool::new(false),
+            source: Arc::new(source),
+            status_probe: Arc::new(StatusProbeState {
+                slot: StdMutex::new(None),
+                refreshing: AtomicBool::new(false),
+                closed: AtomicBool::new(false),
+            }),
+        })
+    }
+
+    /// Queue one request and wait for its answer on behalf of `cancel`'s request.
+    ///
+    /// The wait ends at the answer or at the cancellation, whichever comes first. A
+    /// cancelled caller drops its receiver and returns [`BaselineCall::Withdrawn`]; the
+    /// request it queued is skipped by the worker if it has not started, and completes
+    /// into the dead receiver if it has. Neither disturbs the requests of other callers.
     fn request<R>(
         &self,
-        build: impl FnOnce(mpsc::Sender<R>) -> BaselineServiceRequest,
-    ) -> Result<R, bsl_search::SearchError>
+        cancel: &tokio_util::sync::CancellationToken,
+        build: impl FnOnce(mpsc::Sender<R>) -> BaselineRequestKind,
+    ) -> Result<R, BaselineCall>
     where
         R: Send + 'static,
     {
         if self.closed.load(Ordering::Acquire) {
-            return Err(service_closed_error(&self.corpus));
+            return Err(BaselineCall::Failed(service_closed_error(&self.corpus)));
         }
         let (reply_tx, reply_rx) = mpsc::channel();
-        self.sender.send(build(reply_tx)).map_err(|_| service_closed_error(&self.corpus))?;
-        reply_rx.recv().map_err(|_| service_closed_error(&self.corpus))
+        self.sender
+            .send(BaselineServiceRequest { cancel: cancel.clone(), kind: build(reply_tx) })
+            .map_err(|_| BaselineCall::Failed(service_closed_error(&self.corpus)))?;
+        match crate::tools::search::await_reply(&reply_rx, cancel, crate::tools::search::REPLY_POLL)
+        {
+            Ok(Some(answer)) => Ok(answer),
+            Ok(None) => Err(BaselineCall::Failed(service_closed_error(&self.corpus))),
+            Err(crate::tools::search::Withdrawn) => Err(BaselineCall::Withdrawn),
+        }
+    }
+
+    /// Flatten the actor's own `Result` into the call outcome.
+    fn answered<R>(
+        answer: Result<Result<R, bsl_search::SearchError>, BaselineCall>,
+    ) -> Result<R, BaselineCall> {
+        answer?.map_err(BaselineCall::Failed)
     }
 
     pub(crate) fn lexical_search(
         &self,
+        cancel: &tokio_util::sync::CancellationToken,
         snapshot_id: &str,
         query: &str,
         collection: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<bsl_search::LexicalHit>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::LexicalSearch {
+    ) -> Result<Vec<bsl_search::LexicalHit>, BaselineCall> {
+        Self::answered(self.request(cancel, |reply| BaselineRequestKind::LexicalSearch {
             snapshot_id: snapshot_id.to_owned(),
             query: query.to_owned(),
             collection: collection.map(ToOwned::to_owned),
             limit,
             reply,
-        })?
+        }))
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the actor call takes the search's own identity values plus the caller's token; a one-use context struct would only rename them"
+    )]
     pub(crate) fn semantic_search(
         &self,
+        cancel: &tokio_util::sync::CancellationToken,
         snapshot_id: &str,
         query_embedding: &[f32],
         model_id: &str,
         dimension: usize,
         collection: Option<&str>,
         limit: usize,
-    ) -> Result<Vec<bsl_search::SemanticHit>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::SemanticSearch {
+    ) -> Result<Vec<bsl_search::SemanticHit>, BaselineCall> {
+        Self::answered(self.request(cancel, |reply| BaselineRequestKind::SemanticSearch {
             snapshot_id: snapshot_id.to_owned(),
             query_embedding: query_embedding.to_vec(),
             model_id: model_id.to_owned(),
@@ -704,7 +831,7 @@ impl ExternalBaselineService {
             collection: collection.map(ToOwned::to_owned),
             limit,
             reply,
-        })?
+        }))
     }
 
     /// Non-blocking status probe: returns the last completed probe immediately and,
@@ -809,8 +936,9 @@ impl ExternalBaselineService {
 
     pub(crate) fn resolve_reference_view(
         &self,
-    ) -> Result<Option<ResolvedView>, bsl_search::SearchError> {
-        let Some(snapshot) = self.load_reference_snapshot_documents(None, None)? else {
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<ResolvedView>, BaselineCall> {
+        let Some(snapshot) = self.load_reference_snapshot_documents(cancel, None, None)? else {
             return Ok(None);
         };
         let baseline = BaselineRef::for_snapshot(self.corpus.clone(), snapshot.snapshot_id);
@@ -819,28 +947,37 @@ impl ExternalBaselineService {
 
     pub(crate) fn load_reference_snapshot_documents(
         &self,
+        cancel: &tokio_util::sync::CancellationToken,
         model_id: Option<&str>,
         dimension: Option<usize>,
-    ) -> Result<Option<BaselineSnapshotDocuments>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::LoadReferenceSnapshotDocuments {
-            model_id: model_id.map(ToOwned::to_owned),
-            dimension,
-            reply,
-        })?
+    ) -> Result<Option<BaselineSnapshotDocuments>, BaselineCall> {
+        Self::answered(self.request(cancel, |reply| {
+            BaselineRequestKind::LoadReferenceSnapshotDocuments {
+                model_id: model_id.map(ToOwned::to_owned),
+                dimension,
+                reply,
+            }
+        }))
     }
 
     pub(crate) fn load_baseline_manifest(
         &self,
+        cancel: &tokio_util::sync::CancellationToken,
         snapshot_id: &str,
-    ) -> Result<WorkspaceBaselineManifest, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::LoadBaselineManifest {
+    ) -> Result<WorkspaceBaselineManifest, BaselineCall> {
+        Self::answered(self.request(cancel, |reply| BaselineRequestKind::LoadBaselineManifest {
             snapshot_id: snapshot_id.to_owned(),
             reply,
-        })?
+        }))
     }
 
-    pub fn embedding_identity(&self) -> Result<Option<(String, usize)>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::EmbeddingIdentity { reply })?
+    pub fn embedding_identity(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<(String, usize)>, BaselineCall> {
+        Self::answered(
+            self.request(cancel, |reply| BaselineRequestKind::EmbeddingIdentity { reply }),
+        )
     }
 
     pub(crate) fn corpus(&self) -> CorpusId {
@@ -853,8 +990,9 @@ impl ExternalBaselineService {
 
     pub(crate) fn resolve_snapshot(
         &self,
-    ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, bsl_search::SearchError> {
-        self.request(|reply| BaselineServiceRequest::ResolveSnapshot { reply })?
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Option<(BaselineRef, bsl_search::Snapshot)>, BaselineCall> {
+        Self::answered(self.request(cancel, |reply| BaselineRequestKind::ResolveSnapshot { reply }))
     }
 
     pub(crate) fn shutdown(&self) {
@@ -870,10 +1008,10 @@ impl ExternalBaselineService {
         self.status_probe.closed.store(true, Ordering::Release);
 
         let (reply_tx, reply_rx) = mpsc::channel();
-        let acknowledged = match self
-            .sender
-            .send(BaselineServiceRequest::Shutdown { reply: reply_tx })
-        {
+        let acknowledged = match self.sender.send(BaselineServiceRequest {
+            cancel: tokio_util::sync::CancellationToken::new(),
+            kind: BaselineRequestKind::Shutdown { reply: reply_tx },
+        }) {
             Ok(()) => match reply_rx.recv_timeout(shutdown_ack_timeout()) {
                 Ok(()) => true,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1794,12 +1932,12 @@ fn platform_reference_documents() -> Vec<Document> {
 #[cfg(test)]
 mod tests {
     use super::{
-        baseline_description, resolve_project_baseline_diagnostics, BaselineBootstrap,
-        BaselineRuntime, BaselineServiceRequest, BaselineSlot, BaselineStatusProbe,
-        ConfiguredBaselineStatus, DeferredBaselineRuntime, ExternalBaselineService,
-        ExternalBaselineSource, ExternalBaselineState, ExternalBaselineStatus,
-        RefreshOrTerminalError, RefreshableExternalBaselineSource, ResolvedSnapshot,
-        StatusProbeState, SNAPSHOT_CACHE_TTL,
+        baseline_description, resolve_project_baseline_diagnostics, uncancellable,
+        BaselineBootstrap, BaselineRequestKind, BaselineRuntime, BaselineServiceRequest,
+        BaselineSlot, BaselineStatusProbe, ConfiguredBaselineStatus, DeferredBaselineRuntime,
+        ExternalBaselineService, ExternalBaselineSource, ExternalBaselineState,
+        ExternalBaselineStatus, RefreshOrTerminalError, RefreshableExternalBaselineSource,
+        ResolvedSnapshot, StatusProbeState, SNAPSHOT_CACHE_TTL,
     };
     use bsl_search::{BaselineRef, CorpusId, ExternalBaselineConfig, SearchError};
     use project_model::{
@@ -2483,13 +2621,13 @@ mod tests {
         let worker = std::thread::Builder::new()
             .name("baseline-service-test-timeout".to_owned())
             .spawn(move || {
-                while let Ok(request) = receiver.recv() {
-                    match request {
-                        BaselineServiceRequest::ResolveSnapshot { reply } => {
+                while let Ok(BaselineServiceRequest { kind, .. }) = receiver.recv() {
+                    match kind {
+                        BaselineRequestKind::ResolveSnapshot { reply } => {
                             std::thread::sleep(Duration::from_millis(250));
                             let _ = reply.send(Ok(None));
                         }
-                        BaselineServiceRequest::Shutdown { reply } => {
+                        BaselineRequestKind::Shutdown { reply } => {
                             let _ = reply.send(());
                             break;
                         }
@@ -2526,7 +2664,7 @@ mod tests {
 
         let probe_service = Arc::clone(&service);
         let probe_thread = std::thread::spawn(move || {
-            let _ = probe_service.resolve_snapshot();
+            let _ = probe_service.resolve_snapshot(&uncancellable());
         });
         std::thread::sleep(Duration::from_millis(20));
 
@@ -2538,7 +2676,7 @@ mod tests {
             started.elapsed()
         );
 
-        let error = service.resolve_snapshot().unwrap_err();
+        let error = service.resolve_snapshot(&uncancellable()).unwrap_err().into_error();
         assert!(
             error
                 .to_string()
@@ -2703,5 +2841,88 @@ mod tests {
             !service.status_probe_refreshing_for_test(),
             "a closed service must not spawn probe threads"
         );
+    }
+
+    /// A caller that withdraws while its request is queued stops waiting at once, its
+    /// request is skipped by the worker, and the request in flight ahead of it is answered
+    /// untouched. Both halves matter: the wait ending proves the cancellation reaches the
+    /// caller, the skip proves it reaches the queue, and the untouched neighbour proves
+    /// neither one disturbs anybody else.
+    #[test]
+    fn a_withdrawn_caller_stops_waiting_and_its_queued_request_is_skipped() {
+        use std::sync::atomic::AtomicUsize;
+        use std::time::Instant;
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let executed = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let started = Arc::new(AtomicUsize::new(0));
+        let service = {
+            let executed = Arc::clone(&executed);
+            let started = Arc::clone(&started);
+            ExternalBaselineService::with_worker_for_test(move |kind| {
+                started.fetch_add(1, Ordering::SeqCst);
+                match kind {
+                    BaselineRequestKind::LexicalSearch { query, reply, .. } => {
+                        // Every lexical query is latched until the test releases it.
+                        release_rx.recv().ok();
+                        executed.lock().unwrap().push(query.clone());
+                        let _ = reply.send(Ok(vec![]));
+                    }
+                    BaselineRequestKind::Shutdown { reply } => {
+                        let _ = reply.send(());
+                        return std::ops::ControlFlow::Break(());
+                    }
+                    _ => {}
+                }
+                std::ops::ControlFlow::Continue(())
+            })
+        };
+
+        // A: in flight, latched inside the worker.
+        let first = {
+            let service = Arc::clone(&service);
+            std::thread::spawn(move || {
+                service.lexical_search(&uncancellable(), "snap", "first", None, 5)
+            })
+        };
+        while started.load(Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        // B: queued behind A, then cancelled while it waits.
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (second_tx, second_rx) = mpsc::channel();
+        {
+            let service = Arc::clone(&service);
+            let cancel = cancel.clone();
+            std::thread::spawn(move || {
+                let waited = Instant::now();
+                let out = service.lexical_search(&cancel, "snap", "second", None, 5);
+                let _ = second_tx.send((out, waited.elapsed()));
+            });
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        cancel.cancel();
+        // Bounded: a B that waits for A's latched query instead of its own cancellation
+        // must fail this gate, not hang it.
+        let (out, waited) = second_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("B never came back from its wait");
+        assert!(matches!(out, Err(super::BaselineCall::Withdrawn)), "B must withdraw");
+        assert!(
+            waited < Duration::from_millis(500),
+            "B waited {waited:?} past its cancellation, i.e. for A's query to finish"
+        );
+        assert_eq!(started.load(Ordering::SeqCst), 1, "A is still the only request started");
+
+        // Release A: it answers, and the worker moves on to B's request — and skips it.
+        release_tx.send(()).unwrap();
+        let first = first.join().unwrap();
+        assert!(
+            matches!(first, Ok(ref hits) if hits.is_empty()),
+            "A's answer is untouched: {first:?}"
+        );
+        service.shutdown();
+        assert_eq!(*executed.lock().unwrap(), vec!["first".to_owned()], "B's query never ran");
     }
 }

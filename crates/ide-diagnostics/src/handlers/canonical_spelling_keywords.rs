@@ -1,6 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxToken};
 
@@ -174,18 +176,16 @@ fn check_token_canonical(token: &SyntaxToken) -> Option<String> {
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::CanonicalSpellingKeywords;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
+    for token in ctx.tokens() {
+        {
             if matches!(
                 token.kind(),
                 kind if kind.is_trivia()
@@ -194,7 +194,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             }
 
             if let Some(canonical) = check_token_canonical(&token) {
-                let range = token.text_range();
+                let range = LocalRange::of_detached_node(token.text_range());
                 diagnostics.push(Diagnostic {
                     code: DiagnosticCode::CanonicalSpellingKeywords,
                     message: format!(
@@ -214,13 +214,13 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         }
     }
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::check_ast_diagnostic_with_config;
+    use crate::test_utils::check_body_diagnostic_with_config;
     use crate::DiagnosticsConfig;
     #[test]
     fn test_canonical_keywords() {
@@ -232,7 +232,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert_eq!(diagnostics.len(), 0);
     }
@@ -244,7 +244,7 @@ mod tests {
         let code = "Процедура Тест()\n#Вставка\n\tА = 1;\n#КонецВставки\nКонецПроцедуры";
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(
             !diagnostics.iter().any(|d| d.code == DiagnosticCode::CanonicalSpellingKeywords),
@@ -258,7 +258,7 @@ mod tests {
         let code = "Процедура Тест()\n#вставка\n\tА = 1;\n#КонецВставки\nКонецПроцедуры";
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(
             diagnostics.iter().any(|d| d.code == DiagnosticCode::CanonicalSpellingKeywords),
@@ -273,7 +273,7 @@ mod tests {
 конецфункции"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(diagnostics.len() >= 3);
         assert_eq!(diagnostics[0].code, DiagnosticCode::CanonicalSpellingKeywords);
@@ -286,7 +286,7 @@ mod tests {
 КОНЕЦФУНКЦИИ"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(diagnostics.len() >= 3);
     }
@@ -300,7 +300,7 @@ mod tests {
 КонецЕсЛи;"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(diagnostics.len() >= 4);
     }
@@ -325,7 +325,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         assert!(!diagnostics.is_empty(), "Should detect lowercase logical operators");
     }
@@ -344,7 +344,7 @@ mod tests {
 КонецПроцедуры"#;
 
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         for diag in &diagnostics {
             assert!(!diag.message.contains("Каждого"));
@@ -358,7 +358,7 @@ mod tests {
     ПерЕМ Б;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ПерЕМ")));
     }
 
@@ -369,7 +369,7 @@ mod tests {
     Б = НоВый Массив();
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("НЕОПРЕделено")));
         assert!(diagnostics.iter().any(|d| d.message.contains("НоВый")));
     }
@@ -386,7 +386,7 @@ mod tests {
     КонецЕсЛи;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ЕслИ")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ТогдА")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ИначеЕСли")));
@@ -406,7 +406,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -419,7 +419,7 @@ mod tests {
     КонецЦиклА;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ДЛЯ")));
         assert!(diagnostics.iter().any(|d| d.message.contains("КАЖДОГО")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ИЗ")));
@@ -438,7 +438,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -452,7 +452,7 @@ mod tests {
     КОНЕЦПопытки;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ПопЫтка")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ИсключенИЕ")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ВызваТЬИсключение")));
@@ -468,7 +468,7 @@ mod tests {
     ВозВРат Истина;
 КонецФункцИИ"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ПРОЦЕДУРА")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ЗнаЧ")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ЭКспорт")));
@@ -482,7 +482,7 @@ mod tests {
     fn test_non_canonical_preprocessor_directives() {
         let code = "#ЕСЛИ СеРвер ТОГДА\n#ИнАЧе\n#КонецЕСЛИ";
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics
             .iter()
             .any(|d| d.message.contains("ЕСЛИ") || d.message.contains("#ЕСЛИ")));
@@ -493,7 +493,7 @@ mod tests {
     fn test_canonical_preprocessor_directives_no_diagnostic() {
         let code = "#Если Сервер Или Клиент Тогда\n#Иначе\n#КонецЕсли";
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -501,7 +501,7 @@ mod tests {
     fn test_non_canonical_annotations() {
         let code = "&НАСервере\nПроцедура Тест()\nКонецПроцедуры";
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].message.contains("НАСервере"));
     }
@@ -510,7 +510,7 @@ mod tests {
     fn test_canonical_annotations_no_diagnostic() {
         let code = "&НаСервере\nПроцедура Тест()\nКонецПроцедуры";
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 
@@ -518,7 +518,7 @@ mod tests {
     fn test_non_canonical_region_directives() {
         let code = "#ОБЛАСТЬ НоваяОбласть\n#КонецОбластИ";
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("ОБЛАСТЬ")));
         assert!(diagnostics.iter().any(|d| d.message.contains("КонецОбластИ")));
     }
@@ -531,7 +531,7 @@ mod tests {
     А = ИсТИна;
 КонецПроцедуры"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(!diagnostics.is_empty(), "Should detect non-canonical logical operators");
     }
 
@@ -544,7 +544,7 @@ FUNCtion Test8()
     RETUrn True;
 EnDFunction"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert!(diagnostics.iter().any(|d| d.message.contains("PROCEDURE")));
         assert!(diagnostics.iter().any(|d| d.message.contains("VaL")));
         assert!(diagnostics.iter().any(|d| d.message.contains("ExPort")));
@@ -563,7 +563,7 @@ Function Test6()
     Return True;
 EndFunction"#;
         let config = DiagnosticsConfig::default();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 0);
     }
 }

@@ -1,11 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{
-    call_graph::{CallTarget, CallerId, EdgeKind, ModuleCallSummary},
-    ModItem, ModuleId,
-};
-use rustc_hash::{FxHashMap, FxHashSet};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,91 +17,39 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::CognitiveComplexity;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let threshold = ctx.config_int(code, "complexityThreshold", 15) as u32;
-    let module_metrics = ctx.module_hir_metrics();
-    if module_metrics.is_empty() {
-        return Vec::new();
+    let (Some(decl), Some(name_range)) = (ctx.decl(), ctx.method_name_range()) else {
+        return;
+    };
+    let metrics = ctx.hir_metrics();
+    let recursion_bonus =
+        if ctx.module_recursive_methods().contains(&decl.id.local_id) { 1 } else { 0 };
+    let total = metrics.cognitive + recursion_bonus;
+    if total <= threshold {
+        return;
     }
-    let module_bodies = ctx.module_bodies();
-    let item_tree = ctx.item_tree();
-    let module_id = ModuleId::new(ctx.file_id);
-    let recursive_methods = local_recursive_methods(&ctx.call_summary(module_id));
-
-    let mut local_ids: Vec<u32> = module_bodies.iter_bodies().map(|(id, _)| id).collect();
-    local_ids.sort_unstable();
-
-    let mut out = Vec::new();
-    for local_id in local_ids {
-        let Some(metrics) = module_metrics.get(local_id) else { continue };
-        let recursion_bonus = if recursive_methods.contains(&local_id) { 1 } else { 0 };
-        let total = metrics.cognitive + recursion_bonus;
-        if total <= threshold {
-            continue;
-        }
-        let Some(item) = item_tree.top_level_items().get(local_id as usize) else { continue };
-        let (name, name_range, is_function) = match item {
-            ModItem::Procedure(idx) => {
-                let p = item_tree.procedure(*idx);
-                (p.name.as_str().to_string(), p.name_range, false)
-            }
-            ModItem::Function(idx) => {
-                let f = item_tree.function(*idx);
-                (f.name.as_str().to_string(), f.name_range, true)
-            }
-            ModItem::Variable(_) => continue,
-        };
-        let method_type = if is_function { "Функция" } else { "Процедура" };
-        out.push(Diagnostic {
-            code,
-            message: format!(
-                "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
-                 Упростите логику или уменьшите вложенность",
-                method_type, name, total, threshold
-            ),
-            severity: ctx.severity(code),
-            range: name_range,
-            tags: ctx.tags(code),
-            fixes: vec![],
-        });
-    }
-    out
-}
-
-fn local_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
-    let mut graph: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-    for edge in &summary.call_edges {
-        if !matches!(edge.kind, EdgeKind::DirectLocal) {
-            continue;
-        }
-        let CallerId::Method(caller_id) = edge.caller else { continue };
-        let CallTarget::Local { callee_local_id } = edge.target else { continue };
-        graph.entry(caller_id).or_default().push(callee_local_id);
-    }
-
-    let mut recursive = FxHashSet::default();
-    for &start in graph.keys() {
-        let mut stack = graph.get(&start).cloned().unwrap_or_default();
-        let mut visited = FxHashSet::default();
-        while let Some(node) = stack.pop() {
-            if node == start {
-                recursive.insert(start);
-                break;
-            }
-            if !visited.insert(node) {
-                continue;
-            }
-            if let Some(next) = graph.get(&node) {
-                stack.extend(next.iter().copied());
-            }
-        }
-    }
-    recursive
+    let method_type = if decl.is_function { "Функция" } else { "Процедура" };
+    acc.push(Diagnostic {
+        code,
+        message: format!(
+            "{} '{}' имеет когнитивную сложность {} (максимум: {}). \
+             Упростите логику или уменьшите вложенность",
+            method_type,
+            decl.name.as_str(),
+            total,
+            threshold
+        ),
+        severity: ctx.severity(code),
+        range: name_range,
+        tags: ctx.tags(code),
+        fixes: vec![],
+    });
 }
 
 #[cfg(test)]
@@ -309,7 +253,7 @@ mod tests {
         let module_id = ModuleId::new(file_id);
         let module_bodies = db.module_bodies(module_id);
 
-        let body = module_bodies.body(0).expect("Should have first method body");
+        let (_, body) = module_bodies.iter_bodies().next().expect("Should have first method body");
         let metrics = hir::metrics::compute_hir_metrics(body);
 
         assert_eq!(metrics.cognitive, 25, "ОбработатьКоллекцию should have cognitive 25");

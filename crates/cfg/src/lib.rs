@@ -1,5 +1,4 @@
 pub mod builder;
-pub mod collection;
 pub mod cyclomatic;
 pub mod edge;
 pub mod graph;
@@ -7,7 +6,6 @@ pub mod test_utils;
 pub mod vertex;
 
 pub use builder::CfgBuilder;
-pub use collection::ModuleCfgs;
 pub use cyclomatic::cyclomatic_complexity;
 pub use edge::CfgEdgeType;
 pub use graph::ControlFlowGraph;

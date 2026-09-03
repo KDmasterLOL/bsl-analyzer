@@ -1,4 +1,4 @@
-use crate::{DiagnosticCode, DiagnosticsContext};
+use crate::{AnalysisContext, DiagnosticCode};
 use std::collections::{BTreeSet, HashSet};
 use stdx::case::CaseExt;
 use syntax::{SyntaxKind, SyntaxNode};
@@ -44,7 +44,7 @@ pub struct NstrConfig {
 }
 
 impl NstrConfig {
-    pub fn from_context(ctx: &DiagnosticsContext, code: DiagnosticCode) -> Self {
+    pub fn from_context(ctx: &AnalysisContext, code: DiagnosticCode) -> Self {
         let declared_str =
             ctx.config.get_string(code, "declaredLanguages").unwrap_or(DEFAULT_DECLARED_LANGUAGES);
 

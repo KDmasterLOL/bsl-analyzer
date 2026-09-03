@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{MethodId, ModuleId, Name};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,17 +22,17 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(
     callee: &str,
     module: Option<&str>,
-    range: TextRange,
-    method_id: &MethodId,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    method_id: Option<MethodId>,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::DeprecatedMethodCall;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    if is_caller_deprecated(method_id, ctx) {
+    if method_id.is_some_and(|method_id| is_caller_deprecated(method_id, ctx)) {
         return None;
     }
 
@@ -56,15 +57,14 @@ pub fn from_hir(
     })
 }
 
-fn is_caller_deprecated(method_id: &MethodId, ctx: &DiagnosticsContext) -> bool {
-    ctx.method_docs(*method_id).map(|docs| docs.is_deprecated()).unwrap_or(false)
+fn is_caller_deprecated(method_id: MethodId, ctx: &AnalysisContext) -> bool {
+    ctx.method_docs(method_id).map(|docs| docs.is_deprecated()).unwrap_or(false)
 }
 
-fn check_local_call(callee: &str, ctx: &DiagnosticsContext) -> (bool, Option<String>) {
-    let symbol_tree = ctx.symbol_tree();
+fn check_local_call(callee: &str, ctx: &AnalysisContext) -> (bool, Option<String>) {
     let callee_name = Name::new(callee);
 
-    let method_symbol = match symbol_tree.find_method(&callee_name) {
+    let method_symbol = match ctx.interface_method_named(&callee_name) {
         Some(m) => m,
         None => return (false, None),
     };
@@ -85,7 +85,7 @@ fn check_local_call(callee: &str, ctx: &DiagnosticsContext) -> (bool, Option<Str
 fn check_qualified_call(
     module_name: &str,
     method_name: &str,
-    ctx: &DiagnosticsContext,
+    ctx: &AnalysisContext,
 ) -> (bool, Option<String>) {
     let module_index = ctx.module_index();
     let module_name_obj = Name::new(module_name);

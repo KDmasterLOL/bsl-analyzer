@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 use stdx::case::CaseExt;
 
 use base_db::FileIdInput;
@@ -17,7 +17,7 @@ use crate::RootDatabase;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleEffectSummaries {
-    methods: FxHashMap<u32, Arc<EffectSummary>>,
+    methods: FxHashMap<hir::MethodKey, Arc<EffectSummary>>,
     is_initial_seed: bool,
 }
 
@@ -26,7 +26,7 @@ impl ModuleEffectSummaries {
         Self { methods: FxHashMap::default(), is_initial_seed: true }
     }
 
-    pub fn get(&self, local_id: u32) -> Option<Arc<EffectSummary>> {
+    pub fn get(&self, local_id: hir::MethodKey) -> Option<Arc<EffectSummary>> {
         if let Some(arc) = self.methods.get(&local_id) {
             return Some(arc.clone());
         }
@@ -61,53 +61,10 @@ impl ModuleEffectSummaries {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleSecurityState {
-    methods: FxHashMap<u32, Arc<DataflowResult<SecurityModeState>>>,
-    module_level: Option<Arc<DataflowResult<SecurityModeState>>>,
-}
-
-impl ModuleSecurityState {
-    pub fn get(&self, local_id: u32) -> Option<Arc<DataflowResult<SecurityModeState>>> {
-        self.methods.get(&local_id).cloned()
-    }
-
-    pub fn module_level(&self) -> Option<Arc<DataflowResult<SecurityModeState>>> {
-        self.module_level.clone()
-    }
-
-    pub fn len(&self) -> usize {
-        self.methods.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.methods.is_empty() && self.module_level.is_none()
-    }
-
-    /// Approximate live heap bytes for Salsa's `memory_usage` report: the per-method
-    /// results table plus each uniquely-owned [`DataflowResult<SecurityModeState>`]
-    /// (its block-state maps, owned `Body` clone, and per-block `ValueOverlay`).
-    pub fn estimated_heap(&self) -> usize {
-        use crate::queries::heap_estimate::map_table_bytes;
-
-        let result_heap =
-            |r: &DataflowResult<SecurityModeState>| r.estimated_heap_with(|s| s.estimated_heap());
-        let mut bytes =
-            map_table_bytes::<u32, Arc<DataflowResult<SecurityModeState>>>(self.methods.len());
-        for r in self.methods.values() {
-            bytes += result_heap(r);
-        }
-        if let Some(r) = &self.module_level {
-            bytes += result_heap(r);
-        }
-        bytes
-    }
-}
-
 /// `heap_size` estimators for the effect/security memos — see
 /// [`crate::queries::heap_estimate`] for the shared approximation rationale.
 mod heap_estimate {
-    use super::{EffectSummary, ModuleEffectSummaries, ModuleSecurityState};
+    use super::{DataflowResult, EffectSummary, ModuleEffectSummaries, SecurityModeState};
     use crate::queries::heap_estimate::map_table_bytes;
     use std::sync::Arc;
 
@@ -115,7 +72,8 @@ mod heap_estimate {
         // Each `Arc<EffectSummary>` heap-allocates a small `Copy` struct; count the
         // table backbone plus one payload per entry.
         let len = v.len();
-        map_table_bytes::<u32, Arc<EffectSummary>>(len) + len * std::mem::size_of::<EffectSummary>()
+        map_table_bytes::<hir::MethodKey, Arc<EffectSummary>>(len)
+            + len * std::mem::size_of::<EffectSummary>()
     }
 
     /// A `method_effect_summary` result is a clone of an `Arc` owned by
@@ -124,8 +82,8 @@ mod heap_estimate {
         0
     }
 
-    pub(super) fn module_security_state_heap(v: &Arc<ModuleSecurityState>) -> usize {
-        v.estimated_heap()
+    pub(super) fn security_state_heap(v: &Option<Arc<DataflowResult<SecurityModeState>>>) -> usize {
+        v.as_ref().map_or(0, |r| r.estimated_heap_with(|s| s.estimated_heap()))
     }
 }
 
@@ -152,7 +110,7 @@ pub fn module_effect_summaries_query<'db>(
 
     let recursive = detect_recursive_methods(&call_summary);
 
-    let mut summaries: FxHashMap<u32, EffectSummary> = FxHashMap::default();
+    let mut summaries: FxHashMap<hir::MethodKey, EffectSummary> = FxHashMap::default();
     for (local_id, _) in module_bodies.iter_bodies() {
         summaries.insert(local_id, EffectSummary::EMPTY);
     }
@@ -242,85 +200,51 @@ pub fn method_effect_summary_query<'db>(
     summaries.get(method_id.local_id).unwrap_or_else(|| Arc::new(EffectSummary::EMPTY))
 }
 
-#[salsa::tracked(lru = 128, heap_size = heap_estimate::module_security_state_heap, returns(clone))]
-pub fn module_security_state_query<'db>(
+/// Security-mode dataflow of one method, computed from its own body and CFG
+/// so that a body edit re-runs it for the edited method only. Retained at the
+/// cap of the per-method chain (see `queries::set_dataflow_lru_sweep_mode`).
+#[salsa::tracked(lru = 8192, heap_size = heap_estimate::security_state_heap, returns(clone))]
+pub fn method_security_state_query<'db>(
     db: &'db dyn RootDatabase,
-    file_id_input: FileIdInput<'db>,
-) -> Arc<ModuleSecurityState> {
-    let file_id = file_id_input.file_id(db);
-    let module_id = ModuleId::new(file_id);
-    let _span = tracing::info_span!("module_security_state", ?module_id).entered();
-    let total_start = Instant::now();
-
-    let module_cfgs = db.module_cfgs(file_id_input);
-    let module_bodies = db.module_bodies(module_id);
-
-    let mut methods = FxHashMap::default();
-    for (local_id, body) in module_bodies.iter_bodies() {
-        db.unwind_if_revision_cancelled();
-        let cfg = match module_cfgs.get(local_id) {
-            Some(c) => c.clone(),
-            None => continue,
-        };
-        let method_start = Instant::now();
-        let block_count = cfg.vertices().count();
-        let stmt_count = body.stmt_count();
-        if let Some(result) = security_state::analyze(cfg, body.clone()) {
-            methods.insert(local_id, Arc::new(result));
-        }
-        let elapsed_ms = method_start.elapsed().as_millis();
-        if elapsed_ms >= 100 {
-            tracing::info!(
-                local_id,
-                block_count,
-                stmt_count,
-                elapsed_ms,
-                "Slow module security-state method"
-            );
-        }
-    }
-
-    let module_level = module_bodies
-        .module_code()
-        .filter(|body| !body.body_stmts_typed().is_empty())
-        .and_then(|body| {
-            db.unwind_if_revision_cancelled();
-            let cfg = db.module_level_cfg(module_id);
-            let start = Instant::now();
-            let block_count = cfg.vertices().count();
-            let stmt_count = body.stmt_count();
-            let result = security_state::analyze(cfg, body.clone()).map(Arc::new);
-            let elapsed_ms = start.elapsed().as_millis();
-            if elapsed_ms >= 100 {
-                tracing::info!(
-                    block_count,
-                    stmt_count,
-                    elapsed_ms,
-                    "Slow module-level security-state"
-                );
-            }
-            result
-        });
-
-    tracing::info!(
-        count = methods.len(),
-        module_level = module_level.is_some(),
-        elapsed_ms = total_start.elapsed().as_millis(),
-        "Module security-state batch built"
-    );
-    Arc::new(ModuleSecurityState { methods, module_level })
+    method_id_input: hir::MethodIdInput<'db>,
+) -> Option<Arc<DataflowResult<SecurityModeState>>> {
+    let _span = tracing::info_span!("method_security_state", ?method_id_input).entered();
+    let cfg = crate::queries::method_cfg_query(db, method_id_input);
+    let body = db.method_body_ref(method_id_input);
+    security_state::analyze(cfg, (**body).clone()).map(Arc::new)
 }
 
-fn build_local_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, u32> {
-    let mut map: FxHashMap<String, u32> = FxHashMap::default();
+/// Security-mode dataflow of the module-level code; `None` when the module
+/// has no statements outside methods.
+#[salsa::tracked(lru = 128, heap_size = heap_estimate::security_state_heap, returns(clone))]
+pub fn module_code_security_state_query<'db>(
+    db: &'db dyn RootDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Option<Arc<DataflowResult<SecurityModeState>>> {
+    let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+    let _span = tracing::info_span!("module_code_security_state", ?module_id).entered();
+    let module_bodies = db.module_bodies_ref(module_id);
+    let body = module_bodies.module_code().filter(|body| !body.body_stmts_typed().is_empty())?;
+    db.unwind_if_revision_cancelled();
+    let cfg = db.module_level_cfg(module_id);
+    security_state::analyze(cfg, body.clone()).map(Arc::new)
+}
+
+pub(crate) fn set_security_state_lru_capacity(db: &mut dyn RootDatabase, cap: usize) {
+    method_security_state_query::set_lru_capacity(db, cap);
+}
+
+fn build_local_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, hir::MethodKey> {
+    let mut map: FxHashMap<String, hir::MethodKey> = FxHashMap::default();
     for MethodSummary { local_id, name, .. } in &summary.methods {
         map.entry(name.as_str().fold_lower()).or_insert(*local_id);
     }
     map
 }
 
-fn build_exported_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, u32> {
-    let mut map: FxHashMap<String, u32> = FxHashMap::default();
+fn build_exported_name_index(summary: &ModuleCallSummary) -> FxHashMap<String, hir::MethodKey> {
+    let mut map: FxHashMap<String, hir::MethodKey> = FxHashMap::default();
     for m in &summary.methods {
         if !m.is_export {
             continue;
@@ -350,8 +274,8 @@ fn resolve_qualified_callee(
     other_summaries.get(other_local_id).map(|arc| *arc.as_ref())
 }
 
-fn detect_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
-    let mut graph: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+fn detect_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<hir::MethodKey> {
+    let mut graph: FxHashMap<hir::MethodKey, Vec<hir::MethodKey>> = FxHashMap::default();
     for CallEdge { caller, target, kind, .. } in &summary.call_edges {
         if !matches!(kind, EdgeKind::DirectLocal) {
             continue;
@@ -361,10 +285,10 @@ fn detect_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
         graph.entry(*caller_id).or_default().push(*callee_local_id);
     }
 
-    let mut recursive: FxHashSet<u32> = FxHashSet::default();
+    let mut recursive: FxHashSet<hir::MethodKey> = FxHashSet::default();
     for &start in graph.keys() {
-        let mut stack: Vec<u32> = graph.get(&start).cloned().unwrap_or_default();
-        let mut visited: FxHashSet<u32> = FxHashSet::default();
+        let mut stack: Vec<hir::MethodKey> = graph.get(&start).cloned().unwrap_or_default();
+        let mut visited: FxHashSet<hir::MethodKey> = FxHashSet::default();
         while let Some(node) = stack.pop() {
             if node == start {
                 recursive.insert(start);
@@ -385,10 +309,14 @@ fn detect_recursive_methods(summary: &ModuleCallSummary) -> FxHashSet<u32> {
 mod tests {
     use super::*;
 
+    fn k(n: u32) -> hir::MethodKey {
+        hir::MethodKey::first(&format!("М{n}"))
+    }
+
     #[test]
     fn module_effect_summaries_initial_seed_returns_empty_bottom() {
         let seed = ModuleEffectSummaries::initial_recursive();
-        let s = seed.get(0).expect("seed must answer for any id");
+        let s = seed.get(k(0)).expect("seed must answer for any id");
         assert!(!s.is_recursive, "seed lookup must not pre-flag recursion");
         assert_eq!(*s, EffectSummary::EMPTY);
     }
@@ -397,16 +325,18 @@ mod tests {
     fn cycle_fn_is_pure_join_no_flagging() {
         let mut a = ModuleEffectSummaries::default();
         a.methods.insert(
-            3,
+            k(3),
             Arc::new(EffectSummary { may_call_filesystem: true, ..EffectSummary::EMPTY }),
         );
         let mut b = ModuleEffectSummaries::default();
-        b.methods
-            .insert(3, Arc::new(EffectSummary { may_call_internet: true, ..EffectSummary::EMPTY }));
+        b.methods.insert(
+            k(3),
+            Arc::new(EffectSummary { may_call_internet: true, ..EffectSummary::EMPTY }),
+        );
 
         let joined = a.join(&b);
 
-        let s = joined.get(3).unwrap();
+        let s = joined.get(k(3)).unwrap();
         assert!(s.may_call_filesystem, "effect bits propagate via OR");
         assert!(s.may_call_internet, "effect bits propagate via OR");
         assert!(
@@ -418,7 +348,7 @@ mod tests {
     #[test]
     fn non_seed_lookup_misses_return_none() {
         let summaries = ModuleEffectSummaries::default();
-        assert!(summaries.get(0).is_none());
+        assert!(summaries.get(k(0)).is_none());
     }
 
     #[test]
@@ -441,23 +371,25 @@ mod tests {
     fn join_per_method_is_bitwise_or() {
         let mut a = ModuleEffectSummaries::default();
         a.methods.insert(
-            7,
+            k(7),
             Arc::new(EffectSummary { may_call_filesystem: true, ..EffectSummary::EMPTY }),
         );
         let mut b = ModuleEffectSummaries::default();
-        b.methods
-            .insert(7, Arc::new(EffectSummary { may_call_internet: true, ..EffectSummary::EMPTY }));
+        b.methods.insert(
+            k(7),
+            Arc::new(EffectSummary { may_call_internet: true, ..EffectSummary::EMPTY }),
+        );
         let merged = a.join(&b);
-        let s = merged.get(7).unwrap();
+        let s = merged.get(k(7)).unwrap();
         assert!(s.may_call_filesystem);
         assert!(s.may_call_internet);
         let mut c = ModuleEffectSummaries::default();
         c.methods.insert(
-            9,
+            k(9),
             Arc::new(EffectSummary { may_call_external_app: true, ..EffectSummary::EMPTY }),
         );
         let merged2 = merged.join(&c);
-        assert!(merged2.get(7).unwrap().may_call_filesystem);
-        assert!(merged2.get(9).unwrap().may_call_external_app);
+        assert!(merged2.get(k(7)).unwrap().may_call_filesystem);
+        assert!(merged2.get(k(9)).unwrap().may_call_external_app);
     }
 }

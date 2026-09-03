@@ -85,6 +85,7 @@ pub(crate) mod heap_estimate {
                 .sum::<usize>()
             + stdx::heap::vec_bytes::<std::path::PathBuf>(snapshot.canonical_paths.len())
             + snapshot.canonical_paths.iter().map(|p| p.capacity()).sum::<usize>()
+            + stdx::heap::vec_bytes::<super::RootKind>(snapshot.kinds.len())
             + stdx::heap::vec_bytes::<Vec<usize>>(snapshot.closures.len())
             + snapshot
                 .closures
@@ -345,6 +346,31 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
     }
 }
 
+/// What a registered config root is. The label in `paths` tells the base from
+/// the rest; the kind tells an extension from an external object, which shares
+/// the extension's per-file plumbing (own-root matching, chain entry, listing)
+/// but is a leaf: it sees every extension and no one sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RootKind {
+    Base,
+    Extension,
+    /// An external data processor or report export (EPF/ERF), of the kind the
+    /// project established when it validated the root.
+    External(bsl_metadata::ExternalObjectKind),
+}
+
+impl RootKind {
+    /// The legacy reading of a label list: the unlabelled slot is the base and
+    /// every other one an extension. External objects only ever enter through
+    /// [`WorkspaceConfigsSnapshot::from_project`].
+    pub fn from_labels(paths: &[(Option<String>, PathBuf)]) -> Vec<RootKind> {
+        paths
+            .iter()
+            .map(|(label, _)| if label.is_none() { RootKind::Base } else { RootKind::Extension })
+            .collect()
+    }
+}
+
 /// Atomic description of the workspace's config roots and their dependency
 /// topology. ONE input field holds the whole value because Salsa tracks input
 /// FIELDS independently (a revision per setter): splitting paths, closures and
@@ -352,15 +378,20 @@ pub(crate) fn canonicalize_configuration_path(raw_path: &str) -> String {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceConfigsSnapshot {
     /// Config roots in declaration order. At most one `None` label — the base;
-    /// an extension-only project has none, and every entry is an extension.
+    /// an extension-only project has none, and every entry is an extension or
+    /// an external object.
     pub paths: Vec<(Option<String>, PathBuf)>,
+    /// Per entry (same order as `paths`): what the root is.
+    pub kinds: Vec<RootKind>,
     /// Canonicalized counterpart of `paths` (same order) — what per-file
     /// longest-prefix matching uses, so a symlinked workspace still matches.
     pub canonical_paths: Vec<PathBuf>,
     /// Per entry: ordered transitive dependency chain (indices into `paths`,
     /// dependencies first, the entry itself excluded). Empty for the base and
     /// for independent extensions — which keeps the pre-dependency semantics:
-    /// a file sees the base plus its own extension only.
+    /// a file sees the base plus its own extension only. For an external object
+    /// it is what the topology gave it: every extension in topological order
+    /// unless the object narrowed its view with `dependsOn`.
     pub closures: Vec<Vec<usize>>,
     /// Global root order for whole-workspace composition: the base first when the
     /// project has one, then extensions in dependencies-before-dependents order.
@@ -383,7 +414,8 @@ impl WorkspaceConfigsSnapshot {
             .collect();
         let closures = vec![Vec::new(); paths.len()];
         let topological_order = (0..paths.len()).collect();
-        Self { paths, canonical_paths, closures, topological_order, fingerprint: None }
+        let kinds = RootKind::from_labels(&paths);
+        Self { paths, kinds, canonical_paths, closures, topological_order, fingerprint: None }
     }
 
     /// The full shape from a validated project. A configured base occupies the
@@ -393,6 +425,7 @@ impl WorkspaceConfigsSnapshot {
     pub fn from_project(project: &project_model::Project) -> Self {
         let topology = project.extension_topology();
         let mut paths: Vec<(Option<String>, PathBuf)> = Vec::new();
+        let mut kinds: Vec<RootKind> = Vec::new();
         let mut canonical_paths = Vec::new();
         let mut closures: Vec<Vec<usize>> = Vec::new();
         let base = project.semantic_base_path();
@@ -401,12 +434,17 @@ impl WorkspaceConfigsSnapshot {
             let base = base.to_path_buf();
             let canonical_base = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
             paths.push((None, base));
+            kinds.push(RootKind::Base);
             canonical_paths.push(canonical_base);
             closures.push(Vec::new());
         }
         for node in topology.nodes() {
             paths.push((Some(node.name().to_string()), node.path().to_path_buf()));
             canonical_paths.push(node.canonical_path().to_path_buf());
+            kinds.push(match node.kind() {
+                project_model::NodeKind::External(kind) => RootKind::External(kind),
+                project_model::NodeKind::Extension => RootKind::Extension,
+            });
             closures.push(node.closure().iter().map(|id| id.index() + offset).collect());
         }
         let topological_order = base
@@ -416,6 +454,7 @@ impl WorkspaceConfigsSnapshot {
             .collect();
         Self {
             paths,
+            kinds,
             canonical_paths,
             closures,
             topological_order,
@@ -433,6 +472,75 @@ impl WorkspaceConfigsSnapshot {
             *path = self.canonical_paths[idx].clone();
         }
         self
+    }
+
+    pub fn is_external(&self, idx: usize) -> bool {
+        self.kinds.get(idx).is_some_and(|kind| matches!(kind, RootKind::External(_)))
+    }
+
+    /// Whether any registered root is an external object.
+    pub fn has_externals(&self) -> bool {
+        (0..self.paths.len()).any(|idx| self.is_external(idx))
+    }
+
+    pub fn has_base(&self) -> bool {
+        self.kinds.contains(&RootKind::Base)
+    }
+
+    /// The slot of the root owning `path`: the longest registered root — by its
+    /// configured or its canonical spelling — that is a prefix of it.
+    pub fn owner_of_path(&self, path: &std::path::Path) -> Option<usize> {
+        self.paths
+            .iter()
+            .zip(&self.canonical_paths)
+            .enumerate()
+            .filter_map(|(idx, ((_, configured), canonical))| {
+                [configured, canonical]
+                    .into_iter()
+                    .filter(|root| path.starts_with(root))
+                    .map(|root| root.as_os_str().len())
+                    .max()
+                    .map(|len| (len, idx))
+            })
+            .max_by_key(|&(len, _)| len)
+            .map(|(_, idx)| idx)
+    }
+
+    pub fn owner_kind_of_path(&self, path: &std::path::Path) -> Option<RootKind> {
+        self.owner_of_path(path).map(|idx| self.kinds[idx])
+    }
+
+    /// The external root owning `path`, with its kind: the configured spelling
+    /// (so a relative object path can be cut from a file enumerated either way,
+    /// the caller strips whichever prefix matches) and the export's kind.
+    pub fn external_root_of_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(PathBuf, PathBuf, bsl_metadata::ExternalObjectKind)> {
+        let idx = self.owner_of_path(path)?;
+        match self.kinds[idx] {
+            RootKind::External(kind) => {
+                Some((self.paths[idx].1.clone(), self.canonical_paths[idx].clone(), kind))
+            }
+            _ => None,
+        }
+    }
+
+    /// The designer's view of the project: the base and its extensions in
+    /// topological order, external objects left out. What a consumer with no
+    /// file to anchor visibility to composes over — an external object is
+    /// visible from its own files only.
+    pub fn designer_order(&self) -> impl Iterator<Item = usize> + '_ {
+        self.topological_order.iter().copied().filter(|&idx| !self.is_external(idx))
+    }
+
+    /// The designer's view followed by every external object: what a lookup
+    /// keyed by `(kind, name)` composes over. An external kind never names a
+    /// designer object, so the externals at the tail shadow nothing and are the
+    /// only roots that hold their own kinds.
+    pub fn inventory_order(&self) -> impl Iterator<Item = usize> + '_ {
+        let externals = self.topological_order.iter().copied().filter(|&idx| self.is_external(idx));
+        self.designer_order().chain(externals)
     }
 }
 
@@ -2107,6 +2215,36 @@ pub fn build_module_metadata(
     }
 }
 
+/// The owner of an object module inside an external root, by the export's own
+/// layout: `<root>/<Name>/Ext/ObjectModule.bsl` names the object, and the root's
+/// kind names its type. The path carries no collection segment, so the
+/// collection-based owner lookup finds nothing here — and it must not be trusted
+/// even when the root directory happens to be spelled like a collection: an
+/// export placed under a `DataProcessors/` folder would otherwise borrow a
+/// same-named INTERNAL object's metadata from the base. Form modules keep their
+/// owner through the form's main attribute, as every form does.
+pub fn attach_external_owner(
+    metadata: &mut hir::ModuleMetadata,
+    file_path: &Path,
+    root: &Path,
+    canonical_root: &Path,
+    kind: bsl_metadata::ExternalObjectKind,
+    configuration: &bsl_metadata::Configuration,
+) {
+    if metadata.module_type != bsl_metadata::ModuleType::ObjectModule {
+        return;
+    }
+    let relative =
+        match file_path.strip_prefix(root).or_else(|_| file_path.strip_prefix(canonical_root)) {
+            Ok(relative) => relative,
+            Err(_) => return,
+        };
+    let name = relative.components().next().and_then(|first| first.as_os_str().to_str());
+    metadata.mdo = name
+        .and_then(|name| configuration.find_metadata_object(kind.mdo_type(), name))
+        .map(|object| Arc::new(object.clone()));
+}
+
 /// The object segment of a service module path, taken from the shared
 /// specification — the same one the module type comes from. A scan of its own put
 /// the owner and the type on different rules, and the first ancestor directory
@@ -2175,6 +2313,63 @@ mod tests {
         assert_eq!(snapshot.paths[0].0.as_deref(), Some("Feature"));
         assert_eq!(snapshot.topological_order, vec![0]);
         assert_eq!(snapshot.closures, vec![Vec::<usize>::new()]);
+        assert_eq!(snapshot.kinds, vec![super::RootKind::Extension]);
+    }
+
+    /// An external object declared first still lands after every extension, sees
+    /// all of them, and is absent from the designer's order — while the
+    /// extensions keep the closures the topology gave them.
+    #[test]
+    fn an_external_object_sees_every_extension_and_is_seen_by_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfe = "<Properties><ConfigurationExtensionPurpose>Customization\
+                   </ConfigurationExtensionPurpose></Properties>";
+        for name in ["A", "B"] {
+            let extension = dir.path().join("src/cfe").join(name);
+            std::fs::create_dir_all(&extension).unwrap();
+            std::fs::write(extension.join("Configuration.xml"), cfe).unwrap();
+        }
+        let base = dir.path().join("src/cf");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("Configuration.xml"), "<Configuration/>").unwrap();
+        let epf = dir.path().join("src/epf/Обработка");
+        std::fs::create_dir_all(epf.join("Обработка")).unwrap();
+        std::fs::write(
+            epf.join("Обработка.xml"),
+            "<MetaDataObject><ExternalDataProcessor uuid=\"1\"/></MetaDataObject>",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("bsl-analyzer.toml"),
+            "[source]\nroot = \"src/cf\"\n\
+             externals = [{ name = \"EPF\", path = \"src/epf/Обработка\" }]\n\
+             extensions = [\n\
+               { name = \"A\", path = \"src/cfe/A\", dependsOn = [\"B\"] },\n\
+               { name = \"B\", path = \"src/cfe/B\" },\n\
+             ]\n",
+        )
+        .unwrap();
+
+        let project = project_model::Project::new(dir.path()).unwrap();
+        let snapshot = super::WorkspaceConfigsSnapshot::from_project(&project);
+
+        let labels: Vec<Option<&str>> =
+            snapshot.paths.iter().map(|(label, _)| label.as_deref()).collect();
+        assert_eq!(labels, vec![None, Some("A"), Some("B"), Some("EPF")]);
+        assert_eq!(
+            snapshot.kinds,
+            vec![
+                super::RootKind::Base,
+                super::RootKind::Extension,
+                super::RootKind::Extension,
+                super::RootKind::External(bsl_metadata::ExternalObjectKind::DataProcessor)
+            ]
+        );
+        assert_eq!(snapshot.closures[1], vec![2], "A keeps its declared dependency on B");
+        assert_eq!(snapshot.closures[2], Vec::<usize>::new(), "B stays independent");
+        assert_eq!(snapshot.closures[3], vec![2, 1], "the external sees B then A");
+        assert_eq!(snapshot.topological_order, vec![0, 2, 1, 3], "and comes last");
+        assert_eq!(snapshot.designer_order().collect::<Vec<_>>(), vec![0, 2, 1]);
     }
 
     /// Таблица по словарю: для каждого конвенционного имени файла модуля

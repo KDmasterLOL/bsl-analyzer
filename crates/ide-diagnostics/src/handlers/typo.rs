@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use ide_db::TextRange;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
@@ -184,7 +185,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let code = DiagnosticCode::Typo;
 
         let min_word_length = ctx
@@ -293,8 +294,8 @@ fn remove_quotes(text: &str) -> String {
 
 fn check_ident_token(
     token: &SyntaxToken,
-    acc: &mut Vec<Diagnostic>,
-    ctx: &DiagnosticsContext,
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+    ctx: &BodyContext,
     config: &Config,
     dictionaries: &Dictionaries,
 ) {
@@ -320,7 +321,10 @@ fn check_ident_token(
                 code,
                 message: format!("Возможная опечатка в \"{}\"", word),
                 severity: ctx.severity(code),
-                range: TextRange::new(word_start.into(), word_end.into()),
+                range: LocalRange::of_detached_node(TextRange::new(
+                    word_start.into(),
+                    word_end.into(),
+                )),
                 tags: ctx.tags(code).to_vec(),
                 fixes: vec![],
             });
@@ -348,7 +352,7 @@ fn find_lvalue_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
     None
 }
 
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::Typo;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -402,8 +406,8 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
 fn check_text(
     text: &str,
     base_offset: TextSize,
-    acc: &mut Vec<Diagnostic>,
-    ctx: &DiagnosticsContext,
+    acc: &mut Vec<Diagnostic<LocalRange>>,
+    ctx: &BodyContext,
     config: &Config,
     dictionaries: &Dictionaries,
 ) {
@@ -430,7 +434,10 @@ fn check_text(
                     code,
                     message: format!("Возможная опечатка в \"{}\"", word),
                     severity: ctx.severity(code),
-                    range: TextRange::new(word_start.into(), word_end.into()),
+                    range: LocalRange::of_detached_node(TextRange::new(
+                        word_start.into(),
+                        word_end.into(),
+                    )),
                     tags: ctx.tags(code).to_vec(),
                     fixes: vec![],
                 });

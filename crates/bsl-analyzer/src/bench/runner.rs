@@ -26,8 +26,8 @@ use syntax::{TextRange, TextSize};
 
 use crate::bench::manifest::{self, EditPatch, FeatureSpec, Target};
 use crate::bench::report::{
-    percentile_ns, CallHierarchyIndexReport, EditPhases, FamilyChurn, MemoryReport, PointReport,
-    RecomputeReport, MODULES_CAP, REPORT_SCHEMA_VERSION,
+    percentile_ns, CallHierarchyIndexReport, EditPhases, FamilyChurn, MemoryReport,
+    ParseOutcomeDelta, PointReport, RecomputeReport, MODULES_CAP, REPORT_SCHEMA_VERSION,
 };
 use crate::frozen_context::{FrozenFilePaths, LatencyRequestContext};
 use crate::global_state::GlobalState;
@@ -185,7 +185,7 @@ struct CallHierarchyBuildContext {
     modules: Vec<ide::ModuleId>,
     paths: FxHashMap<vfs::FileId, String>,
     file_paths: HashMap<vfs::FileId, PathBuf>,
-    config_paths: Vec<(Option<String>, PathBuf)>,
+    configs: Arc<ide::WorkspaceConfigsSnapshot>,
     config_cache: Arc<ide::GraphConfigCache>,
     workspace_root: PathBuf,
     /// Modules no pass could read. Non-empty fails the run: a measurement over a
@@ -266,8 +266,17 @@ pub fn run_point(args: &RunArgs) -> Result<PointReport, RunError> {
 
     match args.mode {
         RunMode::Latency => match &target.spec {
-            FeatureSpec::Edit { patch, edit_kind, followup } => {
-                run_edit_point(args, &mut env, &target, &resolved, patch, *edit_kind, followup)
+            FeatureSpec::Edit { patch, edit_kind, followup } => run_edit_point(
+                args,
+                &mut env,
+                &target,
+                &resolved,
+                std::slice::from_ref(patch),
+                *edit_kind,
+                followup,
+            ),
+            FeatureSpec::EditBurst { patches, edit_kind, followup } => {
+                run_edit_point(args, &mut env, &target, &resolved, patches, *edit_kind, followup)
             }
             spec => run_plain_point(args, &mut env, &target, &resolved, spec),
         },
@@ -296,15 +305,8 @@ fn run_recompute_point(
     }
 
     match &target.spec {
-        FeatureSpec::Edit { patch, edit_kind, followup } => {
-            let (start, end) = (patch.range.start as usize, patch.range.end as usize);
-            let text = &resolved.text;
-            if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-                return Err(RunError::Manifest(format!(
-                    "patch range {start}..{end} out of bounds or splits a UTF-8 char (file len {})",
-                    text.len()
-                )));
-            }
+        FeatureSpec::Edit { .. } | FeatureSpec::EditBurst { .. } => {
+            let (patches, edit_kind, followup) = edit_parts(&target.spec);
             open_document(env, resolved)?;
             ensure_overlay(env, resolved, followup)?;
             // Settle to a steady warm state so the window sees only
@@ -313,40 +315,13 @@ fn run_recompute_point(
                 let _ = execute_once(env, resolved, followup)?;
             }
 
-            let mut patched = String::with_capacity(text.len() + patch.new_text.len());
-            patched.push_str(&text[..start]);
-            patched.push_str(&patch.new_text);
-            patched.push_str(&text[end..]);
-            let change_params = lsp_types::DidChangeTextDocumentParams {
-                text_document: lsp_types::VersionedTextDocumentIdentifier {
-                    uri: resolved.url.clone(),
-                    version: 2,
-                },
-                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: patched.clone(),
-                }],
-            };
-
+            let PreparedEdits { changes, post } = prepare_edits(env, resolved, patches)?;
             env.state.analysis_host.raw_database().salsa_events_reset();
             let window_start = Instant::now();
-            notification::handle_did_change(&mut env.state, change_params)
-                .map_err(|e| RunError::Other(format!("didChange failed: {e}")))?;
-            env.frozen_paths = None;
-            if env.state.mem_docs.get(&resolved.url).as_deref() != Some(patched.as_str()) {
-                return Err(RunError::Other(
-                    "didChange did not apply: document text differs from the patched text"
-                        .to_string(),
-                ));
-            }
-            let post = ResolvedTarget {
-                file_id: resolved.file_id,
-                url: resolved.url.clone(),
-                text: patched,
-            };
+            send_edits(env, changes)?;
             let (_, obs) = execute_once(env, &post, followup)?;
             let window_ns = window_start.elapsed().as_nanos() as u64;
+            verify_applied(env, &post)?;
 
             let recompute = collect_recompute(env)?;
             // Only the whole-window duration is meaningful here; the
@@ -356,6 +331,9 @@ fn run_recompute_point(
                 warm_before_p50_ns: None,
                 edit_apply_ns: None,
                 after_edit_ns: window_ns,
+                burst_len: burst_len(&target.spec),
+                parse_outcome: None,
+                slab_verify: None,
             };
             finish_mode_report(
                 args,
@@ -398,6 +376,17 @@ fn collect_recompute(env: &BenchEnv) -> Result<RecomputeReport, RunError> {
     let window = db
         .salsa_key_event_window()
         .ok_or_else(|| RunError::Other("salsa event window unavailable".to_string()))?;
+    // The report keeps the window as counts; the keys themselves are the
+    // thing to look at when a family executes where it should validate.
+    if let Ok(path) = std::env::var("BSL_BENCH_KEY_DUMP") {
+        let mut dump = String::new();
+        for row in &window.rows {
+            use std::fmt::Write as _;
+            let _ = writeln!(dump, "{}\t{}\t{}", row.execute, row.discard_stale, row.name);
+        }
+        std::fs::write(&path, dump)
+            .map_err(|e| RunError::Other(format!("key dump {path}: {e}")))?;
+    }
 
     let families: Vec<FamilyChurn> = rows
         .into_iter()
@@ -471,48 +460,19 @@ fn run_memory_point(
     // The sampler is stopped before any error propagates — a leaked sampler
     // thread would spin every 5 ms until process exit.
     let (result, (phase_peak, sample_count)) = match &target.spec {
-        FeatureSpec::Edit { patch, followup, .. } => {
-            let (start, end) = (patch.range.start as usize, patch.range.end as usize);
-            let text = &resolved.text;
-            if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
-                return Err(RunError::Manifest(format!(
-                    "patch range {start}..{end} out of bounds (file len {})",
-                    text.len()
-                )));
-            }
+        FeatureSpec::Edit { .. } | FeatureSpec::EditBurst { .. } => {
+            let (patches, _, followup) = edit_parts(&target.spec);
             open_document(env, resolved)?;
             ensure_overlay(env, resolved, followup)?;
             let _ = execute_once(env, resolved, followup)?;
-            let mut patched = String::with_capacity(text.len() + patch.new_text.len());
-            patched.push_str(&text[..start]);
-            patched.push_str(&patch.new_text);
-            patched.push_str(&text[end..]);
-            let change_params = lsp_types::DidChangeTextDocumentParams {
-                text_document: lsp_types::VersionedTextDocumentIdentifier {
-                    uri: resolved.url.clone(),
-                    version: 2,
-                },
-                content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
-                    range: None,
-                    range_length: None,
-                    text: patched.clone(),
-                }],
-            };
+            let PreparedEdits { changes, post } = prepare_edits(env, resolved, patches)?;
             let sampler = RssSampler::start();
             let t = Instant::now();
-            let result = notification::handle_did_change(&mut env.state, change_params)
-                .map_err(|e| RunError::Other(format!("didChange failed: {e}")))
-                .and_then(|()| {
-                    env.frozen_paths = None;
-                    let post = ResolvedTarget {
-                        file_id: resolved.file_id,
-                        url: resolved.url.clone(),
-                        text: patched,
-                    };
-                    execute_once(env, &post, followup)
-                });
+            let result = send_edits(env, changes).and_then(|_| execute_once(env, &post, followup));
             let ns = t.elapsed().as_nanos() as u64;
-            (result.map(|(_, obs)| (ns, obs)), sampler.stop())
+            let sampled = sampler.stop();
+            verify_applied(env, &post)?;
+            (result.map(|(_, obs)| (ns, obs)), sampled)
         }
         spec => {
             ensure_overlay(env, resolved, spec)?;
@@ -624,7 +584,7 @@ fn trim_and_settle(env: &mut BenchEnv, deep: bool, settle_ms: u64) -> Result<u64
     }
     let db = env.state.analysis_host.raw_database_mut();
     if deep {
-        db.enforce_lru_deep();
+        ide::sweep_lru_deep(db);
     } else {
         db.enforce_lru();
     }
@@ -697,17 +657,28 @@ fn run_plain_point(
     finish_report(args, env, target, &cold_obs, cold_ns, warm_ns, None)
 }
 
-#[allow(clippy::too_many_arguments, reason = "one call site; grouping would only rename the args")]
-fn run_edit_point(
-    args: &RunArgs,
-    env: &mut BenchEnv,
-    target: &Target,
-    resolved: &ResolvedTarget,
-    patch: &EditPatch,
-    edit_kind: manifest::EditKind,
-    followup: &FeatureSpec,
-) -> Result<PointReport, RunError> {
-    let text = &resolved.text;
+/// The patches, kind and followup of an `Edit` / `EditBurst` spec. Panics on
+/// any other spec: callers dispatch on the variant first.
+fn edit_parts(spec: &FeatureSpec) -> (&[EditPatch], manifest::EditKind, &FeatureSpec) {
+    match spec {
+        FeatureSpec::Edit { patch, edit_kind, followup } => {
+            (std::slice::from_ref(patch), *edit_kind, followup)
+        }
+        FeatureSpec::EditBurst { patches, edit_kind, followup } => (patches, *edit_kind, followup),
+        other => unreachable!("edit_parts on a non-edit spec {}", other.feature_name()),
+    }
+}
+
+fn burst_len(spec: &FeatureSpec) -> Option<usize> {
+    match spec {
+        FeatureSpec::EditBurst { patches, .. } => Some(patches.len()),
+        _ => None,
+    }
+}
+
+/// The text after `patch`, or a manifest error when the range does not name a
+/// substring of `text`.
+fn apply_patch(text: &str, patch: &EditPatch) -> Result<String, RunError> {
     let (start, end) = (patch.range.start as usize, patch.range.end as usize);
     if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
         return Err(RunError::Manifest(format!(
@@ -715,9 +686,127 @@ fn run_edit_point(
             text.len()
         )));
     }
+    let mut patched = String::with_capacity(text.len() + patch.new_text.len());
+    patched.push_str(&text[..start]);
+    patched.push_str(&patch.new_text);
+    patched.push_str(&text[end..]);
+    Ok(patched)
+}
 
-    // Resident overlay for the document; the edit itself flows through the
-    // real didChange path.
+/// Build the `didChange` an editor would send for `patch`: a ranged content
+/// change in the server's negotiated position encoding, not a full-text
+/// replacement. A full-text change would take `mem_docs` down its
+/// replace-everything branch, so the stand would never observe the ranged
+/// path a real keystroke exercises.
+fn ranged_change(
+    env: &BenchEnv,
+    text: &str,
+    url: &Url,
+    patch: &EditPatch,
+    version: i32,
+) -> Result<lsp_types::DidChangeTextDocumentParams, RunError> {
+    let line_index = LineIndex::new(text);
+    let range = TextRange::new(TextSize::from(patch.range.start), TextSize::from(patch.range.end));
+    let lsp_range = crate::lsp::to_proto::range_with_encoding(
+        &line_index,
+        text,
+        range,
+        env.state.position_encoding,
+    )
+    .ok_or_else(|| {
+        RunError::Manifest(format!(
+            "patch range {}..{} has no LSP position in the document",
+            patch.range.start, patch.range.end
+        ))
+    })?;
+    Ok(lsp_types::DidChangeTextDocumentParams {
+        text_document: lsp_types::VersionedTextDocumentIdentifier { uri: url.clone(), version },
+        content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+            range: Some(lsp_range),
+            range_length: None,
+            text: patch.new_text.clone(),
+        }],
+    })
+}
+
+/// The `didChange`s of an edit point, built before any measurement window
+/// opens, and the target they leave behind.
+///
+/// Building them costs the benchmark a text clone, a patched copy and a
+/// `LineIndex` per patch — tens of megabytes on a 10 MB module — none of
+/// which the server pays for a keystroke. Preparing everything up front keeps
+/// that bookkeeping out of every window: the per-`didChange` timer of mode
+/// A, the salsa-event window of mode B and the RSS sampler of mode C.
+struct PreparedEdits {
+    changes: Vec<lsp_types::DidChangeTextDocumentParams>,
+    post: ResolvedTarget,
+}
+
+fn prepare_edits(
+    env: &BenchEnv,
+    resolved: &ResolvedTarget,
+    patches: &[EditPatch],
+) -> Result<PreparedEdits, RunError> {
+    let mut text = resolved.text.clone();
+    let mut changes = Vec::with_capacity(patches.len());
+    for (i, patch) in patches.iter().enumerate() {
+        let patched = apply_patch(&text, patch)?;
+        let version = 2 + i as i32;
+        changes.push(ranged_change(env, &text, &resolved.url, patch, version)?);
+        text = patched;
+    }
+    Ok(PreparedEdits {
+        changes,
+        post: ResolvedTarget { file_id: resolved.file_id, url: resolved.url.clone(), text },
+    })
+}
+
+/// Push the prepared `didChange`s through the real handler, one notification
+/// per patch, and return the summed handler time. Nothing but the handler
+/// runs between a timer's start and stop.
+fn send_edits(
+    env: &mut BenchEnv,
+    changes: Vec<lsp_types::DidChangeTextDocumentParams>,
+) -> Result<u64, RunError> {
+    let mut apply_ns = 0u64;
+    for change_params in changes {
+        let apply_start = Instant::now();
+        notification::handle_did_change(&mut env.state, change_params)
+            .map_err(|e| RunError::Other(format!("didChange failed: {e}")))?;
+        apply_ns += apply_start.elapsed().as_nanos() as u64;
+        env.frozen_paths = None;
+    }
+    Ok(apply_ns)
+}
+
+/// `handle_did_change` swallows a rejected edit (logs and returns Ok), so a
+/// dropped patch would silently re-measure unchanged text — compare the
+/// document with the text the patches must have produced. The check also
+/// pins the ranged conversion: a wrong column lands a patch elsewhere and the
+/// texts differ. It clones the whole document, so it runs after the window
+/// closes, never inside it.
+fn verify_applied(env: &BenchEnv, post: &ResolvedTarget) -> Result<(), RunError> {
+    let applied = env.state.mem_docs.get(&post.url);
+    if applied.as_deref() != Some(post.text.as_str()) {
+        return Err(RunError::Other(
+            "didChange did not apply: document text differs from the patched text".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, reason = "two call sites; grouping would only rename the args")]
+fn run_edit_point(
+    args: &RunArgs,
+    env: &mut BenchEnv,
+    target: &Target,
+    resolved: &ResolvedTarget,
+    patches: &[EditPatch],
+    edit_kind: manifest::EditKind,
+    followup: &FeatureSpec,
+) -> Result<PointReport, RunError> {
+    // Resident overlay for the document; the edits themselves flow through
+    // the real didChange path.
     open_document(env, resolved)?;
     ensure_overlay(env, resolved, followup)?;
 
@@ -729,45 +818,22 @@ fn run_edit_point(
         warm_before.push(ns);
     }
 
-    let mut patched = String::with_capacity(text.len() + patch.new_text.len());
-    patched.push_str(&text[..start]);
-    patched.push_str(&patch.new_text);
-    patched.push_str(&text[end..]);
-
-    // Fully built before the timer: `edit_apply_ns` must cover the didChange
-    // handler alone, not the benchmark's own document clone.
-    let change_params = lsp_types::DidChangeTextDocumentParams {
-        text_document: lsp_types::VersionedTextDocumentIdentifier {
-            uri: resolved.url.clone(),
-            version: 2,
-        },
-        content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
-            range: None,
-            range_length: None,
-            text: patched.clone(),
-        }],
-    };
-    let apply_start = Instant::now();
-    notification::handle_did_change(&mut env.state, change_params)
-        .map_err(|e| RunError::Other(format!("didChange failed: {e}")))?;
-    let edit_apply_ns = apply_start.elapsed().as_nanos() as u64;
-    env.frozen_paths = None;
-
-    // handle_did_change swallows a rejected edit (logs and returns Ok), so a
-    // dropped patch would silently re-measure unchanged text — verify.
-    let applied = env.state.mem_docs.get(&resolved.url);
-    if applied.as_deref() != Some(patched.as_str()) {
-        return Err(RunError::Other(
-            "didChange did not apply: document text differs from the patched text".to_string(),
-        ));
-    }
-
-    // Followup offsets are validated to precede the patch, so the pre-edit
-    // resolved target stays valid; only the text snapshot must be refreshed.
-    let post =
-        ResolvedTarget { file_id: resolved.file_id, url: resolved.url.clone(), text: patched };
+    // Followup offsets are validated to precede every patch, so the pre-edit
+    // resolved target stays valid; only the text snapshot is refreshed.
+    let PreparedEdits { changes, post } = prepare_edits(env, resolved, patches)?;
+    let parse_before = env.state.analysis_host.raw_database().parse_stats();
+    let slab_verify_before = ide::slab_verify_mismatches();
+    let edit_apply_ns = send_edits(env, changes)?;
+    verify_applied(env, &post)?;
 
     let (after_edit_ns, after_obs) = execute_once(env, &post, followup)?;
+    let parse_outcome = ParseOutcomeDelta::between(
+        parse_before,
+        env.state.analysis_host.raw_database().parse_stats(),
+    );
+    let slab_verify = std::env::var("BSL_SLAB_VERIFY")
+        .is_ok_and(|v| v == "1")
+        .then(|| ide::slab_verify_mismatches() - slab_verify_before);
     let mut warm_after = Vec::with_capacity(args.warm_iterations);
     for _ in 0..args.warm_iterations {
         let (ns, obs) = execute_once(env, &post, followup)?;
@@ -785,6 +851,9 @@ fn run_edit_point(
         warm_before_p50_ns: Some(percentile_ns(&warm_before, 50)),
         edit_apply_ns: Some(edit_apply_ns),
         after_edit_ns,
+        burst_len: burst_len(&target.spec),
+        parse_outcome: Some(parse_outcome),
+        slab_verify,
     };
     finish_report(args, env, target, &after_obs, after_edit_ns, warm_after, Some(phases))
 }
@@ -1137,7 +1206,7 @@ pub(crate) fn execute_once(
                 text_document: lsp_types::TextDocumentIdentifier { uri: resolved.url.clone() },
             };
             let t = Instant::now();
-            let r = request::handle_semantic_tokens_full(ctx, params)
+            let r = request::handle_semantic_tokens_full(&ctx, params)
                 .map_err(|e| RunError::Other(format!("semantic tokens handler failed: {e}")))?;
             let ns = t.elapsed().as_nanos() as u64;
             let count = match &r {
@@ -1165,7 +1234,7 @@ pub(crate) fn execute_once(
                 partial_result_params: Default::default(),
             };
             let t = Instant::now();
-            let r = request::handle_code_action(ctx, params)
+            let r = request::handle_code_action(&ctx, params)
                 .map_err(|e| RunError::Other(format!("code action handler failed: {e}")))?;
             let ns = t.elapsed().as_nanos() as u64;
             let actions = r.unwrap_or_default();
@@ -1182,7 +1251,7 @@ pub(crate) fn execute_once(
                 partial_result_params: Default::default(),
             };
             let t = Instant::now();
-            let r = request::handle_document_diagnostic(ctx, params)
+            let r = request::handle_document_diagnostic(&ctx, params)
                 .map_err(|e| RunError::Other(format!("pull diagnostics handler failed: {e}")))?;
             let ns = t.elapsed().as_nanos() as u64;
             let count = pull_report_count(&r);
@@ -1201,7 +1270,7 @@ pub(crate) fn execute_once(
             }
             Ok((total_ns, Observation::from_lines(count, lines)))
         }
-        FeatureSpec::Edit { .. } => Err(RunError::Other(
+        FeatureSpec::Edit { .. } | FeatureSpec::EditBurst { .. } => Err(RunError::Other(
             "edit points are executed by run_edit_point, not execute_once".to_string(),
         )),
     }
@@ -1240,7 +1309,7 @@ fn call_hierarchy_build_context(
         modules,
         paths,
         file_paths,
-        config_paths: db.all_config_paths(),
+        configs: db.workspace_configs_snapshot(),
         config_cache: Arc::new(ide::GraphConfigCache::default()),
         workspace_root: env.workspace_root.clone(),
         unread: Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::new())),
@@ -1273,7 +1342,7 @@ fn open_call_hierarchy_batch(
         let mut seen = context.unread.lock().expect("bench unread set is never poisoned");
         seen.extend(unreadable.into_iter().map(|(path, _err)| path));
     }
-    db.set_all_config_paths(context.config_paths.clone());
+    db.set_workspace_configs_snapshot((*context.configs).clone());
     ide::warm_batch_config_roots(&db, &batch_files);
     db
 }

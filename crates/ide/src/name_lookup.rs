@@ -1125,7 +1125,8 @@ fn from_module_index(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCandid
 }
 
 /// Configuration objects and common modules, from the metadata listing of every
-/// config root (base first, then extensions — the same order navigation uses).
+/// registered root (base first, then extensions — the same order navigation
+/// uses — then external objects, which are listed under their own kind).
 fn from_metadata_listing(db: &RootDatabaseImpl, merge: &Merge<'_>) -> Vec<NameCandidate> {
     let mut out = Vec::new();
     let paths = db.all_config_paths();

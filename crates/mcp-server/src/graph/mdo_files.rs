@@ -37,33 +37,47 @@ pub(crate) fn mdo_files(configs: &ide::WorkspaceConfigsSnapshot, tree: &dyn DirT
     let canonical = (configs.canonical_paths.len() == configs.paths.len())
         .then_some(configs.canonical_paths.as_slice());
 
-    let roots: Vec<(bool, &Path)> = configs
+    let roots: Vec<(bool, &Path, Option<bsl_metadata::ExternalObjectKind>)> = configs
         .paths
         .iter()
         .enumerate()
         .map(|(i, (label, declared))| {
             let root = canonical.map_or(declared.as_path(), |paths| paths[i].as_path());
-            (label.is_none(), root)
+            let external = match configs.kinds.get(i) {
+                Some(ide::WorkspaceRootKind::External(kind)) => Some(*kind),
+                _ => None,
+            };
+            (label.is_none(), root, external)
         })
         .collect();
 
     let mut out = MdoFiles::default();
-    for (_, root) in roots.iter().filter(|(is_base, _)| *is_base) {
-        collect_root(root, tree, &mut out);
+    for (_, root, external) in roots.iter().filter(|(is_base, _, _)| *is_base) {
+        collect_root(root, tree, *external, &mut out);
     }
-    for (_, root) in roots.iter().filter(|(is_base, _)| !*is_base) {
-        collect_root(root, tree, &mut out);
+    for (_, root, external) in roots.iter().filter(|(is_base, _, _)| !*is_base) {
+        collect_root(root, tree, *external, &mut out);
     }
     out
 }
 
-fn collect_root(root: &Path, tree: &dyn DirTree, out: &mut MdoFiles) {
+fn collect_root(
+    root: &Path,
+    tree: &dyn DirTree,
+    external: Option<bsl_metadata::ExternalObjectKind>,
+    out: &mut MdoFiles,
+) {
     let mut put = |mdo_type: MdoType, name: &str, file: &Path| {
         out.entry(mdo_files_key(mdo_type, name)).or_insert_with(|| encoded_path(file));
     };
 
     for mdo in bsl_metadata::discover_metadata_structure(root, tree) {
         put(mdo.mdo_type, &mdo.name, &mdo.main);
+    }
+    if let Some(kind) = external {
+        if let Some(mdo) = bsl_metadata::discover_external_object_structure(root, tree, kind) {
+            put(mdo.mdo_type, &mdo.name, &mdo.main);
+        }
     }
     for register in bsl_metadata::discover_register_structure(root, tree) {
         put(register.mdo_type, &register.name, &register.main);

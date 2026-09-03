@@ -17,12 +17,39 @@ use vfs::FileId;
 use crate::features::FeaturesInput;
 use crate::metadata::{GlobalConfigRevisionInput, MetadataDb};
 use crate::queries::{
-    line_index_query, liveness_analysis_query, method_cfg_query, module_metadata_query,
-    reaching_definitions_query,
+    line_index_query, method_cfg_query, module_metadata_query, reaching_definitions_query,
 };
 use crate::type_kernel::TypeKernelInner;
 use crate::{metadata, queries, vfs_helpers, RootDatabase, SdblHirEntries};
 use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
+use intern::NormName;
+
+/// Query families whose salsa key is exactly one `MethodIdInput` — the memos
+/// that live per method. The hot-key decoder reads the key through this
+/// list, and the incrementality stands count executions per family from it,
+/// so a per-method query missing here is invisible to both. Check the
+/// signature before adding a name.
+pub const METHOD_KEYED_QUERY_FAMILIES: &[&str] = &[
+    "infer_method_query",
+    "interface_method_query",
+    "method_syntax_query",
+    "method_slab_query",
+    "method_lower_query",
+    "method_body_query",
+    "method_sdbl_hir_query",
+    "method_return_type_query",
+    "proc_signature_query",
+    "doc_see_signature_query",
+    "structure_param_keys_query",
+    "method_cfg_query",
+    "reaching_definitions_query",
+    "method_path_terminates_query",
+    "method_security_state_query",
+    "method_hir_metrics_query",
+    "method_cyclomatic_query",
+    "method_effect_summary_query",
+    "method_arg_diagnostics_query",
+];
 
 /// The config roots visible to one file: the base configuration plus the
 /// file's dependency-ordered extension chain. `chain` holds `(name, path)`
@@ -144,6 +171,14 @@ impl RootDatabaseImpl {
         Self::new_inner(salsa_events_enabled_by_env())
     }
 
+    /// A database with the salsa event counters installed regardless of
+    /// `BSL_SALSA_EVENTS` (process-global and racy under the test harness).
+    /// For stands and tests that assert *what* a change recomputes; the env
+    /// gate stays the production switch.
+    pub fn new_with_salsa_events() -> Self {
+        Self::new_inner(true)
+    }
+
     fn new_inner(events_enabled: bool) -> Self {
         // Install the event callback (if any) before any input is created so it
         // observes the whole database lifetime, including the singleton inputs below.
@@ -197,14 +232,6 @@ impl RootDatabaseImpl {
         db
     }
 
-    /// Construct a database with salsa event counting forced on, independent of the
-    /// `BSL_SALSA_EVENTS` env var (which is process-global and racy under the test
-    /// harness). For tests of [`crate::salsa_events`].
-    #[cfg(test)]
-    pub(crate) fn new_with_salsa_events() -> Self {
-        Self::new_inner(true)
-    }
-
     pub(crate) fn type_kernel_inner(&self) -> &Arc<TypeKernelInner> {
         &self.type_kernel
     }
@@ -240,7 +267,8 @@ impl RootDatabaseImpl {
     /// sequence of [`Self::enforce_lru_deep`].
     fn set_sweep_lru(&mut self, sweep: bool) {
         base_db::set_parse_lru_sweep_mode(self, sweep);
-        hir::set_module_bodies_lru_sweep_mode(self, sweep);
+        hir::set_lowering_lru_sweep_mode(self, sweep);
+        queries::set_dataflow_lru_sweep_mode(self, sweep);
     }
 
     /// Per-ingredient memory snapshot for diagnostics tooling, via salsa's
@@ -283,6 +311,19 @@ impl RootDatabaseImpl {
     /// [`Self::salsa_event_report`].
     pub fn salsa_event_global(&self) -> Option<crate::salsa_events::GlobalCounts> {
         self.salsa_events.as_ref().map(|s| s.global_counts())
+    }
+
+    /// `(execute, validate)` of one query family in the current observation
+    /// window, matched on the family's unqualified name (`infer_method_query`).
+    /// A family that recorded no event in the window reads as `(0, 0)` — the
+    /// value a churn assertion wants. `None` unless events are enabled.
+    pub fn salsa_family_churn(&self, family: &str) -> Option<(u64, u64)> {
+        let rows = self.salsa_event_report()?;
+        Some(
+            rows.iter()
+                .find(|r| r.name.rsplit("::").next().unwrap_or(&r.name) == family)
+                .map_or((0, 0), |r| (r.execute, r.validate)),
+        )
     }
 
     /// The `k` hottest salsa *keys* (concrete file/method query instances) by
@@ -359,7 +400,7 @@ impl RootDatabaseImpl {
         Some(crate::salsa_events::KeyEventWindow { distinct_keys, rows })
     }
 
-    /// Name one hot salsa key: `query(<module path>[#m<local>])` for the curated
+    /// Name one hot salsa key: `query(<module path>[#<name>#<ordinal>])` for the curated
     /// per-file / per-method query families, else the attach-rendered
     /// `query(Id(..))` fallback. Must run inside a [`salsa::attach`] scope (for the
     /// fallback) and only within the key's originating revision (see
@@ -394,9 +435,11 @@ impl RootDatabaseImpl {
             "infer_query",
             "infer_module_code_query",
             "module_bodies_query",
+            "module_code_reaching_definitions_query",
+            "module_code_security_state_query",
+            "module_code_arg_diagnostics_query",
         ];
-        const METHOD_KEYED: &[&str] =
-            &["infer_method_query", "method_body_query", "method_return_type_query"];
+        const METHOD_KEYED: &[&str] = METHOD_KEYED_QUERY_FAMILIES;
 
         if FILE_KEYED.contains(&name) {
             let file_id = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -411,7 +454,7 @@ impl RootDatabaseImpl {
             }))
             .ok()?;
             let path = vfs_helpers::get_file_path(self, method_id.module.file_id)?;
-            Some(format!("{query}({}#m{})", path.display(), method_id.local_id))
+            Some(format!("{query}({}#{:?})", path.display(), method_id.local_id))
         } else {
             None
         }
@@ -503,11 +546,25 @@ impl RootDatabaseImpl {
     /// agree). Reading the workspace config paths records a dependency, so a
     /// workspace reload invalidates every config-dependent query.
     fn longest_config_root_for_path(&self, path: &Path) -> Option<PathBuf> {
-        self.all_config_paths()
-            .into_iter()
-            .map(|(_, p)| p)
-            .filter(|root| path.starts_with(root))
-            .max_by_key(|root| root.as_os_str().len())
+        // Both spellings match, as in `visible_roots_for_file`: a file enumerated
+        // canonically under a root configured through a symlink still belongs to
+        // it. The CONFIGURED spelling is what comes back, so the revision key a
+        // reader interns is the one a bump on that root increments.
+        let snapshot = self.workspace_configs_snapshot();
+        snapshot
+            .paths
+            .iter()
+            .zip(&snapshot.canonical_paths)
+            .filter_map(|((_, configured), canonical)| {
+                [configured, canonical]
+                    .into_iter()
+                    .filter(|root| path.starts_with(root))
+                    .map(|root| root.as_os_str().len())
+                    .max()
+                    .map(|len| (len, configured))
+            })
+            .max_by_key(|&(len, _)| len)
+            .map(|(_, configured)| configured.clone())
     }
 
     /// The revision token to fold into a config's interned key for any reader
@@ -652,6 +709,11 @@ impl RootDatabaseImpl {
             snapshot.topological_order.len(),
             "workspace-configs snapshot: topological_order must cover every path"
         );
+        assert_eq!(
+            snapshot.paths.len(),
+            snapshot.kinds.len(),
+            "workspace-configs snapshot: kinds must parallel paths"
+        );
         assert!(
             snapshot.closures.iter().flatten().all(|&dep| dep < snapshot.paths.len()),
             "workspace-configs snapshot: closure indices must point into paths"
@@ -681,6 +743,13 @@ impl RootDatabaseImpl {
 
     pub fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         self.workspace_configs().snapshot(self).paths.clone()
+    }
+
+    /// The base and its extensions in topological order — the designer's view,
+    /// with external objects left out. See [`metadata::WorkspaceConfigsSnapshot::designer_order`].
+    pub fn designer_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
+        let snapshot = self.workspace_configs_snapshot();
+        snapshot.designer_order().map(|idx| snapshot.paths[idx].clone()).collect()
     }
 
     pub fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)> {
@@ -1682,8 +1751,9 @@ impl RootDatabaseImpl {
     }
 
     /// Config-root path strings in visibility precedence: the base configuration first,
-    /// then each extension. Order is load-bearing for the `*_across_roots` resolvers —
-    /// the base is an object's authoritative definition and extensions overlay it.
+    /// then each extension, then every external object. Order is load-bearing for the
+    /// `*_across_roots` resolvers — the base is an object's authoritative definition,
+    /// extensions overlay it, and an external root holds only its own kind.
     fn ordered_config_roots(&self) -> Vec<String> {
         let snapshot = self.workspace_configs_snapshot();
         let paths = &snapshot.paths;
@@ -1691,10 +1761,16 @@ impl RootDatabaseImpl {
             paths.iter().filter(|(label, _)| label.is_none()).count() <= 1,
             "all_config_paths must carry at most one None-labelled base root",
         );
+        snapshot.inventory_order().map(|idx| paths[idx].1.to_string_lossy().into_owned()).collect()
+    }
+
+    /// [`Self::ordered_config_roots`] without the external objects: the designer's
+    /// view, for a resolver whose language names none of them.
+    fn designer_config_roots(&self) -> Vec<String> {
+        let snapshot = self.workspace_configs_snapshot();
         snapshot
-            .topological_order
-            .iter()
-            .map(|&idx| paths[idx].1.to_string_lossy().into_owned())
+            .designer_order()
+            .map(|idx| snapshot.paths[idx].1.to_string_lossy().into_owned())
             .collect()
     }
 
@@ -1742,16 +1818,17 @@ impl RootDatabaseImpl {
         found_object.then(|| Arc::new(members))
     }
 
-    /// Effective top-level object members in the designer-wide view. The base
+    /// Effective top-level object members in the workspace-wide view. The base
     /// is composed first, followed by every loaded extension in the workspace's
-    /// stable topological order. An unread or absent root contributes nothing.
+    /// stable topological order, then the external objects, which only ever
+    /// answer for their own kinds. An unread or absent root contributes nothing.
     pub fn effective_metadata_members_across_roots(
         &self,
         mdo_type: bsl_metadata::MdoType,
         name: &str,
     ) -> Option<Arc<Vec<EffectiveMetadataMember>>> {
         let snapshot = self.workspace_configs_snapshot();
-        let roots = snapshot.topological_order.iter().map(|&idx| snapshot.paths[idx].clone());
+        let roots = snapshot.inventory_order().map(|idx| snapshot.paths[idx].clone());
         self.effective_metadata_members_from_roots(roots, mdo_type, name)
     }
 
@@ -1776,16 +1853,36 @@ impl RootDatabaseImpl {
     /// extension — composing base with each extension's overlay via
     /// [`bsl_metadata::MetadataObject::apply_extension_overlay`]. The root-scoped
     /// counterpart of [`Self::resolve_metadata_object_for_file`] for a consumer that has
-    /// NO file anchor (the MCP `metadata object` tool): visibility is the whole-config
-    /// "designer view", not one file's root. Deliberately wider than a base-only read —
-    /// an object defined only in an extension is found.
+    /// NO file anchor (the MCP `metadata object` tool): visibility is the whole
+    /// workspace, not one file's root. Deliberately wider than a base-only read —
+    /// an object defined only in an extension is found, and an external object is
+    /// found under its own kind.
     pub fn resolve_metadata_object_across_roots(
         &self,
         mdo_type: bsl_metadata::MdoType,
         name: &str,
     ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.resolve_metadata_object_over(self.ordered_config_roots(), mdo_type, name)
+    }
+
+    /// [`Self::resolve_metadata_object_across_roots`] over the designer's view alone —
+    /// what a query resolver composes over, since SDBL names no external object.
+    pub fn resolve_metadata_object_across_designer_roots(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
+        self.resolve_metadata_object_over(self.designer_config_roots(), mdo_type, name)
+    }
+
+    fn resolve_metadata_object_over(
+        &self,
+        roots: Vec<String>,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::MetadataObject>> {
         let mut acc: Option<bsl_metadata::MetadataObject> = None;
-        for root in self.ordered_config_roots() {
+        for root in roots {
             let Some(listing) = self.metadata_listing(&root) else { continue };
             if let Some(found) =
                 metadata::resolve_metadata_object(self, listing, mdo_type, name.to_string())
@@ -1807,8 +1904,26 @@ impl RootDatabaseImpl {
         mdo_type: bsl_metadata::MdoType,
         name: &str,
     ) -> Option<Arc<bsl_metadata::Register>> {
+        self.resolve_register_over(self.ordered_config_roots(), mdo_type, name)
+    }
+
+    /// [`Self::resolve_register_across_roots`] over the designer's view alone.
+    pub fn resolve_register_across_designer_roots(
+        &self,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
+        self.resolve_register_over(self.designer_config_roots(), mdo_type, name)
+    }
+
+    fn resolve_register_over(
+        &self,
+        roots: Vec<String>,
+        mdo_type: bsl_metadata::MdoType,
+        name: &str,
+    ) -> Option<Arc<bsl_metadata::Register>> {
         let mut acc: Option<bsl_metadata::Register> = None;
-        for root in self.ordered_config_roots() {
+        for root in roots {
             let Some(listing) = self.metadata_listing(&root) else { continue };
             if let Some(found) =
                 metadata::resolve_register(self, listing, mdo_type, name.to_string())
@@ -1836,8 +1951,24 @@ impl RootDatabaseImpl {
         &self,
         name: &str,
     ) -> Option<bsl_metadata::AttributeType> {
+        self.resolve_defined_type_over(self.ordered_config_roots(), name)
+    }
+
+    /// [`Self::resolve_defined_type_across_roots`] over the designer's view alone.
+    pub fn resolve_defined_type_across_designer_roots(
+        &self,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
+        self.resolve_defined_type_over(self.designer_config_roots(), name)
+    }
+
+    fn resolve_defined_type_over(
+        &self,
+        roots: Vec<String>,
+        name: &str,
+    ) -> Option<bsl_metadata::AttributeType> {
         let mut found = None;
-        for root in self.ordered_config_roots() {
+        for root in roots {
             let Some(listing) = self.metadata_listing(&root) else { continue };
             if let Some(underlying) =
                 metadata::resolve_defined_type(self, listing, name.to_string())
@@ -2318,7 +2449,31 @@ impl RootDatabaseImpl {
         &'db self,
         file_path: &Path,
     ) -> Option<metadata::ConfigurationPathInput<'db>> {
-        let config_root = self.find_configuration_root(file_path)?;
+        // Two answers. The registered root is the identity every key is built on,
+        // so it wins whenever both name the same directory — in either spelling:
+        // the walk finds the canonical one through a symlinked root, and taking
+        // that spelling would intern a second key for one configuration. The walk
+        // wins only when it stops strictly INSIDE the registered root: a nested
+        // configuration nothing declared still owns its files by its own markers.
+        // An external object's root carries no marker, so the walk passes it by
+        // and the registered root is the only answer.
+        let snapshot = self.workspace_configs_snapshot();
+        let registered = snapshot
+            .owner_of_path(file_path)
+            .map(|idx| (snapshot.paths[idx].1.clone(), snapshot.canonical_paths[idx].clone()));
+        let walked = self.find_configuration_root(file_path);
+        let config_root = match (registered, walked) {
+            (Some((configured, canonical)), Some(walked)) => {
+                let strictly_inside = |root: &Path| walked.starts_with(root) && walked != root;
+                if strictly_inside(&configured) || strictly_inside(&canonical) {
+                    walked
+                } else {
+                    configured
+                }
+            }
+            (Some((configured, _)), None) => configured,
+            (None, walked) => walked?,
+        };
         Some(metadata::intern_configuration_path(
             self,
             &config_root.to_string_lossy(),
@@ -2418,6 +2573,22 @@ impl SourceDatabase for RootDatabaseImpl {
         self.files.file_is_unread(self, file_id)
     }
 
+    fn parse_snapshot(&self, file_id: FileId) -> Option<base_db::ParseSnapshot> {
+        self.files.parse_snapshot(file_id)
+    }
+
+    fn store_parse_snapshot(&self, file_id: FileId, snapshot: base_db::ParseSnapshot) {
+        self.files.store_parse_snapshot(file_id, snapshot);
+    }
+
+    fn count_parse(&self, outcome: base_db::ParseOutcome) {
+        self.files.count_parse(outcome);
+    }
+
+    fn parse_stats(&self) -> base_db::ParseStats {
+        self.files.parse_stats()
+    }
+
     fn set_file_source_root(&mut self, file_id: FileId, source_root_id: SourceRootId) {
         let files = self.files.clone();
         files.set_file_source_root(self, file_id, source_root_id);
@@ -2489,6 +2660,35 @@ impl DefDatabase for RootDatabaseImpl {
         hir::module_data_query(self, file_id_input).clone()
     }
 
+    fn module_interface(&self, module_id: ModuleId) -> Arc<hir::ModuleInterface> {
+        self.module_interface_ref(module_id).clone()
+    }
+
+    fn module_interface_ref(&self, module_id: ModuleId) -> &Arc<hir::ModuleInterface> {
+        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
+        hir::module_interface_query(self, file_id_input)
+    }
+
+    fn interface_method(&self, method_id: hir::MethodId) -> Option<Arc<hir::MethodDecl>> {
+        hir::interface_method_query(self, hir::MethodIdInput::new(self, method_id))
+    }
+
+    fn interface_method_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::MethodDecl>> {
+        hir::interface_method_named(self, module_id, NormName::intern(name.as_str()))
+    }
+
+    fn interface_variable_named(
+        &self,
+        module_id: ModuleId,
+        name: &hir::Name,
+    ) -> Option<Arc<hir::VariableDecl>> {
+        hir::interface_variable_named(self, module_id, NormName::intern(name.as_str()))
+    }
+
     fn symbol_tree(&self, module_id: ModuleId) -> Arc<SymbolTree> {
         self.symbol_tree_ref(module_id).clone()
     }
@@ -2515,11 +2715,8 @@ impl DefDatabase for RootDatabaseImpl {
         hir::method_body_query(self, method)
     }
 
-    fn method_body_with_source_map(
-        &self,
-        method: hir::MethodIdInput<'_>,
-    ) -> Arc<(hir::Body, hir::BodySourceMap)> {
-        hir::method_body_with_source_map_query(self, method)
+    fn method_lower(&self, method: hir::MethodIdInput<'_>) -> Option<Arc<hir::LowerResult>> {
+        hir::method_lower_query(self, method).clone()
     }
 
     fn module_metadata(&self, module_id: ModuleId) -> Arc<hir::ModuleMetadata> {
@@ -2532,15 +2729,15 @@ impl DefDatabase for RootDatabaseImpl {
         hir::module_call_summary_query(self, file_id_input)
     }
 
+    // Docs come off the method's own declaration, so a reader keyed by the
+    // method depends on neither the position nor the rest of the file.
     fn method_docs(&self, method: hir::MethodId) -> Option<Arc<hir::MethodDocs>> {
-        let symbol_tree = self.symbol_tree_ref(method.module);
-        let method_symbol = symbol_tree.find_method_by_id(method)?;
-        method_symbol.docs.clone()
+        self.interface_method(method)?.docs.clone()
     }
 
     fn variable_docs(&self, variable: hir::VariableId) -> Option<Arc<hir::VariableDocs>> {
-        let symbol_tree = self.symbol_tree_ref(variable.module);
-        let variable_symbol = symbol_tree.find_variable_by_id(variable)?;
+        let interface = self.module_interface_ref(variable.module);
+        let variable_symbol = interface.find_variable_by_id(variable)?;
         variable_symbol.docs.clone()
     }
 
@@ -2937,11 +3134,23 @@ impl hir::HirDatabase for RootDatabaseImpl {
         hir::narrow_query(self, file_id, owner)
     }
 
+    fn method_arg_diagnostics(
+        &self,
+        method: hir::MethodIdInput<'_>,
+    ) -> Arc<Vec<hir::InferenceDiagnostic>> {
+        hir::method_arg_diagnostics_query(self, method)
+    }
+
+    fn module_code_arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<hir::InferenceDiagnostic>> {
+        let file_id_input = FileIdInput::new(self, file_id);
+        hir::module_code_arg_diagnostics_query(self, file_id_input)
+    }
+
     fn arg_diagnostics(
         &self,
         file_id: FileId,
     ) -> Arc<Vec<(hir::DefWithBodyId, hir::InferenceDiagnostic)>> {
-        hir::arg_diagnostics_query(self, file_id)
+        Arc::new(hir::file_arg_diagnostics(self, file_id))
     }
 
     fn type_narrowing_enabled(&self) -> bool {
@@ -2987,12 +3196,19 @@ impl hir::HirDatabase for RootDatabaseImpl {
         hir::infer_module_code_query(self, file_id_input)
     }
 
-    fn module_reaching_definitions(
+    fn module_code_reaching_definitions(
         &self,
         file_id: FileId,
-    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
         let file_id_input = FileIdInput::new(self, file_id);
-        queries::module_reaching_definitions_query(self, file_id_input)
+        queries::module_code_reaching_definitions_query(self, file_id_input)
+    }
+
+    fn method_reaching_definitions(
+        &self,
+        method: hir::MethodIdInput<'_>,
+    ) -> Option<Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        queries::reaching_definitions_query(self, method)
     }
 }
 
@@ -3032,8 +3248,10 @@ impl RootDatabase for RootDatabaseImpl {
     fn all_configurations_inventory(
         &self,
     ) -> Vec<(Option<String>, Arc<bsl_metadata::Configuration>)> {
-        RootDatabaseImpl::all_config_paths(self)
-            .into_iter()
+        let snapshot = self.workspace_configs_snapshot();
+        snapshot
+            .inventory_order()
+            .map(|idx| snapshot.paths[idx].clone())
             .map(|(name, path)| {
                 let path_input = metadata::intern_configuration_path(
                     self,
@@ -3048,6 +3266,17 @@ impl RootDatabase for RootDatabaseImpl {
 
     fn all_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
         RootDatabaseImpl::all_config_paths(self)
+    }
+
+    fn designer_config_paths(&self) -> Vec<(Option<String>, std::path::PathBuf)> {
+        RootDatabaseImpl::designer_config_paths(self)
+    }
+
+    fn external_root_of_path(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, std::path::PathBuf, bsl_metadata::ExternalObjectKind)> {
+        RootDatabaseImpl::workspace_configs_snapshot(self).external_root_of_path(path)
     }
 
     fn config_root_rank_and_label(&self, file_id: FileId) -> Option<(usize, Option<String>)> {
@@ -3111,31 +3340,6 @@ impl RootDatabase for RootDatabaseImpl {
         sdbl_hir_for_file_query(self, file_id_input)
     }
 
-    fn module_cfgs(&self, file_id_input: FileIdInput) -> Arc<hir::cfg::ModuleCfgs> {
-        queries::module_cfgs_query(self, file_id_input)
-    }
-
-    fn module_reaching_definitions(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
-        queries::module_reaching_definitions_query(self, file_id_input)
-    }
-
-    fn module_path_terminates(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
-        queries::module_path_terminates_query(self, file_id_input)
-    }
-
-    fn module_liveness_analysis(
-        &self,
-        file_id_input: FileIdInput,
-    ) -> Arc<hir::dataflow::liveness::ModuleLiveness> {
-        queries::module_liveness_analysis_query(self, file_id_input)
-    }
-
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
@@ -3144,12 +3348,30 @@ impl RootDatabase for RootDatabaseImpl {
         reaching_definitions_query(self, method_id_input)
     }
 
-    fn liveness_analysis(
+    fn method_path_terminates(
         &self,
         method_id: hir::MethodId,
-    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
+    ) -> Option<Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
         let method_id_input = hir::MethodIdInput::new(self, method_id);
-        liveness_analysis_query(self, method_id_input)
+        queries::method_path_terminates_query(self, method_id_input)
+    }
+
+    fn method_security_state(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        let method_id_input = hir::MethodIdInput::new(self, method_id);
+        crate::effects::method_security_state_query(self, method_id_input)
+    }
+
+    fn module_code_security_state(
+        &self,
+        file_id: FileId,
+    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>>>
+    {
+        let file_id_input = base_db::FileIdInput::new(self, file_id);
+        crate::effects::module_code_security_state_query(self, file_id_input)
     }
 
     fn method_cfg(&self, method_id: hir::MethodId) -> Arc<hir::cfg::ControlFlowGraph> {
@@ -3160,14 +3382,6 @@ impl RootDatabase for RootDatabaseImpl {
     fn module_level_cfg(&self, module_id: hir::ModuleId) -> Arc<hir::cfg::ControlFlowGraph> {
         let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
         queries::module_level_cfg_query(self, file_id_input)
-    }
-
-    fn module_level_liveness_analysis(
-        &self,
-        module_id: hir::ModuleId,
-    ) -> Option<Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>> {
-        let file_id_input = base_db::FileIdInput::new(self, module_id.file_id);
-        queries::module_level_liveness_analysis_query(self, file_id_input)
     }
 
     fn line_index(&self, file_id_input: base_db::FileIdInput) -> Arc<line_index::LineIndex> {

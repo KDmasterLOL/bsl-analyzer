@@ -283,7 +283,7 @@ fn narrow_query_handles_module_code_body() {
     let module_bodies = db.module_bodies(ModuleId::new(file_id));
     let module_code = module_bodies.module_code_result().expect("module-level body lowered");
     let expr_id = module_code
-        .source_map
+        .source_map()
         .expr_at_range(then_rhs.text_range())
         .expect("module-level BodySourceMap must locate the then-body Х");
 
@@ -360,7 +360,7 @@ fn narrow_query_returns_none_for_unknown_owner() {
 КонецПроцедуры
 "#;
     let (db, file_id) = setup(fixture);
-    let owner = DefWithBodyId::Method(999);
+    let owner = DefWithBodyId::Method(hir::MethodKey::first("НетТакой"));
 
     assert!(
         narrow_query(&db, file_id, owner).is_none(),

@@ -36,7 +36,7 @@ const CALL_HIERARCHY_CANCELLATION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(10);
 
 pub fn handle_goto_definition(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
     let _p = tracing::info_span!(
@@ -105,7 +105,7 @@ pub fn handle_goto_definition(
 }
 
 pub fn handle_type_definition(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
     let _p = tracing::info_span!(
@@ -154,7 +154,7 @@ pub fn handle_type_definition(
 }
 
 pub fn handle_find_references(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
     let _p = tracing::info_span!(
@@ -184,7 +184,7 @@ pub fn handle_find_references(
         return Ok(None);
     }
 
-    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let mut converter = ReferenceLocationConverter::new(ctx, file_id, text);
     let lsp_locations: Vec<Location> =
         locations.into_iter().map(|loc| converter.convert(loc)).collect::<Result<Vec<_>>>()?;
 
@@ -196,7 +196,7 @@ pub fn handle_find_references(
 }
 
 pub fn handle_prepare_rename(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: TextDocumentPositionParams,
 ) -> Result<Option<PrepareRenameResponse>> {
     let _p =
@@ -232,7 +232,7 @@ pub fn handle_prepare_rename(
 }
 
 pub fn handle_rename(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {
     let _p = tracing::info_span!(
@@ -267,7 +267,7 @@ pub fn handle_rename(
         }
     };
 
-    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let mut converter = ReferenceLocationConverter::new(ctx, file_id, text);
     let mut grouped: FxHashMap<lsp_types::Url, Vec<TextEdit>> = FxHashMap::default();
     for location in locations {
         let lsp_location = converter.convert(location)?;
@@ -308,7 +308,7 @@ pub fn handle_rename(
 }
 
 pub fn handle_prepare_call_hierarchy(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: CallHierarchyPrepareParams,
 ) -> Result<Option<Vec<CallHierarchyItem>>> {
     let uri = params.text_document_position_params.text_document.uri;
@@ -385,18 +385,18 @@ pub fn handle_prepare_call_hierarchy(
         ),
     }
 
-    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, text);
+    let mut converter = ReferenceLocationConverter::new(ctx, file_id, text);
     let item = to_lsp_call_hierarchy_item(&mut converter, ide_item)?;
     Ok(Some(vec![item]))
 }
 
 pub fn handle_call_hierarchy_incoming(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: CallHierarchyIncomingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
     let item = params.item;
     let file_id = ctx.file_id_for_url(&item.uri)?;
-    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let text = call_hierarchy_anchor_text(ctx, &item.uri, file_id);
     let line_index = LineIndex::new(&text);
 
     let offset = crate::lsp::offset_with_encoding(
@@ -582,7 +582,7 @@ pub fn handle_call_hierarchy_incoming(
         caller_count = calls.len(),
         "call hierarchy incoming served from compact index"
     );
-    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut converter = ReferenceLocationConverter::new(ctx, file_id, &text);
     let mut result = Vec::with_capacity(calls.len());
     for call in calls {
         // Incoming call sites live in the caller's own file.
@@ -595,7 +595,7 @@ pub fn handle_call_hierarchy_incoming(
 }
 
 pub fn handle_call_hierarchy_outgoing(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: CallHierarchyOutgoingCallsParams,
 ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
     let _p =
@@ -603,7 +603,7 @@ pub fn handle_call_hierarchy_outgoing(
 
     let item = params.item;
     let file_id = ctx.file_id_for_url(&item.uri)?;
-    let text = call_hierarchy_anchor_text(&ctx, &item.uri, file_id);
+    let text = call_hierarchy_anchor_text(ctx, &item.uri, file_id);
     let line_index = LineIndex::new(&text);
 
     let offset = crate::lsp::offset_with_encoding(
@@ -618,7 +618,7 @@ pub fn handle_call_hierarchy_outgoing(
         return Ok(None);
     }
 
-    let mut converter = ReferenceLocationConverter::new(&ctx, file_id, &text);
+    let mut converter = ReferenceLocationConverter::new(ctx, file_id, &text);
     let mut result = Vec::with_capacity(calls.len());
     for call in calls {
         let to = to_lsp_call_hierarchy_item(&mut converter, call.item)?;
@@ -671,7 +671,7 @@ fn convert_call_ranges(
 }
 
 pub fn handle_inlay_hint(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: InlayHintParams,
 ) -> Result<Option<Vec<LspInlayHint>>> {
     let _p = tracing::info_span!("handle_inlay_hint", uri = %params.text_document.uri).entered();
@@ -733,7 +733,7 @@ pub fn handle_inlay_hint(
 }
 
 pub fn handle_document_highlight(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: DocumentHighlightParams,
 ) -> Result<Option<Vec<LspDocumentHighlight>>> {
     let _p = tracing::info_span!(
@@ -786,7 +786,7 @@ pub fn handle_document_highlight(
 }
 
 pub fn handle_folding_range(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: FoldingRangeParams,
 ) -> Result<Option<Vec<LspFoldingRange>>> {
     let _p = tracing::info_span!("handle_folding_range", uri = %params.text_document.uri).entered();
@@ -827,7 +827,7 @@ pub fn handle_folding_range(
     }
 }
 
-pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<Option<Hover>> {
+pub fn handle_hover(ctx: &LatencyRequestContext, params: HoverParams) -> Result<Option<Hover>> {
     let _p = tracing::info_span!(
         "handle_hover",
         uri = %params.text_document_position_params.text_document.uri
@@ -869,7 +869,7 @@ pub fn handle_hover(ctx: LatencyRequestContext, params: HoverParams) -> Result<O
 }
 
 pub fn handle_completion(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: CompletionParams,
 ) -> Result<Option<CompletionResponse>> {
     let _p = tracing::info_span!(
@@ -948,7 +948,7 @@ pub fn handle_completion(
 }
 
 pub fn handle_semantic_tokens_full(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: SemanticTokensParams,
 ) -> Result<Option<SemanticTokensResult>> {
     let start = std::time::Instant::now();
@@ -1006,7 +1006,7 @@ pub fn handle_semantic_tokens_full(
 }
 
 pub fn handle_document_symbol(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: DocumentSymbolParams,
 ) -> Result<Option<DocumentSymbolResponse>> {
     let _p = tracing::info_span!(
@@ -1032,7 +1032,7 @@ pub fn handle_document_symbol(
 }
 
 pub fn handle_selection_range(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: SelectionRangeParams,
 ) -> Result<Option<Vec<SelectionRange>>> {
     let _p =
@@ -1081,7 +1081,7 @@ pub fn handle_selection_range(
 }
 
 pub fn handle_workspace_symbol(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: WorkspaceSymbolParams,
 ) -> Result<Option<WorkspaceSymbolResponse>> {
     let _p = tracing::info_span!("handle_workspace_symbol", query = %params.query).entered();
@@ -1104,7 +1104,7 @@ pub fn handle_workspace_symbol(
 
     // No document of its own: this request names no file, and every candidate's
     // file is read the same overlay-or-disk way.
-    let mut converter = ReferenceLocationConverter::detached(&ctx);
+    let mut converter = ReferenceLocationConverter::detached(ctx);
 
     let mut result = Vec::with_capacity(symbols.len());
     for symbol in symbols {
@@ -1166,7 +1166,7 @@ fn workspace_symbol_kind(category: ide::NameCategory) -> SymbolKind {
 }
 
 pub fn handle_signature_help(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: SignatureHelpParams,
 ) -> Result<Option<lsp_types::SignatureHelp>> {
     let _p = tracing::info_span!(
@@ -1244,7 +1244,7 @@ fn to_lsp_signature_help(sh: ide::SignatureHelp) -> lsp_types::SignatureHelp {
 }
 
 pub fn handle_code_action(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: CodeActionParams,
 ) -> Result<Option<CodeActionResponse>> {
     let _p = tracing::info_span!(
@@ -1403,7 +1403,7 @@ fn fix_all_occurrences_action(
 /// diagnostics, and computing them for that one file on demand is cheap (it does not
 /// trigger whole-base analysis).
 pub fn handle_document_diagnostic(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: lsp_types::DocumentDiagnosticParams,
 ) -> Result<lsp_types::DocumentDiagnosticReportResult> {
     use lsp_types::{
@@ -1520,7 +1520,7 @@ impl Drop for WorkDoneProgressGuard<'_> {
 /// waiting for a minutes-long `all` sweep), and the final response is an empty report. A
 /// `workDoneToken` drives a work-done progress indicator over the same sweep.
 pub fn handle_workspace_diagnostic(
-    ctx: LatencyRequestContext,
+    ctx: &LatencyRequestContext,
     params: lsp_types::WorkspaceDiagnosticParams,
 ) -> Result<lsp_types::WorkspaceDiagnosticReportResult> {
     use lsp_types::{
@@ -1590,7 +1590,7 @@ pub fn handle_workspace_diagnostic(
             }))
             .unwrap_or_default(),
         );
-        WorkDoneProgressGuard { ctx: &ctx, token: token.clone() }
+        WorkDoneProgressGuard { ctx, token: token.clone() }
     });
 
     // Compute in chunks so streaming clients see progress and the heavy per-file memos fall out
@@ -1616,7 +1616,7 @@ pub fn handle_workspace_diagnostic(
         let chunk_items: Vec<_> = computed
             .into_iter()
             .filter_map(|(file_id, diagnostics)| {
-                workspace_report_item(&ctx, file_id, diagnostics.to_vec(), &previous)
+                workspace_report_item(ctx, file_id, diagnostics.to_vec(), &previous)
             })
             .collect();
         done += chunk.len();
@@ -2465,7 +2465,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let result = handle_goto_definition(ctx, params);
+        let result = handle_goto_definition(&ctx, params);
         assert!(result.is_err() || result.unwrap().is_none());
     }
 
@@ -2514,7 +2514,7 @@ mod tests {
             context: lsp_types::ReferenceContext { include_declaration: true },
         };
 
-        let result = handle_find_references(ctx, params);
+        let result = handle_find_references(&ctx, params);
         assert!(result.is_err() || result.unwrap().is_none());
     }
 
@@ -2612,7 +2612,7 @@ mod tests {
             position: Position { line: 1, character: 10 },
         };
 
-        let result = handle_prepare_rename(ctx, params).unwrap().unwrap();
+        let result = handle_prepare_rename(&ctx, params).unwrap().unwrap();
         match result {
             PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => {
                 assert_eq!(placeholder, "МояПеременная");
@@ -2640,7 +2640,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        let edit = handle_rename(&ctx, params).unwrap().unwrap();
         let changes = edit.changes.expect("workspace edit must carry changes");
         let edits = changes.get(&uri).expect("edits for the renamed file");
         assert_eq!(edits.len(), 3, "declaration + 2 usages");
@@ -2668,7 +2668,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        let edit = handle_rename(ctx, params).unwrap().unwrap();
+        let edit = handle_rename(&ctx, params).unwrap().unwrap();
         assert!(edit.changes.is_none(), "versioned path must not populate changes");
         match edit.document_changes.expect("document_changes must be present") {
             DocumentChanges::Edits(edits) => {
@@ -2701,7 +2701,7 @@ mod tests {
             work_done_progress_params: Default::default(),
         };
 
-        assert!(handle_rename(ctx, params).is_err());
+        assert!(handle_rename(&ctx, params).is_err());
     }
 
     fn call_hierarchy_item_at(
@@ -2717,7 +2717,7 @@ mod tests {
             },
             work_done_progress_params: Default::default(),
         };
-        let mut items = handle_prepare_call_hierarchy(ctx, params).unwrap().unwrap();
+        let mut items = handle_prepare_call_hierarchy(&ctx, params).unwrap().unwrap();
         assert_eq!(items.len(), 1);
         items.pop().unwrap()
     }
@@ -2797,7 +2797,7 @@ mod tests {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
         };
-        let calls = handle_call_hierarchy_outgoing(ctx, params).unwrap().unwrap();
+        let calls = handle_call_hierarchy_outgoing(&ctx, params).unwrap().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].to.name, "Помощник");
         assert_eq!(calls[0].from_ranges.len(), 1);
@@ -2821,7 +2821,7 @@ mod tests {
         let item = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
 
         let ctx = latency_ctx(&state);
-        let calls = handle_call_hierarchy_incoming(ctx, incoming_params(item)).unwrap().unwrap();
+        let calls = handle_call_hierarchy_incoming(&ctx, incoming_params(item)).unwrap().unwrap();
         // Then: every caller and its live call-site ranges are returned.
         assert_eq!(calls.len(), 2);
         let first = calls.iter().find(|call| call.from.name == "Первый").unwrap();
@@ -2845,12 +2845,12 @@ mod tests {
         // When: the client prepares and expands the same Ready index twice.
         let first = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
         let first_calls =
-            handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(first))
+            handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(first))
                 .unwrap()
                 .unwrap();
         let second = call_hierarchy_item_at(&state, &uri, Position { line: 0, character: 10 });
         let second_calls =
-            handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(second))
+            handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(second))
                 .unwrap()
                 .unwrap();
 
@@ -2961,7 +2961,7 @@ mod tests {
 
         // When: incoming calls arrive before the build publishes.
         let result = handle_call_hierarchy_incoming(
-            ctx,
+            &ctx,
             CallHierarchyIncomingCallsParams {
                 item,
                 work_done_progress_params: Default::default(),
@@ -2988,7 +2988,7 @@ mod tests {
         state.call_hierarchy_index = Default::default();
 
         // When: incoming calls arrive without a successful prepare for this lifecycle.
-        let result = handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item));
+        let result = handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(item));
 
         // Then: the request returns null and does not create a lifecycle generation.
         assert!(result.unwrap().is_none());
@@ -3019,14 +3019,14 @@ mod tests {
 
         // When: the single waiter reaches its deadline before publication.
         let started = std::time::Instant::now();
-        let timed_out = handle_call_hierarchy_incoming(ctx, incoming_params(item.clone()));
+        let timed_out = handle_call_hierarchy_incoming(&ctx, incoming_params(item.clone()));
 
         // Then: it returns promptly, releases the permit, and a later Ready request succeeds.
         assert!(timed_out.unwrap().is_none());
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
         assert!(!state.call_hierarchy_index.has_waiter(source_root, 1));
         assert!(state.call_hierarchy_index.publish(source_root, 1, index));
-        let calls = handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item))
+        let calls = handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(item))
             .unwrap()
             .unwrap();
         assert_eq!(calls.len(), 1);
@@ -3052,7 +3052,7 @@ mod tests {
         let (ctx, token) = latency_ctx_with_token(&state);
         let waiter = std::thread::spawn(move || {
             salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
-                handle_call_hierarchy_incoming(ctx, incoming_params(item))
+                handle_call_hierarchy_incoming(&ctx, incoming_params(item))
             }))
         });
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
@@ -3071,7 +3071,7 @@ mod tests {
         assert!(state.call_hierarchy_index.is_building(source_root, 1));
         assert!(state.call_hierarchy_index.publish(source_root, 1, index));
         let calls = handle_call_hierarchy_incoming(
-            latency_ctx(&state),
+            &latency_ctx(&state),
             incoming_params(call_hierarchy_item_at(
                 &state,
                 &uri,
@@ -3113,7 +3113,7 @@ mod tests {
         std::thread::scope(|scope| {
             let waiting_item = item.clone();
             let waiting_request = scope.spawn(move || {
-                handle_call_hierarchy_incoming(waiting_ctx, incoming_params(waiting_item))
+                handle_call_hierarchy_incoming(&waiting_ctx, incoming_params(waiting_item))
             });
             let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
             while !state.call_hierarchy_index.has_waiter(source_root, 1) {
@@ -3130,13 +3130,13 @@ mod tests {
                 .into_iter()
                 .map(|ctx| {
                     let item = item.clone();
-                    scope.spawn(move || handle_call_hierarchy_incoming(ctx, incoming_params(item)))
+                    scope.spawn(move || handle_call_hierarchy_incoming(&ctx, incoming_params(item)))
                 })
                 .collect();
             let hover_uri = uri.clone();
             let hover = scope.spawn(move || {
                 handle_hover(
-                    hover_ctx,
+                    &hover_ctx,
                     HoverParams {
                         text_document_position_params: TextDocumentPositionParams {
                             text_document: TextDocumentIdentifier { uri: hover_uri },
@@ -3186,7 +3186,7 @@ mod tests {
         };
 
         // Then: the stale index cannot serve the request.
-        assert!(handle_call_hierarchy_incoming(ctx, params).unwrap().is_none());
+        assert!(handle_call_hierarchy_incoming(&ctx, params).unwrap().is_none());
     }
 
     #[test]
@@ -3213,7 +3213,7 @@ mod tests {
 
         // Then: the ready index is no longer eligible to serve its stale callers.
         assert!(!state.call_hierarchy_index.is_ready_generation(source_root, 1));
-        assert!(handle_call_hierarchy_incoming(latency_ctx(&state), incoming_params(item))
+        assert!(handle_call_hierarchy_incoming(&latency_ctx(&state), incoming_params(item))
             .unwrap()
             .is_none());
     }
@@ -3235,7 +3235,7 @@ mod tests {
             query: "Общий".to_string(),
         };
 
-        let response = handle_workspace_symbol(ctx, params).unwrap().unwrap();
+        let response = handle_workspace_symbol(&ctx, params).unwrap().unwrap();
         let symbols = match response {
             WorkspaceSymbolResponse::Nested(s) => s,
             other => panic!("expected nested workspace symbols, got {other:?}"),
@@ -3270,7 +3270,7 @@ mod tests {
 
         // A platform primitive (Число) has no navigable type definition; the
         // handler must decline cleanly rather than error or panic.
-        let result = handle_type_definition(ctx, params);
+        let result = handle_type_definition(&ctx, params);
         assert!(result.is_err() || result.unwrap().is_none());
     }
 
@@ -3291,7 +3291,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let ranges = handle_selection_range(ctx, params).unwrap().unwrap();
+        let ranges = handle_selection_range(&ctx, params).unwrap().unwrap();
         assert_eq!(ranges.len(), 1);
 
         // Walk the parent chain; each parent must strictly contain its child.
@@ -3329,7 +3329,7 @@ mod tests {
             },
         };
 
-        let hints = handle_inlay_hint(ctx, params).unwrap().unwrap();
+        let hints = handle_inlay_hint(&ctx, params).unwrap().unwrap();
         assert!(hints.iter().all(|h| h.kind == Some(LspInlayHintKind::PARAMETER)));
         let labels: Vec<String> = hints
             .iter()
@@ -3379,7 +3379,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let result = handle_document_highlight(ctx, params).unwrap().unwrap();
+        let result = handle_document_highlight(&ctx, params).unwrap().unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].kind, Some(LspDocumentHighlightKind::TEXT));
@@ -3417,7 +3417,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        let result = handle_folding_range(ctx, params).unwrap().unwrap();
+        let result = handle_folding_range(&ctx, params).unwrap().unwrap();
 
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].start_line, 0);
@@ -3458,7 +3458,7 @@ mod tests {
             partial_result_params: Default::default(),
         };
 
-        handle_folding_range(ctx, params)
+        handle_folding_range(&ctx, params)
             .unwrap()
             .unwrap()
             .iter()
@@ -3589,7 +3589,7 @@ mod tests {
         let (state, uri) = setup_code_action_doc(source);
         let ctx = latency_ctx(&state);
 
-        let result = handle_code_action(ctx, code_action_params(uri, None)).unwrap().unwrap();
+        let result = handle_code_action(&ctx, code_action_params(uri, None)).unwrap().unwrap();
 
         // Two individual quick fixes (one per `ЭтаФорма`).
         let quickfixes = actions_of_kind(&result, "quickfix");
@@ -3623,7 +3623,7 @@ mod tests {
         let ctx = latency_ctx(&state);
 
         let only = Some(vec![CodeActionKind::SOURCE_FIX_ALL]);
-        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+        let result = handle_code_action(&ctx, code_action_params(uri, only)).unwrap().unwrap();
 
         assert!(
             actions_of_kind(&result, "quickfix").is_empty(),
@@ -3644,7 +3644,7 @@ mod tests {
         let ctx = latency_ctx(&state);
 
         let only = Some(vec![CodeActionKind::QUICKFIX]);
-        let result = handle_code_action(ctx, code_action_params(uri, only)).unwrap().unwrap();
+        let result = handle_code_action(&ctx, code_action_params(uri, only)).unwrap().unwrap();
 
         assert!(
             actions_of_kind(&result, crate::lsp::to_proto::FIX_ALL_BSL).is_empty(),
@@ -3725,7 +3725,7 @@ mod tests {
 
         let ctx = latency_ctx(&state);
         let response = handle_workspace_symbol(
-            ctx,
+            &ctx,
             WorkspaceSymbolParams { query: "ДрейфТест".to_string(), ..Default::default() },
         )
         .expect("one unreadable file must not fail the request");
@@ -3816,7 +3816,7 @@ mod tests {
             context: None,
         };
 
-        let result = handle_completion(ctx, params);
+        let result = handle_completion(&ctx, params);
         assert!(result.unwrap().is_none());
     }
 
@@ -3858,5 +3858,186 @@ mod tests {
         );
         assert_eq!(lsp.active_signature, Some(1), "active signature must be preserved");
         assert_eq!(lsp.active_parameter, Some(0), "active parameter must be preserved");
+    }
+    /// A `$/cancelRequest` against a reference walk over many files, through the real
+    /// door: dispatcher, task pool, `handle_cancel`, response code. The walk is counted
+    /// from the span `ide` emits per file, so the cancel is sent on observing the first
+    /// file rather than after a sleep.
+    mod cancel_walk_tests {
+        use super::*;
+        use crate::global_state::Task;
+        use lsp_types::request::References;
+        use std::time::Duration;
+        use test_utils::walk_probe;
+
+        /// Serialises the tests of this binary that read the process-global walk
+        /// counter; see `test_utils::walk_probe`.
+        static WALK_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        /// A test that failed while holding the gate poisons it; the gate guards no
+        /// data, so the next test simply takes it.
+        fn serialised() -> std::sync::MutexGuard<'static, ()> {
+            WALK_GATE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        /// Callers of one exported procedure. Enough that an uncancelled walk takes
+        /// long enough for a cancel sent on its first file to land mid-walk; the
+        /// positive control below reports the count the walk really visits.
+        const CALLERS: usize = 1000;
+        const ROOT: &str = "/cancel-walk/CommonModules";
+        const ANCHOR_SOURCE: &str = "Процедура ПриИзмененииПоля() Экспорт\nКонецПроцедуры\n";
+        const CALLER_SOURCE: &str =
+            "Процедура Тело() Экспорт\n    Объявление.ПриИзмененииПоля();\nКонецПроцедуры\n";
+
+        fn anchor_uri() -> lsp_types::Url {
+            lsp_types::Url::from_file_path(format!("{ROOT}/Объявление/Ext/Module.bsl")).unwrap()
+        }
+
+        /// The callers are registered as open buffers: the walk takes its candidates
+        /// from the name-usage index over the `.bsl` paths of the anchor's source root,
+        /// and an open buffer stays resident in salsa instead of being re-read from a
+        /// disk this stand does not have. No metadata is needed for every file to be
+        /// entered.
+        fn stand(workers: Option<usize>) -> GlobalState {
+            let mut state = create_test_state();
+            if let Some(workers) = workers {
+                state.task_pool = TaskPool::new_with_workers(workers);
+            }
+            state.init_empty_source_root();
+            state.vfs_done = true;
+
+            {
+                let mut vfs = state.vfs.write();
+                for i in 0..CALLERS {
+                    let path = VfsPath::new(format!("{ROOT}/Вызов{i:04}/Ext/Module.bsl"));
+                    vfs.set_file_contents(path.clone(), Some(Arc::from(CALLER_SOURCE)));
+                    let file_id = vfs.file_id(&path).expect("just registered");
+                    state.open_files.insert(file_id);
+                }
+            }
+            // Registers the anchor the same way and folds every pending VFS change,
+            // callers included, into salsa.
+            open_source(&mut state, &anchor_uri(), ANCHOR_SOURCE);
+            state
+        }
+
+        fn references_request(id: i32) -> lsp_server::Request {
+            let params = lsp_types::ReferenceParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri: anchor_uri() },
+                    position: Position { line: 0, character: 10 },
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: lsp_types::ReferenceContext { include_declaration: true },
+            };
+            lsp_server::Request::new(
+                lsp_server::RequestId::from(id),
+                References::METHOD.to_owned(),
+                serde_json::to_value(params).unwrap(),
+            )
+        }
+
+        fn dispatch_references(state: &mut GlobalState, id: i32) {
+            RequestDispatcher { req: Some(references_request(id)), global_state: state }
+                .on_latency::<References>(handle_find_references)
+                .finish();
+        }
+
+        fn cancel(state: &mut GlobalState, id: i32) {
+            crate::handlers::notification::handle_cancel(
+                state,
+                lsp_types::CancelParams { id: lsp_types::NumberOrString::Number(id) },
+            )
+            .unwrap();
+        }
+
+        fn response(state: &GlobalState, id: i32) -> lsp_server::Response {
+            let deadline = std::time::Instant::now() + Duration::from_secs(120);
+            loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let task = state
+                    .task_pool
+                    .receiver
+                    .recv_timeout(remaining)
+                    .expect("the references request never answered");
+                if let Task::RequestResult { response } = task {
+                    if response.id == lsp_server::RequestId::from(id) {
+                        return response;
+                    }
+                }
+            }
+        }
+
+        /// The uncancelled walk enters every caller: what the counter can reach, so a
+        /// smaller number after a cancel means files skipped and not a counter that
+        /// never moved.
+        #[test]
+        fn an_uncancelled_walk_enters_every_caller() {
+            let _serialised = serialised();
+            walk_probe::install();
+            walk_probe::reset();
+            let mut state = stand(None);
+
+            dispatch_references(&mut state, 40);
+            let response = response(&state, 40);
+
+            assert!(response.error.is_none(), "{:?}", response.error);
+            assert!(
+                walk_probe::entered() >= CALLERS,
+                "the walk entered {} files of {CALLERS} callers",
+                walk_probe::entered()
+            );
+        }
+
+        #[test]
+        fn a_client_cancel_stops_the_walk_before_its_end() {
+            let _serialised = serialised();
+            walk_probe::install();
+            walk_probe::reset();
+            let mut state = stand(None);
+
+            dispatch_references(&mut state, 41);
+            walk_probe::await_walk_start();
+            cancel(&mut state, 41);
+            let response = response(&state, 41);
+
+            let err = response.error.expect("a cancelled walk must not answer with locations");
+            assert_eq!(err.code, lsp_server::ErrorCode::RequestCanceled as i32, "{err:?}");
+            assert!(
+                walk_probe::entered() < CALLERS,
+                "the walk ran to the end after the cancel: entered {} of {CALLERS}",
+                walk_probe::entered()
+            );
+        }
+
+        /// One worker, so the second request can only start once the first has let go
+        /// of the slot: both walks together entering fewer files than two full walks
+        /// proves the cancelled one released it before reaching its end.
+        #[test]
+        fn a_cancelled_walk_hands_its_only_worker_to_the_next_request() {
+            let _serialised = serialised();
+            walk_probe::install();
+            walk_probe::reset();
+            let mut state = stand(Some(1));
+
+            dispatch_references(&mut state, 42);
+            walk_probe::await_walk_start();
+            cancel(&mut state, 42);
+            dispatch_references(&mut state, 43);
+            let first = response(&state, 42);
+            let second = response(&state, 43);
+
+            assert_eq!(
+                first.error.map(|err| err.code),
+                Some(lsp_server::ErrorCode::RequestCanceled as i32)
+            );
+            assert!(second.error.is_none(), "{:?}", second.error);
+            assert!(
+                walk_probe::entered() < 2 * CALLERS,
+                "the cancelled walk kept the worker to its end: entered {} of 2×{CALLERS}",
+                walk_probe::entered()
+            );
+        }
     }
 }

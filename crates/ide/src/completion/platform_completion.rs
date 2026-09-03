@@ -314,6 +314,12 @@ fn collect_platform_items<DB: RootDatabase>(
                 tracing::debug!(scalar_key, "Synthetic-kind scalar completion");
                 return complete_platform_methods(db, scalar_key, locale, env);
             }
+            // An external object's members live under its bare platform type;
+            // the prefix index of dotted names holds nothing for it.
+            if let Some(bare_type) = kind.bare_platform_type() {
+                tracing::debug!(bare_type, "Bare-type completion for an external object");
+                return complete_platform_methods(db, bare_type, locale, env);
+            }
             kind.platform_prefix()
         }
         Shape::FormData => {
@@ -888,6 +894,33 @@ mod tests {
                 .is_empty(),
             "register-flavour any-ref has no ref method surface"
         );
+    }
+
+    /// An external object's members live under its bare platform type, not a
+    /// dotted prefix; completion must take the same detour inference does.
+    #[test]
+    fn external_object_completes_its_bare_platform_type_surface() {
+        use bsl_platform::PlatformDataInner;
+        use bsl_types::testing::RootConfigCtx;
+        use ide_db::base_db::Locale;
+        use ide_db::RootDatabaseImpl;
+
+        if PlatformDataInner::instance().all_methods().is_empty() {
+            return;
+        }
+        let db = RootDatabaseImpl::new();
+        let offers = |kind: hir::MetadataKind| {
+            let receiver = db.metadata_ref(kind, "АРМ".to_string(), &RootConfigCtx);
+            collect_platform_items(&db, receiver, Locale::Ru, &EnvFilter::permissive())
+                .iter()
+                .any(|item| item.label == "ПолучитьФорму")
+        };
+        assert!(offers(hir::MetadataKind::DataProcessorObject), "control: the internal object");
+        assert!(
+            offers(hir::MetadataKind::ExternalDataProcessorObject),
+            "the external processor offers its own platform method"
+        );
+        assert!(offers(hir::MetadataKind::ExternalReportObject), "and so does the external report");
     }
 
     #[test]

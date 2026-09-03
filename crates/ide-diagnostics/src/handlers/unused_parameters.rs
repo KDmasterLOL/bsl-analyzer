@@ -135,9 +135,8 @@ struct SignatureExemptions<'a> {
     owner: ModuleOwner,
 }
 
-fn get_method_name(item_tree: &hir::ItemTree, local_id: u32) -> Option<String> {
-    let items = item_tree.top_level_items();
-    let item = items.get(local_id as usize)?;
+fn get_method_name(item_tree: &hir::ItemTree, local_id: hir::MethodKey) -> Option<String> {
+    let item = item_tree.item_of(local_id)?;
     match item {
         ModItem::Procedure(idx) => Some(item_tree.procedure(*idx).name.as_str().to_string()),
         ModItem::Function(idx) => Some(item_tree.function(*idx).name.as_str().to_string()),
@@ -146,7 +145,7 @@ fn get_method_name(item_tree: &hir::ItemTree, local_id: u32) -> Option<String> {
 }
 
 fn check_method(
-    local_id: u32,
+    local_id: hir::MethodKey,
     body: &hir::Body,
     method_name: Option<&str>,
     module_bodies: &hir::ModuleBodies,

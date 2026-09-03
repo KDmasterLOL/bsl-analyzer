@@ -1,9 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
+use crate::BodyContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 use line_index::TextSize;
 use stdx::case::CaseExt;
-use syntax::{NodeOrToken, SyntaxKind};
+use syntax::SyntaxKind;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -69,24 +71,22 @@ fn is_good_comment(comment_text: &str, use_strict: bool, annotations: &[String])
     false
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let _span = tracing::debug_span!("SpaceAtStartComment::check").entered();
 
     let code = DiagnosticCode::SpaceAtStartComment;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let use_strict = true;
     let comments_annotation = parse_comments_annotation(DEFAULT_COMMENTS_ANNOTATION);
 
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
     let mut diagnostics = Vec::new();
 
-    for element in root.descendants_with_tokens() {
-        if let NodeOrToken::Token(token) = element {
+    for token in ctx.tokens() {
+        {
             if token.kind() == SyntaxKind::COMMENT {
                 let text = token.text();
 
@@ -97,12 +97,14 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                         code,
                         message: "Комментарий должен иметь пробел после //".to_string(),
                         severity: ctx.severity(code),
-                        range: token.text_range(),
+                        range: LocalRange::of_detached_node(token.text_range()),
                         tags: ctx.tags(code),
                         fixes: vec![Fix::safe(
                             "Добавить пробел после //",
                             vec![TextEdit {
-                                range: ide_db::TextRange::new(insert_pos, insert_pos),
+                                range: LocalRange::of_detached_node(ide_db::TextRange::empty(
+                                    insert_pos,
+                                )),
                                 new_text: " ".to_string(),
                             }],
                         )],
@@ -114,7 +116,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     tracing::debug!(count = diagnostics.len(), "SpaceAtStartComment diagnostics found");
 
-    diagnostics
+    acc.extend(diagnostics);
 }
 
 #[cfg(test)]

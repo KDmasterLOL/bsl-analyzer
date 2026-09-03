@@ -7,6 +7,7 @@ pub mod dimension;
 pub mod enums;
 pub mod error;
 pub mod event_subscription;
+pub mod external_object;
 pub mod form;
 pub mod http_service;
 pub mod integration_service;
@@ -32,6 +33,10 @@ pub use enums::{
 };
 pub use error::{MetadataError, Result};
 pub use event_subscription::{EventSubscription, EventSubscriptionHandler};
+pub use external_object::{
+    discover_external_object_structure, external_object_xml, load_external_object,
+    ExternalObjectKind,
+};
 pub use form::{
     Form, FormAttribute, FormAttributeColumn, FormElement, FormElementKind, FormEventHandler,
 };

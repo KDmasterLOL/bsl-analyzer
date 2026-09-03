@@ -1,11 +1,11 @@
-use hir::cfg::CfgBuilder;
 use hir::dataflow::temp_resource::{analyze_open_resources, ResourceEvent, ResourceProvider};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, ExprIdx, IdConversion};
 use stdx::case::CaseExt;
 
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,48 +21,30 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::MissingTempStorageDeletion;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let module_bodies = ctx.module_bodies();
-    let module_cfgs = ctx.module_cfgs();
-    let mut diagnostics = Vec::new();
-
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        let Some(cfg) = module_cfgs.get(local_id) else { continue };
-        diagnostics.extend(check_body(body, source_map, cfg.as_ref(), code, ctx));
-    }
-
-    if let Some(module_result) = module_bodies.module_code_result() {
-        let body = &module_result.body;
-        let source_map = &module_result.source_map;
-        let cfg =
-            CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), body, Some(source_map));
-        diagnostics.extend(check_body(body, source_map, &cfg, code, ctx));
-    }
-
-    diagnostics.sort_by_key(|d| d.range.start());
-    diagnostics
+    let cfg = ctx.cfg();
+    acc.extend(check_body_resources(ctx.body(), ctx.source_map(), &cfg, code, ctx));
 }
 
-fn check_body(
+fn check_body_resources(
     body: &Body,
     source_map: &BodySourceMap,
     cfg: &hir::cfg::ControlFlowGraph,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Vec<Diagnostic> {
+    ctx: &BodyContext,
+) -> Vec<Diagnostic<LocalRange>> {
     let Some(result) = analyze_open_resources::<_, CanonExpr>(body, cfg, TempStorageProvider)
     else {
         return Vec::new();
     };
 
-    let mut ranges: Vec<ide_db::TextRange> = Vec::new();
+    let mut ranges: Vec<LocalRange> = Vec::new();
     for sites in result.open_at_exit().values() {
         for &expr_idx in sites {
             if let Some(range) = source_map.expr_range(ExprId::from_idx(expr_idx)) {
@@ -168,7 +150,7 @@ fn is_delete_from_temp_storage(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::check_body;
     use crate::test_utils::*;
     use crate::DiagnosticsConfig;
     use expect_test::expect;
@@ -177,7 +159,7 @@ mod tests {
     fn test_missing_temp_storage_deletion() {
         let code = "&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Ошибка(АдресТоваровВХранилище)\n\n    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); // ошибка\n    Объект.Товары.Загрузить(ПодобранныеТовары);\n\nКонецПроцедуры \n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Ошибка2(АдресТоваровВХранилище)\n\n    УдалитьИзВременногоХранилища(АдресТоваровВХранилище);\n\n    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); // ошибка\n    Объект.Товары.Загрузить(ПодобранныеТовары);\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Ошибка3(АдресТоваровВХранилище)\n\n    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); //ошибка\n    Объект.Товары.Загрузить(ПодобранныеТовары);\n\n    Если Истина Тогда\n        УдалитьИзВременногоХранилища(ДругойАдрес);\n    КонецЕсли;\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ЕдинственныйВызовВМетоде(АдресТоваровВХранилище)\n\n    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); //ошибка\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Успешно()\n\n    Адрес = \"\";\n    ОбщийМодуль.ПолучитьАдрес(Адрес);\n\n    ПодобранныеТовары = ПолучитьИзВременногоХранилища(Адрес); // не ошибка\n    Результат = ПодобранныеТовары.ВыгрузитьКолонку(\"Наименование\");\n\n    УдалитьИзВременногоХранилища(Адрес);\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Успешно1()\n\n    Адрес = \"\";\n    Попытка\n        ОбщийМодуль.ПолучитьАдрес(Адрес);\n\n        ПодобранныеТовары = ПолучитьИзВременногоХранилища(Адрес); // не ошибка\n        Результат = ПодобранныеТовары.ВыгрузитьКолонку(\"Наименование\");\n\n        УдалитьИзВременногоХранилища(Адрес);\n    Исключение\n    КонецПопытки;\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Успешно2(АдресТоваровВХранилище)\n\n    Если Истина Тогда\n\t    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); // не ошибка\n        Объект.Товары.Загрузить(ПодобранныеТовары);\n    КонецЕсли;\n\n    УдалитьИзВременногоХранилища(АдресТоваровВХранилище);\n\nКонецПроцедуры\n\n&НаСервере\nПроцедура ПолучитьТоварыИзХранилища_Успешно3(АдресТоваровВХранилище)\n\n    Если Истина Тогда\n\t    ПодобранныеТовары = ПолучитьИзВременногоХранилища(АдресТоваровВХранилище); // не ошибка\n        Объект.Товары.Загрузить(ПодобранныеТовары);\n    КонецЕсли;\n\n    Если Истина Тогда\n        УдалитьИзВременногоХранилища(АдресТоваровВХранилище);\n    КонецЕсли;\n\nКонецПроцедуры\n\n&НаКлиенте\nПроцедура ПриЗавершенииПоискаНастроек(Результат, ДополнительныеПараметры) Экспорт\n\n\tЕсли Результат = Неопределено Тогда // Пользователь отменил задание.\n\t\tВозврат;\n\tКонецЕсли;\n\n\tЕсли Результат.Статус = \"Ошибка\" Тогда\n\t\tВызватьИсключение Результат.КраткоеПредставлениеОшибки;\n\tКонецЕсли;\n\n\tНастройки = ПолучитьИзВременногоХранилища(Результат.АдресРезультата); // не ошибка\n\tУдалитьИзВременногоХранилища(Результат.АдресРезультата);\n\tУстановитьНастройкиУчетнойЗаписи(Настройки);\n\nКонецПроцедуры\n";
         let config = DiagnosticsConfig::all_enabled();
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
 
         expect![[r#"
             MissingTempStorageDeletion @ 4:25..4:78
@@ -205,7 +187,7 @@ mod tests {
     УдалитьИзВременногоХранилища(Результат.АдресРезультата);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -217,7 +199,7 @@ mod tests {
     УдалитьИзВременногоХранилища(ДругойАдрес);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 3:14..3:57
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -232,7 +214,7 @@ Procedure Test()
     DeleteFromTempStorage(Address);
 EndProcedure
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -246,7 +228,7 @@ EndProcedure
     УдалитьИзВременногоХранилища(Адрес);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -259,7 +241,7 @@ EndProcedure
     ОбработатьДанные(Данные);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 4:14..4:50
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -275,7 +257,7 @@ EndProcedure
     Данные = ПолучитьИзВременногоХранилища(Адрес);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 5:14..5:50
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -292,7 +274,7 @@ EndProcedure
     удалитьизвременногохранилища(АДРЕС);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             0,
@@ -314,7 +296,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 4:18..4:54
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -331,7 +313,7 @@ EndProcedure
     УдалитьИзВременногоХранилища(Адрес);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 3:14..3:50
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -345,7 +327,7 @@ EndProcedure
     СохранитьВ(ПолучитьИзВременногоХранилища(Адрес));
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 3:16..3:52
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -361,7 +343,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 3:10..3:46
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -376,7 +358,7 @@ EndProcedure
     ОбработатьДанные(Данные);
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             MissingTempStorageDeletion @ 3:14..3:61
               message: Нужно добавить удаление данных из временного хранилища после использования, вызвав "УдалитьИзВременногоХранилища"
@@ -392,7 +374,7 @@ EndProcedure
     УдалитьИзВременногоХранилища(ПолучитьАдрес());
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -410,7 +392,7 @@ EndProcedure
     КонецЕсли;
 КонецПроцедуры
 "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert_eq!(
             diagnostics.len(),
             0,

@@ -1,11 +1,16 @@
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_platform::deprecation::DeprecationEntry;
-use ide_db::TextRange;
+use hir::LocalRange;
 use stdx::case::CaseExt;
 
 use super::deprecated_platform_facts::{deprecated_method_fact, replacement_for_name};
 
-pub fn from_hir(name: &str, range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(
+    name: &str,
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let (code, replacement) = get_diagnostic_code_and_replacement(name)?;
 
     if ctx.is_disabled_with_metadata(code) {

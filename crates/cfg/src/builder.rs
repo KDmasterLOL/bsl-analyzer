@@ -3,7 +3,7 @@ use crate::graph::ControlFlowGraph;
 use crate::vertex::{BasicBlockVertex, CfgVertex};
 use cfg_types::{BindingId, ExprId, IdConversion, StmtId};
 use hir_def::hir::StmtIdx;
-use hir_def::{Body, BodySourceMap, Name, Stmt};
+use hir_def::{Body, Name, Stmt};
 use petgraph::graph::NodeIndex;
 use rustc_hash::FxHashMap;
 
@@ -44,12 +44,7 @@ impl CfgBuilder {
         self.produce_loop_iterations = value;
     }
 
-    pub fn build_graph_from_hir(
-        mut self,
-        body_stmts: &[StmtIdx],
-        body: &Body,
-        _source_map: Option<&BodySourceMap>,
-    ) -> ControlFlowGraph {
+    pub fn build_graph_from_hir(mut self, body_stmts: &[StmtIdx], body: &Body) -> ControlFlowGraph {
         let entry = self.cfg.add_vertex(CfgVertex::BasicBlock(BasicBlockVertex::new()));
         self.cfg.set_entry_point(entry);
         self.current_block = Some(entry);
@@ -670,7 +665,7 @@ mod tests {
 
         body.set_body_stmts(vec![var_decl, assign, return_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert!(cfg.entry_point().is_some(), "CFG should have entry point");
         assert!(cfg.exit_point() != cfg.entry_point().unwrap(), "Exit should differ from entry");
@@ -712,7 +707,7 @@ mod tests {
 
         body.set_body_stmts(vec![if_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let vertex_count = cfg.graph().node_count();
         assert!(
@@ -773,7 +768,7 @@ mod tests {
         })));
         body.set_body_stmts(vec![if_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert_eq!(
             source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::Conditional(_))),
@@ -790,7 +785,7 @@ mod tests {
         let while_stmt = body.stmts_mut().alloc(Stmt::While { condition, body: Box::default() });
         body.set_body_stmts(vec![while_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert_eq!(
             source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::WhileLoop(_))),
@@ -807,7 +802,7 @@ mod tests {
             body.stmts_mut().alloc(Stmt::Try { body: Box::default(), except: Box::default() });
         body.set_body_stmts(vec![try_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert_eq!(
             source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::TryExcept(_))),
@@ -823,7 +818,7 @@ mod tests {
         let label_stmt = body.stmts_mut().alloc(Stmt::Label(Name::new("Метка")));
         body.set_body_stmts(vec![label_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert_eq!(
             source_stmt_id_of_kind(&cfg, |vertex| matches!(vertex, CfgVertex::Label(_))),
@@ -843,7 +838,7 @@ mod tests {
             .alloc(Stmt::While { condition: true_lit, body: vec![break_stmt].into() });
         body.set_body_stmts(vec![while_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let while_vertex = cfg
             .graph()
@@ -876,7 +871,7 @@ mod tests {
             .alloc(Stmt::While { condition: true_lit, body: vec![cont_stmt].into() });
         body.set_body_stmts(vec![while_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let while_vertex = cfg
             .graph()
@@ -900,7 +895,7 @@ mod tests {
         let break_stmt = body.stmts_mut().alloc(Stmt::Break);
         body.set_body_stmts(vec![break_stmt].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         assert!(
             edges_of_kind(&cfg, CfgEdgeType::LoopBreak).is_empty(),
@@ -917,7 +912,7 @@ mod tests {
         let goto = body.stmts_mut().alloc(Stmt::Goto(Name::new("М")));
         body.set_body_stmts(vec![label, goto].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let label_vertex = cfg
             .graph()
@@ -943,7 +938,7 @@ mod tests {
         let label = body.stmts_mut().alloc(Stmt::Label(Name::new("М")));
         body.set_body_stmts(vec![goto, label].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let label_vertex = cfg
             .graph()
@@ -968,7 +963,7 @@ mod tests {
         let goto = body.stmts_mut().alloc(Stmt::Goto(Name::new("Нет")));
         body.set_body_stmts(vec![goto].into());
 
-        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body, None);
+        let cfg = CfgBuilder::new().build_graph_from_hir(body.body_stmts_typed(), &body);
 
         let label_vertex_exists = cfg
             .graph()

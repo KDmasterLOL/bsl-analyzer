@@ -393,7 +393,7 @@ fn trim_light(env: &mut BenchEnv) {
 /// Deep release: LRU trim past the working-set caps, drop the shared
 /// green-node arena on every thread and return freed pages.
 fn trim_deep(env: &mut BenchEnv) {
-    env.state.analysis_host.raw_database_mut().enforce_lru_deep();
+    ide::sweep_lru_deep(env.state.analysis_host.raw_database_mut());
     syntax::clear_shared_node_cache();
     rayon::broadcast(|_| syntax::clear_shared_node_cache());
     profile::purge_allocator();

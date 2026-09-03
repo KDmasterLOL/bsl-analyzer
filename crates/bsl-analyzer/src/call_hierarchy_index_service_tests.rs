@@ -67,7 +67,9 @@ fn call_hierarchy_index_edit_journal_catches_up_body_only_buffer_edit() {
 
 #[test]
 fn call_hierarchy_index_layout_edit_supersedes_instead_of_publishing() {
-    // Given: a frozen module whose later edit inserts a top-level variable.
+    // Given: a frozen module whose later edit declares a new method above the
+    // existing one — a change in what the module declares, unlike a variable
+    // added above the methods, which moves no method's identity.
     let initial = "Процедура А()\nКонецПроцедуры";
     let mut fixture = fixture(initial);
     let snapshot = CallHierarchyIndexFrozenSnapshot::capture(
@@ -79,7 +81,11 @@ fn call_hierarchy_index_layout_edit_supersedes_instead_of_publishing() {
     let lifecycle = CallHierarchyIndexState::default();
     assert!(lifecycle.start_build(fixture.source_root, 1, CallHierarchyIndexSnapshotId(1)));
     let uri = Url::from_file_path(fixture._directory.path().join("Module.bsl")).expect("file URL");
-    fixture.mem_docs.insert(uri, "Перем Счетчик;\n\nПроцедура А()\nКонецПроцедуры".to_owned(), 2);
+    fixture.mem_docs.insert(
+        uri,
+        "Процедура Новая()\nКонецПроцедуры\n\nПроцедура А()\nКонецПроцедуры".to_owned(),
+        2,
+    );
     assert!(lifecycle.record_body_edit_or_supersede_ready(fixture.source_root, 1, fixture.file_id,));
 
     // When: reconciliation compares the old layout with the latest module layout.

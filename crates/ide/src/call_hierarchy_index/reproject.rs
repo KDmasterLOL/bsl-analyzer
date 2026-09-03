@@ -137,15 +137,15 @@ mod tests {
         assert_eq!(
             projections[0].pairs,
             vec![MethodCallPair::new(
-                MethodId { module: second_module, local_id: 0 },
-                MethodId { module: second_module, local_id: 1 }
+                MethodId { module: second_module, local_id: hir::MethodKey::first("Первый") },
+                MethodId { module: second_module, local_id: hir::MethodKey::first("Второй") }
             )]
         );
         assert_eq!(
             projections[1].pairs,
             vec![MethodCallPair::new(
-                MethodId { module: first_module, local_id: 0 },
-                MethodId { module: first_module, local_id: 1 }
+                MethodId { module: first_module, local_id: hir::MethodKey::first("Первый") },
+                MethodId { module: first_module, local_id: hir::MethodKey::first("Второй") }
             )]
         );
     }

@@ -216,6 +216,18 @@ pub fn symbol_tree_effective<'db>(
     db: &'db dyn crate::DefDatabase,
     eid: EffectiveModuleId<'db>,
 ) -> Arc<SymbolTree> {
+    let interface = module_interface_effective(db, eid);
+    let item_tree = item_tree_effective(db, eid);
+    Arc::new(SymbolTree::assemble(&interface, &item_tree))
+}
+
+/// `ModuleInterface` over the effective parse, carrying the base file's `ModuleId`
+/// like [`symbol_tree_effective`].
+#[salsa::tracked(returns(clone))]
+pub fn module_interface_effective<'db>(
+    db: &'db dyn crate::DefDatabase,
+    eid: EffectiveModuleId<'db>,
+) -> Arc<crate::module_interface::ModuleInterface> {
     let base = eid.base_file(db);
     let parse = parse_effective(db, eid);
     let item_tree = item_tree_effective(db, eid);
@@ -223,7 +235,16 @@ pub fn symbol_tree_effective<'db>(
         Some(em) => em.text.clone(),
         None => db.file_text(base),
     };
-    Arc::new(SymbolTree::from_item_tree(&item_tree, ModuleId::new(base), &parse, &source_text))
+    let conditionals = item_tree
+        .has_module_preproc()
+        .then(|| crate::conditional_tree::lower_conditionals(&parse.syntax_node()));
+    Arc::new(crate::module_interface::ModuleInterface::from_item_tree(
+        &item_tree,
+        ModuleId::new(base),
+        &parse,
+        &source_text,
+        conditionals.as_ref(),
+    ))
 }
 
 /// `ModuleBodies` over the effective parse, carrying the base module's `ModuleId`.
@@ -241,7 +262,7 @@ pub fn module_bodies_effective<'db>(
         Some(em) => em.text.clone(),
         None => db.file_text(base),
     };
-    Arc::new(ModuleBodies::from_parse_with_text(&parse, ModuleId::new(base), &source_text))
+    Arc::new(ModuleBodies::from_parse_with_text(&parse, &source_text))
 }
 
 #[cfg(test)]

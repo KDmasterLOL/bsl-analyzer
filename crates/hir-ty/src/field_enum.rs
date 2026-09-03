@@ -232,11 +232,14 @@ fn push_platform_prefix_properties(
     seen: &mut std::collections::HashSet<Name>,
     mut ty_override: impl FnMut(&str) -> Option<TypeId>,
 ) {
-    let Some(prefix) = kind.platform_prefix() else {
-        return;
+    let data = PlatformData::instance();
+    let properties = match (kind.platform_prefix(), kind.bare_platform_type()) {
+        (Some(prefix), _) => data.get_manager_properties(prefix),
+        (None, Some(type_name)) => data.get_type_properties(type_name),
+        (None, None) => return,
     };
     let spec_names = standard_attribute_names_for(mdo_type);
-    for prop in PlatformData::instance().get_manager_properties(prefix) {
+    for prop in properties {
         let en_tail =
             prop.english_name.as_str().rsplit('.').next().unwrap_or(prop.english_name.as_str());
         if name_in_spec(&spec_names, prop.name.as_str(), en_tail) {
@@ -273,7 +276,12 @@ fn specialize_self_ref_ty(
     for candidate in candidates.into_iter().flatten() {
         let ru = candidate.display_label(base_db::Locale::Ru);
         let en = candidate.display_label(base_db::Locale::En);
-        if eq_yo_insensitive(&base, ru) || base == en {
+        // An external object's self-returning members are typed by the bare
+        // platform type (`ВнешняяОбработка`), which is the object type itself.
+        let bare = candidate.bare_platform_type_names();
+        let matches_bare = bare
+            .is_some_and(|(bare_ru, bare_en)| eq_yo_insensitive(&base, bare_ru) || base == bare_en);
+        if eq_yo_insensitive(&base, ru) || base == en || matches_bare {
             let cfg = FixedConfigCtx(config_id.clone());
             return Some(db.metadata_ref(candidate, mdo_name.as_str().to_string(), &cfg));
         }
@@ -689,6 +697,8 @@ pub(crate) fn mdo_type_for_kind(kind: MetadataKind) -> Option<MdoType> {
         }
         MetadataKind::DataProcessorObject => Some(MdoType::DataProcessor),
         MetadataKind::ReportObject => Some(MdoType::Report),
+        MetadataKind::ExternalDataProcessorObject => Some(MdoType::ExternalDataProcessor),
+        MetadataKind::ExternalReportObject => Some(MdoType::ExternalReport),
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
             Some(MdoType::ExchangePlan)
         }

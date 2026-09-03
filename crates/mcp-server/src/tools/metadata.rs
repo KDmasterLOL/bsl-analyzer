@@ -1079,7 +1079,7 @@ fn service_from_db(
 pub fn configs_from_db(
     db: &ide::RootDatabaseImpl,
 ) -> (Configuration, Vec<(String, Configuration)>) {
-    let paths = db.all_config_paths();
+    let paths = db.designer_config_paths();
     let base = paths
         .iter()
         .find(|(label, _)| label.is_none())

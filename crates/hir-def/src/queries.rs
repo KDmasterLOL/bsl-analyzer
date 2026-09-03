@@ -148,6 +148,25 @@ pub fn module_data_query<'db>(
     Arc::new(ModuleData::from_item_tree(module_id, tree))
 }
 
+fn module_code_lower_heap(v: &Arc<crate::body::LowerResult>) -> usize {
+    crate::body::lower_result_heap(&Some(Arc::clone(v)))
+}
+
+/// Module-level code (statements outside any method) lowered from the file
+/// root with the file's own line index; its positions are file positions.
+#[salsa::tracked(lru = 1024, heap_size = module_code_lower_heap, returns(ref))]
+pub fn module_code_lower_query<'db>(
+    db: &'db dyn DefDatabase,
+    file_id_input: FileIdInput<'db>,
+) -> Arc<crate::body::LowerResult> {
+    let file_id = file_id_input.file_id(db);
+    let _span = tracing::info_span!("module_code_lower", ?file_id_input).entered();
+    let parse = db.parse_ref(file_id);
+    let text = db.file_text_ref(file_id);
+    let line_index = Arc::new(line_index::LineIndex::new(text));
+    Arc::new(crate::body::lower_module_code(&parse.syntax_node(), Some(line_index)))
+}
+
 #[salsa::tracked(lru = 128, heap_size = heap_estimate::module_bodies_heap, returns(ref))]
 pub fn module_bodies_query<'db>(
     db: &'db dyn DefDatabase,
@@ -162,19 +181,32 @@ pub fn module_bodies_query<'db>(
     Arc::new(result)
 }
 
-/// Switch [`module_bodies_query`]'s LRU cap between the interactive profile and a
+/// Switch the lowering memos' LRU caps between the interactive profile and a
 /// small sweep profile. Lowered bodies are the second-largest retained value after
 /// parse trees (megabytes per module), and during a chunked whole-workspace sweep a
 /// closed file's bodies are needed only while its own chunk is analyzed — so the
-/// sweep shrinks the cap and restores the interactive one when it ends. The
-/// interactive value must stay equal to the `lru` literal on [`module_bodies_query`].
-/// The new cap takes effect at the next LRU trim; it evicts nothing by itself. Like
-/// any salsa write, this cancels in-flight snapshots — call it only from points that
-/// may already trim.
-pub fn set_module_bodies_lru_sweep_mode(db: &mut dyn DefDatabase, sweep: bool) {
-    const INTERACTIVE: usize = 128;
-    const SWEEP: usize = 16;
-    module_bodies_query::set_lru_capacity(db, if sweep { SWEEP } else { INTERACTIVE });
+/// sweep shrinks the caps and restores the interactive ones when it ends. The
+/// interactive values must stay equal to the `lru` literals on the queries; the
+/// per-method chain keeps its interactive retention order (`method_syntax` ≥
+/// `method_lower` ≥ `method_body` ≥ `infer_method`), which a sweep, having no
+/// edits to validate against, does not need. The new caps take effect at the next
+/// LRU trim; they evict nothing by themselves. Like any salsa write, this cancels
+/// in-flight snapshots — call it only from points that may already trim.
+pub fn set_lowering_lru_sweep_mode(db: &mut dyn crate::ConfigsDatabase, sweep: bool) {
+    const FILE_INTERACTIVE: usize = 128;
+    const FILE_SWEEP: usize = 16;
+    const MODULE_CODE_INTERACTIVE: usize = 1024;
+    const METHOD_INTERACTIVE: usize = 8192;
+    const METHOD_SWEEP: usize = 2048;
+    let file_cap = if sweep { FILE_SWEEP } else { FILE_INTERACTIVE };
+    let module_code_cap = if sweep { FILE_SWEEP } else { MODULE_CODE_INTERACTIVE };
+    let method_cap = if sweep { METHOD_SWEEP } else { METHOD_INTERACTIVE };
+    module_bodies_query::set_lru_capacity(db, file_cap);
+    module_code_lower_query::set_lru_capacity(db, module_code_cap);
+    crate::method_syntax::set_lru_capacity(db, method_cap);
+    crate::method_slab::set_lru_capacity(db, method_cap);
+    crate::method_body::set_lru_capacity(db, method_cap);
+    crate::sdbl_cache::set_method_sdbl_hir_lru_capacity(db, method_cap);
 }
 
 #[salsa::tracked(lru = 16, heap_size = crate::workspace::module_members_heap, returns(clone))]
@@ -934,7 +966,7 @@ pub fn file_external_refs_query<'db>(
 
     let mut refs = Vec::new();
     for (method_id, lower_result) in bodies.iter_lower_results() {
-        let ref_count = lower_result.external_refs.len();
+        let ref_count = lower_result.result.external_refs.len();
         if ref_count > 0 {
             tracing::debug!(
                 file_id = file_id.0,
@@ -943,11 +975,11 @@ pub fn file_external_refs_query<'db>(
                 "file_external_refs: found refs in method"
             );
         }
-        refs.extend(lower_result.external_refs.iter().cloned());
+        refs.extend(lower_result.external_refs());
     }
 
     if let Some(module_code) = bodies.module_code_result() {
-        let ref_count = module_code.external_refs.len();
+        let ref_count = module_code.result.external_refs.len();
         if ref_count > 0 {
             tracing::debug!(
                 file_id = file_id.0,
@@ -955,7 +987,7 @@ pub fn file_external_refs_query<'db>(
                 "file_external_refs: found refs in module code"
             );
         }
-        refs.extend(module_code.external_refs.iter().cloned());
+        refs.extend(module_code.external_refs());
     }
 
     tracing::debug!(file_id = file_id.0, total_refs = refs.len(), "file_external_refs: done");
@@ -1040,8 +1072,10 @@ mod tests {
     #[test]
     fn unique_global_handler_resolves_only_an_unambiguous_match() {
         let names = [Name::new("МодульА"), Name::new("МодульБ")];
-        let m_a = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
-        let m_b = MethodId { module: ModuleId::new(FileId(2)), local_id: 0 };
+        let m_a =
+            MethodId { module: ModuleId::new(FileId(1)), local_id: crate::MethodKey::first("М0") };
+        let m_b =
+            MethodId { module: ModuleId::new(FileId(2)), local_id: crate::MethodKey::first("М0") };
 
         let both = |module: &Name, _h: &Name| {
             if module.as_str() == "МодульА" {

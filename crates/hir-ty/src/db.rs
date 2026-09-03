@@ -21,6 +21,13 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
         owner: DefWithBodyId,
     ) -> Option<Arc<dataflow::DataflowResult<NarrowState>>>;
 
+    /// Argument-shape diagnostics of one method; see `arg_diagnostics`.
+    fn method_arg_diagnostics(&self, method: MethodIdInput<'_>) -> Arc<Vec<InferenceDiagnostic>>;
+
+    fn module_code_arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<InferenceDiagnostic>>;
+
+    /// Every body's argument diagnostics of the file, paired with their
+    /// owners: a fold over the per-body memos, not a memo of its own.
     fn arg_diagnostics(&self, file_id: FileId) -> Arc<Vec<(DefWithBodyId, InferenceDiagnostic)>>;
 
     fn type_narrowing_enabled(&self) -> bool;
@@ -52,8 +59,18 @@ pub trait HirDatabase: ConfigsDatabase + bsl_types::intern::TypeKernelDb {
     /// [`infer_method_ref`](Self::infer_method_ref).
     fn infer_module_code_ref(&self, file_id: FileId) -> &Arc<ModuleCodeInferenceResult>;
 
-    fn module_reaching_definitions(
+    /// Reaching definitions of the module-level code, which is lowered from
+    /// the file root and so has no method key.
+    fn module_code_reaching_definitions(
         &self,
         file_id: FileId,
-    ) -> Arc<dataflow::reaching_defs::ModuleReachingDefs>;
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
+
+    /// Reaching definitions of one method. A method-keyed query reads this
+    /// rather than the module-wide table, whose value changes with every body
+    /// in the file.
+    fn method_reaching_definitions(
+        &self,
+        method: MethodIdInput<'_>,
+    ) -> Option<Arc<dataflow::reaching_defs::ReachingDefsResult>>;
 }

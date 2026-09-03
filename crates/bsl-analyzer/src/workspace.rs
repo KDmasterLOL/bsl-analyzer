@@ -68,7 +68,10 @@ impl GlobalState {
             }
         };
 
-        if let Some(notice) = project.standalone_extension_notice() {
+        for notice in [project.standalone_extension_notice(), project.standalone_external_notice()]
+            .into_iter()
+            .flatten()
+        {
             self.show_warning_message(notice);
         }
 
@@ -728,6 +731,21 @@ impl GlobalState {
             );
         }
 
+        let external_paths: Vec<_> = project.external_paths().to_vec();
+        for (name, path) in &external_paths {
+            let path_input = ide_db::metadata::intern_configuration_path(
+                db,
+                &path.to_string_lossy(),
+                db.config_root_revision_for_path(path),
+            );
+            let config = ide_db::metadata::load_configuration(db, path_input);
+            tracing::info!(
+                external = %name,
+                metadata_objects = config.metadata_objects().len(),
+                "external metadata cache warmed"
+            );
+        }
+
         // Eager-warm the global context: a global common module extends the global context,
         // so its exported methods are callable unqualified. Building their symbol trees here —
         // through the SAME visibility-correct resolver path completion, hover and inference
@@ -920,6 +938,38 @@ mod metadata_warmup_tests {
         assert!(
             without_base.contains("extension metadata cache warmed"),
             "an extension-only project must still be warmed: {without_base}"
+        );
+    }
+
+    /// An external object is a root like the others: the warm-up that reaches
+    /// every extension reaches it too, or its first request pays the parse.
+    #[test]
+    fn the_warm_up_reaches_external_roots() {
+        let log = warmup_log(|root| {
+            let cf = root.join("src/cf");
+            std::fs::create_dir_all(&cf).unwrap();
+            std::fs::write(cf.join("Configuration.xml"), "<Configuration/>").unwrap();
+            let epf = root.join("src/epf/АРМ");
+            std::fs::create_dir_all(epf.join("АРМ/Ext")).unwrap();
+            std::fs::write(
+                epf.join("АРМ.xml"),
+                "<MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\n\
+                 <ExternalDataProcessor uuid=\"3696c164-ad14-4a0d-b659-10e3bf6d6ad2\">\n\
+                 <Properties><Name>АРМ</Name></Properties>\n\
+                 </ExternalDataProcessor>\n</MetaDataObject>\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("bsl-analyzer.toml"),
+                "[source]\nroot = \"src/cf\"\n\
+                 externals = [{ name = \"АРМ\", path = \"src/epf/АРМ\" }]\n",
+            )
+            .unwrap();
+        });
+        assert!(log.contains("metadata cache warmed"), "control: the base is warmed: {log}");
+        assert!(
+            log.contains("external metadata cache warmed"),
+            "the external root is warmed alongside the base: {log}"
         );
     }
 }

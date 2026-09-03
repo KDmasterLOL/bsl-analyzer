@@ -1242,6 +1242,7 @@ mod tests {
     /// The initial scan follows symlinks, so a source file reached through one is
     /// loaded — and its later edits have to arrive as content, not be ignored. Baseline
     /// files keep their exact-match handling and are unaffected.
+    #[cfg(unix)]
     #[test]
     fn classify_event_path_follows_a_symlinked_source() {
         let (_g, root) = fixture_mixed(0, 0, 0);

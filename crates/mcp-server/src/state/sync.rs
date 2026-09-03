@@ -839,33 +839,46 @@ impl SharedState {
 pub(super) fn prefetch_resident_overlay(
     engine: &SharedSearchEngine,
     lease: &crate::workspace_lease::WorkspaceLease,
-) {
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<(), crate::tools::search::Withdrawn> {
+    use crate::tools::search::{try_acquire_engine, AcquireFailure, Withdrawn};
+
     // Once terminal, every later query is a pure resident-snapshot read. This atomic check avoids
     // resident work and, importantly, never reopens the lease file after supersession is latched.
     if lease.is_superseded() || lease.is_released() {
-        return;
+        return Ok(());
     }
     let (source, roots, dirty) = {
-        let Ok(guard) = engine.lock() else { return };
-        let Some(engine) = guard.as_ref() else { return };
-        let Some(source) = engine.module_snapshot_source() else { return };
+        // The request's own acquire, not a plain `lock()`: this runs BEFORE the search's own
+        // acquire, and a cancelled request must not park here behind a long holder. A stall
+        // or a poisoned lock skips the prefetch — the search's acquire reports it.
+        let guard = match try_acquire_engine(engine, cancel) {
+            Ok(guard) => guard,
+            Err(AcquireFailure::Cancelled) => return Err(Withdrawn),
+            Err(AcquireFailure::Poisoned | AcquireFailure::TimedOut) => return Ok(()),
+        };
+        let Some(engine) = guard.as_ref() else { return Ok(()) };
+        let Some(source) = engine.module_snapshot_source() else { return Ok(()) };
         // The overlay keys dirty files by (root, path relative to that root);
         // resolving them for the resident needs the same table.
         let Some(roots) = engine.workspace_roots().cloned() else {
-            return;
+            return Ok(());
         };
         match engine.workspace_overlay_dirty_paths() {
             Ok(dirty) => (source, roots, dirty),
             Err(e) => {
                 tracing::debug!("overlay dirty-path read failed: {e}");
-                return;
+                return Ok(());
             }
         }
     };
     if dirty.is_empty() {
-        return;
+        return Ok(());
     }
 
+    if cancel.is_cancelled() {
+        return Err(Withdrawn);
+    }
     // Search and diagnostics drain independent hub cursors and a query never polls drift on
     // its own, so the resident is usually BEHIND disk on the just-edited files. Reconcile
     // pending drift FIRST — off the engine lock, resident lock only (I3 holds) — so the
@@ -883,6 +896,12 @@ pub(super) fn prefetch_resident_overlay(
     // the query's own lazy disk refresh and by later queries' prefetches. The cap is the whole
     // budget — no separate time budget needed.
     for key in dirty.iter().take(MAX_RESIDENT_PREFETCH_PATHS_PER_QUERY) {
+        // Per path: each resident read is a synchronous parse, and a cancelled request
+        // must not pay for the rest of the batch. What is left stays dirty for the next
+        // query, exactly as the cap leaves it.
+        if cancel.is_cancelled() {
+            return Err(Withdrawn);
+        }
         // Resolve the dirty key to an ABSOLUTE path through its own root before handing it to
         // the resident: the resident is indexed under the OUTER workspace root, so a bare
         // root-relative path would be re-joined against that root and silently miss on every
@@ -898,16 +917,32 @@ pub(super) fn prefetch_resident_overlay(
         }
     }
     if snapshots.is_empty() {
-        return;
+        return Ok(());
     }
 
+    let mut guard = match try_acquire_engine(engine, cancel) {
+        Ok(guard) => guard,
+        Err(AcquireFailure::Cancelled) => return Err(Withdrawn),
+        // Skipped, not failed: the fetched snapshots stay dirty for the next query. Logged
+        // all the same — a poisoned lock is the trace of an earlier panic, and this was the
+        // one place on the request path that used to record it.
+        Err(AcquireFailure::Poisoned) => {
+            tracing::debug!("resident-fed overlay reindex skipped: engine lock poisoned");
+            return Ok(());
+        }
+        Err(AcquireFailure::TimedOut) => {
+            tracing::debug!("resident-fed overlay reindex skipped: engine lock held past the cap");
+            return Ok(());
+        }
+    };
     if let super::WorkspaceSearchApply::OperationError(error) =
-        SharedState::apply_workspace_search(engine, lease, |engine| {
-            engine.reindex_dirty_from_snapshots(&snapshots)
+        SharedState::apply_to_engine(&mut guard, lease, |engine, _checkpoint| {
+            std::ops::ControlFlow::Continue(engine.reindex_dirty_from_snapshots(&snapshots))
         })
     {
         tracing::debug!("resident-fed overlay reindex failed: {error}");
     }
+    Ok(())
 }
 
 /// The owned-module subtree of a metadata descriptor `.xml`: `<Dir>/<Name>/` beside a
@@ -3999,7 +4034,9 @@ mod tests {
         SharedState::prefetch_resident_overlay_fenced(
             &engine_arc,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
-        );
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("an uncancelled prefetch completes");
 
         let fed = engine_arc
             .lock()
@@ -4092,7 +4129,9 @@ mod tests {
         SharedState::prefetch_resident_overlay_fenced(
             &engine_arc,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
-        );
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("an uncancelled prefetch completes");
 
         let fed = engine_arc
             .lock()
@@ -4147,7 +4186,9 @@ mod tests {
         SharedState::prefetch_resident_overlay_fenced(
             &engine_arc,
             &crate::workspace_lease::WorkspaceLease::unmanaged(),
-        );
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .expect("an uncancelled prefetch completes");
 
         let guard = engine_arc.lock().unwrap();
         let engine = guard.as_ref().unwrap();

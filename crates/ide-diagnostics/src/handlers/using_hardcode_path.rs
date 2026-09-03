@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use regex::Regex;
 use syntax::{SyntaxKind, SyntaxToken};
 
@@ -55,7 +56,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let std_paths_str = ctx
             .config
             .get_string(DiagnosticCode::UsingHardcodePath, "searchWordsStdPathsUnix")
@@ -93,7 +94,7 @@ fn is_url(content: &str) -> bool {
 }
 
 #[inline]
-pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     let code = DiagnosticCode::UsingHardcodePath;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -132,30 +133,15 @@ pub fn check_token(token: &SyntaxToken, acc: &mut Vec<Diagnostic>, ctx: &Diagnos
         code,
         message: "Используется хранение в коде пути к файлу".to_string(),
         severity: ctx.severity(code),
-        range: token.text_range(),
+        range: LocalRange::of_detached_node(token.text_range()),
         tags: ctx.tags(code),
         fixes: vec![],
     });
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let mut diagnostics = Vec::new();
-
-    for element in root.descendants_with_tokens() {
-        if let Some(token) = element.into_token() {
-            check_token(&token, &mut diagnostics, ctx);
-        }
-    }
-
-    diagnostics
-}
-
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
+    use crate::test_utils::{check_diagnostics_for_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -338,7 +324,8 @@ mod tests {
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics =
+            check_diagnostics_for_with_config(code, config, DiagnosticCode::UsingHardcodePath);
         assert_eq!(diagnostics.len(), 16, "Expected 16 diagnostics with reduced Unix paths");
     }
 

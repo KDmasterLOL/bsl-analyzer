@@ -71,7 +71,7 @@ impl RequestDispatcher<'_> {
 
     pub fn on_latency<R>(
         &mut self,
-        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+        f: fn(&LatencyRequestContext, R::Params) -> Result<R::Result>,
     ) -> &mut Self
     where
         R: lsp_types::request::Request,
@@ -83,7 +83,7 @@ impl RequestDispatcher<'_> {
 
     pub fn on_waiting_latency<R>(
         &mut self,
-        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+        f: fn(&LatencyRequestContext, R::Params) -> Result<R::Result>,
     ) -> &mut Self
     where
         R: lsp_types::request::Request,
@@ -95,7 +95,7 @@ impl RequestDispatcher<'_> {
 
     fn on_latency_with<R>(
         &mut self,
-        f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+        f: fn(&LatencyRequestContext, R::Params) -> Result<R::Result>,
         executor: LatencyExecutor,
     ) -> &mut Self
     where
@@ -333,7 +333,7 @@ fn run_latency_handler<R>(
     id: RequestId,
     ctx: LatencyRequestContext,
     params: R::Params,
-    f: fn(LatencyRequestContext, R::Params) -> Result<R::Result>,
+    f: fn(&LatencyRequestContext, R::Params) -> Result<R::Result>,
 ) -> Response
 where
     R: lsp_types::request::Request,
@@ -346,7 +346,10 @@ where
     // cannot.
     let revision = salsa::plumbing::current_revision(ctx.analysis.database());
     let inner = move || -> Response {
-        match salsa::Cancelled::catch(AssertUnwindSafe(|| f(ctx, params))) {
+        // The handler body is one attach scope, so a `$/cancelRequest` landing inside
+        // any of its queries is still there for the next checkpoint (`Analysis::attached`).
+        let attached = || ctx.analysis.attached(|_| f(&ctx, params));
+        match salsa::Cancelled::catch(AssertUnwindSafe(attached)) {
             Ok(result) => result_to_response::<R>(inner_id, result),
             Err(cancelled) => {
                 let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -592,6 +595,15 @@ mod tests {
 
         let first_token =
             state.request_tokens.get(&id).expect("first dispatch must register token").clone();
+        // Let the first job finish before its token is cancelled: the handler runs
+        // under `Analysis::attached`, and the exit of that scope resets the token, so a
+        // cancel that raced the job's completion could be read back as clear.
+        let task = state
+            .task_pool
+            .receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first job must answer");
+        assert!(matches!(task, Task::RequestResult { .. }), "{task:?}");
 
         let req2 = Request::new(
             id.clone(),

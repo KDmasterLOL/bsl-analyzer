@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use parser_error::ParseError;
-use rowan::{GreenNode, GreenNodeBuilder, Language, NodeCache};
+use rowan::{GreenNodeBuilder, Language, NodeCache};
 
 use crate::{Parse, SyntaxError, SyntaxKind};
 
@@ -86,11 +86,14 @@ pub fn clear_shared_node_cache() {
 pub struct SyntaxTreeBuilder<'cache> {
     errors: Vec<SyntaxError>,
     inner: GreenNodeBuilder<'cache>,
+    /// Оценка памяти дерева, накопленная по ходу построения; см.
+    /// [`Parse::heap_bytes`](crate::Parse::heap_bytes).
+    heap_bytes: usize,
 }
 
 impl Default for SyntaxTreeBuilder<'static> {
     fn default() -> Self {
-        Self { errors: Vec::new(), inner: GreenNodeBuilder::new() }
+        Self { errors: Vec::new(), inner: GreenNodeBuilder::new(), heap_bytes: 0 }
     }
 }
 
@@ -102,16 +105,18 @@ impl SyntaxTreeBuilder<'static> {
 
 impl<'cache> SyntaxTreeBuilder<'cache> {
     pub fn with_cache(cache: &'cache mut NodeCache) -> Self {
-        Self { errors: Vec::new(), inner: GreenNodeBuilder::with_cache(cache) }
+        Self { errors: Vec::new(), inner: GreenNodeBuilder::with_cache(cache), heap_bytes: 0 }
     }
 
     pub fn token(&mut self, kind: SyntaxKind, text: &str) {
         let kind = BslLanguage::kind_to_raw(kind);
+        self.heap_bytes += crate::HEAP_PER_ELEMENT + text.len();
         self.inner.token(kind, text);
     }
 
     pub fn start_node(&mut self, kind: SyntaxKind) {
         let kind = BslLanguage::kind_to_raw(kind);
+        self.heap_bytes += crate::HEAP_PER_ELEMENT;
         self.inner.start_node(kind);
     }
 
@@ -123,14 +128,9 @@ impl<'cache> SyntaxTreeBuilder<'cache> {
         self.errors.push(SyntaxError::new(range, err));
     }
 
-    pub(crate) fn finish_raw(self) -> (GreenNode, Vec<SyntaxError>) {
-        let green = self.inner.finish();
-        (green, self.errors)
-    }
-
     pub fn finish(self) -> Parse<SyntaxNode> {
-        let (green, errors) = self.finish_raw();
-        Parse::new(green, errors)
+        let green = self.inner.finish();
+        Parse::new(green, self.errors, self.heap_bytes)
     }
 }
 

@@ -186,18 +186,47 @@ Salsa сам проверяет отмену на входе в каждый з�
 
 ---
 
-## DiagnosticsContext API
+## Контексты диагностик: `AnalysisContext`, `DiagnosticsContext`, `BodyContext`
+
+Единица пересчёта диагностик — метод, поэтому контекстов три, и выбор
+хендлера начинается с вопроса «что он читает».
+
+- `AnalysisContext` — позиционно-свободное: конфиг, метаданные, кросс-файловое,
+  `module_interface()` (объявления модуля без позиций), per-method dataflow
+  (`method_cfg`, `reaching_definitions`, `method_path_terminates`, …).
+- `DiagnosticsContext` (Deref → `AnalysisContext`) — файловое позиционное:
+  `parse()`, `file_text()`, `item_tree()`, `symbol_tree()`, `module_bodies()`,
+  `call_summary()`, `line_index()`. Пересчитывается на каждую правку файла.
+- `BodyContext` (Deref → `AnalysisContext`) — одно тело: `body()`,
+  `source_map()`, `root()` (оторванный узел метода либо корень файла для
+  модульного кода), `nodes()`/`tokens()` (у модульного кода — без поддеревьев
+  методов), `line_index()` по тексту тела, `decl()`, `method_name_range()`,
+  `cfg()`/`reaching_definitions()`/`hir_metrics()`. Диапазоны здесь —
+  `LocalRange`, относительно `root()`; свод `file_diagnostics` поднимает их
+  в файл сам.
+
+Формы хендлера:
 
 ```rust
-ctx.parse()                    // AST
-ctx.module_bodies()            // HIR bodies + BodyDiagnostic
-ctx.module_cfgs()              // Control Flow Graphs
-ctx.module_reaching_defs()     // Reaching definitions
-ctx.sdbl_hir_in_file()         // SDBL HIR
-ctx.file_text()                // Исходный текст
-ctx.load_configuration()       // Метаданные 1С
-ctx.config.is_disabled(code)   // Проверка включения
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>)   // по телу — мемо на метод
+pub fn from_hir(range: LocalRange, ctx: &AnalysisContext) -> Option<Diagnostic<LocalRange>> // диспетчер HIR по телу
+pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic>                      // файловый
 ```
+
+Правило выбора: если проверка читает только своё тело и `module_interface`,
+это `check_body` — она регистрируется в `BODY_DIAGNOSTICS` (`body.rs`) и не
+пересчитывается на чужие правки. Если ей нужен `parse()`, `item_tree`,
+`call_summary`, соседство токенов через границу метода или строки файла
+целиком (`LineLength`, `MissingSpace`, `IncorrectLineBreak`, `CommentedCode`),
+это файловый `check` в `runner.rs`. Файловый хендлер, вызывающий per-method
+запросы по каждому методу, — переходное состояние, а не форма: он платит N
+выборок на правку.
+
+Инвариант per-method мемо — позиционная независимость: `check_body` не должен
+доставать файловое состояние окольным путём (через провайдер, `symbol_tree`,
+`module_bodies`). Утечку ловит гейт I1 (`crates/ide/tests/method_increment_churn.rs`:
+`execute == 1` на правку тела) — прогонять его при добавлении нового чтения в
+`BodyContext`/`AnalysisContext`.
 
 ---
 

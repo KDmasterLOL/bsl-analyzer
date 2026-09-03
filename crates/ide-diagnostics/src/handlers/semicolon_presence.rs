@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext, Fix, TextEdit};
-use ide_db::TextRange;
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode, Fix, TextEdit};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -17,7 +18,7 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &AnalysisContext) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::SemicolonPresence;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -32,10 +33,7 @@ pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic
         tags: ctx.tags(code),
         fixes: vec![Fix::safe(
             "Добавить точку с запятой",
-            vec![TextEdit {
-                range: TextRange::new(range.end(), range.end()),
-                new_text: ";".to_string(),
-            }],
+            vec![TextEdit { range: LocalRange::empty(range.end()), new_text: ";".to_string() }],
         )],
     })
 }

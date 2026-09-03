@@ -1,8 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, ExprId, IdConversion, Literal, Name, Stmt, StmtId};
-use ide_db::TextRange;
 use rustc_hash::{FxHashMap, FxHasher};
 use smol_str::SmolStr;
 use std::hash::{Hash, Hasher};
@@ -22,12 +22,12 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check_body(
+pub fn check_body_insertions(
     body: &Body,
     source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Vec<Diagnostic> {
+    ctx: &BodyContext,
+) -> Vec<Diagnostic<LocalRange>> {
     let _span = tracing::debug_span!("DuplicatedInsertionIntoCollection::check_body").entered();
 
     if ctx.is_disabled_with_metadata(code) {
@@ -160,7 +160,7 @@ fn matches_case_insensitive(text: &str, start: usize, pattern: &str) -> bool {
 
 #[derive(Debug, Clone)]
 struct Insertion {
-    range: TextRange,
+    range: LocalRange,
     receiver: ExprId,
     args: Vec<ExprId>,
     scope_depth: usize,
@@ -405,7 +405,7 @@ impl<'a> InsertionTracker<'a> {
         &mut self,
         receiver: ExprId,
         args: &[ExprId],
-        call_range: TextRange,
+        call_range: LocalRange,
         scope_depth: usize,
         kind: InsertionMethodKind,
     ) {
@@ -496,10 +496,10 @@ impl<'a> InsertionTracker<'a> {
 
     fn report_duplicates(
         &mut self,
-        diagnostics: &mut Vec<Diagnostic>,
+        diagnostics: &mut Vec<Diagnostic<LocalRange>>,
         scope_depth: usize,
         code: DiagnosticCode,
-        ctx: &DiagnosticsContext,
+        ctx: &BodyContext,
     ) {
         for insertions in self.insertions.values() {
             let scope_insertions: Vec<_> =
@@ -585,11 +585,11 @@ fn check_stmt_list(
     source_map: &BodySourceMap,
     stmts: &[StmtId],
     tracker: &mut InsertionTracker,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     scope_depth: usize,
     allow_add: bool,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     for stmt_id in stmts {
         check_stmt(
@@ -612,11 +612,11 @@ fn check_stmt(
     source_map: &BodySourceMap,
     stmt_id: StmtId,
     tracker: &mut InsertionTracker,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     scope_depth: usize,
     allow_add: bool,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     let stmt_range = source_map.stmt_range(stmt_id);
 
@@ -639,25 +639,25 @@ fn check_stmt(
 
         Stmt::Return { .. } => {
             if let Some(range) = stmt_range {
-                tracker.record_breaker(range.start().into(), scope_depth);
+                tracker.record_breaker(range.in_root().start().into(), scope_depth);
             }
         }
 
         Stmt::Raise { .. } => {
             if let Some(range) = stmt_range {
-                tracker.record_breaker(range.start().into(), scope_depth);
+                tracker.record_breaker(range.in_root().start().into(), scope_depth);
             }
         }
 
         Stmt::Break => {
             if let Some(range) = stmt_range {
-                tracker.record_local_breaker(range.start().into(), scope_depth);
+                tracker.record_local_breaker(range.in_root().start().into(), scope_depth);
             }
         }
 
         Stmt::Continue => {
             if let Some(range) = stmt_range {
-                tracker.record_local_breaker(range.start().into(), scope_depth);
+                tracker.record_local_breaker(range.in_root().start().into(), scope_depth);
             }
         }
 
@@ -909,34 +909,25 @@ fn check_expr_for_side_effects(
     }
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let _span = tracing::debug_span!("DuplicatedInsertionIntoCollection::check").entered();
     let code = DiagnosticCode::DuplicatedInsertionIntoCollection;
 
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+    if ctx.is_disabled_with_metadata(code) || ctx.is_module_code() {
+        return;
     }
 
-    let text = ctx.file_text();
-    if !has_insertion_methods(&text) {
-        return Vec::new();
+    if !has_insertion_methods(&ctx.root().text().to_string()) {
+        return;
     }
 
-    let module_bodies = ctx.module_bodies();
-
-    let mut diagnostics = Vec::new();
-
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        diagnostics.extend(check_body(body, source_map, code, ctx));
-    }
-
-    diagnostics
+    acc.extend(check_body_insertions(ctx.body(), ctx.source_map(), code, ctx));
 }
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic, format_diags};
+    use super::check_body;
+    use crate::test_utils::{check_body_diagnostic, format_diags};
     use expect_test::expect;
 
     #[test]
@@ -948,7 +939,7 @@ mod tests {
     Массив.Добавить(Значение);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:5..5:30
               message: Проверьте повторную вставку Значение в коллекцию Массив
@@ -966,7 +957,7 @@ mod tests {
     Массив.Добавить(Х);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -983,7 +974,7 @@ mod tests {
     Список.Добавить(Символы.ПС);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -995,7 +986,7 @@ mod tests {
     Коллекция().Добавить(Значение);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 4:5..4:35
               message: Проверьте повторную вставку Значение в коллекцию Коллекция()
@@ -1014,7 +1005,7 @@ mod tests {
     #КонецЕсли
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1028,7 +1019,7 @@ mod tests {
     #КонецЕсли
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:9..5:34
               message: Проверьте повторную вставку Значение в коллекцию Массив
@@ -1048,7 +1039,7 @@ mod tests {
     #КонецЕсли
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:9..5:34
               message: Проверьте повторную вставку Значение в коллекцию Массив
@@ -1068,7 +1059,7 @@ mod tests {
     #КонецЕсли
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 6:13..6:38
               message: Проверьте повторную вставку Значение в коллекцию Массив
@@ -1089,7 +1080,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1102,7 +1093,7 @@ mod tests {
     Данные.Метод().Коллекция.Добавить("Значение");
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:5..5:50
               message: Проверьте повторную вставку "Значение" в коллекцию Данные.Метод().Коллекция
@@ -1118,7 +1109,7 @@ mod tests {
     Данные.Метод().ОбщаяКоллекция.Добавить(Данные.Метод().ПовторнаяКоллекция);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 4:5..4:78
               message: Проверьте повторную вставку Данные.Метод().ПовторнаяКоллекция в коллекцию Данные.Метод().ОбщаяКоллекция
@@ -1134,7 +1125,7 @@ mod tests {
     Коллекция.Вставить("Ключ1", 2);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:5..5:35
               message: Проверьте повторную вставку "Ключ1", 2 в коллекцию Коллекция
@@ -1152,7 +1143,7 @@ mod tests {
     КонецЦикла;
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 5:9..5:56
               message: Проверьте повторную вставку "Пользователь" в коллекцию Итог.Коллекция.Индексы
@@ -1168,7 +1159,7 @@ mod tests {
     Итог.ВтораяКоллекция.Индексы.Добавить("Пользователь");
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1186,7 +1177,7 @@ mod tests {
     КонецЕсли;
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1205,7 +1196,7 @@ mod tests {
     Возврат ВидыСвойствНабора;
 КонецФункции
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1224,7 +1215,7 @@ mod tests {
     Возврат ВидыСвойствНабора;
 КонецФункции
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#"
             DuplicatedInsertionIntoCollection @ 10:5..10:66
               message: Проверьте повторную вставку "ДополнительныеРеквизиты", Истина в коллекцию ВидыСвойствНабора
@@ -1239,7 +1230,7 @@ mod tests {
     Сведения2.ДобавленныеЭлементы.Добавить(ИмяКоманды, 9, Истина);
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
@@ -1252,7 +1243,7 @@ mod tests {
     Контекст.Коллекция.Вставить("ИмяПрава", "Изменение");
 КонецПроцедуры
         "#;
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 

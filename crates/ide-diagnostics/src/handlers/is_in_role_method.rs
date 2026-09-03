@@ -1,8 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::{BodySourceMap, LocalRange};
 use hir::{Expr, ExprId, IdConversion, Stmt};
-use ide_db::TextRange;
 use std::collections::HashSet;
 use stdx::case::CaseExt;
 
@@ -20,63 +20,37 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::IsInRoleMethod;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
-    let mut all_diagnostics = Vec::new();
-    let module_bodies = ctx.module_bodies();
+    let mut checker = IsInRoleChecker {
+        is_in_role_vars: HashSet::new(),
+        privileged_mode_vars: HashSet::new(),
+        diagnostics: Vec::new(),
+        body: ctx.body(),
+        source_map: ctx.source_map(),
+        code,
+        ctx,
+    };
 
-    for (_local_id, body, source_map) in module_bodies.method_bodies() {
-        let mut checker = IsInRoleChecker {
-            is_in_role_vars: HashSet::new(),
-            privileged_mode_vars: HashSet::new(),
-            diagnostics: Vec::new(),
-            body,
-            source_map,
-            code,
-            ctx,
-        };
+    checker.collect_variables();
+    checker.check_statements();
 
-        checker.collect_variables();
-
-        checker.check_statements();
-
-        all_diagnostics.extend(checker.diagnostics);
-    }
-
-    if let Some(lower_result) = module_bodies.module_code_result() {
-        let mut checker = IsInRoleChecker {
-            is_in_role_vars: HashSet::new(),
-            privileged_mode_vars: HashSet::new(),
-            diagnostics: Vec::new(),
-            body: &lower_result.body,
-            source_map: &lower_result.source_map,
-            code,
-            ctx,
-        };
-
-        checker.collect_variables();
-        checker.check_statements();
-
-        all_diagnostics.extend(checker.diagnostics);
-    }
-
-    all_diagnostics.sort_by_key(|d| d.range.start());
-    all_diagnostics
+    acc.extend(checker.diagnostics);
 }
 
 struct IsInRoleChecker<'a> {
     is_in_role_vars: HashSet<String>,
     privileged_mode_vars: HashSet<String>,
-    diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic<LocalRange>>,
     body: &'a hir::Body,
-    source_map: &'a hir::BodySourceMap,
+    source_map: &'a BodySourceMap,
     code: DiagnosticCode,
-    ctx: &'a DiagnosticsContext<'a>,
+    ctx: &'a BodyContext<'a>,
 }
 
 impl<'a> IsInRoleChecker<'a> {
@@ -227,10 +201,10 @@ fn is_privileged_mode_method(name: &str) -> bool {
 }
 
 fn create_diagnostic(
-    range: TextRange,
+    range: LocalRange,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: "Для проверки прав доступа в коде следует использовать метод ПравоДоступа"

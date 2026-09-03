@@ -121,10 +121,9 @@ mod tests {
 
     fn bindings(src: &str) -> Vec<(String, String)> {
         let parse = parser::parse(src);
-        let module_bodies =
-            crate::ModuleBodies::from_parse(&parse, crate::ModuleId::new(vfs::FileId(0)));
-        let lower_result = module_bodies.lower_result(0).expect("one method body");
-        let mut v: Vec<(String, String)> = common_module_var_bindings(&lower_result.body)
+        let module_bodies = crate::ModuleBodies::from_parse(&parse);
+        let (_, lower_result) = module_bodies.iter_lower_results().next().expect("one method body");
+        let mut v: Vec<(String, String)> = common_module_var_bindings(lower_result.body())
             .into_iter()
             .map(|(k, m)| (k, m.as_str().to_string()))
             .collect();

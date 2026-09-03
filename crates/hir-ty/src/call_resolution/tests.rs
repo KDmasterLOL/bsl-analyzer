@@ -99,7 +99,7 @@ fn candidate_identity_rejects_duplicates() {
     );
 
     let user = CandidateId::User {
-        method: UserMethodId::new(vfs::FileId::from_raw(7), 11),
+        method: UserMethodId::new(vfs::FileId::from_raw(7), hir_def::MethodKey::first("М11")),
         signature_ordinal: 0,
     };
     let builtin =

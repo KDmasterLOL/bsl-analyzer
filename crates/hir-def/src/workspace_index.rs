@@ -54,26 +54,14 @@ impl WorkspaceIndex {
 
         for (idx, item) in item_tree.top_level_items().iter().enumerate() {
             match item {
-                ModItem::Procedure(proc_idx) => {
-                    let proc = item_tree.procedure(*proc_idx);
-                    let method_id = MethodId { module: module_id, local_id: idx as u32 };
+                ModItem::Procedure(_) | ModItem::Function(_) => {
+                    let method = item_tree.method_item(item).expect("a method item");
+                    let method_id = MethodId { module: module_id, local_id: method.key() };
 
-                    self.method_index.entry(proc.name.clone()).or_default().push(method_id);
-
-                    file_symbols.push(SymbolInfo {
-                        name: proc.name.clone(),
-                        kind: SymbolKind::Method,
-                        file_id,
-                    });
-                }
-                ModItem::Function(func_idx) => {
-                    let func = item_tree.function(*func_idx);
-                    let method_id = MethodId { module: module_id, local_id: idx as u32 };
-
-                    self.method_index.entry(func.name.clone()).or_default().push(method_id);
+                    self.method_index.entry(method.name().clone()).or_default().push(method_id);
 
                     file_symbols.push(SymbolInfo {
-                        name: func.name.clone(),
+                        name: method.name().clone(),
                         kind: SymbolKind::Method,
                         file_id,
                     });

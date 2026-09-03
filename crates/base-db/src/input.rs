@@ -103,6 +103,16 @@ pub(crate) mod heap_estimate {
             + stdx::heap::vec_bytes::<(String, String)>(config.parameters.len())
             + config.parameters.iter().map(|(k, v)| k.capacity() + v.capacity()).sum::<usize>()
             + config.scope.as_deref().map_or(0, crate::scope::scope_heap_size)
+            + config.only_enabled.as_ref().map_or(0, |codes| {
+                stdx::heap::vec_bytes::<String>(codes.len())
+                    + codes.iter().map(String::capacity).sum::<usize>()
+            })
+            + stdx::heap::vec_bytes::<(String, String)>(config.metadata_overrides.len())
+            + config
+                .metadata_overrides
+                .iter()
+                .map(|(k, v)| k.capacity() + v.capacity())
+                .sum::<usize>()
     }
 
     #[cfg(test)]
@@ -209,6 +219,15 @@ pub struct DiagnosticsConfigInput {
     /// state (vendor-diff filter). `None` = no restriction. Part of the
     /// interned config so replacing the scope re-keys `file_diagnostics_query`.
     pub scope: Option<std::sync::Arc<crate::AnalysisScope>>,
+
+    /// Codes the run is restricted to (the CLI `--only` filter); `None` when
+    /// every enabled code runs. Sorted and deduplicated.
+    pub only_enabled: Option<Vec<String>>,
+
+    /// Per-code metadata overrides as `(code, JSON)`, sorted by code. Part of
+    /// the key because they change a diagnostic's tags and severity — two
+    /// configurations that differ only here must not share a memo.
+    pub metadata_overrides: Vec<(String, String)>,
 }
 
 impl DiagnosticsConfigInput {
@@ -242,7 +261,27 @@ impl DiagnosticsConfigInput {
             locale,
             bslls_suppression_compat,
             scope: None,
+            only_enabled: None,
+            metadata_overrides: Vec::new(),
         }
+    }
+
+    pub fn with_filters(
+        mut self,
+        only_enabled: Option<impl IntoIterator<Item = String>>,
+        metadata_overrides: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.only_enabled = only_enabled.map(|codes| {
+            let mut codes: Vec<String> = codes.into_iter().collect();
+            codes.sort();
+            codes.dedup();
+            codes
+        });
+        let mut overrides: Vec<(String, String)> = metadata_overrides.into_iter().collect();
+        overrides.sort_by(|a, b| a.0.cmp(&b.0));
+        overrides.dedup_by(|a, b| a.0 == b.0);
+        self.metadata_overrides = overrides;
+        self
     }
 
     pub fn with_scope(mut self, scope: Option<std::sync::Arc<crate::AnalysisScope>>) -> Self {

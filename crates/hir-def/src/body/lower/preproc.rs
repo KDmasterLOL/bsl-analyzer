@@ -1,3 +1,4 @@
+use cfg_types::LocalRange;
 use syntax::{SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
@@ -28,8 +29,8 @@ pub(crate) fn lower_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Opti
         let elsif_directive_range = get_directive_header_range(&elsif);
         let elsif_body = lower_preproc_branch_stmts(ctx, &elsif);
         elsif_branches.push((
-            elsif_cond_range,
-            elsif_directive_range,
+            LocalRange::of_detached_node(elsif_cond_range),
+            LocalRange::of_detached_node(elsif_directive_range),
             elsif_body.into_boxed_slice(),
         ));
     }
@@ -39,10 +40,11 @@ pub(crate) fn lower_preproc_if(ctx: &mut LoweringCtx, node: &SyntaxNode) -> Opti
         .find(|n| n.kind() == SyntaxKind::PRE_ELSE_CLAUSE)
         .map(|else_node| lower_preproc_branch_stmts(ctx, &else_node).into_boxed_slice());
 
+    let local = LocalRange::of_detached_node;
     Some(Stmt::PreprocIf(Box::new(PreprocIfStmt {
-        condition_range,
-        directive_range,
-        full_range: node.text_range(),
+        condition_range: local(condition_range),
+        directive_range: local(directive_range),
+        full_range: local(node.text_range()),
         condition,
         then_branch: then_branch.into_boxed_slice(),
         elsif_branches: elsif_branches.into_boxed_slice(),

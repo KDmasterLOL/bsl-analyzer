@@ -109,8 +109,11 @@ impl Run {
     /// anywhere in the absolute path: a temp directory that happens to carry the
     /// module's name in an ancestor would otherwise pick the wrong file.
     fn file_event(&self, module: &str) -> Option<&Value> {
-        let tail = format!("CommonModules/{module}/Ext/Module.bsl");
-        self.files.iter().find(|e| e["path"].as_str().is_some_and(|p| p.ends_with(&tail)))
+        self.file_event_at(&format!("CommonModules/{module}/Ext/Module.bsl"))
+    }
+
+    fn file_event_at(&self, tail: &str) -> Option<&Value> {
+        self.files.iter().find(|e| e["path"].as_str().is_some_and(|p| p.ends_with(tail)))
     }
 
     /// The module's file event, having established that it was actually
@@ -119,10 +122,14 @@ impl Run {
     /// `done.failed_files` and the process still exiting zero — so the event's
     /// mere presence proves nothing.
     fn analyzed(&self, module: &str) -> &Value {
+        self.analyzed_at(&format!("CommonModules/{module}/Ext/Module.bsl"))
+    }
+
+    fn analyzed_at(&self, tail: &str) -> &Value {
         let event = self
-            .file_event(module)
-            .unwrap_or_else(|| panic!("{module} was not analyzed at all; jsonl: {:?}", self.files));
-        assert_eq!(event["error"], Value::Null, "{module} failed to analyze: {event}");
+            .file_event_at(tail)
+            .unwrap_or_else(|| panic!("{tail} was not analyzed at all; jsonl: {:?}", self.files));
+        assert_eq!(event["error"], Value::Null, "{tail} failed to analyze: {event}");
         assert_eq!(self.done["failed_files"], 0, "some file failed: {}", self.done);
         event
     }
@@ -133,8 +140,8 @@ impl Run {
     /// unresolvable call beside the one under test, and a count alone cannot
     /// tell "the real call resolved" from "the two swapped places" or from the
     /// diagnostic being suppressed wholesale.
-    fn messages(&self, module: &str, code: &str) -> Vec<String> {
-        self.analyzed(module)["diagnostics"]
+    fn messages_at(&self, tail: &str, code: &str) -> Vec<String> {
+        self.analyzed_at(tail)["diagnostics"]
             .as_array()
             .unwrap()
             .iter()
@@ -145,8 +152,12 @@ impl Run {
 
     /// Which module names the given code complains about, sorted.
     fn unresolved_modules(&self, module: &str) -> Vec<String> {
+        self.unresolved_modules_at(&format!("CommonModules/{module}/Ext/Module.bsl"))
+    }
+
+    fn unresolved_modules_at(&self, tail: &str) -> Vec<String> {
         let mut names: Vec<String> = self
-            .messages(module, "UnresolvedMethodCall")
+            .messages_at(tail, "UnresolvedMethodCall")
             .iter()
             .filter_map(|m| m.split('\'').nth(1).map(str::to_owned))
             .collect();
@@ -429,76 +440,111 @@ fn an_extension_taken_as_the_main_root_is_reported() {
 /// Readiness is polled rather than assumed: a freshly started server answers a
 /// data action with a "still building" envelope that carries no diagnostics at
 /// all, which would read exactly like "everything resolved".
-fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<String>, Value) {
-    use std::io::{BufRead, BufReader, Write as _};
-    use std::process::Stdio;
+/// One MCP server over stdio, driven by JSON-RPC a line at a time.
+struct McpSession {
+    child: std::process::Child,
+    stdin: Option<std::process::ChildStdin>,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+    next_id: i64,
+}
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
-        .args(["mcp", "serve", "--profile", "workspace", "--mode", "stdio", "-s"])
-        .arg(workspace)
-        .args(flags)
-        // `--mode stdio` is also the *unset* value, and the workspace profile
-        // resolves that to the broker — which detaches a daemon that outlives
-        // the test and writes a cache into the temp workspace.
-        .env("BSL_MCP_BROKER", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start the MCP server");
+impl McpSession {
+    fn start(workspace: &Path, flags: &[&str]) -> Self {
+        use std::process::Stdio;
 
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut send = |value: Value| writeln!(stdin, "{value}").unwrap();
-    let mut recv = |id: i64| -> Value {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+            .args(["mcp", "serve", "--profile", "workspace", "--mode", "stdio", "-s"])
+            .arg(workspace)
+            .args(flags)
+            // `--mode stdio` is also the *unset* value, and the workspace profile
+            // resolves that to the broker — which detaches a daemon that outlives
+            // the test and writes a cache into the temp workspace.
+            .env("BSL_MCP_BROKER", "0")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("failed to start the MCP server");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut session = Self { child, stdin: Some(stdin), stdout, next_id: 1 };
+        session.request(
+            "initialize",
+            serde_json::json!({"protocolVersion": "2024-11-05", "capabilities": {},
+                               "clientInfo": {"name": "t", "version": "1"}}),
+        );
+        session.send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+        session
+    }
+
+    fn send(&mut self, value: Value) {
+        use std::io::Write as _;
+        writeln!(self.stdin.as_mut().expect("the session is open"), "{value}").unwrap();
+    }
+
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        use std::io::BufRead as _;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}),
+        );
         loop {
             let mut line = String::new();
-            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "the server closed stdout");
+            assert_ne!(self.stdout.read_line(&mut line).unwrap(), 0, "the server closed stdout");
             if let Ok(message) = serde_json::from_str::<Value>(&line) {
                 if message["id"] == id {
                     return message;
                 }
             }
         }
-    };
-
-    send(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                   "clientInfo": {"name": "t", "version": "1"}}
-    }));
-    recv(1);
-    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-
-    let call = |id: i64, arguments: Value| {
-        serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": "diagnostics", "arguments": arguments}
-        })
-    };
-
-    let mut status = Value::Null;
-    for id in 10..200 {
-        send(call(id, serde_json::json!({"action": "status"})));
-        status = recv(id)["result"]["structuredContent"].clone();
-        if status["state"] == "ready" || status["state"] == "failed" {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(status["state"], "ready", "the resident database never became ready: {status}");
 
-    let reply = {
-        let arguments =
-            serde_json::json!({"action": "file", "path": module_file.display().to_string()});
-        send(call(2, arguments));
-        recv(2)
-    };
-    let body = reply.to_string();
-    assert!(!body.contains("\"isError\":true"), "the diagnostics call failed: {body}");
+    /// A tool call's reply, whole.
+    fn call(&mut self, tool: &str, arguments: Value) -> Value {
+        self.request("tools/call", serde_json::json!({"name": tool, "arguments": arguments}))
+    }
 
-    drop(stdin);
-    let _ = child.wait();
+    /// Poll `tool`'s `status` action until its state settles; the settled status.
+    fn wait_ready(&mut self, tool: &str) -> Value {
+        let mut status = Value::Null;
+        for _ in 0..300 {
+            status = self.call(tool, serde_json::json!({"action": "status"}))["result"]
+                ["structuredContent"]
+                .clone();
+            if status["state"] == "ready" || status["state"] == "failed" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(status["state"], "ready", "{tool} never became ready: {status}");
+        status
+    }
+
+    /// One `diagnostics` call that must succeed; its reply, whole.
+    fn diagnostics(&mut self, arguments: Value) -> Value {
+        let reply = self.call("diagnostics", arguments);
+        let body = reply.to_string();
+        assert!(!body.contains("\"isError\":true"), "the diagnostics call failed: {body}");
+        reply
+    }
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
+fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<String>, Value) {
+    let mut session = McpSession::start(workspace, flags);
+    let status = session.wait_ready("diagnostics");
+    let body = session
+        .diagnostics(
+            serde_json::json!({"action": "file", "path": module_file.display().to_string()}),
+        )
+        .to_string();
 
     let mut names: Vec<String> = body
         .match_indices("разрешить получателя вызова '")
@@ -520,69 +566,13 @@ fn mcp_probe(workspace: &Path, module_file: &Path, flags: &[&str]) -> (Vec<Strin
 /// on-disk config would keep every diagnostics check green while the graph was
 /// built over a different set of roots.
 fn mcp_graph_overview(workspace: &Path, flags: &[&str]) -> Value {
-    use std::io::{BufRead, BufReader, Write as _};
-    use std::process::Stdio;
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
-        .args(["mcp", "serve", "--profile", "workspace", "--mode", "stdio", "-s"])
-        .arg(workspace)
-        .args(flags)
-        .env("BSL_MCP_BROKER", "0")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to start the MCP server");
-
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let mut send = |value: Value| writeln!(stdin, "{value}").unwrap();
-    let mut recv = |id: i64| -> Value {
-        loop {
-            let mut line = String::new();
-            assert_ne!(stdout.read_line(&mut line).unwrap(), 0, "the server closed stdout");
-            if let Ok(message) = serde_json::from_str::<Value>(&line) {
-                if message["id"] == id {
-                    return message;
-                }
-            }
-        }
-    };
-
-    send(serde_json::json!({
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                   "clientInfo": {"name": "t", "version": "1"}}
-    }));
-    recv(1);
-    send(serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
-
-    let call = |id: i64, action: &str| {
-        serde_json::json!({
-            "jsonrpc": "2.0", "id": id, "method": "tools/call",
-            "params": {"name": "graph", "arguments": {"action": action}}
-        })
-    };
-
-    let mut status = Value::Null;
-    for id in 10..300 {
-        send(call(id, "status"));
-        status = recv(id)["result"]["structuredContent"].clone();
-        if status["state"] == "ready" || status["state"] == "failed" {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    let mut session = McpSession::start(workspace, flags);
     // `failed` is a real outcome here, not a flake: the builder reports it when
     // it panicked, and an overview read past it would compare empty to empty.
-    assert_eq!(status["state"], "ready", "the graph never became ready: {status}");
-
-    send(call(2, "overview"));
-    let overview = recv(2)["result"]["structuredContent"]["result"].clone();
-
-    drop(stdin);
-    let _ = child.wait();
-    overview
+    session.wait_ready("graph");
+    session.call("graph", serde_json::json!({"action": "overview"}))["result"]["structuredContent"]
+        ["result"]
+        .clone()
 }
 
 #[test]
@@ -678,5 +668,484 @@ fn the_source_set_reaches_the_mcp_server() {
         .0,
         vec![MISSING_MODULE.to_string()],
         "the source set must resolve the main configuration's module here too"
+    );
+}
+
+/// An external data processor export: `<Name>.xml` beside `<Name>/`, with one
+/// managed form whose module is `body`. The same tree the designer writes,
+/// minus everything the analysis does not read.
+const EPF: &str = "a/b/epf";
+const EPF_NAME: &str = "АРМ";
+const EPF_FORM_MODULE: &str = "АРМ/Forms/Форма/Ext/Form/Module.bsl";
+
+fn write_external(root: &Path, rel: &str, name: &str, body: &str) {
+    write_external_with_attribute(root, rel, name, body, None);
+}
+
+/// The processor's XML, internal or external: `element` is the object element and
+/// `attribute`, when given, one string attribute of the object.
+fn processor_xml(element: &str, name: &str, attribute: Option<&str>) -> String {
+    let attribute = attribute.map_or(String::new(), |attribute| {
+        format!(
+            r#"<Attribute uuid="d010948a-27f1-4b21-80a2-361efec05def"><Properties><Name>{attribute}</Name><Type><v8:Type>xs:string</v8:Type></Type></Properties></Attribute>"#
+        )
+    });
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+	<{element} uuid="3696c164-ad14-4a0d-b659-10e3bf6d6ad2">
+		<Properties><Name>{name}</Name><Synonym/><Comment/><DefaultForm>{element}.{name}.Form.Форма</DefaultForm></Properties>
+		<ChildObjects>{attribute}<Form>Форма</Form></ChildObjects>
+	</{element}>
+</MetaDataObject>"#
+    )
+}
+
+fn write_external_with_attribute(
+    root: &Path,
+    rel: &str,
+    name: &str,
+    body: &str,
+    attribute: Option<&str>,
+) {
+    let dir = root.join(rel);
+    let form_dir = dir.join(name).join("Forms").join("Форма").join("Ext").join("Form");
+    std::fs::create_dir_all(&form_dir).unwrap();
+    std::fs::write(
+        dir.join(format!("{name}.xml")),
+        processor_xml("ExternalDataProcessor", name, attribute),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join(name).join("Forms").join("Форма.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+	<Form uuid="8919791a-5b27-410f-9404-010ce96c6db6">
+		<Properties><Name>Форма</Name><Synonym/><Comment/><FormType>Managed</FormType></Properties>
+	</Form>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        form_dir.parent().unwrap().join("Form.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:v8="http://v8.1c.ru/8.1/data/core" version="2.20">
+	<AutoCommandBar name="ФормаКоманднаяПанель" id="-1"/>
+	<Attributes/>
+</Form>"#,
+    )
+    .unwrap();
+    std::fs::write(form_dir.join("Module.bsl"), body).unwrap();
+}
+
+/// Runs `analyze` expecting it to refuse, and returns its stderr.
+fn analyze_refuses(source_dir: &Path, flags: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_bsl-analyzer-app"))
+        .arg("analyze")
+        .arg("-s")
+        .arg(source_dir)
+        .args(flags)
+        .args(["--format", "jsonl"])
+        .env_remove("ONEC_CONFIGURATIONS_ROOT")
+        .output()
+        .expect("failed to run the analyzer");
+    assert!(!output.status.success(), "analyze {flags:?} must refuse to start");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+fn external_notices(run: &Run) -> usize {
+    assert_eq!(run.done["failed_files"], 0, "some file failed: {}", run.done);
+    run.stderr
+        .lines()
+        .filter(|line| line.contains("are analyzed without an owning configuration"))
+        .count()
+}
+
+#[test]
+fn binding_the_main_configuration_resolves_calls_from_an_external_object() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    write_external(
+        dir.path(),
+        EPF,
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{MAIN_MODULE}.Экспортируемая();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
+    );
+    let external = format!("{EPF_NAME}={EPF}");
+
+    // Positive control: alone, the owning configuration's module is unresolved
+    // and the run says why. Without this the bound run's clean result could
+    // equally mean the form module was never analyzed.
+    let standalone = analyze(dir.path(), &["--external", &external]);
+    assert_eq!(
+        standalone.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MAIN_MODULE.to_string(), MISSING_MODULE.to_string()],
+    );
+    assert_eq!(external_notices(&standalone), 1, "the missing owner is called out once");
+
+    let bound = analyze(dir.path(), &["--configuration-root", MAIN, "--external", &external]);
+    assert_eq!(
+        bound.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "the owning configuration's module resolves and only the missing one remains"
+    );
+    assert_eq!(external_notices(&bound), 0, "bound, there is nothing to announce");
+}
+
+#[test]
+fn an_external_object_sees_every_extension_while_the_base_sees_none() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    // The extension exports a method; the base calls it too, as the control:
+    // an extension's API is invisible from the base, so the same call that
+    // resolves from the external object must stay unresolved there.
+    std::fs::write(
+        path(dir.path(), EXT).join("CommonModules").join(EXT_MODULE).join("Ext/Module.bsl"),
+        "Функция ИзРасширения() Экспорт\n\tВозврат 3;\nКонецФункции\n",
+    )
+    .unwrap();
+    std::fs::write(
+        path(dir.path(), MAIN).join("CommonModules").join(MAIN_MODULE).join("Ext/Module.bsl"),
+        format!(
+            "Функция Экспортируемая() Экспорт\n\tВозврат 1;\nКонецФункции\n\
+             Процедура Контроль()\n\t{EXT_MODULE}.ИзРасширения();\nКонецПроцедуры\n"
+        ),
+    )
+    .unwrap();
+    write_external(
+        dir.path(),
+        EPF,
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{EXT_MODULE}.ИзРасширения();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
+    );
+    let external = format!("{EPF_NAME}={EPF}");
+    // No dependency is declared anywhere: the external object sees the
+    // extension by construction, not by an edge.
+    let run = analyze(
+        dir.path(),
+        &["--configuration-root", MAIN, "--extension", "EXT=a/b/ext", "--external", &external],
+    );
+
+    assert_eq!(
+        run.unresolved_modules(MAIN_MODULE),
+        vec![EXT_MODULE.to_string()],
+        "control: the base does not see the extension"
+    );
+    assert_eq!(
+        run.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "the external object sees the extension without any declared edge"
+    );
+}
+
+#[test]
+fn an_external_depends_on_narrows_what_it_sees_to_the_named_extensions() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    std::fs::write(
+        path(dir.path(), EXT).join("CommonModules").join(EXT_MODULE).join("Ext/Module.bsl"),
+        "Функция ИзРасширения() Экспорт\n\tВозврат 3;\nКонецФункции\n",
+    )
+    .unwrap();
+    write_configuration(
+        dir.path(),
+        DEP,
+        "Зависимость",
+        DEP_MODULE,
+        "Функция ИзЗависимости() Экспорт\n\tВозврат 4;\nКонецФункции\n",
+        true,
+    );
+    write_external(
+        dir.path(),
+        EPF,
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{MAIN_MODULE}.Экспортируемая();\n\t{EXT_MODULE}.ИзРасширения();\n\t{DEP_MODULE}.ИзЗависимости();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
+    );
+    let external = format!("{EPF_NAME}={EPF}");
+    let flags = |extra: &[&str]| -> Vec<String> {
+        [
+            "--configuration-root",
+            MAIN,
+            "--extension",
+            "EXT=a/b/ext",
+            "--extension",
+            "DEP=a/b/dep",
+            "--external",
+            &external,
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(str::to_owned)
+        .collect()
+    };
+    fn as_str(flags: &[String]) -> Vec<&str> {
+        flags.iter().map(String::as_str).collect()
+    }
+
+    let every = analyze(dir.path(), &as_str(&flags(&[])));
+    assert_eq!(
+        every.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "control: without dependsOn both extensions are visible"
+    );
+
+    let narrowed = analyze(dir.path(), &as_str(&flags(&["--external-depends-on", "АРМ=EXT"])));
+    assert_eq!(
+        narrowed.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string(), DEP_MODULE.to_string()],
+        "narrowed to EXT, the other extension's module is gone and the base stays"
+    );
+
+    // The base alone, declared in the file: `dependsOn = []` is not "no key".
+    std::fs::write(
+        dir.path().join("bsl-analyzer.toml"),
+        format!(
+            "[source]\nroot = \"{MAIN}\"\nextensions = [\n  {{ name = \"EXT\", path = \"{EXT}\" }},\n  {{ name = \"DEP\", path = \"{DEP}\" }},\n]\nexternals = [{{ name = \"{EPF_NAME}\", path = \"{EPF}\", dependsOn = [] }}]\n"
+        ),
+    )
+    .unwrap();
+    let base_only = analyze(dir.path(), &[]);
+    assert_eq!(
+        base_only.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string(), DEP_MODULE.to_string(), EXT_MODULE.to_string()],
+        "an empty list leaves the base visible and nothing else"
+    );
+}
+
+#[test]
+fn an_external_under_src_epf_is_discovered_unless_opted_out() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    write_external(
+        dir.path(),
+        "src/epf/АРМ",
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{MAIN_MODULE}.Экспортируемая();\n\t{MISSING_CALL}\nКонецПроцедуры\n"
+        ),
+    );
+    let discovered = analyze(dir.path(), &["--configuration-root", MAIN]);
+    assert_eq!(
+        discovered.unresolved_modules_at(EPF_FORM_MODULE),
+        vec![MISSING_MODULE.to_string()],
+        "found without a declaration, and bound to the owner"
+    );
+    assert_eq!(external_notices(&discovered), 0);
+
+    let opted_out = analyze(dir.path(), &["--configuration-root", MAIN, "--no-externals"]);
+    assert!(
+        opted_out.file_event_at(EPF_FORM_MODULE).is_none(),
+        "control: opted out, the export is not a root and its module is not analyzed"
+    );
+}
+
+#[test]
+fn a_root_declared_under_the_wrong_key_is_refused_by_name() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    write_external(dir.path(), EPF, EPF_NAME, "Процедура П()\nКонецПроцедуры\n");
+
+    let as_extension = analyze_refuses(
+        dir.path(),
+        &["--configuration-root", MAIN, "--extension", &format!("{EPF_NAME}={EPF}")],
+    );
+    // The CLI renders a project error in its Debug form, so the variant name is
+    // what reaches the operator; matching on it keeps the check honest either way.
+    assert!(
+        as_extension.contains("StructuredNotAnExtension"),
+        "an export named as an extension: {as_extension}"
+    );
+
+    let as_external = analyze_refuses(
+        dir.path(),
+        &["--configuration-root", MAIN, "--external", &format!("EXT={EXT}")],
+    );
+    assert!(
+        as_external.contains("ExternalIsAConfiguration"),
+        "an extension named as an external: {as_external}"
+    );
+
+    let inside = analyze_refuses(
+        dir.path(),
+        &["--configuration-root", MAIN, "--external", &format!("CM={MAIN}/CommonModules")],
+    );
+    // `CommonModules/` holds exactly one object XML in this fixture, so it is
+    // refused by what that XML describes, naming the element it found.
+    assert!(
+        inside.contains("ExternalNotAnExternalObject") && inside.contains("CommonModule"),
+        "a directory that is not one export: {inside}"
+    );
+}
+
+#[test]
+fn the_mcp_status_reports_an_external_object_without_its_owner() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    write_external(
+        dir.path(),
+        EPF,
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{MAIN_MODULE}.Экспортируемая();\nКонецПроцедуры\n"
+        ),
+    );
+    let module = path(dir.path(), EPF).join(EPF_FORM_MODULE);
+    let external = format!("{EPF_NAME}={EPF}");
+
+    let (unresolved, standalone) = mcp_probe(dir.path(), &module, &["--external", &external]);
+    assert_eq!(unresolved, vec![MAIN_MODULE.to_string()], "control: alone, the owner is missing");
+    assert!(
+        standalone["standalone_extension"]
+            .as_str()
+            .is_some_and(|s| s.contains("analyzed without an owning configuration")),
+        "status must carry the notice: {standalone}"
+    );
+
+    let (unresolved, bound) =
+        mcp_probe(dir.path(), &module, &["--configuration-root", MAIN, "--external", &external]);
+    assert!(unresolved.is_empty(), "bound, the owner's module resolves: {unresolved:?}");
+    assert!(
+        bound.get("standalone_extension").is_none(),
+        "a bound owning configuration must leave the field out: {bound}"
+    );
+}
+
+/// The `workspace` sweep aggregates the same findings the `file` action flags, so
+/// it must carry the same advisory when the project has no owner for its external
+/// objects: a consumer reading only that envelope must not take the unresolved
+/// calls for real.
+#[test]
+fn the_diagnostics_workspace_action_reports_a_missing_owner_like_the_file_action() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    write_external(
+        dir.path(),
+        EPF,
+        EPF_NAME,
+        &format!(
+            "&НаСервере\nПроцедура ПриСозданииНаСервере(Отказ, СтандартнаяОбработка)\n\t{MAIN_MODULE}.Экспортируемая();\nКонецПроцедуры\n"
+        ),
+    );
+    let module = path(dir.path(), EPF).join(EPF_FORM_MODULE);
+    let external = format!("{EPF_NAME}={EPF}");
+    const REASON: &str = "owning_configuration_missing";
+
+    let names_reason = |flags: &[&str], arguments: Value| -> bool {
+        let mut session = McpSession::start(dir.path(), flags);
+        session.wait_ready("diagnostics");
+        session.diagnostics(arguments).to_string().contains(REASON)
+    };
+    let file = serde_json::json!({"action": "file", "path": module.display().to_string()});
+    let sweep = serde_json::json!({"action": "workspace"});
+
+    let alone: &[&str] = &["--external", &external];
+    assert!(names_reason(alone, file), "control: the file action names the missing owner");
+    assert!(names_reason(alone, sweep.clone()), "the workspace sweep names it too");
+
+    let bound: &[&str] = &["--configuration-root", MAIN, "--external", &external];
+    assert!(!names_reason(bound, sweep), "bound, the sweep carries no such reason");
+}
+
+// Prefixed by the root directory: the base carries a namesake at
+// `DataProcessors/АРМ/Ext/ObjectModule.bsl`, and a bare tail would find it first.
+const EPF_OBJECT_MODULE: &str = "epf/АРМ/Ext/ObjectModule.bsl";
+
+/// A method that exists on no object: the negative control for `UnresolvedMethodCall`.
+const BOGUS_CALL: &str = "\tЭтотОбъект.ЗаведомоНетТакогоМетода();\n";
+
+fn object_module_body(attribute: &str) -> String {
+    format!(
+        "Процедура ОбработкаПроведения() Экспорт\n\tЗначение = ЭтотОбъект.{attribute};\n\tОпечатка = ЭтотОбъект.{attribute}ЛишняяБуква;\nКонецПроцедуры\n"
+    )
+}
+
+/// Which attributes `UnresolvedField` complains about, sorted.
+fn unresolved_fields(run: &Run, tail: &str) -> Vec<String> {
+    let mut names: Vec<String> = run
+        .messages_at(tail, "UnresolvedField")
+        .iter()
+        .filter_map(|m| m.split('\'').nth(1).map(str::to_owned))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn an_external_object_module_knows_its_own_attributes_and_not_a_namesakes() {
+    let dir = workspace();
+    workspace_calling_main_configuration(dir.path());
+    // The base carries an INTERNAL processor of the same name with a different
+    // attribute — the ERP shape, where the export is a copy of a built-in one.
+    let internal = path(dir.path(), MAIN).join("DataProcessors");
+    std::fs::create_dir_all(internal.join("АРМ/Ext")).unwrap();
+    std::fs::write(
+        internal.join("АРМ.xml"),
+        processor_xml("DataProcessor", "АРМ", Some("Внутренний")),
+    )
+    .unwrap();
+    std::fs::write(
+        internal.join("АРМ/Ext/ObjectModule.bsl"),
+        format!(
+            "{}{BOGUS_CALL}КонецПроцедуры\n",
+            object_module_body("Внутренний").trim_end_matches("КонецПроцедуры\n")
+        ),
+    )
+    .unwrap();
+
+    write_external_with_attribute(
+        dir.path(),
+        EPF,
+        "АРМ",
+        "Процедура П()\nКонецПроцедуры\n",
+        Some("Внешний"),
+    );
+    let epf_object = path(dir.path(), EPF).join("АРМ/Ext");
+    std::fs::create_dir_all(&epf_object).unwrap();
+    std::fs::write(
+        epf_object.join("ObjectModule.bsl"),
+        format!(
+            "{}\tЧужой = ЭтотОбъект.Внутренний;\n{BOGUS_CALL}КонецПроцедуры\n",
+            object_module_body("Внешний").trim_end_matches("КонецПроцедуры\n")
+        ),
+    )
+    .unwrap();
+
+    let run = analyze(dir.path(), &["--configuration-root", MAIN, "--external", "АРМ=a/b/epf"]);
+
+    // The internal module is the equivalence control: same shape, same verdicts.
+    assert_eq!(
+        unresolved_fields(&run, "DataProcessors/АРМ/Ext/ObjectModule.bsl"),
+        vec!["ВнутреннийЛишняяБуква".to_string()],
+        "control: the internal processor resolves its attribute and flags the typo"
+    );
+    assert_eq!(
+        unresolved_fields(&run, EPF_OBJECT_MODULE),
+        vec!["ВнешнийЛишняяБуква".to_string(), "Внутренний".to_string()],
+        "the external object owns Внешний, flags its typo, and does not borrow the \
+         namesake's Внутренний"
+    );
+
+    // A call that exists nowhere must be flagged on both: the external kind has
+    // no manager collection to name the receiver by, and that must not turn
+    // into silence.
+    let bogus_calls = |tail: &str| run.messages_at(tail, "UnresolvedMethodCall");
+    assert!(
+        bogus_calls("DataProcessors/АРМ/Ext/ObjectModule.bsl")
+            .iter()
+            .any(|m| m.contains("ЗаведомоНетТакогоМетода")),
+        "control: the internal processor flags the bogus call"
+    );
+    let external_calls = bogus_calls(EPF_OBJECT_MODULE);
+    assert!(
+        external_calls
+            .iter()
+            .any(|m| m.contains("ЗаведомоНетТакогоМетода") && m.contains("ВнешняяОбработка.АРМ")),
+        "the external object flags the bogus call and names itself: {external_calls:?}"
     );
 }

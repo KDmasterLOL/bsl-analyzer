@@ -26,6 +26,16 @@ pub enum MdoType {
     Constant,
     DataProcessor,
     Report,
+    /// An external data processor (`ВнешняяОбработка`): an EPF export analyzed as
+    /// its own source root. Like the reference-less kinds below it never surfaces
+    /// in [`MdoType::all`] or as a manager collection — `ВнешниеОбработки` is the
+    /// platform's own manager (`Создать`, `Подключить`), not a collection of
+    /// named objects — but unlike them it is a data-bearing object with
+    /// attributes, tabular sections, forms and an object type of its own.
+    ExternalDataProcessor,
+    /// An external report (`ВнешнийОтчет`): the ERF counterpart of
+    /// [`MdoType::ExternalDataProcessor`].
+    ExternalReport,
     CommonModule,
     /// An event subscription (`ПодпискаНаСобытие`). Unlike the data-bearing objects
     /// above it has no manager, ref type, or attributes — it only binds a platform
@@ -81,6 +91,12 @@ impl FromStr for MdoType {
             }
             "константа" | "constant" => Ok(Self::Constant),
             "обработка" | "dataprocessor" => Ok(Self::DataProcessor),
+            "внешняяобработка" | "externaldataprocessor" => {
+                Ok(Self::ExternalDataProcessor)
+            }
+            "внешнийотчет" | "внешнийотчёт" | "externalreport" => {
+                Ok(Self::ExternalReport)
+            }
             "отчет" | "report" => Ok(Self::Report),
             "общиймодуль" | "commonmodule" => Ok(Self::CommonModule),
             "подписканасобытие" | "eventsubscription" => {
@@ -126,6 +142,8 @@ impl MdoType {
             Self::Constant => "Константа",
             Self::DataProcessor => "Обработка",
             Self::Report => "Отчет",
+            Self::ExternalDataProcessor => "ВнешняяОбработка",
+            Self::ExternalReport => "ВнешнийОтчет",
             Self::CommonModule => "ОбщийМодуль",
             Self::EventSubscription => "ПодпискаНаСобытие",
             Self::Subsystem => "Подсистема",
@@ -152,6 +170,8 @@ impl MdoType {
             Self::Constant => "Constant",
             Self::DataProcessor => "DataProcessor",
             Self::Report => "Report",
+            Self::ExternalDataProcessor => "ExternalDataProcessor",
+            Self::ExternalReport => "ExternalReport",
             Self::CommonModule => "CommonModule",
             Self::EventSubscription => "EventSubscription",
             Self::Subsystem => "Subsystem",
@@ -185,9 +205,12 @@ impl MdoType {
             Self::Constant => "Константы",
             Self::DataProcessor => "Обработки",
             Self::Report => "Отчеты",
-            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => {
-                return None
-            }
+            Self::ExternalDataProcessor
+            | Self::ExternalReport
+            | Self::CommonModule
+            | Self::EventSubscription
+            | Self::Subsystem
+            | Self::Role => return None,
         })
     }
 
@@ -301,7 +324,12 @@ impl MdoType {
             Self::Constant => Some("ConstantManager"),
             Self::DataProcessor => Some("DataProcessorManager"),
             Self::Report => Some("ReportManager"),
-            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => None,
+            Self::ExternalDataProcessor
+            | Self::ExternalReport
+            | Self::CommonModule
+            | Self::EventSubscription
+            | Self::Subsystem
+            | Self::Role => None,
         }
     }
 
@@ -324,7 +352,12 @@ impl MdoType {
             Self::Constant => Some("КонстантаМенеджер"),
             Self::DataProcessor => Some("ОбработкаМенеджер"),
             Self::Report => Some("ОтчетМенеджер"),
-            Self::CommonModule | Self::EventSubscription | Self::Subsystem | Self::Role => None,
+            Self::ExternalDataProcessor
+            | Self::ExternalReport
+            | Self::CommonModule
+            | Self::EventSubscription
+            | Self::Subsystem
+            | Self::Role => None,
         }
     }
 

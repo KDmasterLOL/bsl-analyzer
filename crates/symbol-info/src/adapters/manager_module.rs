@@ -30,7 +30,7 @@ pub(super) fn build(
     }
 
     let item_tree = db.item_tree(module_file_id);
-    let item = item_tree.top_level_items().get(method_symbol.id.local_id as usize)?;
+    let item = item_tree.item_of(method_symbol.id.local_id)?;
     let docs = db.method_docs(method_symbol.id);
     let docs_ref = docs.as_deref();
 

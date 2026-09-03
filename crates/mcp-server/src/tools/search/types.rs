@@ -1,4 +1,5 @@
 use bsl_search::{SearchError, SearchHit, Snapshot};
+use rmcp::ErrorData as McpError;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
@@ -176,15 +177,59 @@ impl SemanticUnavailable {
     }
 }
 
-/// Why [`super::try_acquire_engine`] could not hand back the engine guard. The two cases need
-/// different caller responses, so they stay distinct rather than collapsing into one `None`:
-/// a poisoned lock is a real failure (retrying is futile), a timeout is a stall (retrying or
-/// degrading to the baseline is reasonable).
-pub(super) enum AcquireFailure {
+/// How a search body ends short of an answer.
+///
+/// Cancellation is a VALUE that flows back through `Result`, never an unwind: the engine
+/// guard is a `std::sync::Mutex` guard, and unwinding through it would poison the lock for
+/// every later search. A cancelled body returns `Cancelled` from its next cooperative point
+/// and releases whatever it held by ordinary return.
+///
+/// Kept apart from [`McpError`] on purpose — an error is rendered to the client, while a
+/// cancelled call renders nothing (see `docs/mcp/LOCATION_CONTRACT.md`).
+#[derive(Debug)]
+pub(crate) enum SearchFailure {
+    /// The client cancelled the request (or the transport went away).
+    Cancelled,
+    /// A real failure, rendered to the client as-is.
+    Error(McpError),
+}
+
+impl From<McpError> for SearchFailure {
+    fn from(error: McpError) -> Self {
+        Self::Error(error)
+    }
+}
+
+impl From<super::wait::Withdrawn> for SearchFailure {
+    fn from(_: super::wait::Withdrawn) -> Self {
+        Self::Cancelled
+    }
+}
+
+impl SearchFailure {
+    /// The error of a call that was not cancelled — for tests that drive a search with a
+    /// token they never cancel and assert on the error it produced.
+    #[cfg(test)]
+    pub(crate) fn expect_error(self) -> McpError {
+        match self {
+            Self::Error(error) => error,
+            Self::Cancelled => panic!("the call was cancelled, but the test never cancelled it"),
+        }
+    }
+}
+
+/// Why [`super::try_acquire_engine`] could not hand back the engine
+/// guard. The cases need different caller responses, so they stay distinct rather than
+/// collapsing into one `None`: a poisoned lock is a real failure (retrying is futile), a
+/// timeout is a stall (retrying or degrading to the baseline is reasonable), and a cancelled
+/// wait produces no answer at all.
+pub(crate) enum AcquireFailure {
     /// A holder panicked while holding the lock; waiting cannot recover it.
     Poisoned,
     /// The lock stayed held past the safety cap — a genuine stall, not ordinary contention.
     TimedOut,
+    /// The request was cancelled while waiting; nothing was acquired.
+    Cancelled,
 }
 
 #[derive(Debug)]
@@ -192,6 +237,10 @@ pub(super) enum DirectResult {
     Found(Vec<SearchHit>),
     Unavailable,
     Terminal(SearchError),
+    /// The request was cancelled while waiting on the baseline actor. Its own variant, not
+    /// `Unavailable`: an unavailable baseline is answered with a fallback or a retry
+    /// envelope, and a cancelled call must produce neither.
+    Cancelled,
 }
 
 /// Outcome of the lock-free baseline readiness check that runs before the query embed.
@@ -202,6 +251,8 @@ pub(super) enum DirectResolve {
     Unavailable,
     /// A terminal error from the baseline actor (network/auth failure that retrying cannot fix).
     Terminal(SearchError),
+    /// The request was cancelled while waiting on the baseline actor.
+    Cancelled,
 }
 
 pub(super) fn direct_search_initial_window(limit: usize) -> usize {

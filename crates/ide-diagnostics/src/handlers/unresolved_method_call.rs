@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Name, UnresolvedMethodKind};
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -22,9 +23,9 @@ pub fn from_hir(
     receiver_name: &Name,
     method_name: &Name,
     kind: UnresolvedMethodKind,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let message = match kind {
         UnresolvedMethodKind::MethodNotFound => {
             format!("Метод '{}' не найден у '{}'", method_name.as_str(), receiver_name.as_str())

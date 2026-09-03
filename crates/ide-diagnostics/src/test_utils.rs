@@ -186,6 +186,52 @@ where
     check_fn(&ctx)
 }
 
+/// Run one body check over every body of `code` (methods and module code),
+/// lifted into the file — the per-body counterpart of [`check_ast_diagnostic`].
+pub fn check_body_diagnostic<F>(code: &str, check: F) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::BodyContext, &mut Vec<Diagnostic<hir::LocalRange>>),
+{
+    check_body_diagnostic_with_config(code, crate::DiagnosticsConfig::all_enabled(), check)
+}
+
+pub fn check_body_diagnostic_with_config<F>(
+    code: &str,
+    config: crate::DiagnosticsConfig,
+    check: F,
+) -> Vec<Diagnostic>
+where
+    F: Fn(&crate::BodyContext, &mut Vec<Diagnostic<hir::LocalRange>>),
+{
+    let (db, file_id) = create_test_db(code);
+    let provider = ide_db::SalsaProvider::new(&db, None);
+    let ctx = crate::DiagnosticsContext::new(&config, file_id, &provider);
+    let mut diagnostics =
+        crate::body::for_each_body_context(&ctx, |body_ctx, acc| check(body_ctx, acc));
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+    diagnostics
+}
+
+/// One code's findings from the production pipeline — the path a handler
+/// really runs on (single pass, body memo, file collector), not a driver
+/// the test picks for it.
+pub fn check_diagnostics_for(code: &str, diagnostic: crate::DiagnosticCode) -> Vec<Diagnostic> {
+    check_diagnostics_for_with_config(code, crate::DiagnosticsConfig::all_enabled(), diagnostic)
+}
+
+pub fn check_diagnostics_for_with_config(
+    code: &str,
+    config: crate::DiagnosticsConfig,
+    diagnostic: crate::DiagnosticCode,
+) -> Vec<Diagnostic> {
+    let mut diagnostics: Vec<Diagnostic> = check_file_diagnostics_with_config(code, config)
+        .into_iter()
+        .filter(|d| d.code == diagnostic)
+        .collect();
+    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+    diagnostics
+}
+
 pub fn check_hir_diagnostic(code: &str) -> Vec<Diagnostic> {
     check_ast_diagnostic(code, crate::diagnostics)
 }
@@ -585,26 +631,6 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         ))
     }
 
-    fn module_liveness_analysis(
-        &self,
-        file_id: vfs::FileId,
-    ) -> std::sync::Arc<hir::dataflow::liveness::ModuleLiveness> {
-        use ide_db::base_db::FileIdInput;
-        use ide_db::RootDatabase;
-        let input = FileIdInput::new(&self.db, file_id);
-        self.db.module_liveness_analysis(input)
-    }
-
-    fn module_reaching_definitions(
-        &self,
-        file_id: vfs::FileId,
-    ) -> std::sync::Arc<hir::dataflow::reaching_defs::ModuleReachingDefs> {
-        use ide_db::base_db::FileIdInput;
-        use ide_db::RootDatabase;
-        let input = FileIdInput::new(&self.db, file_id);
-        <ide_db::RootDatabaseImpl as RootDatabase>::module_reaching_definitions(&self.db, input)
-    }
-
     fn reaching_definitions(
         &self,
         method_id: hir::MethodId,
@@ -658,21 +684,72 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         self.db.variable_docs(variable_id)
     }
 
-    fn module_cfgs(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::cfg::ModuleCfgs> {
-        use ide_db::base_db::FileIdInput;
-        use ide_db::RootDatabase;
-        let input = FileIdInput::new(&self.db, file_id);
-        self.db.module_cfgs(input)
+    fn module_interface(&self, module_id: hir::ModuleId) -> std::sync::Arc<hir::ModuleInterface> {
+        use hir::DefDatabase;
+        self.db.module_interface(module_id)
     }
 
-    fn module_path_terminates(
+    fn method_syntax(&self, method_id: hir::MethodId) -> Option<syntax::SyntaxNode> {
+        let input = hir::MethodIdInput::new(&self.db, method_id);
+        hir::method_syntax_query(&self.db, input).as_ref().map(|syntax| syntax.detached_root())
+    }
+
+    fn infer_owner(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<hir::dataflow::path_terminates::ModulePathTerminates> {
-        use ide_db::base_db::FileIdInput;
+        owner: hir::DefWithBodyId,
+    ) -> hir::InferOwnerResult {
+        hir::infer_owner(&self.db, file_id, owner)
+    }
+
+    fn arg_diagnostics_of(
+        &self,
+        file_id: vfs::FileId,
+        owner: hir::DefWithBodyId,
+    ) -> std::sync::Arc<Vec<hir::InferenceDiagnostic>> {
+        use hir::HirDatabase;
+        match owner {
+            hir::DefWithBodyId::Method(local_id) => {
+                let method_id = hir::MethodId { module: hir::ModuleId::new(file_id), local_id };
+                let input = hir::MethodIdInput::new(&self.db, method_id);
+                self.db.method_arg_diagnostics(input)
+            }
+            hir::DefWithBodyId::ModuleCode => self.db.module_code_arg_diagnostics(file_id),
+        }
+    }
+
+    fn module_recursive_methods(
+        &self,
+        file_id: vfs::FileId,
+    ) -> std::sync::Arc<rustc_hash::FxHashSet<hir::MethodKey>> {
+        let input = ide_db::base_db::FileIdInput::new(&self.db, file_id);
+        ide_db::queries::module_recursive_methods_query(&self.db, input)
+    }
+
+    fn module_level_cfg(&self, file_id: vfs::FileId) -> std::sync::Arc<hir::cfg::ControlFlowGraph> {
         use ide_db::RootDatabase;
-        let input = FileIdInput::new(&self.db, file_id);
-        self.db.module_path_terminates(input)
+        self.db.module_level_cfg(hir::ModuleId::new(file_id))
+    }
+
+    fn module_code_reaching_definitions(
+        &self,
+        file_id: vfs::FileId,
+    ) -> Option<std::sync::Arc<hir::dataflow::reaching_defs::ReachingDefsResult>> {
+        use hir::HirDatabase;
+        self.db.module_code_reaching_definitions(file_id)
+    }
+
+    fn method_cfg(&self, method_id: hir::MethodId) -> std::sync::Arc<hir::cfg::ControlFlowGraph> {
+        use ide_db::RootDatabase;
+        self.db.method_cfg(method_id)
+    }
+
+    fn method_path_terminates(
+        &self,
+        method_id: hir::MethodId,
+    ) -> Option<std::sync::Arc<hir::dataflow::path_terminates::PathTerminatesResult>> {
+        use ide_db::RootDatabase;
+        self.db.method_path_terminates(method_id)
     }
 
     fn file_external_refs(
@@ -681,15 +758,6 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
     ) -> std::sync::Arc<Vec<hir::ExternalRef>> {
         use hir::DefDatabase;
         self.db.file_external_refs(module_id)
-    }
-
-    fn module_level_liveness_analysis(
-        &self,
-        module_id: hir::ModuleId,
-    ) -> Option<std::sync::Arc<hir::dataflow::DataflowResult<hir::dataflow::liveness::Liveness>>>
-    {
-        use ide_db::RootDatabase;
-        self.db.module_level_liveness_analysis(module_id)
     }
 
     fn resolve_vfs_path(
@@ -713,13 +781,28 @@ impl ide_db::provider::AnalysisProvider for MetadataTestProvider {
         ide_db::effects::method_effect_summary_query(&self.db, method_input)
     }
 
-    fn module_security_state(
+    fn method_security_state(
+        &self,
+        method: hir::MethodId,
+    ) -> Option<
+        std::sync::Arc<
+            hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>,
+        >,
+    > {
+        use ide_db::RootDatabase;
+        self.db.method_security_state(method)
+    }
+
+    fn module_code_security_state(
         &self,
         file_id: vfs::FileId,
-    ) -> std::sync::Arc<ide_db::effects::ModuleSecurityState> {
-        use ide_db::base_db::FileIdInput;
-        let input = FileIdInput::new(&self.db, file_id);
-        ide_db::effects::module_security_state_query(&self.db, input)
+    ) -> Option<
+        std::sync::Arc<
+            hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>,
+        >,
+    > {
+        use ide_db::RootDatabase;
+        self.db.module_code_security_state(file_id)
     }
 }
 

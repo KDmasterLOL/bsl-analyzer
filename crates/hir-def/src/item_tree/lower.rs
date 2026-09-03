@@ -1,6 +1,7 @@
 use crate::{
     item_tree::{
-        Annotation, AnnotationKind, Function, ItemTree, ModItem, Param, Procedure, Variable,
+        Annotation, AnnotationKind, Function, ItemTree, MethodKeys, ModItem, Param, Procedure,
+        Variable,
     },
     Name,
 };
@@ -15,6 +16,7 @@ use vfs::FileId;
 
 pub(super) struct Ctx {
     tree: ItemTree,
+    keys: MethodKeys,
 }
 
 impl Ctx {
@@ -30,7 +32,7 @@ impl Ctx {
             }
         };
 
-        let mut ctx = Ctx { tree: ItemTree::default() };
+        let mut ctx = Ctx { tree: ItemTree::default(), keys: MethodKeys::default() };
 
         ctx.lower_module_items(&file);
 
@@ -87,7 +89,9 @@ impl Ctx {
 
         trace!(name = %name, is_export, "lowering procedure");
 
+        let key = self.keys.next(&name);
         let idx = self.tree.procedures.alloc(Procedure {
+            key,
             name,
             is_export,
             params,
@@ -99,6 +103,7 @@ impl Ctx {
         });
 
         self.tree.top_level.push(ModItem::Procedure(idx));
+        self.tree.methods_by_key.insert(key, ModItem::Procedure(idx));
     }
 
     fn lower_function(&mut self, func: &ast::FunctionDef) {
@@ -118,7 +123,9 @@ impl Ctx {
 
         trace!(name = %name, is_export, "lowering function");
 
+        let key = self.keys.next(&name);
         let idx = self.tree.functions.alloc(Function {
+            key,
             name,
             is_export,
             params,
@@ -130,6 +137,7 @@ impl Ctx {
         });
 
         self.tree.top_level.push(ModItem::Function(idx));
+        self.tree.methods_by_key.insert(key, ModItem::Function(idx));
     }
 
     fn lower_variable(&mut self, var: &ast::VarDef) {
@@ -282,7 +290,7 @@ fn calculate_params_content_range(param_list: &ast::ParamList) -> Option<text_si
 }
 
 pub fn lower_module_items_into(file: &ast::SourceFile, tree: &mut ItemTree) {
-    let mut ctx = Ctx { tree: std::mem::take(tree) };
+    let mut ctx = Ctx { tree: std::mem::take(tree), keys: MethodKeys::default() };
     ctx.lower_module_items(file);
     *tree = ctx.tree;
 }
@@ -342,6 +350,22 @@ mod tests {
 
         fn file_is_unread(&self, file_id: FileId) -> bool {
             self.files.file_is_unread(self, file_id)
+        }
+
+        fn parse_snapshot(&self, file_id: FileId) -> Option<base_db::ParseSnapshot> {
+            self.files.parse_snapshot(file_id)
+        }
+
+        fn store_parse_snapshot(&self, file_id: FileId, snapshot: base_db::ParseSnapshot) {
+            self.files.store_parse_snapshot(file_id, snapshot);
+        }
+
+        fn count_parse(&self, outcome: base_db::ParseOutcome) {
+            self.files.count_parse(outcome);
+        }
+
+        fn parse_stats(&self) -> base_db::ParseStats {
+            self.files.parse_stats()
         }
 
         fn source_root_input(

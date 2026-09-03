@@ -1,7 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Body, Expr, ExprId, IdConversion, ModItem, Name, Stmt, StmtId};
+use hir::{Body, Expr, ExprId, IdConversion, Name, Stmt, StmtId};
 use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -60,37 +60,22 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
 
     let mut diagnostics = Vec::new();
 
-    let mut local_id = 0u32;
-    for item in item_tree.top_level_items().iter() {
-        match item {
-            ModItem::Procedure(proc_idx) => {
-                let proc = item_tree.procedure(*proc_idx);
-
-                if !is_monitored_procedure(&proc.name) {
-                    local_id += 1;
-                    continue;
-                }
-
-                if let Some(body) = module_bodies.body(local_id) {
-                    if !has_guard_pattern(body, find_first, &guard_wrappers) {
-                        diagnostics.push(Diagnostic {
-                            code: DiagnosticCode::DataExchangeLoading,
-                            message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
-                                      Необходимо добавить проверку для предотвращения выполнения логики при обмене данными"
-                                .to_string(),
-                            severity: ctx.severity(code),
-                            range: proc.name_range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
-                    }
-                }
-                local_id += 1;
-            }
-            ModItem::Function(_) => {
-                local_id += 1;
-            }
-            ModItem::Variable(_) => {}
+    for proc in item_tree.methods().filter(|m| !m.is_function()) {
+        if !is_monitored_procedure(proc.name()) {
+            continue;
+        }
+        let Some(body) = module_bodies.body(proc.key()) else { continue };
+        if !has_guard_pattern(body, find_first, &guard_wrappers) {
+            diagnostics.push(Diagnostic {
+                code: DiagnosticCode::DataExchangeLoading,
+                message: "Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. \
+                          Необходимо добавить проверку для предотвращения выполнения логики при обмене данными"
+                    .to_string(),
+                severity: ctx.severity(code),
+                range: proc.name_range(),
+                tags: ctx.tags(code),
+                fixes: vec![],
+            });
         }
     }
 
@@ -276,6 +261,51 @@ mod tests {
               severity: Critical"#]].assert_eq(&format_diags(code, &diagnostics));
         assert_eq!(diagnostics[0].code, DiagnosticCode::DataExchangeLoading);
         assert_eq!(diagnostics[0].severity, crate::Severity::Critical);
+    }
+
+    /// A module variable above the handler must not hide it: the bodies are
+    /// keyed by every top-level item, variables included.
+    #[test]
+    fn top_level_variable_above_handler_does_not_hide_missing_guard() {
+        let code = r#"
+Перем КэшНастроек;
+
+Процедура ПередЗаписью(Отказ)
+    ВыполнитьЧтоТо();
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DataExchangeLoading @ 4:11..4:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    /// With a variable above, the unguarded handler must be reported and the
+    /// guarded one next to it must not inherit its neighbour's body.
+    #[test]
+    fn top_level_variable_above_handlers_does_not_misattribute_bodies() {
+        let code = r#"
+Перем КэшНастроек;
+
+Процедура ПередЗаписью(Отказ)
+    ВыполнитьЧтоТо();
+КонецПроцедуры
+
+Процедура ПриЗаписи(Отказ)
+    Если ОбменДанными.Загрузка Тогда
+        Возврат;
+    КонецЕсли;
+    ВыполнитьЧтоТо();
+КонецПроцедуры
+"#;
+        let diagnostics = check_ast_diagnostic(code, check);
+        expect![[r#"
+            DataExchangeLoading @ 4:11..4:23
+              message: Отсутствует проверка условия ОбменДанными.Загрузка в обработчике события. Необходимо добавить проверку для предотвращения выполнения логики при обмене данными
+              severity: Critical"#]]
+        .assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]

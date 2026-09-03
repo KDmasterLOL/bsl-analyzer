@@ -38,7 +38,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let summary = ctx.call_summary(hir::ModuleId::new(ctx.file_id));
     let mut diagnostics = Vec::new();
 
-    let client_method_ids: FxHashSet<u32> = symbol_tree
+    let client_method_ids: FxHashSet<hir::MethodKey> = symbol_tree
         .methods()
         .filter(|m| m.annotations.iter().any(|ann| ann.kind == CLIENT_ANNOTATION))
         .map(|m| m.id.local_id)
@@ -75,7 +75,7 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
             continue;
         };
 
-        let body = &lower_result.body;
+        let body = lower_result.body();
         let assigned_params = collect_assigned_params(body);
 
         for (param_idx, param) in by_ref_params {
@@ -85,32 +85,11 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
                 continue;
             }
 
-            let item_tree = ctx.item_tree();
-            let mut param_range = None;
-
-            for item in item_tree.top_level_items() {
-                match item {
-                    hir::ModItem::Procedure(proc_idx) => {
-                        let proc = item_tree.procedure(*proc_idx);
-                        if proc.name == method.name {
-                            if let Some(param_info) = proc.params.get(param_idx) {
-                                param_range = Some(param_info.name_range);
-                            }
-                            break;
-                        }
-                    }
-                    hir::ModItem::Function(func_idx) => {
-                        let func = item_tree.function(*func_idx);
-                        if func.name == method.name {
-                            if let Some(param_info) = func.params.get(param_idx) {
-                                param_range = Some(param_info.name_range);
-                            }
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            let param_range = ctx
+                .item_tree()
+                .method(local_id)
+                .and_then(|item| item.params().get(param_idx))
+                .map(|param_info| param_info.name_range);
 
             if let Some(range) = param_range {
                 diagnostics.push(Diagnostic {

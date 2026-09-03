@@ -143,13 +143,14 @@ struct IndexDigest {
 }
 
 fn digest(result: &CallHierarchyIndexBuildResult) -> IndexDigest {
+    let key = hir::MethodKey::first;
     let methods = [
-        MethodId { module: ModuleId::new(FileId(0)), local_id: 0 },
-        MethodId { module: ModuleId::new(FileId(0)), local_id: 1 },
-        MethodId { module: ModuleId::new(FileId(1)), local_id: 0 },
-        MethodId { module: ModuleId::new(FileId(1)), local_id: 1 },
-        MethodId { module: ModuleId::new(FileId(2)), local_id: 0 },
-        MethodId { module: ModuleId::new(FileId(2)), local_id: 1 },
+        MethodId { module: ModuleId::new(FileId(0)), local_id: key("Начать") },
+        MethodId { module: ModuleId::new(FileId(0)), local_id: key("Внутренний") },
+        MethodId { module: ModuleId::new(FileId(1)), local_id: key("Продолжить") },
+        MethodId { module: ModuleId::new(FileId(1)), local_id: key("Завершить") },
+        MethodId { module: ModuleId::new(FileId(2)), local_id: key("Закрыть") },
+        MethodId { module: ModuleId::new(FileId(2)), local_id: key("Очистить") },
     ];
     let modules = [ModuleId::new(FileId(0)), ModuleId::new(FileId(1)), ModuleId::new(FileId(2))];
 

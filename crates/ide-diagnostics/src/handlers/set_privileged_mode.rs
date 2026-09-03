@@ -1,9 +1,9 @@
-use std::sync::Arc;
-
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 use hir::dataflow::security_state::{open_events, Category};
+use hir::BodySourceMap;
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::SecurityHotspot,
@@ -19,47 +19,24 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::SetPrivilegedMode;
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
-
-    let module_security: Arc<ide_db::effects::ModuleSecurityState> = ctx.module_security_state();
-    if module_security.is_empty() {
-        return Vec::new();
-    }
-    let module_bodies = ctx.module_bodies();
-
-    let mut diagnostics = Vec::new();
-    for (local_id, body) in module_bodies.iter_bodies() {
-        let Some(result) = module_security.get(local_id) else { continue };
-        let Some(source_map) = module_bodies.source_map(local_id) else { continue };
-        emit_for_result(&result, body, source_map, code, ctx, &mut diagnostics);
-    }
-    if let Some(result) = module_security.module_level() {
-        if let Some(lower_result) = module_bodies.module_code_result() {
-            emit_for_result(
-                &result,
-                &lower_result.body,
-                &lower_result.source_map,
-                code,
-                ctx,
-                &mut diagnostics,
-            );
-        }
-    }
-    diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
-    diagnostics
+    let Some(result) = ctx.security_state() else {
+        return;
+    };
+    emit_for_result(&result, ctx.body(), ctx.source_map(), code, ctx, acc);
 }
 
 fn emit_for_result(
     result: &hir::dataflow::DataflowResult<hir::dataflow::security_state::SecurityModeState>,
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    out: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    out: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for event in open_events(result, body) {
         if !matches!(event.category, Category::PrivilegedMode) {

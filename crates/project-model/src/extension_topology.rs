@@ -18,10 +18,13 @@ use std::path::{Path, PathBuf};
 
 use stdx::case::fold_lower_per_char;
 
-/// Bumped whenever the fingerprint recipe or the normalized model's semantics
-/// change, so persisted identities derived from a fingerprint can never match
-/// across incompatible formats.
-pub const TOPOLOGY_FORMAT_VERSION: u32 = 1;
+/// Bumped whenever a digest of the new recipe could equal a digest of an
+/// older one for a topology with different semantics, so persisted identities
+/// derived from a fingerprint can never match across incompatible formats. A
+/// recipe change confined to nodes whose own bytes change with it (the
+/// visibility mode of external objects) needs no bump: every such digest is
+/// new, and the unchanged nodes still digest as before.
+pub const TOPOLOGY_FORMAT_VERSION: u32 = 2;
 
 /// Index of a node inside [`ExtensionTopology`]; stable for the lifetime of
 /// the topology value it came from.
@@ -34,32 +37,72 @@ impl NodeId {
     }
 }
 
+pub use bsl_metadata::ExternalObjectKind;
+
+/// The kind of a topology node. An extension takes part in `dependsOn` edges and
+/// overlays the base for its dependents; an external object is a leaf: it may
+/// depend on extensions, which narrows what it sees, but nothing depends on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeKind {
+    Extension,
+    External(ExternalObjectKind),
+}
+
+impl NodeKind {
+    pub fn is_external(self) -> bool {
+        matches!(self, Self::External(_))
+    }
+
+    /// One byte per kind for the fingerprint; the kind is part of the node's
+    /// identity because the same path declared as an extension and as an
+    /// external object composes differently.
+    fn fingerprint_tag(self) -> u8 {
+        match self {
+            Self::Extension => 0,
+            Self::External(ExternalObjectKind::DataProcessor) => 1,
+            Self::External(ExternalObjectKind::Report) => 2,
+        }
+    }
+}
+
 /// Raw material for one extension node, produced by the config resolver.
 #[derive(Debug, Clone)]
 pub struct ExtensionNodeSpec {
+    pub kind: NodeKind,
     pub name: String,
     /// Path as configured/expanded — what consumers watch and scan.
     pub path: PathBuf,
     /// Canonicalized identity path — what dedup and the fingerprint use.
     pub canonical_path: PathBuf,
-    /// Direct dependency names as declared (`dependsOn`).
-    pub depends_on: Vec<String>,
-    /// Structured entries get strict validation (duplicate names are errors);
-    /// legacy string entries keep their historical lenient semantics.
+    /// Direct dependency names as declared (`dependsOn`); `None` when the
+    /// declaration carried no such key. For an extension the two spell the same
+    /// graph; for an external object they do not: without the key it sees every
+    /// extension, with it exactly the declared closure — an empty one is the base
+    /// alone.
+    pub depends_on: Option<Vec<String>>,
+    /// The name is a user-visible identity, unique among roots: duplicate names
+    /// are errors and the node may own a baseline partition. Legacy string
+    /// entries are not — they keep their historical lenient semantics.
     pub structured: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ExtensionNode {
+    kind: NodeKind,
     name: String,
     path: PathBuf,
     canonical_path: PathBuf,
     depends_on: Vec<NodeId>,
     closure: Vec<NodeId>,
+    sees_every_extension: bool,
     structured: bool,
 }
 
 impl ExtensionNode {
+    pub fn kind(&self) -> NodeKind {
+        self.kind
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -78,9 +121,19 @@ impl ExtensionNode {
 
     /// Ordered transitive dependencies (global topological order, diamond
     /// dependencies included once). The node itself is *not* part of its
-    /// closure: visibility composition appends it last.
+    /// closure: visibility composition appends it last. For an external object
+    /// declared without `dependsOn` this is every extension, in topological
+    /// order: the object runs in the infobase the project describes, extensions
+    /// attached.
     pub fn closure(&self) -> &[NodeId] {
         &self.closure
+    }
+
+    /// True for an external object whose closure is every extension because
+    /// it declared no `dependsOn`, as opposed to one that narrowed its view.
+    /// Always false for an extension.
+    pub fn sees_every_extension(&self) -> bool {
+        self.sees_every_extension
     }
 
     pub fn is_structured(&self) -> bool {
@@ -151,6 +204,56 @@ pub enum TopologyError {
         name: String,
         path: PathBuf,
     },
+    /// A `dependsOn` edge pointing at an external object.
+    ExternalInDependency {
+        from: String,
+        name: String,
+    },
+    ExternalPathMissing {
+        name: String,
+        path: PathBuf,
+    },
+    /// The declared external root carries `Configuration.xml`: it is a
+    /// configuration or an extension declared under the wrong key.
+    ExternalIsAConfiguration {
+        name: String,
+        path: PathBuf,
+    },
+    ExternalNoObjectXml {
+        name: String,
+        path: PathBuf,
+    },
+    ExternalAmbiguousObjectXml {
+        name: String,
+        path: PathBuf,
+    },
+    /// The object XML is there but its `MetaDataObject` carries no element at
+    /// all: an export truncated before its object.
+    ExternalObjectElementMissing {
+        name: String,
+        path: PathBuf,
+    },
+    /// The object XML is there but its element is not an external object's.
+    ExternalNotAnExternalObject {
+        name: String,
+        path: PathBuf,
+        tag: String,
+    },
+    /// `<Name>.xml` is there but the `<Name>/` directory the export keeps its
+    /// modules, forms and templates in is not: a copy that stopped halfway.
+    ExternalObjectDirMissing {
+        name: String,
+        path: PathBuf,
+        object: String,
+    },
+    /// Two external roots export one object: every surface keyed by
+    /// `(MdoType, name)` — the graph, the MCP name dictionary — would keep only
+    /// the first, so the pair is refused by name instead of losing one silently.
+    ExternalObjectNameDuplicate {
+        object: String,
+        first: String,
+        second: String,
+    },
 }
 
 impl fmt::Display for TopologyError {
@@ -159,9 +262,11 @@ impl fmt::Display for TopologyError {
             TopologyError::EmptyName => {
                 write!(f, "extension entry has an empty name")
             }
-            TopologyError::DuplicateName { name } => {
-                write!(f, "duplicate extension name: {name}")
-            }
+            TopologyError::DuplicateName { name } => write!(
+                f,
+                "duplicate root name: {name}; extensions and external objects share one \
+                 namespace"
+            ),
             TopologyError::DuplicatePath { path, first, second } => {
                 write!(
                     f,
@@ -170,19 +275,16 @@ impl fmt::Display for TopologyError {
                 )
             }
             TopologyError::UnknownDependency { from, name } => {
-                write!(f, "extension '{from}' depends on unknown extension '{name}'")
+                write!(f, "'{from}' depends on unknown extension '{name}'")
             }
             TopologyError::SelfReference { name } => {
-                write!(f, "extension '{name}' depends on itself")
+                write!(f, "'{name}' depends on itself")
             }
             TopologyError::DuplicateEdge { from, name } => {
-                write!(f, "extension '{from}' declares a duplicate dependency on '{name}'")
+                write!(f, "'{from}' declares a duplicate dependency on '{name}'")
             }
             TopologyError::AmbiguousDependency { from, name } => {
-                write!(
-                    f,
-                    "extension '{from}' depends on '{name}', which several extensions share as a name"
-                )
+                write!(f, "'{from}' depends on '{name}', which several extensions share as a name")
             }
             TopologyError::Cycle { path } => {
                 write!(f, "extension dependency cycle: {}", path.join(" -> "))
@@ -199,6 +301,55 @@ impl fmt::Display for TopologyError {
             TopologyError::StructuredNotAnExtension { name, path } => {
                 write!(f, "extension '{name}': no Configuration.xml under {}", path.display())
             }
+            TopologyError::ExternalInDependency { from, name } => write!(
+                f,
+                "'{from}' depends on '{name}', but an external data processor or report \
+                 is seen by none: it may depend on extensions, nothing may depend on it"
+            ),
+            TopologyError::ExternalPathMissing { name, path } => {
+                write!(f, "external '{name}': no directory at {}", path.display())
+            }
+            TopologyError::ExternalIsAConfiguration { name, path } => write!(
+                f,
+                "external '{name}': {} carries Configuration.xml, so it is a configuration \
+                 or an extension; declare it under [source].root or [source].extensions",
+                path.display()
+            ),
+            TopologyError::ExternalNoObjectXml { name, path } => write!(
+                f,
+                "external '{name}': no <Name>.xml of an external data processor or report \
+                 directly under {}",
+                path.display()
+            ),
+            TopologyError::ExternalAmbiguousObjectXml { name, path } => write!(
+                f,
+                "external '{name}': several object .xml files directly under {}; an \
+                 external root holds exactly one export",
+                path.display()
+            ),
+            TopologyError::ExternalObjectElementMissing { name, path } => write!(
+                f,
+                "external '{name}': the object XML under {} carries no element inside \
+                 MetaDataObject; the export stopped before its object",
+                path.display()
+            ),
+            TopologyError::ExternalNotAnExternalObject { name, path, tag } => write!(
+                f,
+                "external '{name}': {} describes a <{tag}>, not an ExternalDataProcessor \
+                 or ExternalReport",
+                path.display()
+            ),
+            TopologyError::ExternalObjectDirMissing { name, path, object } => write!(
+                f,
+                "external '{name}': {object}.xml under {} has no {object}/ directory beside \
+                 it; an export keeps the object's modules and forms there",
+                path.display()
+            ),
+            TopologyError::ExternalObjectNameDuplicate { object, first, second } => write!(
+                f,
+                "externals '{first}' and '{second}' both export the object '{object}'; one \
+                 project keeps one export per object name"
+            ),
         }
     }
 }
@@ -257,8 +408,8 @@ impl ExtensionTopology {
         // Resolve declared edges to node ids.
         let mut edges: Vec<Vec<NodeId>> = Vec::with_capacity(specs.len());
         for (idx, spec) in specs.iter().enumerate() {
-            let mut resolved: Vec<NodeId> = Vec::with_capacity(spec.depends_on.len());
-            for dep_name in &spec.depends_on {
+            let mut resolved: Vec<NodeId> = Vec::new();
+            for dep_name in spec.depends_on.iter().flatten() {
                 let key = fold_lower_per_char(dep_name);
                 let target = match by_name.get(&key) {
                     None => {
@@ -275,8 +426,17 @@ impl ExtensionTopology {
                     }
                     Some(NameSlot::Unique(target)) => *target,
                 };
+                // Self-reference first: an external object pointing at itself
+                // is a self-reference like any other, not a foreign external
+                // target.
                 if target == idx {
                     return Err(TopologyError::SelfReference { name: spec.name.clone() });
+                }
+                if specs[target].kind.is_external() {
+                    return Err(TopologyError::ExternalInDependency {
+                        from: spec.name.clone(),
+                        name: dep_name.clone(),
+                    });
                 }
                 let id = NodeId(target as u32);
                 if resolved.contains(&id) {
@@ -316,11 +476,26 @@ impl ExtensionTopology {
             closures[id.index()] = closure;
         }
 
+        // An external object that declared no `dependsOn` records no edge, yet
+        // sees every extension: the visibility rule lives here, not in the
+        // consumers, so that every reader of `closure()` agrees.
+        let every_extension: Vec<NodeId> =
+            topo_order.iter().copied().filter(|id| !specs[id.index()].kind.is_external()).collect();
+        let sees_every_extension =
+            |spec: &ExtensionNodeSpec| spec.kind.is_external() && spec.depends_on.is_none();
+        for (idx, spec) in specs.iter().enumerate() {
+            if sees_every_extension(spec) {
+                closures[idx] = every_extension.clone();
+            }
+        }
+
         let nodes: Vec<ExtensionNode> = specs
             .into_iter()
             .zip(edges)
             .zip(closures)
             .map(|((spec, depends_on), closure)| ExtensionNode {
+                sees_every_extension: sees_every_extension(&spec),
+                kind: spec.kind,
                 name: spec.name,
                 path: spec.path,
                 canonical_path: spec.canonical_path,
@@ -368,9 +543,11 @@ enum NameSlot {
     Ambiguous,
 }
 
-/// Kahn's algorithm with a deterministic tie-breaker: among ready nodes the
-/// smallest declaration index goes first. On a cycle, walks the leftover nodes
-/// to report one concrete cycle path.
+/// Kahn's algorithm with a deterministic tie-breaker: among ready nodes every
+/// extension goes before every external object, and within a kind the smallest
+/// declaration index goes first. External objects are leaves over the whole
+/// extension set, so their place is after it whatever the declaration order.
+/// On a cycle, walks the leftover nodes to report one concrete cycle path.
 fn topological_order(
     specs: &[ExtensionNodeSpec],
     edges: &[Vec<NodeId>],
@@ -384,15 +561,16 @@ fn topological_order(
         }
     }
 
-    let mut ready: std::collections::BTreeSet<usize> =
-        (0..n).filter(|&idx| remaining_deps[idx] == 0).collect();
+    let slot = |idx: usize| (specs[idx].kind.is_external(), idx);
+    let mut ready: std::collections::BTreeSet<(bool, usize)> =
+        (0..n).filter(|&idx| remaining_deps[idx] == 0).map(slot).collect();
     let mut order: Vec<NodeId> = Vec::with_capacity(n);
-    while let Some(idx) = ready.pop_first() {
+    while let Some((_, idx)) = ready.pop_first() {
         order.push(NodeId(idx as u32));
         for &dependent in &dependents[idx] {
             remaining_deps[dependent] -= 1;
             if remaining_deps[dependent] == 0 {
-                ready.insert(dependent);
+                ready.insert(slot(dependent));
             }
         }
     }
@@ -433,6 +611,11 @@ fn topological_order(
 /// the per-node edges — fully determines the derived topological order, so
 /// reordering declarations or touching any edge changes the digest: declared
 /// order is part of overlay precedence and therefore of project identity.
+///
+/// An external object also hashes its visibility mode: with no edges, "every
+/// extension" and "no extension" would otherwise digest alike while composing
+/// differently. Extension nodes hash exactly as before the mode existed, so
+/// the digest of a project without external objects is unchanged.
 fn fingerprint(base_path: &Path, nodes: &[ExtensionNode]) -> TopologyFingerprint {
     let mut hasher = blake3::Hasher::new_derive_key("bsl-analyzer/extension-topology/v1");
     let field = |hasher: &mut blake3::Hasher, bytes: &[u8]| {
@@ -443,6 +626,10 @@ fn fingerprint(base_path: &Path, nodes: &[ExtensionNode]) -> TopologyFingerprint
     field(&mut hasher, base_path.as_os_str().as_encoded_bytes());
     hasher.update(&(nodes.len() as u64).to_le_bytes());
     for node in nodes {
+        hasher.update(&[node.kind.fingerprint_tag()]);
+        if node.kind.is_external() {
+            hasher.update(&[u8::from(!node.sees_every_extension)]);
+        }
         field(&mut hasher, fold_lower_per_char(&node.name).as_bytes());
         field(&mut hasher, node.canonical_path.as_os_str().as_encoded_bytes());
         let mut deps: Vec<String> = node
@@ -465,16 +652,26 @@ mod tests {
 
     fn spec(name: &str, deps: &[&str]) -> ExtensionNodeSpec {
         ExtensionNodeSpec {
+            kind: NodeKind::Extension,
             name: name.to_string(),
             path: PathBuf::from(format!("/ws/{name}")),
             canonical_path: PathBuf::from(format!("/ws/{name}")),
-            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            depends_on: Some(deps.iter().map(|s| s.to_string()).collect()),
             structured: true,
         }
     }
 
     fn legacy_spec(name: &str) -> ExtensionNodeSpec {
-        ExtensionNodeSpec { structured: false, ..spec(name, &[]) }
+        ExtensionNodeSpec { structured: false, depends_on: None, ..spec(name, &[]) }
+    }
+
+    /// An external object; `deps` of `None` is a declaration without `dependsOn`.
+    fn external_spec(name: &str, deps: Option<&[&str]>) -> ExtensionNodeSpec {
+        ExtensionNodeSpec {
+            kind: NodeKind::External(ExternalObjectKind::DataProcessor),
+            depends_on: deps.map(|deps| deps.iter().map(|s| s.to_string()).collect()),
+            ..spec(name, &[])
+        }
     }
 
     fn build(specs: Vec<ExtensionNodeSpec>) -> Result<ExtensionTopology, TopologyError> {
@@ -603,7 +800,7 @@ mod tests {
         assert_ne!(fp(base()), fp(repathed));
 
         let mut extra_edge = base();
-        extra_edge[2].depends_on.push("yaxunit".to_string());
+        extra_edge[2].depends_on.get_or_insert_with(Vec::new).push("yaxunit".to_string());
         assert_ne!(fp(base()), fp(extra_edge));
 
         let reordered = vec![spec("IND", &[]), spec("TESTS", &["yaxunit"]), spec("yaxunit", &[])];
@@ -631,9 +828,93 @@ mod tests {
     }
 
     #[test]
+    fn an_external_without_depends_on_closes_over_every_extension_in_order() {
+        let topology = build(vec![
+            external_spec("E", None),
+            spec("A", &["C"]),
+            spec("B", &[]),
+            spec("C", &[]),
+        ])
+        .unwrap();
+        let external = &topology.nodes()[0];
+        assert!(external.sees_every_extension());
+        assert!(external.depends_on().is_empty(), "no key, no edge");
+        assert_eq!(
+            names(&topology, external.closure()),
+            ["B", "C", "A"],
+            "every extension, in the global topological order"
+        );
+        assert_eq!(names(&topology, topology.topological_order()), ["B", "C", "A", "E"]);
+    }
+
+    #[test]
+    fn an_external_with_depends_on_closes_over_the_declared_extensions_only() {
+        let topology = build(vec![
+            external_spec("E", Some(&["A"])),
+            spec("A", &["C"]),
+            spec("B", &[]),
+            spec("C", &[]),
+        ])
+        .unwrap();
+        let external = &topology.nodes()[0];
+        assert!(!external.sees_every_extension());
+        assert_eq!(names(&topology, external.depends_on()), ["A"]);
+        assert_eq!(names(&topology, external.closure()), ["C", "A"], "transitive, B left out");
+        assert_eq!(
+            names(&topology, topology.topological_order()),
+            ["B", "C", "A", "E"],
+            "declared first, the external still goes after every extension"
+        );
+
+        let base_only = build(vec![external_spec("E", Some(&[])), spec("A", &[])]).unwrap();
+        let external = &base_only.nodes()[0];
+        assert!(!external.sees_every_extension());
+        assert!(external.closure().is_empty(), "an empty list is the base alone");
+        for node in base_only.nodes().iter().chain(topology.nodes()) {
+            if !node.kind().is_external() {
+                assert!(!node.sees_every_extension(), "the mode is an external's alone");
+            }
+        }
+    }
+
+    #[test]
+    fn an_external_target_is_refused_whoever_points_at_it() {
+        let from_extension = build(vec![spec("A", &["E"]), external_spec("E", None)]).unwrap_err();
+        assert_eq!(
+            from_extension,
+            TopologyError::ExternalInDependency { from: "A".into(), name: "E".into() }
+        );
+        let from_external =
+            build(vec![external_spec("E", Some(&["F"])), external_spec("F", None)]).unwrap_err();
+        assert_eq!(
+            from_external,
+            TopologyError::ExternalInDependency { from: "E".into(), name: "F".into() }
+        );
+        assert!(!from_external.to_string().contains("takes no part"), "{from_external}");
+
+        let on_itself = build(vec![external_spec("E", Some(&["e"]))]).unwrap_err();
+        assert_eq!(on_itself, TopologyError::SelfReference { name: "E".into() });
+        let unknown = build(vec![external_spec("E", Some(&["nope"]))]).unwrap_err();
+        assert_eq!(
+            unknown,
+            TopologyError::UnknownDependency { from: "E".into(), name: "nope".into() }
+        );
+    }
+
+    #[test]
+    fn fingerprint_tells_an_externals_visibility_mode_apart() {
+        let fp = |specs| build(specs).unwrap().fingerprint();
+        let every = || vec![external_spec("E", None), spec("A", &[])];
+        let none = || vec![external_spec("E", Some(&[])), spec("A", &[])];
+        assert_eq!(fp(every()), fp(every()));
+        assert_ne!(fp(every()), fp(none()), "no edge either way, yet different visibility");
+        assert_ne!(fp(none()), fp(vec![external_spec("E", Some(&["A"])), spec("A", &[])]));
+    }
+
+    #[test]
     fn fingerprint_golden_vector() {
         let topology = build(vec![spec("TESTS", &["yaxunit"]), spec("yaxunit", &[])]).unwrap();
-        expect_test::expect!["c3d6c675c346fbcd6703281b8e437b3dfa2b3e54cc9460e4a5451a1bb9cf275b"]
+        expect_test::expect!["1cf61d473c2e613cde7ac46705536cd148c79ec3386b45f1769e7a774cff7d1a"]
             .assert_eq(&topology.fingerprint().to_hex());
     }
 }

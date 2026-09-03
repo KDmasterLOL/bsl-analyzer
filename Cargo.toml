@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.76"
+version = "0.2.77"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 authors = ["BSL Analyzer Contributors"]
@@ -159,7 +159,7 @@ opt-level = 3
 # Salsa fork (v0.28.0 + fix): an LRU-evicted fixpoint memo re-verified in a later
 # revision must re-execute instead of being mistaken for a poisoned cycle head
 # (bogus Cancelled::PropagatedPanic that poisons the module until the next write).
-# Not fixed upstream as of 0.28.0; branch rebases the one-commit fix onto the tag.
+# Not fixed upstream as of 0.28.2; branch rebases the one-commit fix onto the tag.
 [patch.crates-io]
 salsa = { git = "https://github.com/itrous/salsa.git", branch = "fix/evicted-cycle-head-false-panic-v0.28" }
 salsa-macros = { git = "https://github.com/itrous/salsa.git", branch = "fix/evicted-cycle-head-false-panic-v0.28" }

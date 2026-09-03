@@ -376,7 +376,7 @@ fn handle_idle_tick(state: &mut GlobalState) {
     let db = state.analysis_host.raw_database_mut();
     match kind {
         IdleTrimKind::Shallow => db.enforce_lru(),
-        IdleTrimKind::Deep => db.enforce_lru_deep(),
+        IdleTrimKind::Deep => ide::sweep_lru_deep(db),
     }
     syntax::clear_shared_node_cache();
 
@@ -908,7 +908,7 @@ fn advance_workspace_batch(state: &mut GlobalState) -> Result<()> {
             // running the whole sweep on the shrunk profile was measured to cost
             // several percent of wall time (each trim evicts hot shared parses that
             // the next chunk re-derives) for only a marginal peak reduction.
-            db.enforce_lru_deep();
+            ide::sweep_lru_deep(db);
         } else {
             db.enforce_lru();
         }

@@ -10,11 +10,9 @@ use cfg_types::{BindingId, IdConversion};
 use hir_def::body::Body;
 use hir_def::effective_module::EffectiveModuleId;
 use hir_def::hir::{BinaryOp, Expr, ExprIdx, Literal, Stmt, StmtIdx, UnaryOp};
+use hir_def::module_interface::ModuleInterface;
 use hir_def::resolver::Resolver;
-use hir_def::symbol_tree::SymbolTree;
-use hir_def::{
-    sdbl_hir_for_file_query, DefWithBodyId, ExprId, MethodIdInput, Name, SdblExprId, StmtId,
-};
+use hir_def::{DefWithBodyId, ExprId, MethodIdInput, Name, StmtId};
 use intern::NormName;
 use once_cell::sync::Lazy;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -452,9 +450,9 @@ pub struct InferenceContext<'db> {
 
     /// Effective module's symbol tree, present only when inferring a spliced
     /// `&ИзменениеИКонтроль` module. `None` for every ordinary module, in which case
-    /// same-module lookups resolve through `db.symbol_tree(ModuleId{context_file_id})` —
-    /// the byte-identical default.
-    local_symbols: Option<Arc<SymbolTree>>,
+    /// same-module lookups go to the declarations of `ModuleId{context_file_id}` by
+    /// name, one memo per declaration.
+    local_symbols: Option<Arc<ModuleInterface>>,
 
     /// Effective return types of the module's own methods, keyed by `MethodId.local_id`,
     /// present only on the SECOND pass of effective inference. A bare same-module call to
@@ -462,7 +460,7 @@ pub struct InferenceContext<'db> {
     /// body's (which `materialise_signature_enriched` would re-derive via the base-keyed
     /// `method_return_type_query`). `None` for ordinary modules and the first effective
     /// pass → byte-identical default behavior.
-    local_effective_returns: Option<Arc<FxHashMap<u32, TypeId>>>,
+    local_effective_returns: Option<Arc<FxHashMap<hir_def::MethodKey, TypeId>>>,
 
     /// Paired base module of a configuration-*extension* module, present only when
     /// inferring an extension module's OWN bodies under weaving (`&Вместо`/`&Перед`/
@@ -565,7 +563,7 @@ pub struct InferenceContext<'db> {
 
     /// [`method_body_env`] per same-module callee, for the local cross-directive
     /// accessibility check.
-    local_callee_env: FxHashMap<u32, hir_def::execution_env::EnvFlags>,
+    local_callee_env: FxHashMap<hir_def::MethodKey, hir_def::execution_env::EnvFlags>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -695,6 +693,13 @@ impl InferOwnerResult {
         }
     }
 
+    pub fn diagnostics(&self) -> &[InferenceDiagnostic] {
+        match self {
+            InferOwnerResult::Method(r) => &r.diagnostics,
+            InferOwnerResult::ModuleCode(r) => &r.diagnostics,
+        }
+    }
+
     pub fn call_arg_bindings(&self) -> &[CallArgBinding] {
         match self {
             InferOwnerResult::Method(r) => &r.call_arg_bindings,
@@ -817,13 +822,14 @@ impl<'db> InferenceContext<'db> {
     pub fn new_effective(
         db: &'db dyn HirDatabase,
         base_file_id: FileId,
-        local_symbols: Arc<SymbolTree>,
+        local_symbols: Arc<ModuleInterface>,
         owner: DefWithBodyId,
         body: &Arc<Body>,
     ) -> Self {
-        // The effective module's local_ids do not match the base file's item
-        // tree, so a directive computed against it may belong to another
-        // method — disable availability checks rather than misattribute them.
+        // The effective module is assembled from two files, and a directive
+        // computed against the base file's item tree may belong to a woven
+        // method rather than the one being inferred — disable availability
+        // checks rather than misattribute them.
         let mut ctx = Self::new_impl(db, base_file_id, owner, body, false);
         ctx.local_symbols = Some(local_symbols);
         ctx
@@ -851,7 +857,10 @@ impl<'db> InferenceContext<'db> {
     /// Second-pass effective inference: supply the effective return types of the module's
     /// own methods so bare same-module calls to changed methods resolve their *changed*
     /// body's return. See [`Self::local_effective_returns`].
-    pub fn set_local_effective_returns(&mut self, returns: Arc<FxHashMap<u32, TypeId>>) {
+    pub fn set_local_effective_returns(
+        &mut self,
+        returns: Arc<FxHashMap<hir_def::MethodKey, TypeId>>,
+    ) {
         self.local_effective_returns = Some(returns);
     }
 
@@ -1006,15 +1015,17 @@ impl<'db> InferenceContext<'db> {
     /// bare global-export path must defer to it. Mirrors the same-module lookup the
     /// `TypeKind::Unknown` call arm performs.
     fn bare_module_method_exists(&self, name: &Name) -> bool {
-        let symbol_tree = match &self.local_symbols {
-            Some(symbols) => symbols,
-            None => self.db.symbol_tree_ref(hir_def::ModuleId::new(self.context_file_id)),
+        let declared = match &self.local_symbols {
+            Some(symbols) => symbols.find_method(name).is_some(),
+            None => {
+                let module_id = hir_def::ModuleId::new(self.context_file_id);
+                self.db.interface_method_named(module_id, name).is_some()
+            }
         };
-        if symbol_tree.find_method(name).is_some() {
+        if declared {
             return true;
         }
-        self.weaving_base
-            .is_some_and(|base| self.db.symbol_tree_ref(base).find_method(name).is_some())
+        self.weaving_base.is_some_and(|base| self.db.interface_method_named(base, name).is_some())
     }
 
     /// Resolve a bare `Имя(...)` call against the exported methods of the visible global
@@ -1057,12 +1068,11 @@ impl<'db> InferenceContext<'db> {
             .variants
             .iter()
             .filter_map(|variant| {
-                let symbol_tree = self.db.symbol_tree_ref(variant.method.module);
-                let method_symbol = symbol_tree.find_method_by_id(variant.method)?;
+                let method_symbol = self.db.interface_method(variant.method)?;
                 let signature = crate::method_resolution::materialise_signature_enriched(
                     self.db,
                     variant.method,
-                    method_symbol,
+                    &method_symbol,
                 );
                 Some((variant.method, signature))
             })
@@ -1089,7 +1099,7 @@ impl<'db> InferenceContext<'db> {
         let return_ty = self
             .effective_local_return(*method_id, self.documented_return(*method_id, signature.ret));
         let candidates =
-            crate::user_call_candidates::for_resolved_method(self.db, name, *method_id, return_ty)
+            crate::user_call_candidates::for_resolved_method(self.db, *method_id, return_ty)
                 .ok()?;
         Some(self.record_candidate_call_arg_binding(callee, args, candidates))
     }
@@ -1365,7 +1375,12 @@ impl<'db> InferenceContext<'db> {
     /// remote server call, so only the server side is ever a violation: code
     /// compiled for the server cannot reach a method that exists only on the
     /// client.
-    fn check_local_callee_env(&mut self, expr: ExprId, name: &Name, callee_local_id: u32) {
+    fn check_local_callee_env(
+        &mut self,
+        expr: ExprId,
+        name: &Name,
+        callee_local_id: hir_def::MethodKey,
+    ) {
         use hir_def::execution_env::EnvFlags;
         if self.body_env.is_empty() {
             return;
@@ -1594,10 +1609,14 @@ impl<'db> InferenceContext<'db> {
         var_key: &str,
     ) -> Option<Vec<Option<TypeId>>> {
         let stmt_id = self.body.enclosing_stmt(use_expr)?;
-        let module_defs = self.db.module_reaching_definitions(self.context_file_id);
+        let module = hir_def::ModuleId::new(self.context_file_id);
         let body_defs = match self.owner {
-            DefWithBodyId::Method(local_id) => module_defs.get(local_id)?,
-            DefWithBodyId::ModuleCode => module_defs.module_code()?,
+            DefWithBodyId::Method(local_id) => self.db.method_reaching_definitions(
+                MethodIdInput::new(self.db, hir_def::MethodId { module, local_id }),
+            )?,
+            DefWithBodyId::ModuleCode => {
+                self.db.module_code_reaching_definitions(self.context_file_id)?
+            }
         };
         let defs = body_defs.defs_for_var_at_stmt(var_key, stmt_id)?;
         Some(
@@ -1635,16 +1654,15 @@ impl<'db> InferenceContext<'db> {
         }
 
         let module = hir_def::ModuleId::new(self.context_file_id);
-        let symbol_tree = self.db.symbol_tree(module);
         let method_id = hir_def::MethodId { module, local_id };
-        let Some(method_symbol) = symbol_tree.find_method_by_id(method_id) else {
+        let Some(method_symbol) = self.db.interface_method(method_id) else {
             return;
         };
         if method_symbol.docs.is_none() {
             return;
         }
 
-        let signature = crate::method_resolution::materialise_signature(self.db, method_symbol);
+        let signature = crate::method_resolution::materialise_signature(self.db, &method_symbol);
         // A parameter documented by pointing at another method is seeded from that method's
         // documentation; one documented inline keeps the type the signature already lowered.
         let referenced = crate::doc_see::doc_see_signature_query(
@@ -2007,13 +2025,12 @@ impl<'db> InferenceContext<'db> {
         if !matches!(self.body.expr(arg_id), Expr::Literal(Literal::String(_))) {
             return Arc::from([]);
         }
-        let sdbl_expr_id = SdblExprId { owner: self.owner, expr_id: arg_id };
-        let file_id_input = FileIdInput::new(self.db, self.context_file_id);
-        let entries = sdbl_hir_for_file_query(self.db, file_id_input);
-        let Some((_, pkg)) = entries.iter().find(|(id, _)| *id == sdbl_expr_id) else {
+        let Some(pkg) =
+            hir_def::sdbl_package_for(self.db, self.context_file_id, self.owner, arg_id)
+        else {
             return Arc::from([]);
         };
-        crate::sdbl_bridge::package_to_projections(self.db, pkg).into()
+        crate::sdbl_bridge::package_to_projections(self.db, &pkg).into()
     }
 
     fn infer_expr(&mut self, expr_id: ExprId) -> TypeId {
@@ -2909,7 +2926,6 @@ impl<'db> InferenceContext<'db> {
                     );
                     let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
                         self.db,
-                        &method_name,
                         resolution.method_id,
                         return_ty,
                     ) else {
@@ -3229,21 +3245,19 @@ impl<'db> InferenceContext<'db> {
         args: &[ExprId],
         callee: ExprId,
     ) -> Option<TypeId> {
-        let symbol_tree = match &self.local_symbols {
-            Some(symbols) => Arc::clone(symbols),
-            None => {
-                let module_id = hir_def::ModuleId::new(self.context_file_id);
-                self.db.symbol_tree(module_id)
-            }
-        };
         // Weaving: a `&Вместо`/`&Перед`/`&После` interceptor calling a base
         // sibling that the extension does not define falls back to the paired
-        // base module's symbols (the extension shadows the base). The base tree
-        // is bound here so the borrowed method outlives the lookup.
-        let base_tree = self.weaving_base.map(|base| self.db.symbol_tree_ref(base));
-        let method = symbol_tree
-            .find_method(name)
-            .or_else(|| base_tree.as_ref().and_then(|base_tree| base_tree.find_method(name)))?;
+        // base module's declarations (the extension shadows the base).
+        let method = match &self.local_symbols {
+            Some(symbols) => symbols.find_method_shared(NormName::intern(name.as_str())).cloned(),
+            None => {
+                let module_id = hir_def::ModuleId::new(self.context_file_id);
+                self.db.interface_method_named(module_id, name)
+            }
+        }
+        .or_else(|| {
+            self.weaving_base.and_then(|base| self.db.interface_method_named(base, name))
+        })?;
 
         // Weaving-base fallbacks resolve into another file whose item tree does
         // not match `context_file_id` — the local directive check only makes
@@ -3262,10 +3276,10 @@ impl<'db> InferenceContext<'db> {
             .and_then(|m| m.get(&method.id.local_id).copied())
             .filter(|ret| !self.is_unknown(*ret));
         let sig =
-            crate::method_resolution::materialise_signature_enriched(self.db, method.id, method);
+            crate::method_resolution::materialise_signature_enriched(self.db, method.id, &method);
         let return_ty = effective_ret.unwrap_or_else(|| self.documented_return(method.id, sig.ret));
         let Ok(candidates) =
-            crate::user_call_candidates::for_resolved_method(self.db, name, method.id, return_ty)
+            crate::user_call_candidates::for_resolved_method(self.db, method.id, return_ty)
         else {
             return Some(self.db.unknown());
         };
@@ -3370,7 +3384,6 @@ impl<'db> InferenceContext<'db> {
                 }
                 let Ok(candidates) = crate::user_call_candidates::for_resolved_method(
                     self.db,
-                    method_name,
                     resolution.method_id,
                     return_ty,
                 ) else {
@@ -3702,19 +3715,19 @@ enum BareReceiverDispatch {
 fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<hir_def::Name> {
     match db.lookup_type(receiver_ty) {
         TypeKind::MetadataRef(facet) => {
-            let plural = mdo_kind_to_plural(facet.kind)?;
+            let plural = mdo_kind_to_receiver_label(facet.kind)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::ThisObject { owner, .. } | TypeKind::ThisManager { owner, .. } => {
-            let plural = owner.mdo_type.russian_plural()?;
+            let plural = mdo_receiver_label(owner.mdo_type)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, owner.name.as_str())))
         }
         TypeKind::ObjectManager(facet) => {
-            let plural = facet.mdo.russian_plural()?;
+            let plural = mdo_receiver_label(facet.mdo)?;
             Some(hir_def::Name::new(&format!("{}.{}", plural, facet.name.as_str())))
         }
         TypeKind::FormData { kind: FormDataFacet::Collection, underlying: Some(underlying) } => {
-            let plural = underlying.mdo_type.russian_plural()?;
+            let plural = mdo_receiver_label(underlying.mdo_type)?;
             let name = &underlying.name;
             Some(hir_def::Name::new(&format!("{}.{}", plural, name.as_str())))
         }
@@ -3722,7 +3735,19 @@ fn receiver_display_name(db: &dyn TypeKernelDb, receiver_ty: TypeId) -> Option<h
     }
 }
 
-fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
+/// How a diagnostic names an object of this kind before the dot: the manager
+/// collection where there is one, the bare platform type where there is none.
+/// An external object has no collection, and a receiver without a label would
+/// silence the diagnostic rather than degrade its wording.
+fn mdo_receiver_label(mdo: bsl_metadata::MdoType) -> Option<&'static str> {
+    mdo.russian_plural().or_else(|| {
+        hir_def::ty::MetadataKind::object_kind_for(mdo)?
+            .bare_platform_type_names()
+            .map(|(russian, _)| russian)
+    })
+}
+
+fn mdo_kind_to_receiver_label(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
     use hir_def::ty::MetadataKind;
     let mdo = match kind {
         MetadataKind::CatalogObject | MetadataKind::CatalogRef => bsl_metadata::MdoType::Catalog,
@@ -3734,6 +3759,8 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         }
         MetadataKind::DataProcessorObject => bsl_metadata::MdoType::DataProcessor,
         MetadataKind::ReportObject => bsl_metadata::MdoType::Report,
+        MetadataKind::ExternalDataProcessorObject => bsl_metadata::MdoType::ExternalDataProcessor,
+        MetadataKind::ExternalReportObject => bsl_metadata::MdoType::ExternalReport,
         MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
             bsl_metadata::MdoType::ExchangePlan
         }
@@ -3768,7 +3795,7 @@ fn mdo_kind_to_plural(kind: hir_def::ty::MetadataKind) -> Option<&'static str> {
         | MetadataKind::RegisterAttribute { .. }
         | MetadataKind::RegisterFilter { .. } => return None,
     };
-    mdo.russian_plural()
+    mdo_receiver_label(mdo)
 }
 
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
@@ -3846,7 +3873,7 @@ pub fn infer_effective<'db>(
         tracing::info_span!("infer_effective", ?base_file, ext_file = ?eid.ext_file(db)).entered();
 
     let module_bodies = hir_def::effective_module::module_bodies_effective(db, eid);
-    let symbol_tree = hir_def::effective_module::symbol_tree_effective(db, eid);
+    let interface = hir_def::effective_module::module_interface_effective(db, eid);
 
     // Only the `&ИзменениеИКонтроль` methods actually differ from the base module; every other
     // body is copied verbatim. A copied body's diagnostics are dropped by the orchestrator's
@@ -3855,7 +3882,7 @@ pub fn infer_effective<'db>(
     // base fallback already yields for it. Restricting both passes to the changed methods is
     // therefore output-identical, while avoiding a re-inference of the whole — often large —
     // base module twice per extension file (the dominant cost on heavily-extended configs).
-    let changed_ids: rustc_hash::FxHashSet<u32> = {
+    let changed_ids: rustc_hash::FxHashSet<hir_def::MethodKey> = {
         let ext_parse = db.parse(eid.ext_file(db));
         let changed_targets: rustc_hash::FxHashSet<String> = ext_parse
             .syntax_node()
@@ -3869,7 +3896,7 @@ pub fn infer_effective<'db>(
             .filter_map(|m| hir_def::extension_merge::extract_change_and_validate(&m))
             .map(|cc| cc.target.fold_lower())
             .collect();
-        symbol_tree
+        interface
             .methods()
             .filter(|m| changed_targets.contains(&m.name.as_str().fold_lower()))
             .map(|m| m.id.local_id)
@@ -3881,7 +3908,7 @@ pub fn infer_effective<'db>(
     // return, not the base body's. Module code has no return, so only methods contribute.
     // This resolves one level of method→method return dependency; deeper chains keep the
     // base inference's same pragmatic bound (no panic, no infinite loop).
-    let mut effective_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
+    let mut effective_returns: FxHashMap<hir_def::MethodKey, TypeId> = FxHashMap::default();
     for (local_id, body) in module_bodies.iter_bodies() {
         if !changed_ids.contains(&local_id) {
             continue;
@@ -3889,7 +3916,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
-            symbol_tree.clone(),
+            interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),
         );
@@ -3919,7 +3946,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
-            symbol_tree.clone(),
+            interface.clone(),
             DefWithBodyId::ModuleCode,
             &Arc::new(body.clone()),
         );
@@ -3935,7 +3962,7 @@ pub fn infer_effective<'db>(
         let mut ctx = InferenceContext::new_effective(
             db,
             base_file,
-            symbol_tree.clone(),
+            interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),
         );
@@ -4018,8 +4045,8 @@ pub fn infer_weaving<'db>(
     let ext_symbols = db.symbol_tree_ref(ext_module);
     let base_symbols = db.symbol_tree_ref(base_module);
     let ext_parse = db.parse(ext_file);
-    let mut proceed_returns: FxHashMap<u32, TypeId> = FxHashMap::default();
-    let mut proceed_arities: FxHashMap<u32, (usize, usize)> = FxHashMap::default();
+    let mut proceed_returns: FxHashMap<hir_def::MethodKey, TypeId> = FxHashMap::default();
+    let mut proceed_arities: FxHashMap<hir_def::MethodKey, (usize, usize)> = FxHashMap::default();
     for method in ext_symbols.methods() {
         let Some(node) = method.syntax_node(&ext_parse) else {
             continue;
@@ -4395,7 +4422,7 @@ mod tests {
 
     #[test]
     fn body_inference_result_empty_for_preserves_owner() {
-        let method_owner = DefWithBodyId::Method(7);
+        let method_owner = DefWithBodyId::Method(hir_def::MethodKey::first("М7"));
         let method_empty = BodyInferenceResult::empty_for(method_owner);
         assert_eq!(method_empty.owner, method_owner);
         assert!(method_empty.var_types.is_empty());
@@ -4442,13 +4469,14 @@ mod tests {
     #[test]
     fn infer_owner_result_method_accessors_route_to_method_payload() {
         let db = InMemoryDb::new();
-        let mut body = BodyInferenceResult::empty_for(DefWithBodyId::Method(2));
+        let mut body =
+            BodyInferenceResult::empty_for(DefWithBodyId::Method(hir_def::MethodKey::first("М2")));
         body.var_types.insert("х".to_string(), db.number(None, None));
         body.expr_types.insert(make_expr(5), db.string(None, false));
 
         let routed = InferOwnerResult::Method(Arc::new(body));
 
-        assert_eq!(routed.owner(), DefWithBodyId::Method(2));
+        assert_eq!(routed.owner(), DefWithBodyId::Method(hir_def::MethodKey::first("М2")));
         assert_eq!(routed.type_id_of_expr(make_expr(5)), Some(db.string(None, false)));
         assert_eq!(routed.type_id_of_expr(make_expr(99)), None);
         assert_eq!(routed.var_types().get("х").copied(), Some(db.number(None, None)),);

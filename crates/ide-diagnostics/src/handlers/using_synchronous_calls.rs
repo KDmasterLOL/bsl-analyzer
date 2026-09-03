@@ -20,7 +20,8 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub(crate) struct SyncCallCandidate<'a> {
-    pub(crate) method_id: &'a MethodId,
+    /// `None` for module-level code, which has no dispatch of its own.
+    pub(crate) method_id: Option<MethodId>,
     pub(crate) method_name: &'a str,
     pub(crate) replacement: &'a str,
     pub(crate) range: TextRange,
@@ -36,7 +37,9 @@ pub(crate) fn from_hir(
         return None;
     }
 
-    if is_server_only_method(candidate.method_id, ctx) {
+    if effective_dispatch(candidate.method_id, ctx)
+        .is_some_and(|dispatch| dispatch.is_server_only())
+    {
         return None;
     }
 
@@ -55,17 +58,19 @@ pub(crate) fn from_hir(
     })
 }
 
-fn is_server_only_method(method_id: &MethodId, ctx: &DiagnosticsContext) -> bool {
-    effective_dispatch(method_id, ctx).is_some_and(|dispatch| dispatch.is_server_only())
-}
-
-fn effective_dispatch(method_id: &MethodId, ctx: &DiagnosticsContext) -> Option<MethodDispatch> {
+/// The module's execution context wins; below it a method has its own dispatch,
+/// while module-level code (`None`) has none.
+fn effective_dispatch(
+    method_id: Option<MethodId>,
+    ctx: &DiagnosticsContext,
+) -> Option<MethodDispatch> {
     let module_dispatch =
         ctx.module_metadata().execution_context.and_then(MethodDispatch::from_execution_context);
     if module_dispatch.is_some() {
         return module_dispatch;
     }
 
+    let method_id = method_id?;
     ctx.call_summary(method_id.module)
         .methods
         .iter()
@@ -719,6 +724,27 @@ EndProcedure
 "#;
 
         check_common_module_code_context(hir::ExecutionContext::Server, code, expect![[r#""#]]);
+    }
+
+    /// Module-level code has no declaration of its own: only the module's
+    /// execution context can make it server-side.
+    #[test]
+    fn module_code_in_a_server_common_module_is_not_reported() {
+        let code = "ЗапуститьПриложение(\"app.exe\");\n";
+        check_common_module_code_context(hir::ExecutionContext::Server, code, expect![[r#""#]]);
+    }
+
+    #[test]
+    fn module_code_in_a_client_common_module_is_reported() {
+        let code = "ЗапуститьПриложение(\"app.exe\");\n";
+        check_common_module_code_context(
+            hir::ExecutionContext::Client,
+            code,
+            expect![[r#"
+            UsingSynchronousCalls @ 1:1..1:31
+              message: Вместо синхронного вызова "ЗапуститьПриложение" необходимо использовать "НачатьЗапускПриложения"
+              severity: Warning"#]],
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ fn collect_comment_ranges(
         let mut owned: Option<TextRange> = None;
         for line in run.lines() {
             if line.owns_line {
-                let range = line.token.text_range();
+                let range = line.range;
                 owned = Some(owned.map_or(range, |open| open.cover(range)));
             } else if let Some(open) = owned.take() {
                 push_multiline_range(ranges, line_index, open, Some(FoldingRangeKind::Comment));

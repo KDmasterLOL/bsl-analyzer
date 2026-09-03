@@ -1,9 +1,12 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::utils::regex_cache::cached_regex;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::{Body, BodySourceMap, Expr, Literal};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::Arc;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -35,12 +38,12 @@ static PATTERN_NETWORK_ADDRESS: Lazy<Regex> = Lazy::new(|| {
 
 #[derive(Debug, Clone)]
 struct Config {
-    search_words_exclusion: Regex,
-    search_popular_version_exclusion: Regex,
+    search_words_exclusion: Arc<Regex>,
+    search_popular_version_exclusion: Arc<Regex>,
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let words_exclusion_str = ctx
             .config
             .get_string(DiagnosticCode::UsingHardcodeNetworkAddress, "searchWordsExclusion")
@@ -54,14 +57,14 @@ impl Config {
             )
             .unwrap_or(DEFAULT_POPULAR_VERSION_EXCLUSION);
 
-        let search_words_exclusion = Regex::new(&format!("(?i){}", words_exclusion_str))
-            .unwrap_or_else(|_| {
-                Regex::new(&format!("(?i){}", DEFAULT_SEARCH_WORDS_EXCLUSION)).unwrap()
+        let search_words_exclusion = cached_regex(&format!("(?i){}", words_exclusion_str))
+            .unwrap_or_else(|| {
+                cached_regex(&format!("(?i){}", DEFAULT_SEARCH_WORDS_EXCLUSION)).unwrap()
             });
 
         let search_popular_version_exclusion =
-            Regex::new(&format!("(?i){}", version_exclusion_str)).unwrap_or_else(|_| {
-                Regex::new(&format!("(?i){}", DEFAULT_POPULAR_VERSION_EXCLUSION)).unwrap()
+            cached_regex(&format!("(?i){}", version_exclusion_str)).unwrap_or_else(|| {
+                cached_regex(&format!("(?i){}", DEFAULT_POPULAR_VERSION_EXCLUSION)).unwrap()
             });
 
         Self { search_words_exclusion, search_popular_version_exclusion }
@@ -181,39 +184,33 @@ fn is_letter_before_match(content: &str, match_start: usize) -> bool {
     false
 }
 
-fn find_string_token(root: &SyntaxNode, range: ide_db::TextRange) -> Option<SyntaxToken> {
+fn find_string_token(root: &SyntaxNode, range: LocalRange) -> Option<SyntaxToken> {
+    let range = range.in_root();
     root.token_at_offset(range.start())
         .find(|t| t.kind() == SyntaxKind::STRING && t.text_range() == range)
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::UsingHardcodeNetworkAddress;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = Config::from_context(ctx);
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body(body, source_map, &root, &config, code, ctx, diags);
-    });
-
-    diagnostics.sort_by_key(|d| d.range.start());
-    diagnostics
+    check_body_literals(ctx.body(), ctx.source_map(), ctx.root(), &config, code, ctx, acc);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn check_body(
+fn check_body_literals(
     body: &Body,
     source_map: &BodySourceMap,
     root: &SyntaxNode,
     config: &Config,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for (expr_id, expr) in body.exprs_iter() {
         let Expr::Literal(Literal::String(content)) = expr else { continue };
@@ -269,8 +266,8 @@ fn check_body(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, check_diagnostics_snapshot_for};
+    use super::check_body;
+    use crate::test_utils::{check_body_diagnostic_with_config, check_diagnostics_snapshot_for};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
     #[test]
@@ -470,7 +467,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 10, "Expected 10 diagnostics with reduced exclusion");
     }
 
@@ -558,7 +555,7 @@ FoundedElement = HTMLDocument.evaluate(".//img[ancestor::div[@aria-hidden=""Fals
             }),
         );
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         assert_eq!(diagnostics.len(), 13, "Expected 13 diagnostics without 2.* exclusion");
     }
 

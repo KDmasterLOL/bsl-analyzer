@@ -1,10 +1,11 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::traits::MdObject;
 use bsl_metadata::{ModuleType, ReturnValueReuse};
+use hir::LocalRange;
 use hir::RedundantAccessKind;
-use ide_db::TextRange;
 use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -30,9 +31,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 
 pub fn from_hir(
     kind: &RedundantAccessKind,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::RedundantAccessToObject;
 
     if ctx.is_disabled_with_metadata(code) {
@@ -105,10 +106,10 @@ pub fn from_hir(
 }
 
 fn create_diagnostic(
-    range: TextRange,
+    range: LocalRange,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &AnalysisContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: "Избыточное обращение к объекту".into(),
@@ -143,9 +144,12 @@ fn get_plural_collection_name(
         MdoType::Constant => Some(("константы", "constants")),
         MdoType::DataProcessor => Some(("обработки", "dataprocessors")),
         MdoType::Report => Some(("отчеты", "reports")),
-        MdoType::CommonModule | MdoType::EventSubscription | MdoType::Subsystem | MdoType::Role => {
-            None
-        }
+        MdoType::ExternalDataProcessor
+        | MdoType::ExternalReport
+        | MdoType::CommonModule
+        | MdoType::EventSubscription
+        | MdoType::Subsystem
+        | MdoType::Role => None,
     }
 }
 
@@ -171,17 +175,17 @@ fn is_collection_prefixed_mdo_type(mdo_type: bsl_metadata::MdoType) -> bool {
     )
 }
 
-fn get_check_object_module(ctx: &DiagnosticsContext) -> bool {
+fn get_check_object_module(ctx: &AnalysisContext) -> bool {
     ctx.config
         .get_bool(DiagnosticCode::RedundantAccessToObject, "checkObjectModule")
         .unwrap_or(true)
 }
 
-fn get_check_form_module(ctx: &DiagnosticsContext) -> bool {
+fn get_check_form_module(ctx: &AnalysisContext) -> bool {
     ctx.config.get_bool(DiagnosticCode::RedundantAccessToObject, "checkFormModule").unwrap_or(true)
 }
 
-fn get_check_record_set_module(ctx: &DiagnosticsContext) -> bool {
+fn get_check_record_set_module(ctx: &AnalysisContext) -> bool {
     ctx.config
         .get_bool(DiagnosticCode::RedundantAccessToObject, "checkRecordSetModule")
         .unwrap_or(true)
@@ -255,8 +259,11 @@ mod tests {
         let diagnostics =
             crate::test_utils::check_metadata_diagnostic(metadata, "", move |_m, ctx| {
                 let kind = hir::RedundantAccessKind::TwoLevel { module: module.clone() };
-                super::from_hir(&kind, ide_db::TextRange::new(0.into(), 1.into()), ctx)
+                let range =
+                    hir::LocalRange::of_detached_node(ide_db::TextRange::new(0.into(), 1.into()));
+                super::from_hir(&kind, range, ctx)
                     .into_iter()
+                    .map(|d| d.lift(hir::MethodOffset::ZERO))
                     .collect()
             });
         !diagnostics.is_empty()

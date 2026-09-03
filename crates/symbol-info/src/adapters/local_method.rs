@@ -20,7 +20,7 @@ pub(super) fn build_from_method_id(
     method_id: hir::MethodId,
 ) -> Option<SymbolSignature> {
     let item_tree = db.item_tree(method_id.module.file_id);
-    let item = item_tree.top_level_items().get(method_id.local_id as usize)?;
+    let item = item_tree.item_of(method_id.local_id)?;
     let docs = db.method_docs(method_id);
     let docs_ref = docs.as_deref();
 

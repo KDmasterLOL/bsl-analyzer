@@ -4,7 +4,9 @@ use rustc_hash::FxHashMap;
 use vfs::{FileId, Vfs, VfsPath};
 
 pub mod cfe;
+pub mod synthetic;
 pub use cfe::{CfeFixture, CfeFixtureBuilder};
+pub use synthetic::{SyntheticMethod, SyntheticModule, SyntheticModuleSpec};
 
 #[derive(Debug, Default)]
 pub struct Fixture {

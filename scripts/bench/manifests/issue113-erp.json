@@ -1,0 +1,152 @@
+{
+  "schema_version": 1,
+  "workspace_commit": "14f1270dcc70c002b83deedda087c7097e01fe15",
+  "config_hash": "d165897eaab1f24fc466bdfbb42a23f255bfd251cb8cd757f2510076c7dd2351",
+  "targets": [
+    {
+      "id": "edit/body_insert_common_large/01",
+      "relative_path": "src/cf/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат/Ext/Module.bsl",
+      "file_hash": "465c40e1c8ecc7baaa4ca1fc963405e4698ad10dc9fb06ec25a8344bbc23ec3a",
+      "spec": {
+        "feature": "edit",
+        "patch": {
+          "range": {
+            "start": 5489601,
+            "end": 5489601
+          },
+          "new_text": "\tПравка113 = 1;\r\n"
+        },
+        "edit_kind": "body",
+        "followup": {
+          "feature": "diagnostics_push"
+        }
+      },
+      "expect": {
+        "kind": "non_empty"
+      },
+      "note": "вставка оператора в тело ПКО_Справочник_ВидыНоменклатуры_ПередЗаписьюПолученныхДанных (строка 57680), интерфейс метода не меняется"
+    },
+    {
+      "id": "edit/signature_param_common_large/01",
+      "relative_path": "src/cf/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат/Ext/Module.bsl",
+      "file_hash": "465c40e1c8ecc7baaa4ca1fc963405e4698ad10dc9fb06ec25a8344bbc23ec3a",
+      "spec": {
+        "feature": "edit",
+        "patch": {
+          "range": {
+            "start": 5489476,
+            "end": 5489476
+          },
+          "new_text": "НовыйПараметр113, "
+        },
+        "edit_kind": "signature",
+        "followup": {
+          "feature": "diagnostics_push"
+        }
+      },
+      "expect": {
+        "kind": "non_empty"
+      },
+      "note": "положительный контроль: новый параметр у того же метода (строка 57679) — интерфейс меняется"
+    },
+    {
+      "id": "edit/method_insert_top_common_large/01",
+      "relative_path": "src/cf/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат/Ext/Module.bsl",
+      "file_hash": "465c40e1c8ecc7baaa4ca1fc963405e4698ad10dc9fb06ec25a8344bbc23ec3a",
+      "spec": {
+        "feature": "edit",
+        "patch": {
+          "range": {
+            "start": 438,
+            "end": 438
+          },
+          "new_text": "Процедура Правка113Верх()\r\n\tПравка113 = 1;\r\nКонецПроцедуры\r\n\r\n"
+        },
+        "edit_kind": "method",
+        "followup": {
+          "feature": "diagnostics_push"
+        }
+      },
+      "expect": {
+        "kind": "non_empty"
+      },
+      "note": "вставка целой процедуры перед первым методом файла (строка 7, до его docstring): интерфейс модуля получает новый метод, позиция каждого из 2349 методов сдвигается на один"
+    },
+    {
+      "id": "edit/method_insert_bottom_common_large/01",
+      "relative_path": "src/cf/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат/Ext/Module.bsl",
+      "file_hash": "465c40e1c8ecc7baaa4ca1fc963405e4698ad10dc9fb06ec25a8344bbc23ec3a",
+      "spec": {
+        "feature": "edit",
+        "patch": {
+          "range": {
+            "start": 9965228,
+            "end": 9965228
+          },
+          "new_text": "\r\nПроцедура Правка113Низ()\r\n\tПравка113 = 1;\r\nКонецПроцедуры\r\n"
+        },
+        "edit_kind": "method",
+        "followup": {
+          "feature": "diagnostics_push"
+        }
+      },
+      "expect": {
+        "kind": "non_empty"
+      },
+      "note": "положительный контроль к вставке сверху: та же процедура после последнего метода файла (строка 107141) — интерфейс меняется так же, позиции существующих методов не сдвигаются"
+    },
+    {
+      "id": "edit_burst/body_insert_common_large/01",
+      "relative_path": "src/cf/CommonModules/МенеджерОбменаЧерезУниверсальныйФормат/Ext/Module.bsl",
+      "file_hash": "465c40e1c8ecc7baaa4ca1fc963405e4698ad10dc9fb06ec25a8344bbc23ec3a",
+      "spec": {
+        "feature": "edit_burst",
+        "patches": [
+          {
+            "range": {
+              "start": 5489601,
+              "end": 5489601
+            },
+            "new_text": "\tПравка113_1 = 1;\r\n"
+          },
+          {
+            "range": {
+              "start": 5489601,
+              "end": 5489601
+            },
+            "new_text": "\tПравка113_2 = 1;\r\n"
+          },
+          {
+            "range": {
+              "start": 5489601,
+              "end": 5489601
+            },
+            "new_text": "\tПравка113_3 = 1;\r\n"
+          },
+          {
+            "range": {
+              "start": 5489601,
+              "end": 5489601
+            },
+            "new_text": "\tПравка113_4 = 1;\r\n"
+          },
+          {
+            "range": {
+              "start": 5489601,
+              "end": 5489601
+            },
+            "new_text": "\tПравка113_5 = 1;\r\n"
+          }
+        ],
+        "edit_kind": "body",
+        "followup": {
+          "feature": "diagnostics_push"
+        }
+      },
+      "expect": {
+        "kind": "non_empty"
+      },
+      "note": "бурст: пять вставок оператора в одну точку тела (каждая следующая перед предыдущей), затем диагностики — «догнать последнюю редакцию»"
+    }
+  ]
+}

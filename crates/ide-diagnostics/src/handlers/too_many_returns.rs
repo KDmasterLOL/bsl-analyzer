@@ -1,7 +1,8 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use ide_db::TextRange;
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -21,10 +22,10 @@ const DEFAULT_MAX_RETURNS_COUNT: i64 = 3;
 
 pub fn from_hir(
     method_name: &str,
-    method_name_range: TextRange,
-    returns: &[TextRange],
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    method_name_range: LocalRange,
+    returns: &[LocalRange],
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::TooManyReturns;
 
     if ctx.is_disabled_with_metadata(code) {

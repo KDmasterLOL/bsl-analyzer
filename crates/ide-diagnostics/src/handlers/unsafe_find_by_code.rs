@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
 use bsl_metadata::{CodeSeries, MdoType};
-use ide_db::TextRange;
+use hir::LocalRange;
 use stdx::case::CaseExt;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -22,9 +23,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(
     manager_name: &str,
     object_name: &str,
-    range: TextRange,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    range: LocalRange,
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::UnsafeFindByCode;
     if ctx.is_disabled_with_metadata(code) {
         return None;

@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use ide_db::TextRange;
 use stdx::case::CaseExt;
 use syntax::ast::{AstNode, PreRegionDir};
@@ -34,7 +35,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let exclude_str = ctx.config_string(
             DiagnosticCode::LatinAndCyrillicSymbolInWord,
             "excludeWords",
@@ -60,7 +61,7 @@ impl Config {
 #[derive(Debug, Clone)]
 struct IdentifierInfo {
     text: String,
-    range: TextRange,
+    range: LocalRange,
 }
 
 #[inline]
@@ -211,7 +212,10 @@ fn extract_region_name(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
     node.children_with_tokens()
         .filter_map(|element| element.into_token())
         .find(|token| token.kind() == SyntaxKind::IDENT)
-        .map(|token| IdentifierInfo { text: token.text().to_string(), range: token.text_range() })
+        .map(|token| IdentifierInfo {
+            text: token.text().to_string(),
+            range: LocalRange::of_detached_node(token.text_range()),
+        })
 }
 
 fn extract_goto_label(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
@@ -224,7 +228,7 @@ fn extract_goto_label(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
             } else if found_tilde && token.kind() == SyntaxKind::IDENT {
                 return Some(IdentifierInfo {
                     text: token.text().to_string(),
-                    range: token.text_range(),
+                    range: LocalRange::of_detached_node(token.text_range()),
                 });
             }
         }
@@ -239,7 +243,7 @@ fn extract_assign_lvalue(node: &syntax::SyntaxNode) -> Option<IdentifierInfo> {
             if token.kind() == SyntaxKind::IDENT {
                 return Some(IdentifierInfo {
                     text: token.text().to_string(),
-                    range: token.text_range(),
+                    range: LocalRange::of_detached_node(token.text_range()),
                 });
             }
         }
@@ -256,9 +260,9 @@ fn is_mixed_candidate(text: &str) -> bool {
 fn process_ident_token(
     token: &syntax::SyntaxToken,
     config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     let text = token.text();
     if !is_mixed_candidate(text) {
@@ -268,7 +272,10 @@ fn process_ident_token(
     if is_excluded(&text_owned, &config.exclude_words) {
         return;
     }
-    let id = IdentifierInfo { text: text_owned, range: token.text_range() };
+    let id = IdentifierInfo {
+        text: text_owned,
+        range: LocalRange::of_detached_node(token.text_range()),
+    };
     if should_report(&id, config) {
         diagnostics.push(Diagnostic {
             code,
@@ -285,15 +292,13 @@ fn process_ident_token(
 }
 
 fn collect_and_check(
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
     config: &Config,
     code: DiagnosticCode,
-) -> Vec<Diagnostic> {
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
+) -> Vec<Diagnostic<LocalRange>> {
     let mut diagnostics = Vec::new();
 
-    for node in root.descendants() {
+    for node in ctx.nodes() {
         match node.kind() {
             SyntaxKind::FUNCTION_DEF | SyntaxKind::PROCEDURE_DEF => {
                 for element in node.children_with_tokens() {
@@ -340,7 +345,10 @@ fn collect_and_check(
                                             (u32::from(token.text_range().start()) + 1).into(),
                                             token.text_range().end(),
                                         );
-                                        let id = IdentifierInfo { text: text_owned, range };
+                                        let id = IdentifierInfo {
+                                            text: text_owned,
+                                            range: LocalRange::of_detached_node(range),
+                                        };
                                         if should_report(&id, config) {
                                             diagnostics.push(Diagnostic {
                                                 code,
@@ -449,16 +457,16 @@ fn collect_and_check(
     diagnostics
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::LatinAndCyrillicSymbolInWord;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = Config::from_context(ctx);
 
-    collect_and_check(ctx, &config, code)
+    acc.extend(collect_and_check(ctx, &config, code));
 }
 
 #[cfg(test)]

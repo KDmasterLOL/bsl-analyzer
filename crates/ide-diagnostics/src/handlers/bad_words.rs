@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use ide_db::TextRange;
 use regex::RegexBuilder;
 use syntax::{SyntaxKind, SyntaxNode};
@@ -26,7 +27,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let bad_words_pattern = ctx.config_string(DiagnosticCode::BadWords, "badWords", "");
 
         let find_in_comments = ctx.config_bool(DiagnosticCode::BadWords, "findInComments", true);
@@ -35,7 +36,7 @@ impl Config {
     }
 }
 
-pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &DiagnosticsContext) {
+pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic<LocalRange>>, ctx: &BodyContext) {
     if node.kind() != SyntaxKind::SOURCE_FILE {
         return;
     }
@@ -84,60 +85,11 @@ pub fn check_node(node: &SyntaxNode, acc: &mut Vec<Diagnostic>, ctx: &Diagnostic
             code,
             message: format!("Использование запрещённого слова '{}'", mat.as_str()),
             severity: ctx.severity(code),
-            range: match_range,
+            range: LocalRange::of_detached_node(match_range),
             tags: ctx.tags(code),
             fixes: vec![],
         });
     }
-}
-
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
-    let code = DiagnosticCode::BadWords;
-
-    if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
-    }
-
-    let config = Config::from_context(ctx);
-
-    if config.bad_words_pattern.is_empty() {
-        return Vec::new();
-    }
-
-    let re = match RegexBuilder::new(&config.bad_words_pattern).case_insensitive(true).build() {
-        Ok(regex) => regex,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_text = ctx.file_text();
-
-    let mut diagnostics = Vec::new();
-    let mut byte_offset = 0;
-
-    for line in file_text.lines() {
-        if !config.find_in_comments && line.trim_start().starts_with("//") {
-            byte_offset += line.len() + 1;
-            continue;
-        }
-
-        for mat in re.find_iter(line) {
-            let start = (byte_offset + mat.start()) as u32;
-            let end = (byte_offset + mat.end()) as u32;
-
-            diagnostics.push(Diagnostic {
-                code: DiagnosticCode::BadWords,
-                message: format!("Использование запрещённого слова '{}'", mat.as_str()),
-                severity: ctx.severity(code),
-                range: TextRange::new(start.into(), end.into()),
-                tags: ctx.tags(code),
-                fixes: vec![],
-            });
-        }
-
-        byte_offset += line.len() + 1;
-    }
-
-    diagnostics
 }
 
 #[cfg(test)]
@@ -312,8 +264,7 @@ fn integration_bad_words_matches_pattern_across_tokens() {
 
 #[cfg(test)]
 mod tests {
-    use super::check;
-    use crate::test_utils::{check_ast_diagnostic_with_config, format_diags};
+    use crate::test_utils::{check_diagnostics_for_with_config, format_diags};
     use crate::{DiagnosticCode, DiagnosticsConfig};
     use expect_test::expect;
 
@@ -322,7 +273,7 @@ mod tests {
         config: DiagnosticsConfig,
         expected: expect_test::Expect,
     ) {
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_diagnostics_for_with_config(code, config, DiagnosticCode::BadWords);
         let filtered = diagnostics
             .into_iter()
             .filter(|d| d.code == DiagnosticCode::BadWords)

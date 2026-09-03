@@ -1,14 +1,33 @@
 use crate::DiagnosticCode;
+use hir::{LocalRange, MethodOffset};
 use ide_db::TextRange;
 
+/// A finding with its range in `R`: file positions (`TextRange`, the default)
+/// once assembled for the file, or positions relative to the body's own root
+/// (`LocalRange`) while it is the result of one body's check — the form a
+/// per-method memo keeps, because it must not change when the method moves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Diagnostic {
+pub struct Diagnostic<R = TextRange> {
     pub code: DiagnosticCode,
     pub message: String,
     pub severity: Severity,
-    pub range: TextRange,
+    pub range: R,
     pub tags: Vec<DiagnosticTag>,
-    pub fixes: Vec<Fix>,
+    pub fixes: Vec<Fix<R>>,
+}
+
+impl Diagnostic<LocalRange> {
+    /// Into file positions: the finding and every edit of its fixes.
+    pub fn lift(self, base: MethodOffset) -> Diagnostic {
+        Diagnostic {
+            code: self.code,
+            message: self.message,
+            severity: self.severity,
+            range: self.range.lift(base),
+            tags: self.tags,
+            fixes: self.fixes.into_iter().map(|fix| fix.lift(base)).collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -122,9 +141,9 @@ impl DiagnosticTag {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Fix {
+pub struct Fix<R = TextRange> {
     pub label: String,
-    pub edits: Vec<TextEdit>,
+    pub edits: Vec<TextEdit<R>>,
     /// Whether this fix may be applied unattended as part of a `source.fixAll`
     /// batch. Safe means the edit is deterministic, semantics-preserving, and
     /// reference-safe when applied together with every other occurrence in the
@@ -133,23 +152,39 @@ pub struct Fix {
     pub safe_for_fix_all: bool,
 }
 
-impl Fix {
+impl<R> Fix<R> {
     /// A fix eligible for `source.fixAll`: deterministic, semantics-preserving,
     /// and reference-safe as an unattended batch edit.
-    pub fn safe(label: impl Into<String>, edits: Vec<TextEdit>) -> Self {
+    pub fn safe(label: impl Into<String>, edits: Vec<TextEdit<R>>) -> Self {
         Self { label: label.into(), edits, safe_for_fix_all: true }
     }
 
     /// A fix that stays an explicit, opt-in quick fix and is excluded from
     /// `source.fixAll` — it offers a choice or renames a symbol whose remaining
     /// references a file-local batch cannot keep in sync.
-    pub fn manual(label: impl Into<String>, edits: Vec<TextEdit>) -> Self {
+    pub fn manual(label: impl Into<String>, edits: Vec<TextEdit<R>>) -> Self {
         Self { label: label.into(), edits, safe_for_fix_all: false }
     }
 }
 
+impl Fix<LocalRange> {
+    pub fn lift(self, base: MethodOffset) -> Fix {
+        Fix {
+            label: self.label,
+            edits: self.edits.into_iter().map(|edit| edit.lift(base)).collect(),
+            safe_for_fix_all: self.safe_for_fix_all,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TextEdit {
-    pub range: TextRange,
+pub struct TextEdit<R = TextRange> {
+    pub range: R,
     pub new_text: String,
+}
+
+impl TextEdit<LocalRange> {
+    pub fn lift(self, base: MethodOffset) -> TextEdit {
+        TextEdit { range: self.range.lift(base), new_text: self.new_text }
+    }
 }

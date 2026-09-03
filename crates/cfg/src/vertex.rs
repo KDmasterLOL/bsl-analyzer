@@ -1,6 +1,6 @@
+use cfg_types::LocalRange;
 use cfg_types::{BindingId, ExprId, StmtId};
 use hir_def::Name;
-use syntax::TextRange;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CfgVertex {
@@ -114,26 +114,28 @@ impl ConditionalVertex {
     }
 }
 
+/// Ranges are those of the lowered body: relative to the method root, so the
+/// graph of a method is the same value wherever the method sits in its file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreprocConditionVertex {
-    pub condition_range: TextRange,
-    pub directive_range: Option<TextRange>,
-    pub full_range: Option<TextRange>,
+    pub condition_range: LocalRange,
+    pub directive_range: Option<LocalRange>,
+    pub full_range: Option<LocalRange>,
 }
 
 impl PreprocConditionVertex {
-    pub fn new(condition_range: TextRange) -> Self {
+    pub fn new(condition_range: LocalRange) -> Self {
         Self { condition_range, directive_range: None, full_range: None }
     }
 
-    pub fn with_directive_range(condition_range: TextRange, directive_range: TextRange) -> Self {
+    pub fn with_directive_range(condition_range: LocalRange, directive_range: LocalRange) -> Self {
         Self { condition_range, directive_range: Some(directive_range), full_range: None }
     }
 
     pub fn with_ranges(
-        condition_range: TextRange,
-        directive_range: TextRange,
-        full_range: TextRange,
+        condition_range: LocalRange,
+        directive_range: LocalRange,
+        full_range: LocalRange,
     ) -> Self {
         Self {
             condition_range,

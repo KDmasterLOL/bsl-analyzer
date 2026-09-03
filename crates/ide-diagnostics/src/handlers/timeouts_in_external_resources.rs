@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::BodySourceMap;
+use hir::LocalRange;
 use hir::{Expr, ExprId, IdConversion, Literal, Name, Stmt};
-use ide_db::TextRange;
 use rustc_hash::FxHashMap;
 use stdx::case::CaseExt;
 
@@ -28,7 +29,7 @@ struct Config {
 }
 
 impl Config {
-    fn from_context(ctx: &DiagnosticsContext) -> Self {
+    fn from_context(ctx: &BodyContext) -> Self {
         let code = DiagnosticCode::TimeoutsInExternalResources;
 
         let analyze_internet_mail_profile_zero_timeout = ctx
@@ -77,34 +78,29 @@ impl ResourceType {
 #[derive(Debug)]
 struct NewExprWithoutTimeout {
     expr_id: ExprId,
-    range: TextRange,
+    range: LocalRange,
     target_var: Option<Name>,
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::TimeoutsInExternalResources;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let config = Config::from_context(ctx);
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body_for_timeouts(body, source_map, code, ctx, &config, diags);
-    });
-
-    diagnostics.sort_by_key(|d| d.range.start());
-    diagnostics
+    check_body_for_timeouts(ctx.body(), ctx.source_map(), code, ctx, &config, acc);
 }
 
 fn check_body_for_timeouts(
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
     config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     let mut candidates: Vec<NewExprWithoutTimeout> = Vec::new();
 
@@ -232,10 +228,10 @@ fn extract_simple_path_idx(body: &hir::Body, expr_idx: hir::ExprIdx) -> Option<N
 }
 
 fn create_diagnostic(
-    range: TextRange,
+    range: LocalRange,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-) -> Diagnostic {
+    ctx: &BodyContext,
+) -> Diagnostic<LocalRange> {
     Diagnostic {
         code,
         message: "Timeout not specified when working with external resource".to_string(),

@@ -75,8 +75,14 @@ pub fn workspace_roots(
     project: &Project,
     excluded: &[std::path::PathBuf],
 ) -> (bsl_search::WorkspaceRoots, Vec<bsl_search::RejectedRoot>) {
-    let extensions: Vec<std::path::PathBuf> =
-        project.extension_paths().iter().map(|(_, path)| path.clone()).collect();
+    // External objects register like extensions: their own root id keeps their
+    // files apart from a same-named object inside the configuration.
+    let extensions: Vec<std::path::PathBuf> = project
+        .extension_paths()
+        .iter()
+        .chain(project.external_paths())
+        .map(|(_, path)| path.clone())
+        .collect();
     let (roots, rejected) = bsl_search::WorkspaceRoots::build_optional(
         &project.root,
         project.semantic_base_path(),

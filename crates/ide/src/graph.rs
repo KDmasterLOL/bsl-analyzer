@@ -1,9 +1,9 @@
 //! Agent-facing projection of the whole-config call graph.
 //!
 //! The MCP surface speaks in **durable string ids**, not interned handles:
-//! `MethodId.local_id` is an item-tree position that shifts whenever methods are
-//! added or removed above it, so an interned id is valid only within one Salsa
-//! revision. The durable id is a path-derived qualified name (`method/common/
+//! `MethodId` keys a method by an interned name whose id is assigned per
+//! process, so a handle is meaningful only inside the server that issued it.
+//! The durable id is a path-derived qualified name (`method/common/
 //! РаботаСКонтрагентами/ПроверитьИНН`) that survives edits and re-resolves to the
 //! current revision's handle per request. BSL identifiers cannot contain `/`,
 //! `:` or `.`, so the structural separators never collide with names.

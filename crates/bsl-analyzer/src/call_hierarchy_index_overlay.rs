@@ -15,7 +15,9 @@ pub struct CallHierarchyIndexFrozenSnapshot {
     pub file_set: Arc<FxHashMap<FileId, PathBuf>>,
     pub disk_revisions: Arc<FxHashMap<FileId, u64>>,
     pub open_texts: Arc<FxHashMap<FileId, Arc<str>>>,
-    pub config_paths: Arc<Vec<(Option<String>, PathBuf)>>,
+    /// The workspace's roots as registered — kinds and closures included. A
+    /// flat label list would re-read an external object as an extension.
+    pub configs: Arc<ide::WorkspaceConfigsSnapshot>,
     pub creation_generation: u64,
     source_root: SourceRoot,
     config_cache: Arc<GraphConfigCache>,
@@ -49,7 +51,7 @@ impl CallHierarchyIndexFrozenSnapshot {
             file_set: Arc::new(file_set),
             disk_revisions: Arc::new(disk_revisions),
             open_texts: Arc::new(open_texts),
-            config_paths: Arc::new(db.all_config_paths()),
+            configs: db.workspace_configs_snapshot(),
             creation_generation,
             source_root,
             config_cache: Arc::new(GraphConfigCache::default()),
@@ -70,7 +72,7 @@ impl CallHierarchyIndexFrozenSnapshot {
             file_set: Arc::clone(&self.file_set),
             disk_revisions: Arc::clone(&self.disk_revisions),
             open_texts,
-            config_paths: Arc::clone(&self.config_paths),
+            configs: Arc::clone(&self.configs),
             creation_generation: self.creation_generation,
             source_root: self.source_root.clone(),
             config_cache: Arc::clone(&self.config_cache),
@@ -123,14 +125,14 @@ impl CallHierarchyIndexFrozenSnapshot {
             batch_files.push((file_id, path.clone()));
         }
 
-        db.set_all_config_paths((*self.config_paths).clone());
+        db.set_workspace_configs_snapshot((*self.configs).clone());
         ide::warm_batch_config_roots(&db, &batch_files);
         db
     }
 
     pub fn freeze_config_inputs(&self) {
         let mut representatives = Vec::new();
-        for (_, config_root) in self.config_paths.iter() {
+        for (_, config_root) in self.configs.paths.iter() {
             let root = config_root.canonicalize().unwrap_or_else(|_| config_root.clone());
             if let Some(file_id) = self
                 .file_set

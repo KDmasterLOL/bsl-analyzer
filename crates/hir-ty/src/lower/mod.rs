@@ -200,6 +200,12 @@ fn metadata_kind_from_prefix(prefix: &str) -> Option<MetadataKind> {
         "reportobject" | "отчётобъект" | "отчетобъект" => {
             Some(MetadataKind::ReportObject)
         }
+        "externaldataprocessorobject" | "внешняяобработкаобъект" => {
+            Some(MetadataKind::ExternalDataProcessorObject)
+        }
+        "externalreportobject" | "внешнийотчётобъект" | "внешнийотчетобъект" => {
+            Some(MetadataKind::ExternalReportObject)
+        }
         "exchangeplanref" | "планобменассылка" => {
             Some(MetadataKind::ExchangePlanRef)
         }

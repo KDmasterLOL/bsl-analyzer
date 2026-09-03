@@ -4,7 +4,7 @@
 //! without lowering every module's bodies into one database at once.
 //!
 //! Resolving a qualified or manager call needs only the target module's method
-//! table (lowercased name → first `{local_id, is_export}`); the rest — config
+//! table (folded name → first `{local_id, is_export}`); the rest — config
 //! visibility and the path-based [`ModuleIndex`](crate::module_index::ModuleIndex)
 //! — is already cheap and path-only. [`GraphIndex`] holds that method table for
 //! every module so a streaming, batched build can resolve cross-batch targets
@@ -15,6 +15,7 @@
 //! method lookup for a [`GraphIndex`] read. A golden-equivalence test
 //! (`ide-db`) asserts the result is identical to the Salsa fold.
 
+use intern::NormName;
 use std::path::Path;
 use stdx::case::CaseExt;
 
@@ -34,7 +35,7 @@ use crate::{
     module_index::{module_key_for_path, ModuleKey},
     name::Name,
     resolver::Resolver,
-    CallHierarchyReverseIndex, MethodId, ModuleId,
+    CallHierarchyReverseIndex, MethodId, MethodKey, ModuleId,
 };
 
 /// A module's methods as seen from the item tree alone (no body lowering).
@@ -42,9 +43,9 @@ use crate::{
 /// ranges) that node materialisation needs. Dispatch lives in
 /// [`GraphIndex::node_dispatch`].
 struct ModuleMethods {
-    /// Lowercased name → first declaration, mirroring `SymbolTree::find_method`.
-    by_name: FxHashMap<String, MethodRef>,
-    /// Every method in declaration order (the index is the `local_id`).
+    /// Folded name → first declaration, mirroring `SymbolTree::find_method`.
+    by_name: FxHashMap<NormName, MethodRef>,
+    /// Every method in declaration order.
     all: Vec<GraphMethodEntry>,
     /// Whether this module's body could be read, as answered by the database that
     /// actually read it. Recorded here because the index is what the batches share:
@@ -55,7 +56,7 @@ struct ModuleMethods {
 
 #[derive(Clone, Copy)]
 struct MethodRef {
-    local_id: u32,
+    local_id: MethodKey,
     is_export: bool,
 }
 
@@ -179,11 +180,11 @@ impl GraphIndex {
         module_dispatch: Option<MethodDispatch>,
         unread: bool,
     ) {
-        // First-wins lowercased map, matching `SymbolTree::find_method`.
+        // First-wins folded map, matching `SymbolTree::find_method`.
         let mut by_name = FxHashMap::default();
         for entry in &all {
             by_name
-                .entry(entry.name.as_str().fold_lower())
+                .entry(entry.local_id.name)
                 .or_insert(MethodRef { local_id: entry.local_id, is_export: entry.is_export });
             // Pass-1 dispatch rule: module execution context wins, else annotation.
             self.node_dispatch.insert(
@@ -245,11 +246,13 @@ impl GraphIndex {
     }
 
     /// A body-free resident layout hash of one module's methods: the ordered
-    /// (`local_id`, original-spelling name, `is_export`, effective dispatch) of every
+    /// (key, original-spelling name, `is_export`, effective dispatch) of every
     /// method in declaration order, plus readability. It deliberately includes the
-    /// top-level position encoded in `local_id`, unlike [`Self::module_sig_hash`], so
-    /// resident identity can detect declaration-layout shifts without widening the
-    /// durable contract. Readability is in it because the call-hierarchy catch-up
+    /// method key, unlike [`Self::module_sig_hash`], so resident identity can
+    /// detect a change in which method is which (a namesake added above one)
+    /// without widening the durable contract. A module variable added above the
+    /// methods moves neither hash: it is not a method and renumbers none.
+    /// Readability is in it because the call-hierarchy catch-up
     /// treats an unchanged hash as proof that the resident index still resolves other
     /// modules' calls the same way, and crossing the unread barrier breaks exactly
     /// that.
@@ -310,7 +313,7 @@ impl GraphIndex {
     /// Returns the same `{local_id, is_export}` the Salsa symbol tree would, so the
     /// reconstructed `MethodId` is identical.
     fn find_method(&self, target: ModuleId, name: &Name) -> Option<MethodRef> {
-        self.methods.get(&target)?.by_name.get(&name.as_str().fold_lower()).copied()
+        self.methods.get(&target)?.by_name.get(&NormName::intern(name.as_str())).copied()
     }
 
     /// Whether `target`'s body could be read, as recorded by the database that indexed
@@ -677,23 +680,36 @@ mod method_only_call_pair_tests {
     fn method_only_call_pairs_drop_non_method_edges_and_deduplicate() {
         // Given: resolved edges to methods, metadata, an unresolved target, and module code.
         let module = ModuleId::new(FileId(0));
-        let local = MethodId { module, local_id: 1 };
-        let other = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
+        let local = MethodId { module, local_id: crate::MethodKey::first("М1") };
+        let other =
+            MethodId { module: ModuleId::new(FileId(1)), local_id: crate::MethodKey::first("М0") };
         let summary = ResolvedModuleSummary {
             module,
             edges: vec![
-                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
-                edge(CallerId::Method(0), ResolvedTarget::Method(local)),
-                edge(CallerId::Method(0), ResolvedTarget::Method(other)),
+                edge(
+                    CallerId::Method(crate::MethodKey::first("М0")),
+                    ResolvedTarget::Method(other),
+                ),
+                edge(
+                    CallerId::Method(crate::MethodKey::first("М0")),
+                    ResolvedTarget::Method(local),
+                ),
+                edge(
+                    CallerId::Method(crate::MethodKey::first("М0")),
+                    ResolvedTarget::Method(other),
+                ),
                 edge(CallerId::ModuleCode, ResolvedTarget::Method(other)),
                 edge(
-                    CallerId::Method(0),
+                    CallerId::Method(crate::MethodKey::first("М0")),
                     ResolvedTarget::Mdo {
                         mdo_type: MdoType::Catalog,
                         object_name: Name::new("Контрагенты"),
                     },
                 ),
-                edge(CallerId::Method(0), ResolvedTarget::Unresolved(CallTarget::Unresolved)),
+                edge(
+                    CallerId::Method(crate::MethodKey::first("М0")),
+                    ResolvedTarget::Unresolved(CallTarget::Unresolved),
+                ),
             ],
         };
 
@@ -704,8 +720,14 @@ mod method_only_call_pair_tests {
         assert_eq!(
             pairs,
             vec![
-                MethodCallPair::new(MethodId { module, local_id: 0 }, local),
-                MethodCallPair::new(MethodId { module, local_id: 0 }, other)
+                MethodCallPair::new(
+                    MethodId { module, local_id: crate::MethodKey::first("М0") },
+                    local
+                ),
+                MethodCallPair::new(
+                    MethodId { module, local_id: crate::MethodKey::first("М0") },
+                    other
+                )
             ],
         );
     }
@@ -2594,6 +2616,35 @@ mod module_layout_hash_tests {
         )
     }
 
+    /// The index answers the same method the symbol tree does, so both must fold
+    /// a name the same way (per character, as `NormName`); a contextual fold
+    /// puts Greek final sigma in another bucket.
+    #[test]
+    fn method_lookup_folds_names_like_the_symbol_tree() {
+        let source = "Функция ΟΔΟΣ() Экспорт\n\tВозврат 1;\nКонецФункции\nФункция οδοσ() Экспорт\n\tВозврат 2;\nКонецФункции\n";
+        let module = ModuleId::new(FileId(0));
+        let item_tree = crate::ItemTree::from_parse(&parser::parse(source));
+        let symbol_tree = crate::SymbolTree::from_item_tree_no_docs(&item_tree, module);
+        let mut index = GraphIndex::new();
+        index.insert_module_data(
+            module,
+            crate::call_graph::extract_graph_methods(&item_tree),
+            None,
+            false,
+        );
+
+        for spelling in ["ΟΔΟΣ", "οδοσ"] {
+            let name = Name::new(spelling);
+            let expected = symbol_tree.find_method(&name).map(|m| m.id.local_id);
+            assert_eq!(expected.map(|key| key.ordinal), Some(0), "{spelling}: first declaration");
+            assert_eq!(
+                index.find_method(module, &name).map(|m| m.local_id),
+                expected,
+                "{spelling}"
+            );
+        }
+    }
+
     /// A call blocked by a non-exported declaration is not answered — it resolves to
     /// nothing, and adding `Экспорт` to that very declaration makes an edge appear. The
     /// reverse references are the only index able to find its callers then, so the walk
@@ -2650,15 +2701,29 @@ mod module_layout_hash_tests {
         assert_eq!(readable, hashes_marked("", false));
     }
 
+    /// A module variable is not a method: adding one above the methods changes
+    /// neither what the module declares to its callers nor which method is
+    /// which, so the catch-up build has no reason to start over.
     #[test]
-    fn module_layout_hash_changes_when_a_top_level_variable_shifts_method_local_ids() {
-        // Given: the same method declaration, with a new preceding top-level variable.
+    fn a_top_level_variable_above_the_methods_moves_neither_hash() {
         let before = hashes("Процедура Выполнить() Экспорт\nКонецПроцедуры");
         let after = hashes("Перем Счетчик;\nПроцедура Выполнить() Экспорт\nКонецПроцедуры");
 
-        // Then: durable signature identity is stable, while resident layout identity moves.
-        assert_eq!(before.0, after.0);
-        assert_ne!(before.1, after.1);
+        assert_eq!(before.0, after.0, "durable signature identity");
+        assert_eq!(before.1, after.1, "resident layout identity");
+    }
+
+    /// A new method is a new declaration: callers may now resolve to it, so
+    /// both identities move — the control for the variable case above.
+    #[test]
+    fn a_method_inserted_above_moves_both_hashes() {
+        let before = hashes("Процедура Выполнить() Экспорт\nКонецПроцедуры");
+        let after = hashes(
+            "Процедура Новая() Экспорт\nКонецПроцедуры\nПроцедура Выполнить() Экспорт\nКонецПроцедуры",
+        );
+
+        assert_ne!(before.0, after.0, "durable signature identity");
+        assert_ne!(before.1, after.1, "resident layout identity");
     }
 
     #[test]

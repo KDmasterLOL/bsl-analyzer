@@ -90,5 +90,6 @@ walkdir = "2.4"
 winresource = "0.1"
 
 [dev-dependencies]
+test-utils.workspace = true
 expect-test.workspace = true
 rmcp = { version = "3.1", features = ["client"] }

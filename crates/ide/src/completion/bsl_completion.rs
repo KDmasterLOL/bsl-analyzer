@@ -422,17 +422,8 @@ fn owner_for_method_range<DB: RootDatabase>(
     method_range: TextRange,
 ) -> Option<DefWithBodyId> {
     let tree = db.item_tree(file_id);
-    for (idx, item) in tree.top_level_items().iter().enumerate() {
-        let range = match item {
-            hir::ModItem::Procedure(proc_idx) => tree.procedure(*proc_idx).source_range,
-            hir::ModItem::Function(func_idx) => tree.function(*func_idx).source_range,
-            _ => continue,
-        };
-        if range == method_range {
-            return Some(DefWithBodyId::Method(idx as u32));
-        }
-    }
-    None
+    let key = tree.methods().find(|method| method.source_range() == method_range)?.key();
+    Some(DefWithBodyId::Method(key))
 }
 
 fn find_method_for_token(
@@ -764,7 +755,7 @@ fn complete_user_defined_symbols<DB: RootDatabase>(
     let symbol_tree = db.symbol_tree(hir::ModuleId::new(file_id));
     let local_admits = |env: &EnvFilter, name: &hir::Name| {
         let Some(method) = symbol_tree.find_method(name) else { return true };
-        env.admits_local_method(hir::execution_env::body_env(&metadata, &method.annotations, &opts))
+        env.admits_local_method(hir::execution_env::body_env(&metadata, &method.directives, &opts))
     };
 
     for procedure in module.procedures() {

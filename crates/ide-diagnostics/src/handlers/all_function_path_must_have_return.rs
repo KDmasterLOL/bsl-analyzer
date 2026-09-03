@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::MethodId;
-use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::CodeSmell,
@@ -19,24 +20,21 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 };
 
 pub fn from_hir(
-    range: TextRange,
+    range: LocalRange,
     method_id: &MethodId,
-    ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::AllFunctionPathMustHaveReturn;
 
     if ctx.is_disabled_with_metadata(code) {
         return None;
     }
 
-    let local_id = method_id.local_id;
-
     let every_path_returns = ctx
-        .module_cfgs()
-        .get(local_id)
-        .and_then(|cfg| cfg.entry_point())
+        .method_cfg(*method_id)
+        .entry_point()
         .and_then(|entry| {
-            ctx.module_path_terminates().get(local_id).map(|pt| !pt.may_fallthrough_at_block(entry))
+            ctx.method_path_terminates(*method_id).map(|pt| !pt.may_fallthrough_at_block(entry))
         })
         .unwrap_or(false);
 

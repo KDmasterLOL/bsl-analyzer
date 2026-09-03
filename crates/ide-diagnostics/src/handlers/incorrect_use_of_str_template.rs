@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
-use hir::{Expr, ExprId, IdConversion, Literal, MethodId, ModuleId, Stmt, StmtId};
-use ide_db::TextRange;
+use crate::AnalysisContext;
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
+use hir::LocalRange;
+use hir::{Expr, ExprId, IdConversion, Literal, Stmt, StmtId};
 use stdx::case::{contains_ignore_case, eq_ignore_case};
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -27,103 +28,91 @@ fn is_str_template_call_name(name: &str) -> bool {
     eq_ignore_case(name, "стршаблон") || eq_ignore_case(name, "strtemplate")
 }
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::IncorrectUseOfStrTemplate;
 
-    if ctx.is_disabled_with_metadata(code) {
-        return vec![];
+    if ctx.is_disabled_with_metadata(code) || ctx.is_module_code() {
+        return;
     }
 
-    let text = ctx.file_text();
-    if !has_str_template_calls(&text) {
-        return vec![];
+    if !has_str_template_calls(&ctx.root().text().to_string()) {
+        return;
     }
 
-    let mut diagnostics = Vec::new();
-    let module_id = ModuleId { file_id: ctx.file_id };
+    let body = ctx.body();
+    let source_map = ctx.source_map();
+    let mut candidates: Vec<(StmtId, ExprId, usize)> = Vec::new();
 
-    let module_bodies = ctx.module_bodies();
-
-    for (local_id, body, source_map) in module_bodies.method_bodies() {
-        let mut candidates: Vec<(StmtId, ExprId, usize)> = Vec::new();
-
-        for (stmt_id, stmt) in body.stmts_iter() {
-            let expr_id = match stmt {
-                Stmt::Expr(id) => Some(*id),
-                Stmt::Assign { value, .. } => Some(*value),
-                _ => None,
-            };
-
-            if let Some(expr_id) = expr_id {
-                let expr = body.expr(ExprId::from_idx(expr_id));
-
-                let (method_name, args) = match expr {
-                    Expr::Call { callee, args } => {
-                        if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
-                            (name.as_str(), args)
-                        } else {
-                            continue;
-                        }
-                    }
-                    Expr::MethodCall { method, args, .. } => (method.as_str(), args),
-                    _ => continue,
-                };
-
-                if !is_str_template_call_name(method_name) {
-                    continue;
-                }
-
-                if args.is_empty() {
-                    continue;
-                }
-
-                let template_expr_id = ExprId::from_idx(args[0]);
-                let param_count = args.len() - 1;
-
-                if matches!(body.expr(template_expr_id), Expr::Literal(Literal::String(_))) {
-                    continue;
-                }
-
-                candidates.push((stmt_id, template_expr_id, param_count));
-            }
-        }
-
-        if candidates.is_empty() {
-            continue;
-        }
-
-        let method_id = MethodId { module: module_id, local_id };
-        let reaching_defs = match ctx.reaching_definitions(method_id) {
-            Some(defs) => defs,
-            None => continue,
+    for (stmt_id, stmt) in body.stmts_iter() {
+        let expr_id = match stmt {
+            Stmt::Expr(id) => Some(*id),
+            Stmt::Assign { value, .. } => Some(*value),
+            _ => None,
         };
 
-        for (stmt_id, template_expr_id, param_count) in candidates {
-            if let Some(template_string) =
-                resolve_expr_to_string(template_expr_id, body, &reaching_defs, stmt_id)
-            {
-                if is_wrong_str_template(&template_string, param_count) {
-                    if let Some(range) = source_map.expr_range(template_expr_id) {
-                        diagnostics.push(Diagnostic {
-                            code,
-                            message: format!(
-                                "Template '{}' requires {} parameters but {} provided",
-                                template_string.chars().take(50).collect::<String>(),
-                                count_required_params(&template_string),
-                                param_count
-                            ),
-                            severity: ctx.severity(code),
-                            range,
-                            tags: ctx.tags(code),
-                            fixes: vec![],
-                        });
+        if let Some(expr_id) = expr_id {
+            let expr = body.expr(ExprId::from_idx(expr_id));
+
+            let (method_name, args) = match expr {
+                Expr::Call { callee, args } => {
+                    if let Expr::Path(name) = body.expr(ExprId::from_idx(*callee)) {
+                        (name.as_str(), args)
+                    } else {
+                        continue;
                     }
+                }
+                Expr::MethodCall { method, args, .. } => (method.as_str(), args),
+                _ => continue,
+            };
+
+            if !is_str_template_call_name(method_name) {
+                continue;
+            }
+
+            if args.is_empty() {
+                continue;
+            }
+
+            let template_expr_id = ExprId::from_idx(args[0]);
+            let param_count = args.len() - 1;
+
+            if matches!(body.expr(template_expr_id), Expr::Literal(Literal::String(_))) {
+                continue;
+            }
+
+            candidates.push((stmt_id, template_expr_id, param_count));
+        }
+    }
+
+    if candidates.is_empty() {
+        return;
+    }
+
+    let Some(reaching_defs) = ctx.reaching_definitions() else { return };
+
+    for (stmt_id, template_expr_id, param_count) in candidates {
+        if let Some(template_string) =
+            resolve_expr_to_string(template_expr_id, body, &reaching_defs, stmt_id)
+        {
+            if is_wrong_str_template(&template_string, param_count) {
+                if let Some(range) = source_map.expr_range(template_expr_id) {
+                    acc.push(Diagnostic {
+                        code,
+                        message: format!(
+                            "Template '{}' requires {} parameters but {} provided",
+                            template_string.chars().take(50).collect::<String>(),
+                            count_required_params(&template_string),
+                            param_count
+                        ),
+                        severity: ctx.severity(code),
+                        range,
+                        tags: ctx.tags(code),
+                        fixes: vec![],
+                    });
                 }
             }
         }
     }
-
-    diagnostics
 }
 
 fn resolve_expr_to_string(
@@ -349,7 +338,7 @@ fn count_required_params(template_string: &str) -> usize {
     max_param
 }
 
-pub fn from_hir(range: TextRange, ctx: &DiagnosticsContext) -> Option<Diagnostic> {
+pub fn from_hir(range: LocalRange, ctx: &AnalysisContext) -> Option<Diagnostic<LocalRange>> {
     let code = DiagnosticCode::IncorrectUseOfStrTemplate;
 
     if ctx.is_disabled_with_metadata(code) {

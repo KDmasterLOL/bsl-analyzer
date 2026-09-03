@@ -16,8 +16,8 @@ pub mod path_scope;
 pub mod source_set;
 pub mod workspace_walk;
 pub use extension_topology::{
-    ExtensionNode, ExtensionNodeSpec, ExtensionTopology, NodeId, TopologyError,
-    TopologyFingerprint, TOPOLOGY_FORMAT_VERSION,
+    ExtensionNode, ExtensionNodeSpec, ExtensionTopology, ExternalObjectKind, NodeId, NodeKind,
+    TopologyError, TopologyFingerprint, TOPOLOGY_FORMAT_VERSION,
 };
 pub use file_role::{
     file_role, is_bsl_source_path, is_common_module_body_path, is_metadata_path,
@@ -55,6 +55,11 @@ pub struct DiagnosticsBaselineProjectScope {
     /// project that has one, so published baselines keep their fingerprints.
     pub source_root: Option<String>,
     pub extensions: Vec<DiagnosticsBaselineProjectExtension>,
+    /// External data processors and reports. Absent from the serialized form when
+    /// empty, so every baseline published before externals existed keeps its
+    /// scope fingerprint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub externals: Vec<DiagnosticsBaselineProjectExternal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +68,18 @@ pub struct DiagnosticsBaselineProjectExtension {
     pub name: String,
     pub path: String,
     pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsBaselineProjectExternal {
+    pub name: String,
+    pub path: String,
+    /// The extensions the object narrowed its view to; `None` when it sees
+    /// every extension. Absent from the serialized form then, so a baseline
+    /// published before the key existed keeps its scope fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,9 +99,24 @@ pub enum DiagnosticsBaselineProjectMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DiagnosticsBaselinePartitionIdentity {
-    Main { path: String },
-    Extension { name: String, path: String, depends_on: Vec<String> },
-    Group { name: String, members: Vec<DiagnosticsBaselineProjectExtension> },
+    Main {
+        path: String,
+    },
+    Extension {
+        name: String,
+        path: String,
+        depends_on: Vec<String>,
+    },
+    Group {
+        name: String,
+        members: Vec<DiagnosticsBaselineProjectExtension>,
+    },
+    External {
+        name: String,
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depends_on: Option<Vec<String>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +271,7 @@ pub struct Project {
     /// expected and it turned out to be an extension. Never a source root.
     extension_in_config_location: Option<PathBuf>,
     extension_paths: Vec<(String, PathBuf)>,
+    external_paths: Vec<(String, PathBuf)>,
     topology: ExtensionTopology,
 }
 
@@ -272,17 +305,23 @@ impl Project {
         let canonical_base =
             std::fs::canonicalize(base_path).unwrap_or_else(|_| base_path.to_path_buf());
         let topology = ExtensionTopology::build(&canonical_base, specs)?;
-        let extension_paths = topology
-            .nodes()
-            .iter()
-            .map(|node| (node.name().to_string(), node.path().to_path_buf()))
-            .collect();
+        let paths_of_kind = |external: bool| -> Vec<(String, PathBuf)> {
+            topology
+                .nodes()
+                .iter()
+                .filter(|node| node.kind().is_external() == external)
+                .map(|node| (node.name().to_string(), node.path().to_path_buf()))
+                .collect()
+        };
+        let extension_paths = paths_of_kind(false);
+        let external_paths = paths_of_kind(true);
         Ok(Self {
             root,
             config,
             source_path,
             extension_in_config_location,
             extension_paths,
+            external_paths,
             topology,
         })
     }
@@ -301,6 +340,7 @@ impl Project {
             roots.push(source_path.to_path_buf());
         }
         roots.extend(self.extension_paths.iter().map(|(_, path)| path.clone()));
+        roots.extend(self.external_paths.iter().map(|(_, path)| path.clone()));
         if roots.is_empty() {
             roots.push(self.root.clone());
         }
@@ -342,14 +382,36 @@ impl Project {
         })
     }
 
+    /// Advisory for external data processors or reports declared in a project
+    /// that has no main configuration. Their calls into the configuration they
+    /// were written for cannot resolve, so valid code is reported as broken.
+    /// Unlike an extension, an external root cannot be mistaken for the base,
+    /// so the subject is the declared list, not the resolved source path.
+    pub fn standalone_external_notice(&self) -> Option<String> {
+        if self.configuration_path().is_some() || self.external_paths.is_empty() {
+            return None;
+        }
+        let names: Vec<&str> = self.external_paths.iter().map(|(name, _)| name.as_str()).collect();
+        Some(format!(
+            "external data processors/reports [{}] are analyzed without an owning \
+             configuration. Calls into the configuration will be reported as unresolved. \
+             Point --configuration-root at the main configuration, declare it in \
+             [source].root, or use [source.configuration] with a shared configuration \
+             id/version.",
+            names.join(", ")
+        ))
+    }
+
     /// Base root used by semantic/search compatibility layers. A configured
-    /// configuration always wins. A project with extensions but no base has no
-    /// semantic base at all. Only a project with neither — one that is just a
-    /// directory of sources — treats the workspace root as its anonymous source
-    /// root.
+    /// configuration always wins. A project with extensions or external objects
+    /// but no base has no semantic base at all. Only a project with none of them —
+    /// one that is just a directory of sources — treats the workspace root as its
+    /// anonymous source root.
     pub fn semantic_base_path(&self) -> Option<&Path> {
-        self.configuration_path()
-            .or_else(|| self.extension_paths.is_empty().then_some(self.root.as_path()))
+        self.configuration_path().or_else(|| {
+            (self.extension_paths.is_empty() && self.external_paths.is_empty())
+                .then_some(self.root.as_path())
+        })
     }
 
     pub fn diagnostics_baseline(
@@ -426,6 +488,7 @@ impl Project {
 
         let mut seen: std::collections::HashSet<String> = source_root.iter().cloned().collect();
         let mut extensions = Vec::with_capacity(self.topology.nodes().len());
+        let mut externals = Vec::new();
         for id in self.topology.topological_order() {
             let node = self.topology.node(*id);
             let path = relative_baseline_path(
@@ -435,21 +498,30 @@ impl Project {
             if !seen.insert(path.clone()) {
                 return Err(DiagnosticsBaselineProjectError::PathCollision(path));
             }
+            let depends_on: Vec<String> = node
+                .depends_on()
+                .iter()
+                .map(|id| self.topology.node(*id).name().to_owned())
+                .collect();
+            if node.kind().is_external() {
+                externals.push(DiagnosticsBaselineProjectExternal {
+                    name: node.name().to_owned(),
+                    path,
+                    depends_on: (!node.sees_every_extension()).then_some(depends_on),
+                });
+                continue;
+            }
             extensions.push(DiagnosticsBaselineProjectExtension {
                 name: node.name().to_owned(),
                 path,
-                depends_on: node
-                    .depends_on()
-                    .iter()
-                    .map(|id| self.topology.node(*id).name().to_owned())
-                    .collect(),
+                depends_on,
             });
         }
 
         Ok(Some(ResolvedDiagnosticsBaseline {
             project_path: relative_baseline_path(&target, &project_root)?,
             path: target,
-            scope: DiagnosticsBaselineProjectScope { source_root, extensions },
+            scope: DiagnosticsBaselineProjectScope { source_root, extensions, externals },
             mode,
         }))
     }
@@ -534,6 +606,7 @@ impl Project {
                     .topology
                     .nodes()
                     .iter()
+                    .filter(|node| !node.kind().is_external())
                     .find(|node| stdx::case::fold_lower_per_char(node.name()) == folded)
                 else {
                     return Err(DiagnosticsBaselineProjectError::InvalidGroup(format!(
@@ -616,6 +689,23 @@ impl Project {
             ));
             roots.push(DiagnosticsBaselineRootOwner {
                 root: extension.path.clone(),
+                partition_id: id,
+            });
+        }
+
+        for external in &resolved.scope.externals {
+            let id = format!("external:{}", external.name);
+            validate_partition_id(&id)?;
+            partitions.push(partition(
+                id.clone(),
+                DiagnosticsBaselinePartitionIdentity::External {
+                    name: external.name.clone(),
+                    path: external.path.clone(),
+                    depends_on: external.depends_on.clone(),
+                },
+            ));
+            roots.push(DiagnosticsBaselineRootOwner {
+                root: external.path.clone(),
                 partition_id: id,
             });
         }
@@ -745,6 +835,12 @@ impl Project {
         &self.extension_paths
     }
 
+    /// External data processors and reports, by declared name, in declaration
+    /// order. Never part of [`Self::extension_paths`]: the two compose differently.
+    pub fn external_paths(&self) -> &[(String, PathBuf)] {
+        &self.external_paths
+    }
+
     /// The validated extension dependency topology. Holding a `Project` implies
     /// the topology is valid — invalid graphs fail construction instead.
     pub fn extension_topology(&self) -> &ExtensionTopology {
@@ -836,10 +932,11 @@ impl Project {
                     };
                     seen.insert(canonical.clone(), specs.len());
                     specs.push(ExtensionNodeSpec {
+                        kind: NodeKind::Extension,
                         name,
                         path,
                         canonical_path: canonical,
-                        depends_on: Vec::new(),
+                        depends_on: None,
                         structured: false,
                     });
                 }
@@ -871,16 +968,185 @@ impl Project {
                     );
                     seen.insert(canonical.clone(), specs.len());
                     specs.push(ExtensionNodeSpec {
+                        kind: NodeKind::Extension,
                         name: structured.name,
                         path,
                         canonical_path: canonical,
-                        depends_on: structured.depends_on,
+                        depends_on: Some(structured.depends_on),
                         structured: true,
                     });
                 }
             }
         }
+
+        // External objects go after every extension so their declaration index
+        // never competes with an extension's. A declared one carries a
+        // user-declared identity and is strict; a discovered one is lenient the
+        // way a discovered extension is — whatever lies under the container must
+        // not stop a project that loaded before the container was looked at —
+        // and enters with a unique name so that it is indistinguishable from a
+        // declared one afterwards.
+        match &config.externals {
+            None => Self::discover_externals(root, &mut specs, &mut seen),
+            Some(list) => Self::declare_externals(root, list, &mut specs, &mut seen)?,
+        }
         Ok(specs)
+    }
+
+    fn declare_externals(
+        root: &Path,
+        list: &[ExternalDecl],
+        specs: &mut Vec<ExtensionNodeSpec>,
+        seen: &mut std::collections::HashMap<PathBuf, usize>,
+    ) -> Result<(), TopologyError> {
+        // The object name, not the declared alias, is the identity every
+        // `(MdoType, name)`-keyed surface sees; two exports of one name would
+        // leave the later one invisible there.
+        let mut seen_objects: std::collections::HashMap<
+            (ExternalObjectKind, String),
+            (usize, String),
+        > = std::collections::HashMap::new();
+        for decl in list {
+            let path = root.join(&decl.path);
+            if !path.is_dir() {
+                return Err(TopologyError::ExternalPathMissing { name: decl.name.clone(), path });
+            }
+            let (kind, object) = classify_external_root(&path)
+                .map_err(|problem| problem.into_error(decl.name.clone(), path.clone()))?;
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if let Some(&first) = seen.get(&canonical) {
+                return Err(TopologyError::DuplicatePath {
+                    path: canonical,
+                    first: specs[first].name.clone(),
+                    second: decl.name.clone(),
+                });
+            }
+            let object_key = (kind, stdx::case::fold_lower_per_char(&object));
+            if let Some((first, object)) = seen_objects.get(&object_key) {
+                return Err(TopologyError::ExternalObjectNameDuplicate {
+                    object: object.clone(),
+                    first: specs[*first].name.clone(),
+                    second: decl.name.clone(),
+                });
+            }
+            seen_objects.insert(object_key, (specs.len(), object));
+            tracing::info!(name = %decl.name, path = %path.display(), ?kind, "resolved external");
+            seen.insert(canonical.clone(), specs.len());
+            specs.push(ExtensionNodeSpec {
+                kind: NodeKind::External(kind),
+                name: decl.name.clone(),
+                path,
+                canonical_path: canonical,
+                depends_on: decl.depends_on.clone(),
+                structured: true,
+            });
+        }
+        Ok(())
+    }
+
+    /// Zero-config discovery of external objects. Every candidate the topology
+    /// would refuse is skipped here with a warning instead: a directory that is
+    /// not one export, an empty directory name, an object already exported by an
+    /// accepted candidate, or a directory name already taken by any root — the
+    /// topology's name table treats a collision with a structured name as an
+    /// error, and a discovered directory the user never declared must not raise
+    /// one. What remains has a unique name and is a structured node.
+    fn discover_externals(
+        root: &Path,
+        specs: &mut Vec<ExtensionNodeSpec>,
+        seen: &mut std::collections::HashMap<PathBuf, usize>,
+    ) {
+        let mut taken_names: std::collections::HashMap<String, usize> = specs
+            .iter()
+            .enumerate()
+            .map(|(idx, spec)| (stdx::case::fold_lower_per_char(&spec.name), idx))
+            .collect();
+        let mut seen_objects: std::collections::HashMap<(ExternalObjectKind, String), usize> =
+            std::collections::HashMap::new();
+        for path in Self::auto_discover_externals(root) {
+            let (kind, object) = match classify_external_root(&path) {
+                Ok(classified) => classified,
+                Err(problem) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        problem = %problem.into_error(String::new(), path.clone()),
+                        "discovered directory is not one external object export, skipping"
+                    );
+                    continue;
+                }
+            };
+            let name =
+                path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            if name.trim().is_empty() {
+                tracing::warn!(path = %path.display(), "discovered external has an empty name, skipping");
+                continue;
+            }
+            let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if let Some(&first) = seen.get(&canonical) {
+                tracing::warn!(
+                    path = %path.display(),
+                    first = %specs[first].name,
+                    "discovered external is already a root, skipping"
+                );
+                continue;
+            }
+            let folded_name = stdx::case::fold_lower_per_char(&name);
+            if let Some(&first) = taken_names.get(&folded_name) {
+                tracing::warn!(
+                    path = %path.display(),
+                    first = %specs[first].path.display(),
+                    name = %name,
+                    "discovered external shares a root name, skipping"
+                );
+                continue;
+            }
+            let object_key = (kind, stdx::case::fold_lower_per_char(&object));
+            if let Some(&first) = seen_objects.get(&object_key) {
+                tracing::warn!(
+                    path = %path.display(),
+                    first = %specs[first].path.display(),
+                    object = %object,
+                    "discovered external exports an object another root already exports, skipping"
+                );
+                continue;
+            }
+            tracing::info!(name = %name, path = %path.display(), ?kind, "discovered external");
+            taken_names.insert(folded_name, specs.len());
+            seen_objects.insert(object_key, specs.len());
+            seen.insert(canonical.clone(), specs.len());
+            specs.push(ExtensionNodeSpec {
+                kind: NodeKind::External(kind),
+                name,
+                path,
+                canonical_path: canonical,
+                depends_on: None,
+                structured: true,
+            });
+        }
+    }
+
+    /// The conventional containers of external objects. Two families, both
+    /// scanned — unlike extensions, processors and reports live side by side —
+    /// and within a family the first directory that exists wins. The kind of
+    /// what is found comes from its XML, not from the container. Candidates
+    /// come back in path order across both families, because a name collision
+    /// keeps the first by path: family order would otherwise decide it when a
+    /// family fell back to its bare container.
+    fn auto_discover_externals(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for family in [["src/epf", "epf"], ["src/erf", "erf"]] {
+            if let Some(parent) = family.into_iter().find(|parent| root.join(parent).is_dir()) {
+                let candidates = expand_extension_glob(root, &format!("{parent}/*"));
+                tracing::info!(
+                    parent,
+                    count = candidates.len(),
+                    "auto-discovered external candidates"
+                );
+                found.extend(candidates);
+            }
+        }
+        found.sort();
+        found
     }
 
     /// Zero-config extension discovery: the first conventional extensions directory
@@ -1018,7 +1284,13 @@ fn canonical_scope(scope: &DiagnosticsBaselineProjectScope) -> DiagnosticsBaseli
     for extension in &mut scope.extensions {
         extension.depends_on.sort();
     }
+    for external in &mut scope.externals {
+        if let Some(depends_on) = &mut external.depends_on {
+            depends_on.sort();
+        }
+    }
     scope.extensions.sort_by(|left, right| left.name.cmp(&right.name));
+    scope.externals.sort_by(|left, right| left.name.cmp(&right.name));
     scope
 }
 
@@ -1029,8 +1301,12 @@ fn canonical_identity(
 ) -> DiagnosticsBaselinePartitionIdentity {
     let mut identity = identity.clone();
     match &mut identity {
-        DiagnosticsBaselinePartitionIdentity::Main { .. } => {}
-        DiagnosticsBaselinePartitionIdentity::Extension { depends_on, .. } => depends_on.sort(),
+        DiagnosticsBaselinePartitionIdentity::Main { .. }
+        | DiagnosticsBaselinePartitionIdentity::External { depends_on: None, .. } => {}
+        DiagnosticsBaselinePartitionIdentity::Extension { depends_on, .. }
+        | DiagnosticsBaselinePartitionIdentity::External { depends_on: Some(depends_on), .. } => {
+            depends_on.sort()
+        }
         DiagnosticsBaselinePartitionIdentity::Group { members, .. } => {
             for member in members.iter_mut() {
                 member.depends_on.sort();
@@ -1376,6 +1652,122 @@ fn configuration_xml_in(dir: &Path) -> Option<PathBuf> {
     .filter(|p| p.is_file())
 }
 
+/// Why a directory is not one external object export.
+enum ExternalRootProblem {
+    IsAConfiguration,
+    NoObjectXml,
+    AmbiguousObjectXml,
+    ObjectElementMissing,
+    NotAnExternalObject { tag: String },
+    ObjectDirMissing { object: String },
+}
+
+impl ExternalRootProblem {
+    fn into_error(self, name: String, path: PathBuf) -> TopologyError {
+        match self {
+            Self::IsAConfiguration => TopologyError::ExternalIsAConfiguration { name, path },
+            Self::NoObjectXml => TopologyError::ExternalNoObjectXml { name, path },
+            Self::AmbiguousObjectXml => TopologyError::ExternalAmbiguousObjectXml { name, path },
+            Self::ObjectElementMissing => {
+                TopologyError::ExternalObjectElementMissing { name, path }
+            }
+            Self::NotAnExternalObject { tag } => {
+                TopologyError::ExternalNotAnExternalObject { name, path, tag }
+            }
+            Self::ObjectDirMissing { object } => {
+                TopologyError::ExternalObjectDirMissing { name, path, object }
+            }
+        }
+    }
+}
+
+/// Backstop on how much of the object XML is read looking for its element. The
+/// element opens within the first kilobyte of any designer export; the bound is
+/// deliberately generous (a mebibyte) and only keeps a malformed file from being
+/// read whole.
+const EXTERNAL_OBJECT_SCAN_CAP: u64 = 1024 * 1024;
+
+/// Classifies a directory as the export of one external data processor or report.
+///
+/// The export has no `Configuration.xml`; what identifies it is the single
+/// `<Name>.xml` directly under the root whose first element under
+/// `MetaDataObject` is `ExternalDataProcessor` or `ExternalReport`, with the
+/// `<Name>/` directory beside it. Anything else — a configuration, several
+/// exports in one directory, an internal object's export, an XML that lost its
+/// directory — is refused by name, because declaring the wrong directory would
+/// otherwise analyze a different object than the one meant, or none at all.
+fn classify_external_root(dir: &Path) -> Result<(ExternalObjectKind, String), ExternalRootProblem> {
+    use std::io::Read as _;
+
+    if configuration_xml_in(dir).is_some() {
+        return Err(ExternalRootProblem::IsAConfiguration);
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Err(ExternalRootProblem::NoObjectXml);
+    };
+    let mut object_xmls: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| bsl_conventions::has_extension(path, bsl_conventions::XML_EXTENSION))
+        .collect();
+    object_xmls.sort();
+    let main = match object_xmls.as_slice() {
+        [] => return Err(ExternalRootProblem::NoObjectXml),
+        [only] => only,
+        _ => return Err(ExternalRootProblem::AmbiguousObjectXml),
+    };
+
+    let Ok(file) = std::fs::File::open(main) else {
+        return Err(ExternalRootProblem::NoObjectXml);
+    };
+    let mut head = Vec::new();
+    if file.take(EXTERNAL_OBJECT_SCAN_CAP).read_to_end(&mut head).is_err() {
+        return Err(ExternalRootProblem::NoObjectXml);
+    }
+    let Some(tag) = first_element_under_metadata_object(&head) else {
+        return Err(ExternalRootProblem::ObjectElementMissing);
+    };
+    let kind = ExternalObjectKind::from_element(&tag)
+        .ok_or(ExternalRootProblem::NotAnExternalObject { tag })?;
+    let object = main.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default().to_owned();
+    if !dir.join(&object).is_dir() {
+        return Err(ExternalRootProblem::ObjectDirMissing { object });
+    }
+    Ok((kind, object))
+}
+
+/// The name of the first element inside `<MetaDataObject …>`, skipping comments
+/// and processing instructions. `None` when there is no `MetaDataObject` at all.
+fn first_element_under_metadata_object(head: &[u8]) -> Option<String> {
+    const OPEN: &[u8] = b"<MetaDataObject";
+    let start = find(head, OPEN)? + OPEN.len();
+    // The container's own tag ends at its `>`; the child element comes after.
+    let mut i = start + find(&head[start..], b">")? + 1;
+    while i < head.len() {
+        let rest = &head[i..];
+        if !rest.starts_with(b"<") {
+            i += 1;
+            continue;
+        }
+        if rest.starts_with(b"<!--") {
+            i += 4 + find(&rest[4..], b"-->")? + 3;
+            continue;
+        }
+        if rest.starts_with(b"<?") {
+            i += 2 + find(&rest[2..], b"?>")? + 2;
+            continue;
+        }
+        let name: Vec<u8> = rest[1..]
+            .iter()
+            .take_while(|b| !b.is_ascii_whitespace() && **b != b'>' && **b != b'/')
+            .copied()
+            .collect();
+        return String::from_utf8(name).ok().filter(|name| !name.is_empty());
+    }
+    None
+}
+
 pub fn configuration_kind(root: &Path) -> ConfigurationKind {
     use std::io::Read as _;
 
@@ -1471,6 +1863,22 @@ pub struct StructuredExtensionDecl {
     pub depends_on: Vec<String>,
 }
 
+/// One entry of `[source] externals`: an external data processor or report
+/// export, declared by name. Only the named form exists, and nothing about a
+/// declared entry is lenient: a missing path or a directory that is not one
+/// export fails project construction.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalDecl {
+    pub name: String,
+    pub path: String,
+    /// The extensions the object sees, by name, transitively. Without the key
+    /// it sees every extension of the project; with it, exactly the closure of
+    /// the listed ones — an empty list is the base alone.
+    #[serde(default, alias = "dependsOn")]
+    pub depends_on: Option<Vec<String>>,
+}
+
 /// Source-set fields supplied outside the config file — today, by CLI flags.
 ///
 /// Applied as a mutation of [`ProjectConfig`] rather than passed to a `Project`
@@ -1493,12 +1901,14 @@ pub struct SourceSetOverride {
     /// `Some(vec![])` is an explicit "no extensions", distinct from leaving the
     /// field unset and inheriting discovery.
     pub extensions: Option<Vec<ExtensionDecl>>,
+    /// Replaces [`ProjectConfig::externals`].
+    pub externals: Option<Vec<ExternalDecl>>,
 }
 
 impl SourceSetOverride {
     /// True when nothing is overridden, i.e. applying this is a no-op.
     pub fn is_empty(&self) -> bool {
-        self.configuration_root.is_none() && self.extensions.is_none()
+        self.configuration_root.is_none() && self.extensions.is_none() && self.externals.is_none()
     }
 
     /// Overwrites the config's source-set fields with the ones set here.
@@ -1509,6 +1919,9 @@ impl SourceSetOverride {
         }
         if let Some(ref extensions) = self.extensions {
             config.extensions = Some(extensions.clone());
+        }
+        if let Some(ref externals) = self.externals {
+            config.externals = Some(externals.clone());
         }
     }
 }
@@ -1639,6 +2052,13 @@ pub struct ProjectConfig {
     /// final-segment `*` glob; structured entries add a name and dependencies).
     #[serde(default)]
     pub extensions: Option<Vec<ExtensionDecl>>,
+
+    /// External data processors and reports (EPF/ERF exports) analyzed against
+    /// this project's main configuration. `None` (unset) auto-discovers the
+    /// conventional `src/epf/*` and `src/erf/*` layouts; `Some([])` is an
+    /// explicit opt-out; a non-empty list is taken verbatim.
+    #[serde(default)]
+    pub externals: Option<Vec<ExternalDecl>>,
 
     #[serde(default)]
     pub search: SearchConfig,
@@ -2492,6 +2912,8 @@ struct TomlSourceConfig {
     configuration: Option<ConfigurationDependency>,
     #[serde(default)]
     extensions: Option<Vec<ExtensionDecl>>,
+    #[serde(default)]
+    externals: Option<Vec<ExternalDecl>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -2560,6 +2982,7 @@ impl From<TomlConfig> for ProjectConfig {
             target_platform_version: toml.target_platform_version,
             language: None,
             extensions: toml.source.extensions,
+            externals: toml.source.externals,
             analysis: AnalysisConfig {
                 diff_base: toml.analysis.diff_base,
                 ignored_authors: toml.analysis.ignored_authors,
@@ -3983,6 +4406,7 @@ extensions = [{ name = "T" }]
         let scope = DiagnosticsBaselineProjectScope {
             source_root: Some("src/cf".to_owned()),
             extensions: Vec::new(),
+            externals: vec![],
         };
         let json = serde_json::to_string(&scope).unwrap();
         assert_eq!(json, r#"{"source_root":"src/cf","extensions":[]}"#);
@@ -4295,6 +4719,7 @@ extensions = [{ name = "T" }]
         SourceSetOverride {
             configuration_root: Some("src/cf".into()),
             extensions: Some(vec![structured("ext", "ext", &[])]),
+            externals: None,
         }
         .apply_to(&mut from_override);
 
@@ -4721,7 +5146,7 @@ include = ["main", "extension:Sales"]
         }
     }
 
-    fn partitioned_config(
+    pub(super) fn partitioned_config(
         directory: &str,
         groups: Vec<DiagnosticsBaselineGroupConfig>,
     ) -> ProjectDiagnosticsConfig {
@@ -5609,5 +6034,830 @@ type_narrowing = false
             err.is_err(),
             "an invalid scope value must fail deserialization, never degrade to on"
         );
+    }
+}
+
+/// External data processors and reports (EPF/ERF exports) as source roots of
+/// their own kind: a leaf that sees the base and every extension, seen by none.
+#[cfg(test)]
+mod external_root_tests {
+    use super::{
+        DiagnosticsBaselinePartitionIdentity, ExtensionDecl, ExternalDecl, ExternalObjectKind,
+        NodeKind, Project, ProjectConfig, ProjectError, StructuredExtensionDecl, TopologyError,
+    };
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    fn structured(name: &str, path: &str, deps: &[&str]) -> ExtensionDecl {
+        ExtensionDecl::Structured(StructuredExtensionDecl {
+            name: name.to_string(),
+            path: path.to_string(),
+            depends_on: deps.iter().map(|s| s.to_string()).collect(),
+        })
+    }
+
+    fn external(name: &str, path: &str) -> ExternalDecl {
+        ExternalDecl { name: name.to_string(), path: path.to_string(), depends_on: None }
+    }
+
+    fn touch_extension(root: &Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Configuration.xml"),
+            "<Properties><ConfigurationExtensionPurpose>Customization\
+             </ConfigurationExtensionPurpose></Properties>",
+        )
+        .unwrap();
+    }
+
+    fn touch_base(root: &Path, rel: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Configuration.xml"), "<Configuration/>").unwrap();
+    }
+
+    /// The designer export of an external object: `<Name>.xml` beside a `<Name>/`
+    /// directory, with `tag` as the object element under `MetaDataObject`.
+    fn touch_external(root: &Path, rel: &str, name: &str, tag: &str) {
+        let dir = root.join(rel);
+        std::fs::create_dir_all(dir.join(name).join("Forms")).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.xml")),
+            format!(
+                "\u{feff}<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\" version=\"2.20\">\n\
+                 \t<!-- <ExternalReport uuid=\"in-a-comment\"/> -->\n\
+                 \t<{tag} uuid=\"3696c164-ad14-4a0d-b659-10e3bf6d6ad2\">\n\
+                 \t\t<Properties><Name>{name}</Name></Properties>\n\
+                 \t</{tag}>\n\
+                 </MetaDataObject>\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn toml_externals_parse_into_named_entries() {
+        let toml_str = r#"
+[source]
+root = "src/cf"
+externals = [
+  { name = "АРМ", path = "src/epf/АРМПроизводство" },
+]
+"#;
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        assert_eq!(project.externals, Some(vec![external("АРМ", "src/epf/АРМПроизводство")]));
+
+        let json = r#"{ "externals": [ { "name": "АРМ", "path": "src/epf/АРМПроизводство" } ] }"#;
+        let config: ProjectConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.externals, Some(vec![external("АРМ", "src/epf/АРМПроизводство")]));
+    }
+
+    #[test]
+    fn toml_externals_reject_a_bare_path_and_an_unknown_field() {
+        let bare = "[source]\nexternals = [\"src/epf/АРМ\"]\n";
+        assert!(toml::from_str::<super::TomlConfig>(bare).is_err(), "a bare path has no name");
+        let unknown = "[source]\nexternals = [{ name = \"A\", path = \"p\", glob = \"*\" }]\n";
+        let err = toml::from_str::<super::TomlConfig>(unknown).unwrap_err().to_string();
+        assert!(err.contains("glob"), "the unknown field is named: {err}");
+    }
+
+    #[test]
+    fn an_external_root_is_a_node_of_its_own_kind_and_a_source_root() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_extension(dir.path(), "src/cfe/Ext");
+        touch_external(dir.path(), "src/epf/АРМ", "АРМПроизводство", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("Ext", "src/cfe/Ext", &[])]),
+            externals: Some(vec![external("АРМ", "src/epf/АРМ")]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+
+        let epf = dir.path().join("src/epf/АРМ");
+        assert_eq!(project.external_paths(), &[("АРМ".to_string(), epf.clone())]);
+        assert_eq!(
+            project.extension_paths().iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["Ext"],
+            "an external is not an extension"
+        );
+        assert!(project.source_roots().contains(&epf), "the external root is scanned");
+        let node = project.extension_topology().nodes().iter().find(|n| n.name() == "АРМ").unwrap();
+        assert_eq!(node.kind(), NodeKind::External(ExternalObjectKind::DataProcessor));
+    }
+
+    #[test]
+    fn an_external_report_is_told_apart_from_a_processor() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "src/erf/Отчет", "Отчет", "ExternalReport");
+        let config = ProjectConfig {
+            externals: Some(vec![external("Отчет", "src/erf/Отчет")]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let node = project.extension_topology().nodes().first().unwrap();
+        assert_eq!(node.kind(), NodeKind::External(ExternalObjectKind::Report));
+    }
+
+    #[test]
+    fn an_external_root_carrying_configuration_xml_is_a_cfe_declared_under_the_wrong_key() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/epf/X");
+        let config = ProjectConfig {
+            externals: Some(vec![external("X", "src/epf/X")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::ExternalIsAConfiguration { .. })),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_external_root_with_an_internal_object_is_rejected() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "src/epf/X", "X", "DataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("X", "src/epf/X")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalNotAnExternalObject { tag, .. })
+                    if tag == "DataProcessor"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_external_root_without_exactly_one_object_xml_is_rejected() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src/epf/Empty")).unwrap();
+        let config = ProjectConfig {
+            externals: Some(vec![external("E", "src/epf/Empty")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::ExternalNoObjectXml { .. })),
+            "got: {err}"
+        );
+
+        touch_external(dir.path(), "src/epf/Two", "A", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/Two", "B", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("T", "src/epf/Two")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::ExternalAmbiguousObjectXml { .. })),
+            "got: {err}"
+        );
+
+        let config = ProjectConfig {
+            externals: Some(vec![external("M", "src/epf/Missing")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::ExternalPathMissing { .. })),
+            "got: {err}"
+        );
+
+        // The XML alone is a copy that stopped halfway: the object's directory is
+        // where its modules and forms live, and without it there is nothing to analyze.
+        touch_external(dir.path(), "src/epf/Half", "H", "ExternalDataProcessor");
+        std::fs::remove_dir_all(dir.path().join("src/epf/Half/H")).unwrap();
+        let config = ProjectConfig {
+            externals: Some(vec![external("H", "src/epf/Half")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalObjectDirMissing { object, .. })
+                    if object == "H"
+            ),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_external_is_never_a_depends_on_target() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/X");
+        touch_external(dir.path(), "src/epf/АРМ", "АРМ", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            extensions: Some(vec![structured("X", "src/cfe/X", &["АРМ"])]),
+            externals: Some(vec![external("АРМ", "src/epf/АРМ")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalInDependency { from, name })
+                    if from == "X" && name == "АРМ"
+            ),
+            "an edge onto an external must be refused, not resolved: {err}"
+        );
+    }
+
+    #[test]
+    fn an_external_sharing_an_extension_name_is_a_duplicate() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/Same");
+        touch_external(dir.path(), "src/epf/Same", "Same", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            extensions: Some(vec![structured("same", "src/cfe/Same", &[])]),
+            externals: Some(vec![external("SAME", "src/epf/Same")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::DuplicateName { .. })),
+            "names share one registry, case-folded: {err}"
+        );
+    }
+
+    #[test]
+    fn externals_come_after_every_extension_in_topological_order() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_extension(dir.path(), "src/cfe/B");
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        // Declared first so that declaration-order tie-breaking alone would put
+        // it first; the kind must win over declaration order.
+        let config = ProjectConfig {
+            extensions: Some(vec![
+                structured("A", "src/cfe/A", &["B"]),
+                structured("B", "src/cfe/B", &[]),
+            ]),
+            externals: Some(vec![external("E", "src/epf/E")]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let topology = project.extension_topology();
+        let order: Vec<&str> =
+            topology.topological_order().iter().map(|id| topology.node(*id).name()).collect();
+        assert_eq!(order, ["B", "A", "E"]);
+        let external = topology.nodes().iter().find(|n| n.name() == "E").unwrap();
+        assert!(external.depends_on().is_empty(), "no key, no edge");
+        let closure: Vec<&str> =
+            external.closure().iter().map(|id| topology.node(*id).name()).collect();
+        assert_eq!(closure, ["B", "A"], "without dependsOn it sees every extension, in order");
+        assert!(external.sees_every_extension());
+    }
+
+    #[test]
+    fn topology_fingerprint_changes_when_an_external_is_added() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        let fingerprint = |externals: Vec<ExternalDecl>| {
+            let config = ProjectConfig {
+                extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+                externals: Some(externals),
+                ..Default::default()
+            };
+            Project::with_config(dir.path(), config).unwrap().extension_topology().fingerprint()
+        };
+        assert_eq!(fingerprint(vec![]), fingerprint(vec![]));
+        assert_ne!(fingerprint(vec![]), fingerprint(vec![external("E", "src/epf/E")]));
+    }
+
+    /// An external-only project has no base: the workspace root must not be
+    /// promoted to an anonymous one, or the `main` partition rooted at "" would
+    /// own every file, the external's own partition included.
+    #[test]
+    fn an_external_only_project_has_no_anonymous_base() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("E", "src/epf/E")]),
+            diagnostics: super::tests::partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        assert!(project.semantic_base_path().is_none());
+
+        let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        assert!(plan.project_scope.source_root.is_none());
+        assert!(!plan.partitions.iter().any(|p| p.id == "main"), "{:?}", plan.partitions);
+        assert_eq!(
+            plan.owner_for_project_path("src/epf/E/E/Ext/ObjectModule.bsl"),
+            Some("external:E")
+        );
+
+        // The control: with externals opted out the anonymous base stays. (Left
+        // unset, discovery finds `src/epf/E` and the project is external-only.)
+        let opted_out = ProjectConfig { externals: Some(vec![]), ..Default::default() };
+        let bare = Project::with_config(dir.path(), opted_out).unwrap();
+        assert_eq!(bare.semantic_base_path(), Some(dir.path()));
+    }
+
+    #[test]
+    fn an_external_without_a_base_is_announced_and_with_one_is_not() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("E", "src/epf/E")]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config.clone()).unwrap();
+        let notice = project.standalone_external_notice().expect("no base: announced");
+        assert!(notice.contains("E"), "names the external: {notice}");
+        assert!(project.standalone_extension_notice().is_none(), "it is not an extension");
+
+        touch_base(dir.path(), "src/cf");
+        let project = Project::with_config(
+            dir.path(),
+            ProjectConfig { configuration_root: Some("src/cf".into()), ..config },
+        )
+        .unwrap();
+        assert!(project.standalone_external_notice().is_none(), "with a base: silent");
+    }
+
+    /// An export kept inside the base's tree is refused by the partition plan
+    /// like a nested extension is: `owner_for_project_path` takes the first
+    /// root that contains a file, which is only right while no root nests
+    /// another.
+    #[test]
+    fn an_external_nested_in_the_base_is_a_path_collision() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_external(dir.path(), "src/cf/epf", "X", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            externals: Some(vec![external("X", "src/cf/epf")]),
+            diagnostics: super::tests::partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let err = project.diagnostics_baseline_partition_plan().unwrap_err();
+        assert_eq!(err, super::DiagnosticsBaselineProjectError::PathCollision("src/cf/epf".into()));
+    }
+
+    /// An object XML whose `MetaDataObject` carries no element is a truncated
+    /// export, not a missing one: the refusal must say the file was found.
+    #[test]
+    fn an_object_xml_without_an_element_is_refused_as_such() {
+        let dir = tempdir().unwrap();
+        let epf = dir.path().join("src/epf/E");
+        std::fs::create_dir_all(epf.join("E")).unwrap();
+        std::fs::write(
+            epf.join("E.xml"),
+            "<?xml version=\"1.0\"?><MetaDataObject xmlns=\"http://v8.1c.ru/8.3/MDClasses\">\
+             </MetaDataObject>",
+        )
+        .unwrap();
+        let config = ProjectConfig {
+            externals: Some(vec![external("E", "src/epf/E")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalObjectElementMissing { name, .. })
+                    if name == "E"
+            ),
+            "got: {err}"
+        );
+    }
+
+    /// Two exports of one object name are one identity to every surface keyed
+    /// by `(MdoType, name)`: the graph and the MCP name dictionary would keep
+    /// only the first. The project refuses the pair by name instead.
+    #[test]
+    fn two_externals_sharing_an_object_name_are_refused() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "src/epf/A", "Foo", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/B", "Foo", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("A", "src/epf/A"), external("B", "src/epf/B")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalObjectNameDuplicate {
+                    object,
+                    first,
+                    second
+                }) if object == "Foo" && first == "A" && second == "B"
+            ),
+            "got: {err}"
+        );
+
+        // Object names are case-insensitive, like every BSL identifier.
+        touch_external(dir.path(), "src/epf/D", "FOO", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            externals: Some(vec![external("A", "src/epf/A"), external("D", "src/epf/D")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), config).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                ProjectError::Topology(TopologyError::ExternalObjectNameDuplicate {
+                    first,
+                    second,
+                    ..
+                }) if first == "A" && second == "D"
+            ),
+            "got: {err}"
+        );
+
+        // A report and a processor of one name are different objects.
+        touch_external(dir.path(), "src/erf/C", "Foo", "ExternalReport");
+        let config = ProjectConfig {
+            externals: Some(vec![external("A", "src/epf/A"), external("C", "src/erf/C")]),
+            ..Default::default()
+        };
+        Project::with_config(dir.path(), config).expect("kinds split the namespace");
+    }
+
+    #[test]
+    fn an_external_lands_in_the_baseline_externals_not_in_extensions() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        let config = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+            externals: Some(vec![external("E", "src/epf/E")]),
+            diagnostics: super::tests::partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+
+        let scope = &plan.project_scope;
+        assert_eq!(scope.extensions.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["A"]);
+        assert_eq!(scope.externals.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["E"]);
+        assert_eq!(scope.externals[0].path, "src/epf/E");
+
+        let external = plan.partitions.iter().find(|p| p.id == "external:E").expect("partition");
+        assert!(matches!(
+            &external.identity,
+            DiagnosticsBaselinePartitionIdentity::External { name, path, depends_on: None }
+                if name == "E" && path == "src/epf/E"
+        ));
+        let identity_json = serde_json::to_string(&external.identity).unwrap();
+        assert!(!identity_json.contains("depends_on"), "no key, no field: {identity_json}");
+        let scope_json = serde_json::to_string(&plan.project_scope).unwrap();
+        assert_eq!(
+            scope_json,
+            r#"{"source_root":"src/cf","extensions":[{"name":"A","path":"src/cfe/A","depends_on":[]}],"externals":[{"name":"E","path":"src/epf/E"}]}"#,
+            "an external without dependsOn serializes as it did before the key existed"
+        );
+        assert_eq!(
+            plan.owner_for_project_path("src/epf/E/E/Ext/ObjectModule.bsl"),
+            Some("external:E")
+        );
+
+        // Serialization keeps the published fingerprints of projects without
+        // externals: the empty field is absent, not `[]`.
+        let without = super::DiagnosticsBaselineProjectScope {
+            source_root: Some("src/cf".into()),
+            extensions: vec![],
+            externals: vec![],
+        };
+        let json = serde_json::to_string(&without).unwrap();
+        assert!(!json.contains("externals"), "empty externals must not serialize: {json}");
+        let back: super::DiagnosticsBaselineProjectScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, without);
+    }
+
+    /// The tempdir of the discovery tests: a base, a processor and a report
+    /// under their conventional containers, a report under the processors'
+    /// container (its kind must come from its XML, not from where it lies) and a
+    /// directory that is no export at all.
+    fn discovery_workspace() -> tempfile::TempDir {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_external(dir.path(), "src/epf/А", "А", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/ОтчетПодEpf", "ОтчетПодEpf", "ExternalReport");
+        std::fs::create_dir_all(dir.path().join("src/epf/НеВыгрузка")).unwrap();
+        touch_external(dir.path(), "src/erf/Отчет", "Отчет", "ExternalReport");
+        dir
+    }
+
+    fn discovered(project: &Project) -> Vec<(String, ExternalObjectKind)> {
+        project
+            .extension_topology()
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                NodeKind::External(kind) => Some((node.name().to_owned(), kind)),
+                NodeKind::Extension => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn externals_are_discovered_under_src_epf_and_src_erf_when_unset() {
+        let dir = discovery_workspace();
+        let base =
+            ProjectConfig { configuration_root: Some("src/cf".into()), ..Default::default() };
+        assert_eq!(base.externals, None, "unset is the discovery default");
+        let project = Project::with_config(dir.path(), base.clone()).unwrap();
+        assert_eq!(
+            discovered(&project),
+            [
+                ("А".to_owned(), ExternalObjectKind::DataProcessor),
+                ("ОтчетПодEpf".to_owned(), ExternalObjectKind::Report),
+                ("Отчет".to_owned(), ExternalObjectKind::Report),
+            ],
+            "both containers, in path order; the kind is the XML's, not the container's"
+        );
+        assert!(
+            project.external_paths().iter().all(|(_, path)| path.starts_with(dir.path())),
+            "{:?}",
+            project.external_paths()
+        );
+        assert!(project.extension_topology().nodes().iter().all(|node| node.is_structured()));
+
+        let opted_out = ProjectConfig { externals: Some(vec![]), ..base.clone() };
+        assert!(Project::with_config(dir.path(), opted_out).unwrap().external_paths().is_empty());
+
+        touch_external(dir.path(), "elsewhere/Явный", "Явный", "ExternalDataProcessor");
+        let explicit = ProjectConfig {
+            externals: Some(vec![external("Явный", "elsewhere/Явный")]),
+            ..base
+        };
+        let names: Vec<String> = discovered(&Project::with_config(dir.path(), explicit).unwrap())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, ["Явный"], "an explicit list switches discovery off");
+    }
+
+    #[test]
+    fn discovery_falls_back_to_bare_containers_per_family() {
+        let dir = tempdir().unwrap();
+        touch_external(dir.path(), "epf/П", "П", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/erf/О", "О", "ExternalReport");
+        let project = Project::with_config(dir.path(), ProjectConfig::default()).unwrap();
+        let names: Vec<String> = discovered(&project).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["П", "О"]);
+    }
+
+    /// A collision across families keeps the first by path, not the first
+    /// family: with `src/erf` absent the report family falls back to `erf/`,
+    /// which sorts before `src/epf/`.
+    #[test]
+    fn a_cross_family_collision_keeps_the_first_by_path() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_external(dir.path(), "src/epf/X", "X", "ExternalDataProcessor");
+        touch_external(dir.path(), "erf/X", "X", "ExternalReport");
+        let config =
+            ProjectConfig { configuration_root: Some("src/cf".into()), ..Default::default() };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        assert_eq!(discovered(&project), [("X".to_owned(), ExternalObjectKind::Report)]);
+        assert_eq!(project.external_paths()[0].1, dir.path().join("erf/X"));
+    }
+
+    #[test]
+    fn a_project_without_containers_discovers_nothing() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        let project = Project::with_config(dir.path(), ProjectConfig::default()).unwrap();
+        assert!(project.external_paths().is_empty());
+        assert!(project.diagnostics_baseline().unwrap().is_none(), "no baseline configured");
+    }
+
+    /// Whatever lies under a container must not stop a project that loaded
+    /// before the container was looked at: every refusal of a declared external
+    /// is a warning and a skip for a discovered one.
+    #[test]
+    fn discovery_skips_what_a_declaration_would_refuse() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_extension(dir.path(), "src/epf/Расш");
+        let broken = dir.path().join("src/epf/Битый");
+        std::fs::create_dir_all(broken.join("Битый")).unwrap();
+        std::fs::write(
+            broken.join("Битый.xml"),
+            "<MetaDataObject><DataProcessor uuid=\"1\"/></MetaDataObject>",
+        )
+        .unwrap();
+        let config =
+            ProjectConfig { configuration_root: Some("src/cf".into()), ..Default::default() };
+        let project = Project::with_config(dir.path(), config.clone()).unwrap();
+        assert!(project.external_paths().is_empty(), "{:?}", project.external_paths());
+
+        // The controls: declared, the same directories are refused by name.
+        for (path, expect) in [
+            ("src/epf/Расш", "ExternalIsAConfiguration"),
+            ("src/epf/Битый", "ExternalNotAnExternalObject"),
+        ] {
+            let declared =
+                ProjectConfig { externals: Some(vec![external("X", path)]), ..config.clone() };
+            let err = Project::with_config(dir.path(), declared).unwrap_err();
+            assert!(format!("{err:?}").contains(expect), "{path}: {err}");
+        }
+    }
+
+    #[test]
+    fn discovery_skips_name_and_object_collisions_instead_of_failing() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_extension(dir.path(), "src/cfe/АРМ");
+        touch_external(dir.path(), "src/epf/арм", "АРМПроизводство", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/Копия", "X", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/X", "X", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/erf/x", "X", "ExternalReport");
+        touch_external(dir.path(), "src/epf/Свой", "Свой", "ExternalDataProcessor");
+        let names_with = |extensions: Option<Vec<ExtensionDecl>>| {
+            let config = ProjectConfig {
+                configuration_root: Some("src/cf".into()),
+                extensions,
+                ..Default::default()
+            };
+            let project = Project::with_config(dir.path(), config).unwrap();
+            discovered(&project).into_iter().map(|(name, _)| name).collect::<Vec<_>>()
+        };
+        // In path order `X` comes first and stays; `Копия` exports the object
+        // `X` already exports, `src/erf/x` collides with the discovered name
+        // `X`, and `арм` with the extension's name (case-folded): each is skipped.
+        assert_eq!(names_with(Some(vec![structured("АРМ", "src/cfe/АРМ", &[])])), ["X", "Свой"]);
+        // A legacy extension of that name too: the extension keeps its slot.
+        assert_eq!(names_with(Some(vec!["src/cfe/АРМ".into()])), ["X", "Свой"]);
+
+        // The control: declared, the collision with the structured name is the
+        // duplicate it always was.
+        let declared = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("АРМ", "src/cfe/АРМ", &[])]),
+            externals: Some(vec![external("арм", "src/epf/арм")]),
+            ..Default::default()
+        };
+        let err = Project::with_config(dir.path(), declared).unwrap_err();
+        assert!(
+            matches!(err, ProjectError::Topology(TopologyError::DuplicateName { .. })),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_directory_appearing_under_the_container_changes_the_fingerprint() {
+        let dir = discovery_workspace();
+        let config =
+            ProjectConfig { configuration_root: Some("src/cf".into()), ..Default::default() };
+        let before = Project::with_config(dir.path(), config.clone()).unwrap();
+        let before = before.extension_topology().fingerprint();
+        touch_external(dir.path(), "src/epf/Б", "Б", "ExternalDataProcessor");
+        let after = Project::with_config(dir.path(), config).unwrap();
+        assert_ne!(before, after.extension_topology().fingerprint());
+    }
+
+    #[test]
+    fn a_discovered_external_owns_a_baseline_partition() {
+        let dir = discovery_workspace();
+        touch_extension(dir.path(), "src/cfe/A");
+        let config = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+            diagnostics: super::tests::partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config.clone()).unwrap();
+        let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        let external = plan.partitions.iter().find(|p| p.id == "external:А").expect("partition");
+        assert!(matches!(
+            &external.identity,
+            DiagnosticsBaselinePartitionIdentity::External { depends_on: None, .. }
+        ));
+        assert_eq!(
+            plan.owner_for_project_path("src/epf/А/А/Ext/ObjectModule.bsl"),
+            Some("external:А")
+        );
+
+        // The control: a legacy extension is still what the gate refuses.
+        touch_extension(dir.path(), "src/cfe/Legacy");
+        let legacy = ProjectConfig {
+            extensions: Some(vec![structured("A", "src/cfe/A", &[]), "src/cfe/Legacy".into()]),
+            ..config
+        };
+        let err = Project::with_config(dir.path(), legacy)
+            .unwrap()
+            .diagnostics_baseline_partition_plan()
+            .unwrap_err();
+        assert!(
+            matches!(err, super::DiagnosticsBaselineProjectError::LegacyExtension(ref name) if name == "Legacy"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn toml_externals_accept_depends_on_in_both_spellings() {
+        let toml_str = "[source]\nexternals = [\n  { name = \"A\", path = \"a\", dependsOn = [\"X\"] },\n  { name = \"B\", path = \"b\", depends_on = [] },\n  { name = \"C\", path = \"c\" },\n]\n";
+        let config: super::TomlConfig = toml::from_str(toml_str).unwrap();
+        let project = ProjectConfig::from(config);
+        let externals = project.externals.unwrap();
+        assert_eq!(externals[0].depends_on, Some(vec!["X".to_owned()]));
+        assert_eq!(externals[1].depends_on, Some(vec![]));
+        assert_eq!(externals[2].depends_on, None);
+        let empty = "[source]\nexternals = []\n";
+        let config: super::TomlConfig = toml::from_str(empty).unwrap();
+        assert_eq!(
+            ProjectConfig::from(config).externals,
+            Some(vec![]),
+            "an empty list is an opt-out"
+        );
+    }
+
+    #[test]
+    fn an_external_depends_on_narrows_its_view_and_reaches_the_baseline() {
+        let dir = tempdir().unwrap();
+        touch_base(dir.path(), "src/cf");
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_extension(dir.path(), "src/cfe/B");
+        touch_extension(dir.path(), "src/cfe/C");
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/F", "F", "ExternalDataProcessor");
+        let mut narrowed = external("E", "src/epf/E");
+        narrowed.depends_on = Some(vec!["a".into()]);
+        let mut base_only = external("F", "src/epf/F");
+        base_only.depends_on = Some(vec![]);
+        let config = ProjectConfig {
+            configuration_root: Some("src/cf".into()),
+            extensions: Some(vec![
+                structured("A", "src/cfe/A", &["C"]),
+                structured("B", "src/cfe/B", &[]),
+                structured("C", "src/cfe/C", &[]),
+            ]),
+            externals: Some(vec![narrowed, base_only]),
+            diagnostics: super::tests::partitioned_config("baselines", vec![]),
+            ..Default::default()
+        };
+        let project = Project::with_config(dir.path(), config).unwrap();
+        let topology = project.extension_topology();
+        let closure_of = |name: &str| -> Vec<&str> {
+            let node = topology.nodes().iter().find(|n| n.name() == name).unwrap();
+            node.closure().iter().map(|id| topology.node(*id).name()).collect()
+        };
+        assert_eq!(closure_of("E"), ["C", "A"], "transitive, B left out");
+        assert!(closure_of("F").is_empty(), "an empty list is the base alone");
+        let order: Vec<&str> =
+            topology.topological_order().iter().map(|id| topology.node(*id).name()).collect();
+        assert_eq!(order, ["B", "C", "A", "E", "F"]);
+
+        let plan = project.diagnostics_baseline_partition_plan().unwrap().unwrap();
+        let scope = &plan.project_scope;
+        assert_eq!(scope.externals[0].depends_on, Some(vec!["A".to_owned()]), "the declared name");
+        assert_eq!(scope.externals[1].depends_on, Some(vec![]));
+        let json = serde_json::to_string(&scope.externals[1]).unwrap();
+        assert_eq!(json, r#"{"name":"F","path":"src/epf/F","depends_on":[]}"#);
+        let partition = plan.partitions.iter().find(|p| p.id == "external:E").unwrap();
+        assert!(matches!(
+            &partition.identity,
+            DiagnosticsBaselinePartitionIdentity::External { depends_on: Some(deps), .. } if deps == &["A".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn an_external_depends_on_is_refused_like_an_extensions_when_wrong() {
+        let dir = tempdir().unwrap();
+        touch_extension(dir.path(), "src/cfe/A");
+        touch_external(dir.path(), "src/epf/E", "E", "ExternalDataProcessor");
+        touch_external(dir.path(), "src/epf/F", "F", "ExternalDataProcessor");
+        let with = |deps: &[&str]| {
+            let mut decl = external("E", "src/epf/E");
+            decl.depends_on = Some(deps.iter().map(|s| s.to_string()).collect());
+            let config = ProjectConfig {
+                extensions: Some(vec![structured("A", "src/cfe/A", &[])]),
+                externals: Some(vec![decl, external("F", "src/epf/F")]),
+                ..Default::default()
+            };
+            Project::with_config(dir.path(), config).unwrap_err()
+        };
+        assert!(matches!(
+            with(&["F"]),
+            ProjectError::Topology(TopologyError::ExternalInDependency { .. })
+        ));
+        assert!(matches!(
+            with(&["e"]),
+            ProjectError::Topology(TopologyError::SelfReference { .. })
+        ));
+        assert!(matches!(
+            with(&["nope"]),
+            ProjectError::Topology(TopologyError::UnknownDependency { .. })
+        ));
     }
 }

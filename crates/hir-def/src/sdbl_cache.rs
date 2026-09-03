@@ -7,7 +7,8 @@ use bsl_metadata::{
 use vfs::FileId;
 
 use crate::configs::ConfigsDatabase;
-use crate::{DefDatabase, ModuleId, SdblExprId};
+use crate::{DefDatabase, DefWithBodyId, MethodId, MethodIdInput, ModuleId, SdblExprId};
+use cfg_types::ExprId;
 
 /// Db-backed metadata resolution for SDBL lowering: routes each lookup through
 /// the file-scoped per-MDO [`ConfigsDatabase`] accessors so lowering a query
@@ -80,17 +81,19 @@ pub fn all_sdbl_in_file_query<'db>(
     let module_bodies = db.module_bodies(module_id);
     let mut result = Vec::new();
 
-    for (local_id, body) in module_bodies.iter_bodies() {
-        for (expr_id, query_info) in body.sdbl_exprs() {
+    for (local_id, lowered) in module_bodies.iter_lower_results() {
+        for (expr_id, literal, query) in lowered.body().sdbl_exprs() {
             let sdbl_expr_id = SdblExprId::from_method(local_id, expr_id);
-            result.push((sdbl_expr_id, query_info.clone()));
+            let info = syntax::SdblQueryInfo::from_query(literal.lift(lowered.base), query);
+            result.push((sdbl_expr_id, info));
         }
     }
 
-    if let Some(module_code) = module_bodies.module_code() {
-        for (expr_id, query_info) in module_code.sdbl_exprs() {
+    if let Some(module_code) = module_bodies.module_code_result() {
+        for (expr_id, literal, query) in module_code.body().sdbl_exprs() {
             let sdbl_expr_id = SdblExprId::from_module_code(expr_id);
-            result.push((sdbl_expr_id, query_info.clone()));
+            let info = syntax::SdblQueryInfo::from_query(literal.lift(module_code.base), query);
+            result.push((sdbl_expr_id, info));
         }
     }
 
@@ -100,6 +103,81 @@ pub fn all_sdbl_in_file_query<'db>(
     Arc::new(result)
 }
 
+/// Lowered SDBL of one body's query literals. Resolves metadata per-MDO instead
+/// of depending on the whole merged config, so editing an unrelated metadata
+/// object does not re-lower these queries; gated on visible config presence
+/// to keep "no config => no validation" — a standalone module must not flag
+/// every table.
+fn lower_body_queries(
+    db: &dyn ConfigsDatabase,
+    file_id: FileId,
+    body: &crate::Body,
+) -> Vec<(ExprId, Arc<sdbl_hir::SdblPackage>)> {
+    let mut result = Vec::new();
+    let mut resolver_ref: Option<Option<&dyn QueryMetadataResolver>> = None;
+    let resolver = DbSdblResolver { db, file_id };
+    for (expr_id, _literal, query) in body.sdbl_exprs() {
+        let Some(sdbl_ast) = &query.query_ast else { continue };
+        // The config check is a database read; take it only once a query needs it.
+        let resolver_ref = *resolver_ref.get_or_insert_with(|| {
+            db.file_has_visible_config(file_id).then_some(&resolver as &dyn QueryMetadataResolver)
+        });
+        let package = sdbl_hir::lower_sdbl_to_hir_with_resolver(sdbl_ast, resolver_ref);
+        result.push((expr_id, Arc::new(package)));
+    }
+    result
+}
+
+pub type MethodSdblHir = Arc<Vec<(ExprId, Arc<sdbl_hir::SdblPackage>)>>;
+
+fn method_sdbl_hir_heap(v: &MethodSdblHir) -> usize {
+    let mut bytes =
+        crate::heap_estimate::vec_bytes::<(ExprId, Arc<sdbl_hir::SdblPackage>)>(v.len());
+    for (_, package) in v.iter() {
+        bytes += package.estimated_heap();
+    }
+    bytes
+}
+
+/// SDBL HIR of one method's query literals. Keyed by the method so that the
+/// method's inference depends on its own queries alone; the file-wide view
+/// below is a fold over this. Held at the cap of `method_body`, which it reads.
+#[salsa::tracked(lru = 8192, heap_size = method_sdbl_hir_heap, returns(clone))]
+pub fn method_sdbl_hir_query<'db>(
+    db: &'db dyn ConfigsDatabase,
+    method: MethodIdInput<'db>,
+) -> MethodSdblHir {
+    let mid = method.method_id(db);
+    let _span = tracing::debug_span!("method_sdbl_hir", ?mid).entered();
+    let body = db.method_body_ref(method);
+    Arc::new(lower_body_queries(db, mid.module.file_id, body))
+}
+
+/// The lowered package of one query literal, wherever its body lives.
+pub fn sdbl_package_for(
+    db: &dyn ConfigsDatabase,
+    file_id: FileId,
+    owner: DefWithBodyId,
+    expr_id: ExprId,
+) -> Option<Arc<sdbl_hir::SdblPackage>> {
+    match owner {
+        DefWithBodyId::Method(local_id) => {
+            let method = MethodId { module: ModuleId::new(file_id), local_id };
+            method_sdbl_hir_query(db, MethodIdInput::new(db, method))
+                .iter()
+                .find(|(id, _)| *id == expr_id)
+                .map(|(_, package)| Arc::clone(package))
+        }
+        DefWithBodyId::ModuleCode => {
+            let target = SdblExprId { owner, expr_id };
+            sdbl_hir_for_file_query(db, FileIdInput::new(db, file_id))
+                .iter()
+                .find(|(id, _)| *id == target)
+                .map(|(_, package)| Arc::clone(package))
+        }
+    }
+}
+
 #[salsa::tracked(lru = 64, heap_size = sdbl_hir_for_file_heap, returns(clone))]
 pub fn sdbl_hir_for_file_query<'db>(
     db: &'db dyn ConfigsDatabase,
@@ -107,28 +185,27 @@ pub fn sdbl_hir_for_file_query<'db>(
 ) -> SdblHirEntries {
     let _span = tracing::debug_span!("sdbl_hir_for_file", ?file_id_input).entered();
     let file_id = file_id_input.file_id(db);
+    let module_id = ModuleId::new(file_id);
+    let module_bodies = db.module_bodies_ref(module_id);
 
-    let sdbl_queries = all_sdbl_in_file_query(db, file_id_input);
-    if sdbl_queries.is_empty() {
-        return Arc::new(Vec::new());
+    let mut result = Vec::new();
+    for (local_id, _) in module_bodies.iter_bodies() {
+        let method = MethodIdInput::new(db, MethodId { module: module_id, local_id });
+        for (expr_id, package) in method_sdbl_hir_query(db, method).iter() {
+            result.push((SdblExprId::from_method(local_id, *expr_id), Arc::clone(package)));
+        }
     }
-
-    // Resolve metadata per-MDO instead of depending on the whole merged config, so
-    // editing an unrelated metadata object does not re-lower this file's queries.
-    // Gate on visible config presence to keep the old "no config => no validation"
-    // behaviour: a standalone module with no config must not flag every table.
-    let resolver = DbSdblResolver { db, file_id };
-    let resolver_ref: Option<&dyn QueryMetadataResolver> =
-        db.file_has_visible_config(file_id).then_some(&resolver as &dyn QueryMetadataResolver);
-
-    let mut result = Vec::with_capacity(sdbl_queries.len());
-    for (expr_id, query_info) in sdbl_queries.iter() {
-        if let Some(ref sdbl_ast) = query_info.query_ast {
-            let sdbl_package = sdbl_hir::lower_sdbl_to_hir_with_resolver(sdbl_ast, resolver_ref);
-            result.push((*expr_id, Arc::new(sdbl_package)));
+    if let Some(module_code) = module_bodies.module_code() {
+        for (expr_id, package) in lower_body_queries(db, file_id, module_code) {
+            result.push((SdblExprId::from_module_code(expr_id), package));
         }
     }
 
     tracing::debug!(count = result.len(), "Lowered SDBL HIR for file");
     Arc::new(result)
+}
+
+/// Retention cap of `method_sdbl_hir_query`; see `set_lowering_lru_sweep_mode`.
+pub(crate) fn set_method_sdbl_hir_lru_capacity(db: &mut dyn ConfigsDatabase, cap: usize) {
+    method_sdbl_hir_query::set_lru_capacity(db, cap);
 }

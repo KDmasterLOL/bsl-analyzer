@@ -1,3 +1,5 @@
+pub mod walk_probe;
+
 pub use expect_test::{expect, Expect};
 
 pub fn check(actual: &str, expect: Expect) {

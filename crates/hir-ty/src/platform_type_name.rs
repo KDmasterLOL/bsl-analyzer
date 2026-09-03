@@ -63,6 +63,8 @@ pub(crate) const OBJECT_NAMES: &[(MdoType, &str, &str)] = &[
     (MdoType::ChartOfCalculationTypes, "ПланВидовРасчетаОбъект", "ChartOfCalculationTypesObject"),
     (MdoType::DataProcessor, "ОбработкаОбъект", "DataProcessorObject"),
     (MdoType::Report, "ОтчетОбъект", "ReportObject"),
+    (MdoType::ExternalDataProcessor, "ВнешняяОбработкаОбъект", "ExternalDataProcessorObject"),
+    (MdoType::ExternalReport, "ВнешнийОтчетОбъект", "ExternalReportObject"),
 ];
 
 pub(crate) fn manager_name_for(mdo: MdoType) -> Option<(&'static str, &'static str)> {

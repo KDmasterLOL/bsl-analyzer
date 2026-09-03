@@ -1200,7 +1200,10 @@ impl SharedState {
             // points at the snapshot the manifest was fetched for, the expensive
             // per-file manifest download from Postgres is skipped entirely. Every
             // failure path clears it instead, so a failed init stays fail-closed.
-            let manifest_files = match external_baseline.resolve_snapshot() {
+            let manifest_files = match external_baseline
+                .resolve_snapshot(&crate::baseline::uncancellable())
+                .map_err(crate::baseline::BaselineCall::into_error)
+            {
                 Ok(Some((_baseline_ref, snapshot))) => {
                     let cached = store.load_coherent_baseline_manifest().unwrap_or_else(|error| {
                         tracing::debug!(
@@ -1220,7 +1223,13 @@ impl SharedState {
                             );
                             record.manifest_files
                         }
-                        None => match external_baseline.load_baseline_manifest(&snapshot.id.0) {
+                        None => match external_baseline
+                            .load_baseline_manifest(
+                                &crate::baseline::uncancellable(),
+                                &snapshot.id.0,
+                            )
+                            .map_err(crate::baseline::BaselineCall::into_error)
+                        {
                             Ok(manifest) => {
                                 let manifest_files = manifest.files.len();
                                 match Self::startup_apply_once(lease, || {
@@ -1540,7 +1549,12 @@ impl SharedState {
                 let model_id = engine.embedding_model().map(ToOwned::to_owned);
                 let dimension = engine.embedding_dimension();
                 match external_baseline
-                    .load_reference_snapshot_documents(model_id.as_deref(), dimension)
+                    .load_reference_snapshot_documents(
+                        &crate::baseline::uncancellable(),
+                        model_id.as_deref(),
+                        dimension,
+                    )
+                    .map_err(crate::baseline::BaselineCall::into_error)
                 {
                     Ok(Some(snapshot)) => {
                         if engine.has_semantic() {
@@ -2977,7 +2991,9 @@ mod tests {
             SharedState::prefetch_resident_overlay_fenced(
                 state.search_engine(),
                 &crate::workspace_lease::WorkspaceLease::unmanaged(),
-            );
+                &tokio_util::sync::CancellationToken::new(),
+            )
+            .expect("an uncancelled prefetch completes");
             let fed = state
                 .search_engine()
                 .lock()

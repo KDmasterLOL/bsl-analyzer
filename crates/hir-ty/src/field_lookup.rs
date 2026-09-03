@@ -288,6 +288,8 @@ fn lookup_field_on_metadata_ref(
         MetadataKind::BusinessProcessObject => MdoType::BusinessProcess,
         MetadataKind::DataProcessorObject => MdoType::DataProcessor,
         MetadataKind::ReportObject => MdoType::Report,
+        MetadataKind::ExternalDataProcessorObject => MdoType::ExternalDataProcessor,
+        MetadataKind::ExternalReportObject => MdoType::ExternalReport,
         MetadataKind::ChartOfCharacteristicTypesObject => MdoType::ChartOfCharacteristicTypes,
         MetadataKind::ChartOfCalculationTypesObject => MdoType::ChartOfCalculationTypes,
         _ => return None,
@@ -1739,5 +1741,50 @@ mod tests {
         let db = InMemoryDb::new();
         let receiver_id = db.query(Arc::from([Some(projection_with_two_fields(&db))]));
         assert!(lookup_field_in_query_projection(&db, receiver_id, &Name::new("КодТов")).is_none());
+    }
+
+    /// An EPF export's object carries its own attributes and specializes
+    /// `ЭтотОбъект` to itself; its platform properties come from the bare type
+    /// `ВнешняяОбработка`, which has no manager prefix in the corpus.
+    #[test]
+    fn field_lookup_external_object_has_its_attributes_self_and_platform_properties() {
+        let mut config = Configuration::new("Test");
+        config.add_metadata_object(mdo_of(
+            MdoType::ExternalDataProcessor,
+            "АРМПроизводство",
+            vec![attr(
+                "АвторизованныйПользователь",
+                None,
+                AttributeType::Ref {
+                    mdo_type: MdoType::Catalog, name: "Пользователи".into()
+                },
+            )],
+        ));
+        // A same-named INTERNAL object with a different attribute: the external
+        // kind must never borrow it.
+        config.add_metadata_object(mdo_of(
+            MdoType::DataProcessor,
+            "АРМПроизводство",
+            vec![attr("Внутренний", None, AttributeType::String { length: None })],
+        ));
+        let configs = wrap(config);
+        let receiver = metadata_ref(MetadataKind::ExternalDataProcessorObject, "АРМПроизводство");
+
+        let this = lookup_field(&configs, &receiver, &Name::new("ЭтотОбъект"))
+            .expect("ЭтотОбъект resolves on ExternalDataProcessorObject");
+        assert_eq!(this.ty, receiver);
+
+        let user = lookup_field(&configs, &receiver, &Name::new("АвторизованныйПользователь"))
+            .expect("the export's own attribute resolves");
+        assert_eq!(user.ty, metadata_ref(MetadataKind::CatalogRef, "Пользователи"));
+
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("Внутренний")).is_none(),
+            "the internal object's attribute is not the external's"
+        );
+        assert!(
+            lookup_field(&configs, &receiver, &Name::new("ИспользуемоеИмяФайла")).is_some(),
+            "ВнешняяОбработка's own platform property resolves through the bare type"
+        );
     }
 }

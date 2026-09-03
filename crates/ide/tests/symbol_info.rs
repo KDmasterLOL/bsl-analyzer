@@ -343,6 +343,7 @@ fn setup_applied_visibility() -> RootDatabaseImpl {
     ];
     let mut db = RootDatabaseImpl::new();
     db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
         paths,
         closures: vec![vec![], vec![], vec![]],
@@ -412,6 +413,7 @@ fn setup_form_resolution_visibility() -> (RootDatabaseImpl, PathBuf) {
     ];
     let mut db = RootDatabaseImpl::new();
     db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
         paths,
         closures: vec![vec![], vec![], vec![]],

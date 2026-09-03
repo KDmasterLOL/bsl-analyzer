@@ -18,6 +18,7 @@ pub mod type_kernel;
 pub mod types;
 pub(crate) mod vfs_helpers;
 
+pub use database::METHOD_KEYED_QUERY_FAMILIES;
 pub use hir::SdblHirEntries;
 // Named by `RootDatabase::resolve_common_module_files` / `AnalysisProvider`, so every
 // consumer of those must be able to spell it without depending on `hir` itself.
@@ -36,13 +37,14 @@ pub use vfs_helpers::get_file_path;
 
 pub use hir::{all_sdbl_in_file_query, sdbl_hir_for_file_query};
 pub use queries::{
-    configuration_path_for_file, effective_target, line_index_query, liveness_analysis_query,
-    method_cfg_query, module_metadata_query, reaching_definitions_query, weaving_target,
+    configuration_path_for_file, effective_target, line_index_query, method_cfg_query,
+    method_path_terminates_query, module_code_reaching_definitions_query, module_metadata_query,
+    reaching_definitions_query, weaving_target,
 };
 
 pub use effects::{
-    method_effect_summary_query, module_effect_summaries_query, module_security_state_query,
-    ModuleEffectSummaries, ModuleSecurityState,
+    method_effect_summary_query, method_security_state_query, module_code_security_state_query,
+    module_effect_summaries_query, ModuleEffectSummaries,
 };
 
 pub use effective_exports::{

@@ -235,7 +235,7 @@ fn test_sdbl_collected_in_hir() {
 
     assert_eq!(result.body.sdbl_exprs.len(), 1);
 
-    let (expr_id, query_info) = &result.body.sdbl_exprs[0];
+    let (expr_id, _literal, query_info) = &result.body.sdbl_exprs[0];
     assert!(query_info.is_valid());
     assert!(query_info.query_text.contains("SELECT"));
 
@@ -262,7 +262,7 @@ fn test_sdbl_multiline_query() {
 
     assert_eq!(result.body.sdbl_exprs.len(), 1);
 
-    let (_expr_id, query_info) = &result.body.sdbl_exprs[0];
+    let (_expr_id, _literal, query_info) = &result.body.sdbl_exprs[0];
     assert!(query_info.is_valid());
     assert!(query_info.query_text.contains("Наименование"));
 }
@@ -298,8 +298,8 @@ fn test_multiple_queries_in_method() {
 
     assert_eq!(result.body.sdbl_exprs.len(), 2);
 
-    assert!(result.body.sdbl_exprs[0].1.query_text.contains("SELECT"));
-    assert!(result.body.sdbl_exprs[1].1.query_text.contains("ВЫБРАТЬ"));
+    assert!(result.body.sdbl_exprs[0].2.query_text.contains("SELECT"));
+    assert!(result.body.sdbl_exprs[1].2.query_text.contains("ВЫБРАТЬ"));
 }
 
 #[test]
@@ -406,7 +406,8 @@ fn test_if_else_duplicated_range_correct() {
     assert_eq!(diags.len(), 1);
 
     if let BodyDiagnostic::IfElseDuplicatedCodeBlock { range } = diags[0] {
-        let text = &code[range.start().into()..range.end().into()];
+        let base = cfg_types::MethodOffset::new(method.text_range().start());
+        let text = &code[range.lift(base)];
         assert!(text.contains("А = 1"), "Range should cover the duplicated statement");
     }
 }

@@ -1,7 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 use hir::catch_class::{classify_catch_body, CatchBodyClass};
+use hir::BodySourceMap;
+use hir::LocalRange;
 use hir::{IdConversion, Stmt, StmtId};
 use syntax::{NodeOrToken, SyntaxKind};
 
@@ -20,11 +22,11 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     clean_code_attribute: CleanCodeAttribute::Intentional,
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::MissingCodeTryCatchEx;
 
     if ctx.is_disabled_with_metadata(code) {
-        return Vec::new();
+        return;
     }
 
     let comment_as_code = ctx
@@ -32,22 +34,16 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         .get_bool(DiagnosticCode::MissingCodeTryCatchEx, "commentAsCode")
         .unwrap_or(false);
 
-    let mut diagnostics = crate::utils::for_each_body(ctx, |body, source_map, diags| {
-        check_body_for_empty_except(body, source_map, comment_as_code, code, ctx, diags);
-    });
-
-    diagnostics.sort_by_key(|d| d.range.start());
-
-    diagnostics
+    check_body_for_empty_except(ctx.body(), ctx.source_map(), comment_as_code, code, ctx, acc);
 }
 
 fn check_body_for_empty_except(
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     comment_as_code: bool,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     for stmt_id in body.body_stmts() {
         check_stmt_recursive(stmt_id, body, source_map, comment_as_code, code, ctx, diagnostics);
@@ -57,11 +53,11 @@ fn check_body_for_empty_except(
 fn check_stmt_recursive(
     stmt_id: StmtId,
     body: &hir::Body,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     comment_as_code: bool,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
 ) {
     let stmt = body.stmt(stmt_id);
 
@@ -177,15 +173,14 @@ fn check_stmt_recursive(
 
 fn except_clause_has_comments(
     stmt_id: StmtId,
-    source_map: &hir::BodySourceMap,
-    ctx: &DiagnosticsContext,
+    source_map: &BodySourceMap,
+    ctx: &BodyContext,
 ) -> bool {
     let Some(stmt_range) = source_map.stmt_range(stmt_id) else { return false };
-    let parse = ctx.parse();
-    let root = parse.syntax_node();
-    let Some(try_node) = root
+    let Some(try_node) = ctx
+        .root()
         .descendants()
-        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)
+        .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range.in_root())
     else {
         return false;
     };
@@ -209,10 +204,10 @@ fn except_clause_has_comments(
 
 fn emit_at_except_keyword(
     stmt_id: StmtId,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
-    diagnostics: &mut Vec<Diagnostic>,
+    ctx: &BodyContext,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
     class: CatchBodyClass,
 ) {
     let message = match class {
@@ -228,16 +223,14 @@ fn emit_at_except_keyword(
     let range = source_map
         .stmt_range(stmt_id)
         .and_then(|stmt_range| {
-            let parse = ctx.parse();
-            let root = parse.syntax_node();
-            let try_node = root
-                .descendants()
-                .find(|n| n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range)?;
+            let try_node = ctx.root().descendants().find(|n| {
+                n.kind() == SyntaxKind::TRY_STMT && n.text_range() == stmt_range.in_root()
+            })?;
             try_node
                 .children_with_tokens()
                 .filter_map(|el| el.into_token())
                 .find(|tok| tok.kind() == SyntaxKind::KW_EXCEPT)
-                .map(|tok| tok.text_range())
+                .map(|tok| ctx.token_range(&tok))
         })
         .or_else(|| source_map.stmt_range(stmt_id));
 
@@ -255,9 +248,9 @@ fn emit_at_except_keyword(
 
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::check_body;
     use crate::test_utils::{
-        check_ast_diagnostic, check_ast_diagnostic_with_config, check_diagnostics_snapshot_for,
+        check_body_diagnostic, check_body_diagnostic_with_config, check_diagnostics_snapshot_for,
         format_diags,
     };
     use crate::{DiagnosticCode, DiagnosticsConfig};
@@ -313,7 +306,7 @@ mod tests {
                   severity: Major"#]],
         );
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert!(
             diagnostics[0].message.contains("молча"),
             "Silent message should mention the swallow, got: {}",
@@ -339,7 +332,7 @@ mod tests {
                   severity: Major"#]],
         );
 
-        let diagnostics = check_ast_diagnostic(code, check);
+        let diagnostics = check_body_diagnostic(code, check_body);
         assert!(
             diagnostics[0].message.contains("откатывает"),
             "Rollback message should mention rollback, got: {}",
@@ -531,7 +524,7 @@ mod tests {
             .parameters
             .insert(DiagnosticCode::MissingCodeTryCatchEx, serde_json::Value::Object(params));
 
-        let diagnostics = check_ast_diagnostic_with_config(code, config, check);
+        let diagnostics = check_body_diagnostic_with_config(code, config, check_body);
         expect![[r#"
             MissingCodeTryCatchEx @ 24:5..24:15
               message: Отсутствует код в блоке исключения

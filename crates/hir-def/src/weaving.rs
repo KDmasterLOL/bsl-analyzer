@@ -240,24 +240,31 @@ mod tests {
         use crate::symbol_tree::ParamSymbol;
         use crate::{MethodId, ModuleId};
         MethodSymbol {
-            id: MethodId { module: ModuleId::new(vfs::FileId(0)), local_id: 0 },
-            name: Name::new("m"),
-            is_function,
-            is_export: false,
-            params: params
-                .iter()
-                .map(|(n, is_val)| ParamSymbol {
-                    name: Name::new(n),
-                    is_val: *is_val,
-                    has_default: false,
-                    type_ref: None,
-                })
-                .collect(),
+            decl: crate::module_interface::MethodDecl {
+                id: MethodId {
+                    module: ModuleId::new(vfs::FileId(0)),
+                    local_id: crate::MethodKey::first("М"),
+                },
+                name: Name::new("m"),
+                is_function,
+                is_export: false,
+                params: params
+                    .iter()
+                    .map(|(n, is_val)| ParamSymbol {
+                        name: Name::new(n),
+                        is_val: *is_val,
+                        has_default: false,
+                        type_ref: None,
+                    })
+                    .collect(),
+                directives: Box::new([]),
+                preproc_env: crate::execution_env::EnvFlags::ALL,
+                docs: None,
+                return_type_ref: None,
+            },
             annotations: Vec::new(),
             source_range: syntax::TextRange::empty(0.into()),
             name_range: syntax::TextRange::empty(0.into()),
-            docs: None,
-            return_type_ref: None,
         }
     }
 

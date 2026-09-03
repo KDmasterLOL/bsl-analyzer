@@ -1,7 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::{BodyContext, Diagnostic, DiagnosticCode};
 use hir::cfg::CfgVertex;
+use hir::BodySourceMap;
+use hir::LocalRange;
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -18,79 +20,36 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
     lsp_severity_override: "",
 };
 
-pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
+pub fn check_body(ctx: &BodyContext, acc: &mut Vec<Diagnostic<LocalRange>>) {
     let code = DiagnosticCode::UnreachableCode;
 
     if ctx.is_disabled_with_metadata(code) {
-        return vec![];
+        return;
     }
 
-    let mut diagnostics = Vec::new();
-    let module_bodies = ctx.module_bodies();
-    let module_cfgs = ctx.module_cfgs();
-    let source_text = ctx.file_text();
+    let cfg = ctx.cfg();
+    let Some(entry) = cfg.entry_point() else {
+        return;
+    };
+    let exit = cfg.exit_point();
 
-    for (local_id, _body) in module_bodies.iter_bodies() {
-        let Some(source_map) = module_bodies.source_map(local_id) else {
-            continue;
-        };
-        let Some(cfg) = module_cfgs.get(local_id) else {
-            continue;
-        };
+    let dead_tail_vertices = compute_dead_tail_vertices(&cfg, entry);
 
-        let Some(entry) = cfg.entry_point() else {
-            continue;
-        };
-        let exit = cfg.exit_point();
-
-        let dead_tail_vertices = compute_dead_tail_vertices(cfg, entry);
-
-        let unreachable_ranges = collect_unreachable_ranges(cfg, source_map, entry, exit, |idx| {
+    let unreachable_ranges =
+        collect_unreachable_ranges(&cfg, ctx.source_map(), entry, exit, |idx| {
             dead_tail_vertices.contains(&idx)
         });
 
-        create_diagnostics(&mut diagnostics, unreachable_ranges, source_text.as_str(), code, ctx);
-    }
-
-    if let Some(module_result) = module_bodies.module_code_result() {
-        let body = &module_result.body;
-        let source_map = &module_result.source_map;
-
-        let cfg = hir::cfg::CfgBuilder::new().build_graph_from_hir(
-            body.body_stmts_typed(),
-            body,
-            Some(source_map),
-        );
-
-        if let Some(entry) = cfg.entry_point() {
-            let exit = cfg.exit_point();
-            let dead_tail_vertices = compute_dead_tail_vertices(&cfg, entry);
-
-            let unreachable_ranges =
-                collect_unreachable_ranges(&cfg, source_map, entry, exit, |idx| {
-                    dead_tail_vertices.contains(&idx)
-                });
-
-            create_diagnostics(
-                &mut diagnostics,
-                unreachable_ranges,
-                source_text.as_str(),
-                code,
-                ctx,
-            );
-        }
-    }
-
-    diagnostics
+    create_diagnostics(acc, unreachable_ranges, &ctx.root().text().to_string(), code, ctx);
 }
 
 fn collect_unreachable_ranges<F>(
     cfg: &hir::cfg::ControlFlowGraph,
-    source_map: &hir::BodySourceMap,
+    source_map: &BodySourceMap,
     entry: hir::cfg::NodeIndex,
     exit: hir::cfg::NodeIndex,
     is_unreachable: F,
-) -> Vec<TextRange>
+) -> Vec<LocalRange>
 where
     F: Fn(hir::cfg::NodeIndex) -> bool,
 {
@@ -120,11 +79,11 @@ where
 }
 
 fn create_diagnostics(
-    diagnostics: &mut Vec<Diagnostic>,
-    ranges: Vec<TextRange>,
+    diagnostics: &mut Vec<Diagnostic<LocalRange>>,
+    ranges: Vec<LocalRange>,
     source_text: &str,
     code: DiagnosticCode,
-    ctx: &DiagnosticsContext,
+    ctx: &BodyContext,
 ) {
     let merged = merge_ranges(ranges, source_text);
     for range in merged {
@@ -139,9 +98,10 @@ fn create_diagnostics(
     }
 }
 
-fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange> {
+fn merge_ranges(ranges: Vec<LocalRange>, source_text: &str) -> Vec<LocalRange> {
+    let mut ranges: Vec<TextRange> = ranges.into_iter().map(LocalRange::in_root).collect();
     if ranges.is_empty() {
-        return ranges;
+        return Vec::new();
     }
 
     ranges.sort_by_key(|r| r.start());
@@ -170,7 +130,7 @@ fn merge_ranges(mut ranges: Vec<TextRange>, source_text: &str) -> Vec<TextRange>
     }
     merged.push(current);
 
-    merged
+    merged.into_iter().map(LocalRange::of_detached_node).collect()
 }
 
 fn compute_dead_tail_vertices(
@@ -219,8 +179,8 @@ fn get_vertex_range(
     cfg: &hir::cfg::ControlFlowGraph,
     vertex_idx: hir::cfg::NodeIndex,
     vertex: &CfgVertex,
-    source_map: &hir::BodySourceMap,
-) -> Option<TextRange> {
+    source_map: &BodySourceMap,
+) -> Option<LocalRange> {
     if let Some(range) =
         cfg.source_stmt_id(vertex_idx).and_then(|stmt_id| source_map.stmt_range(stmt_id))
     {
@@ -240,7 +200,10 @@ fn get_vertex_range(
             let first_range = source_map.stmt_range(*first)?;
             let last_range = source_map.stmt_range(*last)?;
 
-            Some(TextRange::new(first_range.start(), last_range.end()))
+            Some(LocalRange::of_detached_node(TextRange::new(
+                first_range.in_root().start(),
+                last_range.in_root().end(),
+            )))
         }
         CfgVertex::Conditional(_) => None,
         CfgVertex::WhileLoop(loop_vertex) => source_map.expr_range(loop_vertex.condition),
@@ -254,7 +217,7 @@ fn get_vertex_range(
             .or_else(|| source_map.binding_range(loop_vertex.loop_var)),
         CfgVertex::TryExcept(_) => None,
         CfgVertex::PreprocCondition(preproc) => {
-            preproc.full_range.or(preproc.directive_range).or(Some(preproc.condition_range))
+            Some(preproc.full_range.or(preproc.directive_range).unwrap_or(preproc.condition_range))
         }
         CfgVertex::Label(_) | CfgVertex::Exit => None,
     }

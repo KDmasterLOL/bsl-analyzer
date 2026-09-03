@@ -808,6 +808,7 @@ fn references_follow_the_declared_dependency_matrix() {
     let canonical_paths =
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         // `tests` (slot 2) declares a dependency on `yaxunit` (slot 1).
@@ -904,6 +905,7 @@ fn manager_module_references_follow_the_declared_dependency_matrix() {
     let canonical_paths =
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
@@ -990,6 +992,7 @@ fn object_module_references_follow_the_declared_dependency_matrix() {
     let canonical_paths =
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
@@ -1090,6 +1093,7 @@ fn record_set_module_references_follow_the_declared_dependency_matrix() {
     let canonical_paths =
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new(), vec![1], Vec::new()],
@@ -1176,6 +1180,7 @@ fn adopter_first_input() -> (RootDatabaseImpl, FileId, FileId, FileId) {
     let canonical_paths =
         paths.iter().map(|(_, p)| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())).collect();
     db.set_workspace_configs_snapshot(ide_db::metadata::WorkspaceConfigsSnapshot {
+        kinds: ide_db::metadata::RootKind::from_labels(&paths),
         paths,
         canonical_paths,
         closures: vec![Vec::new(), Vec::new()],

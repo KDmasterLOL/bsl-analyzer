@@ -33,12 +33,12 @@ pub enum PlatformSignatureSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UserMethodId {
     file_id: FileId,
-    local_id: u32,
+    local_id: hir_def::MethodKey,
 }
 
 impl UserMethodId {
-    /// Creates an identity from Salsa-stable file and local method IDs.
-    pub const fn new(file_id: FileId, local_id: u32) -> Self {
+    /// Creates an identity from a Salsa-stable file id and the method's key.
+    pub const fn new(file_id: FileId, local_id: hir_def::MethodKey) -> Self {
         Self { file_id, local_id }
     }
 }

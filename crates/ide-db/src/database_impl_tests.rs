@@ -6,7 +6,7 @@ use vfs::FileId;
 use vfs::{file_set::FileSet, VfsPath};
 
 use super::RootDatabaseImpl;
-use crate::metadata::MetadataListingData;
+use crate::metadata::{MetadataListingData, RootKind};
 use crate::RootDatabase;
 
 #[test]
@@ -1128,6 +1128,7 @@ fn a_chain_resolves_the_owning_extension_first_and_lists_each_name_once() {
             (Some("A".to_owned()), dep_root.clone()),
             (Some("B".to_owned()), own_root.clone()),
         ],
+        kinds: vec![RootKind::Extension, RootKind::Extension],
         canonical_paths: vec![dep_root.clone(), own_root.clone()],
         closures: vec![Vec::new(), vec![0]],
         topological_order: vec![0, 1],
@@ -2932,7 +2933,13 @@ fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods
 
     // When: the index-backed batch projection resolves the caller module.
     let pairs = project_batch_method_call_pairs(&pool, &base, &index, &modules);
-    let main = hir::MethodId { module: ModuleId::new(client), local_id: 0 };
+    fn nth_method_key(db: &dyn hir::DefDatabase, file: FileId, n: usize) -> hir::MethodKey {
+        let tree = db.item_tree(file);
+        let key = tree.methods().nth(n).expect("the fixture declares that many methods").key();
+        key
+    }
+    let main =
+        hir::MethodId { module: ModuleId::new(client), local_id: nth_method_key(&base, client, 0) };
 
     // Then: every supported target is emitted once as a method pair.
     assert_eq!(
@@ -2940,23 +2947,38 @@ fn project_batch_method_pairs_include_resolved_callbacks_and_exclude_non_methods
         vec![
             hir::MethodCallPair::new(
                 main,
-                hir::MethodId { module: ModuleId::new(client), local_id: 1 }
+                hir::MethodId {
+                    module: ModuleId::new(client),
+                    local_id: nth_method_key(&base, client, 1)
+                }
             ),
             hir::MethodCallPair::new(
                 main,
-                hir::MethodId { module: ModuleId::new(client), local_id: 2 }
+                hir::MethodId {
+                    module: ModuleId::new(client),
+                    local_id: nth_method_key(&base, client, 2)
+                }
             ),
             hir::MethodCallPair::new(
                 main,
-                hir::MethodId { module: ModuleId::new(client), local_id: 3 }
+                hir::MethodId {
+                    module: ModuleId::new(client),
+                    local_id: nth_method_key(&base, client, 3)
+                }
             ),
             hir::MethodCallPair::new(
                 main,
-                hir::MethodId { module: ModuleId::new(server), local_id: 0 }
+                hir::MethodId {
+                    module: ModuleId::new(server),
+                    local_id: nth_method_key(&base, server, 0)
+                }
             ),
             hir::MethodCallPair::new(
                 main,
-                hir::MethodId { module: ModuleId::new(manager), local_id: 0 }
+                hir::MethodId {
+                    module: ModuleId::new(manager),
+                    local_id: nth_method_key(&base, manager, 0)
+                }
             ),
         ],
         "local, qualified, manager, notify, and idle-handler targets are method-only pairs",
@@ -3560,10 +3582,12 @@ fn call_hierarchy_index_selects_source_root_by_anchor_file() {
     };
 
     // Then: independent roots never share reverse pairs or lifecycle layout state.
-    let caller_a = MethodId { module: ModuleId::new(FileId(0)), local_id: 0 };
-    let target_a = MethodId { module: ModuleId::new(FileId(1)), local_id: 0 };
-    let caller_b = MethodId { module: ModuleId::new(FileId(2)), local_id: 0 };
-    let target_b = MethodId { module: ModuleId::new(FileId(3)), local_id: 0 };
+    let caller = hir::MethodKey::first("Вызвать");
+    let target = hir::MethodKey::first("Цель");
+    let caller_a = MethodId { module: ModuleId::new(FileId(0)), local_id: caller };
+    let target_a = MethodId { module: ModuleId::new(FileId(1)), local_id: target };
+    let caller_b = MethodId { module: ModuleId::new(FileId(2)), local_id: caller };
+    let target_b = MethodId { module: ModuleId::new(FileId(3)), local_id: target };
     let selected_a = index_for(FileId(0));
     let selected_b = index_for(FileId(2));
     assert_eq!(selected_a.callers(target_a), &[caller_a]);
@@ -4004,25 +4028,6 @@ fn common_module_body_lookup_marks_declared_but_unmapped_body() {
 }
 
 #[test]
-fn module_cfgs_reuses_the_module_level_cfg_allocation() {
-    let file = FileId(0);
-    let mut db = RootDatabaseImpl::new();
-    let mut file_set = FileSet::new();
-    file_set.insert(file, VfsPath::new("/Ext/ManagedApplicationModule.bsl"));
-    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
-    db.set_file_source_root(file, SourceRootId(0));
-    db.set_file_text(file, "Значение = 1;");
-
-    let input = base_db::FileIdInput::new(&db, file);
-    let cfgs = <RootDatabaseImpl as RootDatabase>::module_cfgs(&db, input);
-    let module = <RootDatabaseImpl as RootDatabase>::module_level_cfg(&db, ModuleId::new(file));
-    assert!(
-        std::sync::Arc::ptr_eq(cfgs.module_code().expect("module-code CFG"), &module),
-        "module CFG aggregation must share the module-level query allocation"
-    );
-}
-
-#[test]
 fn platform_global_read_does_not_force_reaching_definitions() {
     use hir::HirDatabase;
 
@@ -4037,7 +4042,7 @@ fn platform_global_read_does_not_force_reaching_definitions() {
     let _ = db.infer(file);
     let rows = db.salsa_event_report().expect("event counters enabled");
     assert!(
-        rows.iter().all(|row| !row.name.contains("module_reaching_definitions")),
+        rows.iter().all(|row| !row.name.contains("reaching_definitions")),
         "a read with no same-named assignment has no reason to build module dataflow"
     );
 }
@@ -5771,6 +5776,10 @@ fn effective_metadata_members_keep_topological_winner_and_source() {
     ];
     db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
         canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        kinds: paths
+            .iter()
+            .map(|(label, _)| if label.is_none() { RootKind::Base } else { RootKind::Extension })
+            .collect(),
         paths,
         closures: vec![vec![], vec![2], vec![], vec![], vec![]],
         topological_order: vec![0, 2, 1, 3, 4],
@@ -5920,6 +5929,10 @@ fn effective_module_exports_cover_composition_matrix_for_all_module_roles() {
     let mut db = RootDatabaseImpl::new();
     db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
         canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        kinds: paths
+            .iter()
+            .map(|(label, _)| if label.is_none() { RootKind::Base } else { RootKind::Extension })
+            .collect(),
         paths,
         // `Позднее` depends on `Раннее`, despite being declared first.
         closures: vec![vec![], vec![2], vec![], vec![]],
@@ -6050,6 +6063,10 @@ fn ba010_effective_module_variables_resolve_for_object_and_manager_facets() {
     let mut db = RootDatabaseImpl::new();
     db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
         canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        kinds: paths
+            .iter()
+            .map(|(label, _)| if label.is_none() { RootKind::Base } else { RootKind::Extension })
+            .collect(),
         paths,
         closures: vec![vec![], vec![], vec![1]],
         topological_order: vec![0, 1, 2],
@@ -6647,4 +6664,178 @@ fn resolve_defined_type_across_roots_lets_an_extension_replace_the_base() {
         db.resolve_defined_type_across_roots("НетТакого").is_none(),
         "an absent defined type resolves to None",
     );
+}
+
+/// An external object's root has neither `Configuration.xml` nor `CommonModules/`,
+/// so the disk walk that used to attribute a file to its configuration finds
+/// nothing there. The registered roots must answer first; the designer-wide order
+/// must leave the external out while the file's own chain sees every extension.
+#[test]
+fn an_external_root_binds_its_files_through_the_snapshot_not_the_disk() {
+    let base = std::env::temp_dir().join(format!(
+        "bsl_external_root_binding_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let cf = base.join("cf");
+    let ext = base.join("ext");
+    let epf = base.join("epf");
+    std::fs::create_dir_all(cf.join("CommonModules")).unwrap();
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(ext.join("Configuration.xml"), "<x/>").unwrap();
+    std::fs::create_dir_all(epf.join("АРМ/Forms/Форма/Ext/Form")).unwrap();
+    std::fs::write(
+        epf.join("АРМ.xml"),
+        "<MetaDataObject><ExternalDataProcessor/></MetaDataObject>",
+    )
+    .unwrap();
+
+    let mut db = RootDatabaseImpl::new();
+    let module = FileId(0);
+    let mut file_set = FileSet::new();
+    file_set.insert(
+        module,
+        VfsPath::new(epf.join("АРМ/Forms/Форма/Ext/Form/Module.bsl").to_string_lossy().as_ref()),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(module, SourceRootId(0));
+    db.set_file_text(module, "Процедура Т() КонецПроцедуры");
+
+    let paths = vec![
+        (None, cf.clone()),
+        (Some("EXT".to_owned()), ext.clone()),
+        (Some("EPF".to_owned()), epf.clone()),
+    ];
+    db.set_workspace_configs_snapshot(crate::metadata::WorkspaceConfigsSnapshot {
+        canonical_paths: paths.iter().map(|(_, path)| path.clone()).collect(),
+        kinds: vec![
+            RootKind::Base,
+            RootKind::Extension,
+            RootKind::External(bsl_metadata::ExternalObjectKind::DataProcessor),
+        ],
+        paths,
+        closures: vec![vec![], vec![], vec![1]],
+        topological_order: vec![0, 1, 2],
+        fingerprint: Some("external".to_string()),
+    });
+
+    let bound = db
+        .configuration_input_for_path(&epf.join("АРМ/Forms/Форма/Ext/Form/Module.bsl"))
+        .expect("the file binds to a registered root");
+    assert_eq!(
+        bound.path(&db).as_str(),
+        epf.to_string_lossy().as_ref(),
+        "and that root is the external's"
+    );
+
+    let roots = db.visible_roots_for_file(module).expect("visibility resolves");
+    assert_eq!(roots.main.as_deref(), Some(cf.as_path()));
+    assert_eq!(
+        roots.chain,
+        vec![("EXT".to_owned(), ext.clone()), ("EPF".to_owned(), epf.clone())],
+        "the external sees the extension, then itself"
+    );
+
+    assert_eq!(
+        db.ordered_config_roots(),
+        vec![
+            cf.to_string_lossy().into_owned(),
+            ext.to_string_lossy().into_owned(),
+            epf.to_string_lossy().into_owned()
+        ],
+        "a lookup by kind and name reaches the external last"
+    );
+    assert_eq!(db.designer_config_paths().len(), 2, "while the designer's view leaves it out");
+    assert_eq!(db.all_config_paths().len(), 3, "while every root stays registered");
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// A root configured through one spelling and enumerated through another — a
+/// symlinked checkout, an MCP walk that canonicalizes — must still claim its
+/// files, and the key it hands back must be the configured spelling, which is
+/// the one a bump on that root increments.
+#[cfg(unix)]
+#[test]
+fn an_external_root_matches_its_canonical_spelling_and_keys_by_the_configured_one() {
+    let base = std::env::temp_dir().join(format!(
+        "bsl_external_root_spelling_{}_{}",
+        std::process::id(),
+        line!()
+    ));
+    let epf_real = base.join("epf-real");
+    let epf_link = base.join("epf-link");
+    std::fs::create_dir_all(epf_real.join("АРМ/Forms/Форма/Ext/Form")).unwrap();
+    std::os::unix::fs::symlink(&epf_real, &epf_link).unwrap();
+    let file = epf_real.join("АРМ/Forms/Форма/Ext/Form/Module.bsl");
+
+    let mut db = RootDatabaseImpl::new();
+    let paths = vec![(Some("EPF".to_owned()), epf_link.clone())];
+    db.set_workspace_configs_snapshot(crate::metadata::WorkspaceConfigsSnapshot {
+        canonical_paths: vec![epf_real.clone()],
+        kinds: vec![RootKind::External(bsl_metadata::ExternalObjectKind::DataProcessor)],
+        paths,
+        closures: vec![vec![]],
+        topological_order: vec![0],
+        fingerprint: Some("spelling".to_string()),
+    });
+
+    let bound = db
+        .configuration_input_for_path(&file)
+        .expect("the canonical spelling of the file still binds to the root");
+    assert_eq!(bound.path(&db).as_str(), epf_link.to_string_lossy().as_ref());
+
+    // A marked root behind an alias shallower than its target: the walk finds
+    // the canonical directory, which is the SAME root, not a nested one — the
+    // key must stay the configured spelling or the configuration loads twice.
+    let cf_real = base.join("deep/er/cf-real");
+    let cf_link = base.join("cf");
+    std::fs::create_dir_all(cf_real.join("CommonModules/Foo/Ext")).unwrap();
+    std::os::unix::fs::symlink(&cf_real, &cf_link).unwrap();
+    db.set_workspace_configs_snapshot(crate::metadata::WorkspaceConfigsSnapshot {
+        paths: vec![(None, cf_link.clone())],
+        kinds: vec![RootKind::Base],
+        canonical_paths: vec![cf_real.clone()],
+        closures: vec![vec![]],
+        topological_order: vec![0],
+        fingerprint: Some("alias".to_string()),
+    });
+    let bound = db
+        .configuration_input_for_path(&cf_real.join("CommonModules/Foo/Ext/Module.bsl"))
+        .expect("binds");
+    assert_eq!(
+        bound.path(&db).as_str(),
+        cf_link.to_string_lossy().as_ref(),
+        "the walk's canonical spelling of the same root must not become a second key"
+    );
+
+    std::fs::remove_dir_all(&base).ok();
+}
+
+/// Hover and go-to-definition reach a platform method through
+/// `hir_ty::resolve_method`, a path separate from inference. An external
+/// object's methods live under its bare platform type, and that path must find
+/// them too, or the same call is typed but not navigable.
+#[test]
+fn navigation_resolves_a_platform_method_on_an_external_object() {
+    use bsl_types::builders::Builders;
+    use bsl_types::kind::MetadataKind;
+    use bsl_types::testing::RootConfigCtx;
+
+    let db = RootDatabaseImpl::new();
+    let name = hir::Name::new("ПолучитьФорму");
+    let receiver = |kind: MetadataKind| db.metadata_ref(kind, "АРМ".to_string(), &RootConfigCtx);
+
+    hir_ty::resolve_method(&db, receiver(MetadataKind::DataProcessorObject), &name)
+        .expect("control: an internal object's method resolves");
+
+    let resolved =
+        hir_ty::resolve_method(&db, receiver(MetadataKind::ExternalDataProcessorObject), &name)
+            .expect("the external object's method resolves through its bare platform type");
+    assert!(
+        resolved.handle.lookup(&db).is_some(),
+        "the handle hover reads back must round-trip to the method"
+    );
+    hir_ty::resolve_method(&db, receiver(MetadataKind::ExternalReportObject), &name)
+        .expect("and so does the external report's");
 }

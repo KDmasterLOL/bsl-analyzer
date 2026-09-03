@@ -194,6 +194,8 @@ impl<'db, DB: ConfigsDatabase + TypeKernelDb> Type<'db, DB> {
             }
             MetadataKind::DataProcessorObject => MdoType::DataProcessor,
             MetadataKind::ReportObject => MdoType::Report,
+            MetadataKind::ExternalDataProcessorObject => MdoType::ExternalDataProcessor,
+            MetadataKind::ExternalReportObject => MdoType::ExternalReport,
             MetadataKind::ExchangePlanRef | MetadataKind::ExchangePlanObject => {
                 MdoType::ExchangePlan
             }
@@ -469,14 +471,8 @@ pub fn execution_environment_at<DB: hir_ty::db::HirDatabase>(
     let metadata = db.module_metadata(hir_def::ModuleId::new(file_id));
     let item_tree = db.item_tree(file_id);
     let method_at_cursor = crate::bare_root::method_item_at(&item_tree, offset);
-    if let Some((_, item)) = method_at_cursor {
-        let annotations = match item {
-            hir_def::item_tree::ModItem::Procedure(index) => {
-                &item_tree.procedure(*index).annotations
-            }
-            hir_def::item_tree::ModItem::Function(index) => &item_tree.function(*index).annotations,
-            hir_def::item_tree::ModItem::Variable(_) => unreachable!(),
-        };
+    if let Some(method) = method_at_cursor {
+        let annotations = method.annotations();
         if annotations.iter().any(|annotation| {
             matches!(
                 annotation.kind,
@@ -491,7 +487,7 @@ pub fn execution_environment_at<DB: hir_ty::db::HirDatabase>(
     }
 
     let mut environment = match method_at_cursor {
-        Some((local_id, _)) => execution_env::method_env(&item_tree, local_id, &metadata, &options),
+        Some(method) => execution_env::method_env(&item_tree, method.key(), &metadata, &options),
         None => execution_env::module_code_env(&metadata, &options),
     };
     if !environment.is_empty() {

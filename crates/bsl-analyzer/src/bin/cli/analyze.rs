@@ -353,6 +353,7 @@ fn analyze_salsa(
     }
 
     let start = Instant::now();
+    let slab_verify = std::env::var("BSL_SLAB_VERIFY").is_ok_and(|v| v == "1");
 
     // Absolute walk paths are required for scope matching: a native git scope
     // keys files by absolute path, so a relative `-s .` would match nothing.
@@ -410,7 +411,10 @@ fn analyze_salsa(
     };
     // Deliberately not gated on `--quiet`: this explains why the findings that
     // follow are wrong, and suppressing it leaves the run looking merely broken.
-    if let Some(notice) = project.standalone_extension_notice() {
+    for notice in [project.standalone_extension_notice(), project.standalone_external_notice()]
+        .into_iter()
+        .flatten()
+    {
         eprintln!("warning: {notice}");
     }
     let source_roots = project.source_roots();
@@ -617,6 +621,12 @@ fn analyze_salsa(
                     // pass resolves metadata/cross-module context exactly as the standalone one.
                     let diagnostics = match catch_unwind(AssertUnwindSafe(|| {
                         let standalone = ide::compute_diagnostics(&ctx);
+                        // Under `BSL_SLAB_VERIFY=1` the memoised assembly is run
+                        // as well, so that its self-check covers every module of
+                        // the configuration; the batch answer stays the standalone one.
+                        if slab_verify {
+                            let _ = ide::file_diagnostics(db_snapshot, *file_id, &config);
+                        }
                         ide::apply_extension_merge(
                             db_snapshot,
                             *file_id,
@@ -805,6 +815,9 @@ fn analyze_salsa(
     }
 
     let elapsed = start.elapsed();
+    if slab_verify {
+        eprintln!("slab verify mismatches: {}", ide::slab_verify_mismatches());
+    }
 
     if report_mem {
         bsl_analyzer::mem_report::print_salsa_memory_report(&db, "TROUGH (post-eviction)");

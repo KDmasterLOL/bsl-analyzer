@@ -1,8 +1,9 @@
 use crate::define_metadata;
 use crate::metadata::*;
-use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use crate::AnalysisContext;
+use crate::{Diagnostic, DiagnosticCode};
+use hir::LocalRange;
 use hir::Name;
-use syntax::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
     diagnostic_type: DiagnosticType::Error,
@@ -21,9 +22,9 @@ pub const METADATA: DiagnosticMetadata = define_metadata! {
 pub fn from_hir(
     _module: &str,
     _method: &str,
-    _range: TextRange,
-    _ctx: &DiagnosticsContext,
-) -> Option<Diagnostic> {
+    _range: LocalRange,
+    _ctx: &AnalysisContext,
+) -> Option<Diagnostic<LocalRange>> {
     let _ = (Name::new(""), DiagnosticCode::MissingCommonModuleMethod);
     None
 }

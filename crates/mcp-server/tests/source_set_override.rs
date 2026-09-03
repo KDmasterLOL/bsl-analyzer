@@ -44,6 +44,7 @@ fn a_cli_source_set_changes_the_backend_identity() {
                 path: "ext".to_owned(),
                 depends_on: Vec::new(),
             })]),
+            externals: None,
         }),
         "the override must install on a fresh process"
     );

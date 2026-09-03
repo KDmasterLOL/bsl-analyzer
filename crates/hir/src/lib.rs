@@ -40,10 +40,14 @@ pub use hir_def::{
 pub use hir_def::{ExecutionContext, QualifiedName};
 pub use hir_def::{RedundantAccessKind, SdblExprId};
 
+pub use hir_def::body::SourceMapAt;
 pub use hir_def::body::{
     DeprecatedKind8312, ExistingBindingKind, ExternalRef, MagicNumberContext, ManagerType,
 };
-pub use hir_def::{Body, BodyDiagnostic, BodySourceMap, ModuleBodies};
+pub use hir_def::{
+    Body, BodyDiagnostic, BodySourceMap, LocalOffset, LocalRange, LowerResult, LowerResultAt,
+    MethodOffset, ModuleBodies,
+};
 
 pub use hir_def::hir::{
     BinaryOp, Expr, ExprIdx, HirPreBranch, HirPreBranchKind, IfStmt, Literal, Stmt, StmtIdx,
@@ -91,7 +95,7 @@ pub mod cfg {
     pub use ::cfg::{
         cyclomatic_complexity, BasicBlockVertex, CfgBuilder, CfgEdgeType, CfgVertex,
         ConditionalVertex, ControlFlowGraph, ForEachLoopVertex, ForLoopVertex, LabelVertex,
-        ModuleCfgs, NodeIndex, PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
+        NodeIndex, PreprocConditionVertex, TryExceptVertex, WhileLoopVertex,
     };
 }
 
@@ -100,23 +104,21 @@ pub mod dataflow {
 
     pub mod liveness {
         pub use ::dataflow::liveness::{
-            liveness_analysis_direct, liveness_result_heap, Liveness, LivenessTransfer,
-            ModuleLiveness, VariableIndex,
+            liveness_analysis_direct, Liveness, LivenessTransfer, VariableIndex,
         };
     }
 
     pub mod path_terminates {
         pub use ::dataflow::path_terminates::{
             analyze_path_terminates, analyze_path_terminates_default, MayFallthrough,
-            ModulePathTerminates, PathTerminatesConfig, PathTerminatesResult,
-            PathTerminatesTransfer,
+            PathTerminatesConfig, PathTerminatesResult, PathTerminatesTransfer,
         };
     }
 
     pub mod reaching_defs {
         pub use ::dataflow::reaching_defs::{
-            DefSite, Definition, DefinitionIndex, ModuleReachingDefs, ReachingDefs,
-            ReachingDefsResult, ReachingDefsTransfer,
+            DefSite, Definition, DefinitionIndex, ReachingDefs, ReachingDefsResult,
+            ReachingDefsTransfer,
         };
     }
 
@@ -145,6 +147,11 @@ pub mod dataflow {
 }
 
 pub use hir_def::compute_execution_context;
+pub use hir_def::method_slab::{
+    method_slab_query, module_slab_layout_query, slab_of, LeadingContext, MethodSlab,
+    RemainderBlock, Rules, SlabLayout, SlabSpan,
+};
+pub use hir_def::method_syntax::{detach, method_syntax_query, MethodSyntax};
 pub use hir_def::name_usage_index::{
     normalize_match_name, normalize_name as normalize_usage_name, FileNameOffsets, FileNameUsage,
     SourceRootNameUsage,
@@ -152,22 +159,30 @@ pub use hir_def::name_usage_index::{
 pub use hir_def::region_tree::lower_regions;
 pub use hir_def::resolver::Resolution;
 pub use hir_def::workspace_index::WorkspaceIndex;
-pub use hir_def::MethodIdInput;
+pub use hir_def::{
+    interface_method_named, interface_variable_named, module_declares_method_query,
+    module_method_names_query, module_misses_read_name_set_query, module_variable_names_query,
+    NAME_SET_METHOD_LIMIT,
+};
+pub use hir_def::{MethodDecl, MethodKey, ModuleInterface, VariableDecl};
+pub use hir_def::{MethodIdInput, ModuleNameInput};
 
 pub use hir_def::{
     conditional_tree_query, file_dependencies_query, file_external_refs_query,
-    file_name_offsets_query, file_name_usage_query, item_tree_query, method_body_query,
-    method_body_with_source_map_query, module_bodies_query, module_call_summary_query,
-    module_data_query, module_index_query, module_members_query, region_tree_query,
-    set_module_bodies_lru_sweep_mode, source_root_name_usage_query, symbol_tree_query,
+    file_name_offsets_query, file_name_usage_query, interface_method_query,
+    interface_variable_named_query, item_tree_query, method_body_query, method_lower_query,
+    module_bodies_query, module_call_summary_query, module_code_lower_query, module_data_query,
+    module_index_query, module_interface_query, module_members_query, region_tree_query,
+    set_lowering_lru_sweep_mode, source_root_name_usage_query, symbol_tree_query,
     workspace_index_query,
 };
 
 pub use bsl_config::VisibleConfig;
 pub use bsl_types::facet::{FormBindingFacet, FormBindingTargetFacet, MdoRefFacet};
 pub use hir_def::effective_module::{
-    effective_module_text, item_tree_effective, module_bodies_effective, parse_effective,
-    symbol_tree_effective, EffectiveModule, EffectiveModuleId,
+    effective_module_text, item_tree_effective, module_bodies_effective,
+    module_interface_effective, parse_effective, symbol_tree_effective, EffectiveModule,
+    EffectiveModuleId,
 };
 pub use hir_def::extension_merge::{
     extract_change_and_validate, pair_base_module_path, unquote_bsl_string, Origin, Segment,
@@ -180,7 +195,10 @@ pub use hir_def::{
     ApplicationModuleKind, BodySearch, CommonModuleBodies, CommonModuleBody, ConfigsDatabase,
     MdoModuleRole,
 };
-pub use hir_ty::arg_diagnostics::arg_diagnostics_query;
+pub use hir_ty::arg_diagnostics::{
+    file_arg_diagnostics, method_arg_diagnostics_query, module_code_arg_diagnostics_query,
+    set_arg_diagnostics_lru_capacity,
+};
 pub use hir_ty::call_resolution::{
     BuiltinCallableId, CallCandidateSet, CallParam, CallParamMode, CallResolution, CallSelection,
     CallSignature, CandidateId, CandidateOrigin, CandidateProvenance, PlatformSignatureSlot,
@@ -263,32 +281,15 @@ pub(crate) struct MethodInfo {
 
 pub(crate) fn get_method_info(id: &MethodId, db: &dyn DefDatabase) -> Option<MethodInfo> {
     let tree = db.item_tree_ref(id.module.file_id);
-    let item = tree.top_level_items().get(id.local_id as usize)?;
-    match item {
-        hir_def::item_tree::ModItem::Procedure(proc_idx) => {
-            let proc = tree.procedure(*proc_idx);
-            Some(MethodInfo {
-                name: proc.name.clone(),
-                is_export: proc.is_export,
-                is_function: false,
-                source_range: proc.source_range,
-                name_range: proc.name_range,
-                sig_end: proc.sig_end,
-            })
-        }
-        hir_def::item_tree::ModItem::Function(func_idx) => {
-            let func = tree.function(*func_idx);
-            Some(MethodInfo {
-                name: func.name.clone(),
-                is_export: func.is_export,
-                is_function: true,
-                source_range: func.source_range,
-                name_range: func.name_range,
-                sig_end: func.sig_end,
-            })
-        }
-        _ => None,
-    }
+    let method = tree.method(id.local_id)?;
+    Some(MethodInfo {
+        name: method.name().clone(),
+        is_export: method.is_export(),
+        is_function: method.is_function(),
+        source_range: method.source_range(),
+        name_range: method.name_range(),
+        sig_end: method.sig_end(),
+    })
 }
 
 impl<'db, DB: DefDatabase> Method<'db, DB> {
@@ -504,11 +505,11 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         let range = node.text_range();
 
         if let Some(result) = module_bodies.module_code_result() {
-            if let Some(expr_id) = result.source_map.expr_at_range(range) {
+            if let Some(expr_id) = result.source_map().expr_at_range(range) {
                 let owner = DefWithBodyId::ModuleCode;
                 let routed = infer_owner(self.db, file_id, owner);
                 let base_id = routed.type_id_of_expr(expr_id).unwrap_or_else(|| self.db.unknown());
-                return narrow_or_base(self.db, file_id, owner, &result.body, expr_id, base_id);
+                return narrow_or_base(self.db, file_id, owner, result.body(), expr_id, base_id);
             }
         }
 
@@ -529,7 +530,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         let module_bodies = self.db.module_bodies_ref(module_id);
 
         if let Some(result) = module_bodies.module_code_result() {
-            if let Some(binding_id) = result.source_map.binding_at_range(range) {
+            if let Some(binding_id) = result.source_map().binding_at_range(range) {
                 let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
                 return routed.type_id_of_binding(binding_id);
             }
@@ -613,17 +614,9 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
     fn enclosing_method_id(&self, file_id: FileId, offset: TextSize) -> Option<MethodId> {
         let tree = self.db.item_tree_ref(file_id);
         let module_id = ModuleId::new(file_id);
-        for (idx, item) in tree.top_level_items().iter().enumerate() {
-            let range = match item {
-                hir_def::item_tree::ModItem::Procedure(p) => tree.procedure(*p).source_range,
-                hir_def::item_tree::ModItem::Function(f) => tree.function(*f).source_range,
-                _ => continue,
-            };
-            if range.contains(offset) {
-                return Some(MethodId { module: module_id, local_id: idx as u32 });
-            }
-        }
-        None
+        tree.methods()
+            .find(|method| method.source_range().contains(offset))
+            .map(|method| MethodId { module: module_id, local_id: method.key() })
     }
 
     /// Resolves the call whose argument list contains `offset`.
@@ -653,7 +646,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         if let Some(result) = module_bodies.module_code_result() {
             let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
             if let Some(binding) = routed.call_arg_bindings().iter().find(|binding| {
-                result.source_map.expr_range(binding.call_expr).is_some_and(|range| {
+                result.source_map().expr_range(binding.call_expr).is_some_and(|range| {
                     [Some(callee_range), call_range]
                         .into_iter()
                         .flatten()
@@ -696,7 +689,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
         if let Some(result) = module_bodies.module_code_result() {
             let routed = infer_owner(self.db, file_id, DefWithBodyId::ModuleCode);
             for binding in routed.call_arg_bindings() {
-                if let Some(range) = result.source_map.expr_range(binding.call_expr) {
+                if let Some(range) = result.source_map().expr_range(binding.call_expr) {
                     bindings.push((range, binding.candidate.clone()));
                 }
             }
@@ -733,7 +726,7 @@ impl<'db, DB: HirDatabase + base_db::RootQueryDb> Semantics<'db, DB> {
 
         let mut found: Option<(DefWithBodyId, ExprId)> = None;
         if let Some(result) = module_bodies.module_code_result() {
-            if let Some(expr_id) = result.source_map.expr_at_range(callee_range) {
+            if let Some(expr_id) = result.source_map().expr_at_range(callee_range) {
                 found = Some((DefWithBodyId::ModuleCode, expr_id));
             }
         }
