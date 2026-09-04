@@ -1971,10 +1971,10 @@ impl<'db> InferenceContext<'db> {
 
             Stmt::ForEach { var, collection, body } => {
                 let coll_ty = self.infer_expr(ExprId::from_idx(*collection));
+                let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                 if let Some(elem_ty) =
                     crate::iteration_lookup::resolve_iter_element_ty(self.db, coll_ty)
                 {
-                    let var_name = NormName::intern(self.body.binding_idx(*var).name.as_str());
                     self.var_types.insert(var_name, elem_ty);
                     self.binding_types.insert(BindingId::from_idx(*var), elem_ty);
                 }
@@ -2409,7 +2409,11 @@ impl<'db> InferenceContext<'db> {
                 || resolver.resolve_module_variable(self.db, name).is_some();
         let body_binding_shadows = self.body_declares_binding(name);
 
-        if user_shadows || body_binding_shadows {
+        if user_shadows {
+            return found(self.db.unknown(), BareNameOrigin::UserBinding, all_env);
+        }
+
+        if body_binding_shadows {
             return found(self.db.unknown(), BareNameOrigin::UserBinding, all_env);
         }
 

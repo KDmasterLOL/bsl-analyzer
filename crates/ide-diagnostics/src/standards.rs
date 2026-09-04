@@ -209,6 +209,7 @@ pub fn standards(code: DiagnosticCode) -> &'static [u16] {
         DiagnosticCode::WeavingAnnotationNotApplicable => &[],
         DiagnosticCode::WeavingSignatureMismatch => &[],
         DiagnosticCode::UnresolvedName => &[],
+        DiagnosticCode::LocalVariableUsedBeforeDefinition => &[],
         DiagnosticCode::UnresolvedMethodCall => &[],
         DiagnosticCode::MismatchedArgCount => &[],
         DiagnosticCode::TypeMismatch => &[],

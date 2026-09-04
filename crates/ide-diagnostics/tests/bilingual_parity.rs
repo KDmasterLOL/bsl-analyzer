@@ -143,6 +143,10 @@ const EXCLUSIONS_DOCUMENTED: &[(DiagnosticCode, &str)] = &[
     (DiagnosticCode::ReservedWordAsMethodName, "reserved keyword diagnostic"),
     (DiagnosticCode::RewriteMethodParameter, "parameter reassignment diagnostic"),
     (DiagnosticCode::UnusedLocalVariable, "dataflow liveness diagnostic"),
+    (
+        DiagnosticCode::LocalVariableUsedBeforeDefinition,
+        "local-scope diagnostic over a user-defined identifier; no platform bilingual lookup",
+    ),
     (DiagnosticCode::UnusedLocalMethod, "symbol liveness diagnostic"),
     (DiagnosticCode::ExportVariables, "exported variable policy diagnostic"),
     (DiagnosticCode::MissingVariablesDescription, "documentation diagnostic"),
@@ -617,7 +621,7 @@ EndProcedure"#,
 #[test]
 fn bilingual_inventory_has_expected_size() {
     let all = all_codes();
-    assert_eq!(all.len(), 194, "update the Track 3 Phase E inventory when DiagnosticCode changes");
+    assert_eq!(all.len(), 195, "update the Track 3 Phase E inventory when DiagnosticCode changes");
 }
 
 #[test]

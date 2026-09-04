@@ -82,6 +82,7 @@ pub mod join_with_sub_query;
 pub mod join_with_virtual_table;
 pub mod latin_and_cyrillic_symbol_in_word;
 pub mod line_length;
+pub mod local_variable_used_before_definition;
 pub mod logical_or_in_join_query_section;
 pub mod logical_or_in_the_where_section_of_query;
 pub mod magic_date;
@@ -481,6 +482,9 @@ pub fn get_metadata(code: DiagnosticCode) -> Option<&'static DiagnosticMetadata>
         }
 
         DiagnosticCode::UnresolvedName => Some(&unresolved_name::METADATA),
+        DiagnosticCode::LocalVariableUsedBeforeDefinition => {
+            Some(&local_variable_used_before_definition::METADATA)
+        }
         DiagnosticCode::UnresolvedMethodCall => Some(&unresolved_method_call::METADATA),
         DiagnosticCode::MismatchedArgCount => Some(&mismatched_arg_count::METADATA),
         DiagnosticCode::TypeMismatch => Some(&type_mismatch::METADATA),

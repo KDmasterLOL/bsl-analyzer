@@ -24,6 +24,7 @@ const SYNTAX_DIAGNOSTICS: &[DiagnosticCode] = &[
     DiagnosticCode::DuplicateStringLiteral,
     DiagnosticCode::EmptyRegion,
     DiagnosticCode::NonStandardRegion,
+    DiagnosticCode::LocalVariableUsedBeforeDefinition,
 ];
 
 const ITEM_TREE_DIAGNOSTICS: &[DiagnosticCode] = &[
@@ -163,6 +164,11 @@ pub fn collect_syntax_diagnostics(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
         "NonStandardRegion",
         ctx,
         handlers::non_standard_region::check,
+    ));
+    diagnostics.extend(run_diagnostic(
+        "LocalVariableUsedBeforeDefinition",
+        ctx,
+        handlers::local_variable_used_before_definition::check,
     ));
 
     diagnostics

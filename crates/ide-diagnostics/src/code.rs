@@ -167,6 +167,7 @@ pub enum DiagnosticCode {
     WeavingSignatureMismatch,
 
     UnresolvedName,
+    LocalVariableUsedBeforeDefinition,
     UnresolvedMethodCall,
     MismatchedArgCount,
     TypeMismatch,
