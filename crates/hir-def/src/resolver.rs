@@ -175,7 +175,7 @@ impl Resolver {
     /// The paired base module to retry same-module sibling lookups against, when this
     /// resolver was built for a configuration-extension module
     /// ([`Self::with_builtins_and_workspace_weaving`]). `None` for every other module.
-    fn module_base_fallback(&self) -> Option<ModuleId> {
+    pub fn module_base_fallback(&self) -> Option<ModuleId> {
         for scope in &self.scopes {
             if let Scope::ModuleScope { base_fallback, .. } = scope {
                 return *base_fallback;

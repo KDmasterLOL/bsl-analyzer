@@ -134,6 +134,7 @@ pub struct Form {
     pub form_type: FormType,
     pub uuid: Uuid,
     pub elements: Vec<FormElement>,
+    pub base_elements: Vec<FormElement>,
     pub event_handlers: Vec<FormEventHandler>,
     pub command_handlers: Vec<String>,
     pub attributes: Vec<FormAttribute>,
@@ -146,6 +147,7 @@ impl Form {
             form_type,
             uuid,
             elements: Vec::new(),
+            base_elements: Vec::new(),
             event_handlers: Vec::new(),
             command_handlers: Vec::new(),
             attributes: Vec::new(),
@@ -163,6 +165,7 @@ impl Form {
             form_type,
             uuid,
             elements,
+            base_elements: Vec::new(),
             event_handlers: Vec::new(),
             command_handlers: Vec::new(),
             attributes: Vec::new(),
@@ -182,6 +185,7 @@ impl Form {
             form_type,
             uuid,
             elements,
+            base_elements: Vec::new(),
             event_handlers,
             command_handlers,
             attributes: Vec::new(),
@@ -190,6 +194,15 @@ impl Form {
 
     pub fn elements(&self) -> &[FormElement] {
         &self.elements
+    }
+
+    pub fn base_elements(&self) -> &[FormElement] {
+        &self.base_elements
+    }
+
+    pub fn find_base_element(&self, name: &str) -> Option<&FormElement> {
+        let name_lower = name.fold_lower();
+        self.base_elements.iter().find(|e| e.name.fold_lower() == name_lower)
     }
 
     pub fn elements_with_wrong_data_path(&self) -> impl Iterator<Item = &FormElement> {
@@ -262,6 +275,8 @@ impl Form {
         self.name.capacity()
             + stdx::heap::vec_bytes::<FormElement>(self.elements.len())
             + self.elements.iter().map(FormElement::estimated_heap_size).sum::<usize>()
+            + stdx::heap::vec_bytes::<FormElement>(self.base_elements.len())
+            + self.base_elements.iter().map(FormElement::estimated_heap_size).sum::<usize>()
             + stdx::heap::vec_bytes::<FormEventHandler>(self.event_handlers.len())
             + self.event_handlers.iter().map(FormEventHandler::estimated_heap_size).sum::<usize>()
             + stdx::heap::vec_bytes::<String>(self.command_handlers.len())
