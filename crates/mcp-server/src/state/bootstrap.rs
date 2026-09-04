@@ -161,6 +161,12 @@ impl ReferenceSearchState {
         self.lifecycle.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
+    pub(super) fn loading(&self) -> bool {
+        self.lifecycle
+            .try_lock()
+            .map_or(true, |lifecycle| matches!(*lifecycle, ReferenceSearchLifecycle::Loading))
+    }
+
     pub(super) fn shutdown(&self) {
         self.stopped.store(true, Ordering::Release);
         self.baseline.shutdown();
@@ -303,6 +309,7 @@ impl SharedState {
         );
 
         let search_engine: SharedSearchEngine = Arc::new(Mutex::new(None));
+        let workspace_search_initializing = Arc::new(AtomicBool::new(true));
         let index_progress = IndexProgress::new();
         let semantic_runtime = Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled));
         let overlay_warmup = Arc::new(Mutex::new(OverlayWarmupState::Pending));
@@ -424,6 +431,7 @@ impl SharedState {
         // closure is dropped unrun.
         Self::spawn_workspace_search_init(
             Arc::clone(&search_engine),
+            Arc::clone(&workspace_search_initializing),
             Arc::clone(&index_progress),
             Arc::clone(&semantic_runtime),
             source_dir.clone(),
@@ -448,6 +456,7 @@ impl SharedState {
             onec_connections: Default::default(),
             debug_session: Arc::new(Mutex::new(None)),
             search_engine,
+            workspace_search_initializing,
             index_progress,
             semantic_runtime,
             overlay_warmup,
@@ -470,6 +479,7 @@ impl SharedState {
     #[allow(clippy::too_many_arguments)]
     fn spawn_workspace_search_init(
         search_engine: SharedSearchEngine,
+        initializing: Arc<AtomicBool>,
         index_progress: Arc<IndexProgress>,
         semantic_runtime: Arc<Mutex<SemanticRuntimeStatus>>,
         workspace_root: PathBuf,
@@ -485,9 +495,17 @@ impl SharedState {
         root_drift_epoch: Arc<AtomicU64>,
         embedding_publish_retry_budget: std::time::Duration,
     ) {
-        std::thread::Builder::new()
+        let initializing_for_thread = Arc::clone(&initializing);
+        let spawned = std::thread::Builder::new()
             .name("bsl-search-init".to_owned())
             .spawn(move || {
+                struct InitializingGuard(Arc<AtomicBool>);
+                impl Drop for InitializingGuard {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Relaxed);
+                    }
+                }
+                let _initializing = InitializingGuard(initializing_for_thread);
                 tracing::info!("search engine initialization started in background");
 
                 // The graph is a boot subsystem like the resident, not a lazy one. In
@@ -741,8 +759,10 @@ impl SharedState {
                         retry.kick_fresh();
                     }
                 }
-            })
-            .ok();
+            });
+        if spawned.is_err() {
+            initializing.store(false, Ordering::Relaxed);
+        }
     }
 
     pub fn reference(project_root: Option<PathBuf>) -> Self {
@@ -756,6 +776,7 @@ impl SharedState {
             onec_connections: Default::default(),
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::clone(&reference_search.engine),
+            workspace_search_initializing: Arc::new(AtomicBool::new(false)),
             index_progress: Arc::clone(&reference_search.progress),
             semantic_runtime: Arc::clone(&reference_search.semantic_runtime),
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
@@ -780,6 +801,7 @@ impl SharedState {
             onec_connections: Default::default(),
             debug_session: Arc::new(Mutex::new(None)),
             search_engine: Arc::new(Mutex::new(None)),
+            workspace_search_initializing: Arc::new(AtomicBool::new(false)),
             index_progress: IndexProgress::new(),
             semantic_runtime: Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             overlay_warmup: Arc::new(Mutex::new(OverlayWarmupState::Pending)),
@@ -2213,6 +2235,7 @@ mod tests {
 
         SharedState::spawn_workspace_search_init(
             Arc::new(Mutex::new(None)),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             workspace.clone(),
@@ -2275,6 +2298,7 @@ mod tests {
     ) {
         SharedState::spawn_workspace_search_init(
             engine,
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
             IndexProgress::new(),
             Arc::new(Mutex::new(SemanticRuntimeStatus::Disabled)),
             workspace,

@@ -4455,6 +4455,7 @@ mod tests {
     /// the two happen to coincide; a symlinked root is the same defect, reproducible here.
     #[cfg(unix)]
     #[test]
+    #[cfg(unix)]
     fn the_excluded_root_is_recognised_under_either_spelling() {
         let real = tempdir().unwrap();
         let links = tempdir().unwrap();
