@@ -105,6 +105,8 @@ and this project adheres to [Date-based Versioning](docs/contributing/VERSIONING
 
 ### Fixed
 
+- `UnresolvedField` теперь проверяет заимствованные элементы управляемых форм против актуальной базовой конфигурации: ссылка `Элементы.<имя>` на control из `<BaseForm>`, удалённый в target base, диагностируется до загрузки расширения; собственные controls расширения и controls, сохранившиеся в target base, не затрагиваются.
+
 - `$/cancelRequest` доходит до многофайловых обработчиков LSP: токен отмены
   Salsa больше не стирается на границе tracked-функции, и обход тысячи модулей
   в поиске ссылок прерывается на границе файла (github#41).
