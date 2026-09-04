@@ -2141,12 +2141,17 @@ impl<'db> InferenceContext<'db> {
                     // A name the author has not finished writing (`Справочники.`) is not a
                     // miss: lowering keeps the incomplete field as the missing placeholder,
                     // and accusing the configuration on every keystroke would be noise.
+                    let stale_adopted_form_item =
+                        crate::form_items::is_stale_adopted_form_item_reference(
+                            self.db, &resolver, base_ty, field,
+                        );
                     let closed_receiver = matches!(
                         base_kind,
                         TypeKind::MetadataRef(_)
                             | TypeKind::ThisObject { .. }
                             | TypeKind::ManagerCollection(_)
-                    ) || matches!(base_kind, TypeKind::Structure(facet) if facet.closed);
+                    ) || matches!(base_kind, TypeKind::Structure(facet) if facet.closed)
+                        || stale_adopted_form_item;
                     if !field.is_missing() && closed_receiver {
                         self.push_inference_diagnostic(InferenceDiagnostic::UnresolvedField {
                             expr: expr_id,

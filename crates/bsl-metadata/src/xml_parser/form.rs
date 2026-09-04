@@ -55,6 +55,17 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
         collect_child_items(child_items, &mut elements, None);
     }
 
+    let mut base_elements = Vec::new();
+    if let Some(base_form) =
+        form_node.children().find(|n| n.is_element() && n.tag_name().name() == "BaseForm")
+    {
+        if let Some(child_items) =
+            base_form.children().find(|n| n.is_element() && n.tag_name().name() == "ChildItems")
+        {
+            collect_child_items(child_items, &mut base_elements, None);
+        }
+    }
+
     let event_handlers = collect_all_events(form_node);
 
     let command_handlers: Vec<String> = form_node
@@ -90,12 +101,14 @@ pub fn parse_form_xml(xml: &str) -> Result<Form> {
     let mut form =
         Form::with_handlers(name, form_type, uuid, elements, event_handlers, command_handlers);
     form.attributes = attributes;
+    form.base_elements = base_elements;
 
     tracing::debug!(
         form_name = %form.name(),
         form_type = ?form.form_type(),
         uuid = %form.uuid(),
         elements_count = form.elements().len(),
+        base_elements_count = form.base_elements().len(),
         event_handlers_count = form.event_handlers().len(),
         command_handlers_count = form.command_handlers().len(),
         attributes_count = form.attributes().len(),
@@ -437,6 +450,26 @@ mod tests {
         assert_eq!(wrong.len(), 1);
         assert_eq!(wrong[0].name, "НесуществующийРеквизит");
         assert_eq!(wrong[0].data_path.as_deref(), Some("~Объект.НесуществующийРеквизит"));
+    }
+
+    #[test]
+    fn test_parse_extension_base_form_elements() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+    <ChildItems>
+        <UsualGroup name="ALX_СвойЭлемент" id="1001"/>
+    </ChildItems>
+    <BaseForm version="2.21">
+        <ChildItems>
+            <UsualGroup name="ОсновныеРеквизиты" id="651"/>
+        </ChildItems>
+    </BaseForm>
+</Form>"#;
+
+        let form = parse_form_xml(xml).unwrap();
+        assert!(form.find_element("ALX_СвойЭлемент").is_some());
+        assert!(form.find_base_element("ОсновныеРеквизиты").is_some());
+        assert!(form.find_base_element("ALX_СвойЭлемент").is_none());
     }
 
     #[test]

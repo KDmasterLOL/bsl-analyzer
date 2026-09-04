@@ -44,16 +44,65 @@ pub(crate) fn lookup_form_item_field(
     let module_id = resolver.module_id()?;
     let metadata = db.module_metadata(module_id);
     let form = metadata.form.as_ref()?;
-    let element = form.find_element(field.as_str())?;
+
+    let target_form = resolver
+        .module_base_fallback()
+        .and_then(|base_module| db.module_metadata(base_module).form.clone());
+
+    let (element, element_form) = if form.find_base_element(field.as_str()).is_some() {
+        let target_form = target_form.as_ref()?;
+        target_form.find_element(field.as_str())?;
+        (form.find_element(field.as_str())?, form.as_ref())
+    } else if let Some(element) = form.find_element(field.as_str()) {
+        (element, form.as_ref())
+    } else {
+        let target_form = target_form.as_ref()?;
+        (target_form.find_element(field.as_str())?, target_form.as_ref())
+    };
+
     let obj_resolver = crate::object_resolver::DbObjectResolver::new(db, module_id.file_id);
     Some(FieldInfo {
         name: Name::new(&element.name),
         name_en: None,
-        ty: lower_form_element(db, form, element, &obj_resolver),
+        ty: lower_form_element(db, element_form, element, &obj_resolver),
         value_ty: None,
         is_readonly: true,
         origin: FieldOrigin::PlatformProperty { env: hir_def::execution_env::EnvFlags::ALL },
     })
+}
+
+pub(crate) fn is_stale_adopted_form_item_reference(
+    db: &dyn HirDatabase,
+    resolver: &Resolver,
+    receiver: TypeId,
+    field: &Name,
+) -> bool {
+    if !is_form_items_collection_ty(db, receiver)
+        || !crate::this_object::is_managed_form_module(db, resolver)
+    {
+        return false;
+    }
+
+    let Some(module_id) = resolver.module_id() else {
+        return false;
+    };
+    let metadata = db.module_metadata(module_id);
+    let Some(form) = metadata.form.as_ref() else {
+        return false;
+    };
+    if form.find_base_element(field.as_str()).is_none() {
+        return false;
+    }
+
+    let Some(base_module) = resolver.module_base_fallback() else {
+        return false;
+    };
+    let base_metadata = db.module_metadata(base_module);
+    let Some(target_form) = base_metadata.form.as_ref() else {
+        return false;
+    };
+
+    target_form.find_element(field.as_str()).is_none()
 }
 
 pub(crate) fn lower_form_element(

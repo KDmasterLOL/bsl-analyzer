@@ -75,6 +75,64 @@ fn write_configuration(root: &Path, rel: &str, name: &str, module: &str, body: &
     std::fs::write(module_dir.join("Module.bsl"), body).unwrap();
 }
 
+const CATALOG_FORM_MODULE: &str =
+    "a/b/ext/Catalogs/Номенклатура/Forms/ФормаЭлемента/Ext/Form/Module.bsl";
+
+fn write_catalog_form_configuration(
+    root: &Path,
+    rel: &str,
+    name: &str,
+    extension: bool,
+    form_xml: &str,
+    body: &str,
+) {
+    let dir = root.join(rel);
+    let form = dir.join("Catalogs/Номенклатура/Forms/ФормаЭлемента");
+    std::fs::create_dir_all(form.join("Ext/Form")).unwrap();
+
+    let purpose = if extension {
+        "<ConfigurationExtensionPurpose>Customization</ConfigurationExtensionPurpose>"
+    } else {
+        ""
+    };
+    std::fs::write(
+        dir.join("Configuration.xml"),
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<Configuration uuid="11111111-0000-0000-0000-000000000001">
+		<Properties><Name>{name}</Name><Synonym/><Comment/><NamePrefix/>{purpose}<DefaultRunMode>ManagedApplication</DefaultRunMode></Properties>
+		<ChildObjects><Catalog>Номенклатура</Catalog></ChildObjects>
+	</Configuration>
+</MetaDataObject>"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("Catalogs/Номенклатура.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+	<Catalog uuid="22222222-0000-0000-0000-000000000002">
+		<Properties><Name>Номенклатура</Name><Synonym/><Comment/></Properties>
+		<ChildObjects><Form>ФормаЭлемента</Form></ChildObjects>
+	</Catalog>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        form.join("ФормаЭлемента.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses">
+	<Form uuid="33333333-0000-0000-0000-000000000003">
+		<Properties><Name>ФормаЭлемента</Name><FormType>Managed</FormType></Properties>
+	</Form>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+    std::fs::write(form.join("Ext/Form.xml"), form_xml).unwrap();
+    std::fs::write(form.join("Ext/Form/Module.bsl"), body).unwrap();
+}
+
 /// Main configuration plus an extension whose module calls the main
 /// configuration's exported common-module method.
 fn workspace_calling_main_configuration(root: &Path) {
@@ -1147,5 +1205,65 @@ fn an_external_object_module_knows_its_own_attributes_and_not_a_namesakes() {
             .iter()
             .any(|m| m.contains("ЗаведомоНетТакогоМетода") && m.contains("ВнешняяОбработка.АРМ")),
         "the external object flags the bogus call and names itself: {external_calls:?}"
+    );
+}
+
+#[test]
+fn extension_form_reports_adopted_item_removed_from_target_base() {
+    let dir = workspace();
+    let base_form = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+	<ChildItems>
+		<UsualGroup name="ГруппаСоставГруппыЛево" id="701"/>
+		<UsualGroup name="СохранившийсяЯкорь" id="702"/>
+	</ChildItems>
+</Form>"#;
+    let extension_form = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" version="2.21">
+	<ChildItems>
+		<UsualGroup name="ОсновныеРеквизиты" id="651"/>
+		<UsualGroup name="СохранившийсяЯкорь" id="702"/>
+		<UsualGroup name="ALX_СвойЭлемент" id="1001"/>
+	</ChildItems>
+	<BaseForm version="2.21">
+		<ChildItems>
+			<UsualGroup name="ОсновныеРеквизиты" id="651"/>
+			<UsualGroup name="СохранившийсяЯкорь" id="702"/>
+		</ChildItems>
+	</BaseForm>
+</Form>"#;
+    let body = r#"Процедура Проверить()
+	БазовыйМетод();
+	СтарыйЯкорь = Элементы.ОсновныеРеквизиты;
+	НовыйЯкорь = Элементы.ГруппаСоставГруппыЛево;
+	СохранившийсяЯкорь = Элементы.СохранившийсяЯкорь;
+	СвойЭлемент = Элементы.ALX_СвойЭлемент;
+КонецПроцедуры
+"#;
+
+    write_catalog_form_configuration(
+        dir.path(),
+        MAIN,
+        "ОсновнаяКонфигурация",
+        false,
+        base_form,
+        "Процедура БазовыйМетод()\nКонецПроцедуры\n",
+    );
+    write_catalog_form_configuration(dir.path(), EXT, "Расширение", true, extension_form, body);
+
+    let run =
+        analyze(dir.path(), &["--configuration-root", MAIN, "--extension", &format!("EXT={EXT}")]);
+
+    assert!(
+        run.messages_at(CATALOG_FORM_MODULE, "UnresolvedMethodCall")
+            .iter()
+            .all(|message| !message.contains("БазовыйМетод")),
+        "the form module must be paired to its target-base counterpart",
+    );
+
+    assert_eq!(
+        unresolved_fields(&run, CATALOG_FORM_MODULE),
+        vec!["ОсновныеРеквизиты".to_string()],
+        "only an adopted control removed from the target base is invalid",
     );
 }
