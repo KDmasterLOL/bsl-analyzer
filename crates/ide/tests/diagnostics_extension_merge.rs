@@ -112,6 +112,72 @@ fn extension_file_pairs_and_merge_resolves_base_sibling() {
 }
 
 #[test]
+fn effective_change_and_validate_sees_extension_added_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let main_root = temp.path().join("src/cf");
+    let ext_root = temp.path().join("src/cfe/X");
+    std::fs::create_dir_all(ext_root.join("Constants")).unwrap();
+
+    std::fs::write(
+        ext_root.join("Constants/Расш_Константа.xml"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:v8="http://v8.1c.ru/8.1/data/core">
+  <Constant uuid="ed000001-0000-0000-0000-000000000002">
+    <Properties>
+      <Name>Расш_Константа</Name>
+      <Type><v8:Type>xs:string</v8:Type></Type>
+    </Properties>
+  </Constant>
+</MetaDataObject>"#,
+    )
+    .unwrap();
+
+    let base = "Функция Цель() Экспорт\n\tВозврат 0;\nКонецФункции";
+    let ext = "&ИзменениеИКонтроль(\"Цель\")\nФункция Расш1_Цель()\n#Вставка\n\tЗначение = Константы.Расш_Константа.Получить();\n#КонецВставки\n\tВозврат 0;\nКонецФункции";
+
+    let mut db = RootDatabaseImpl::new();
+    db.set_all_config_paths(vec![
+        (None, main_root.clone()),
+        (Some("X".to_string()), ext_root.clone()),
+    ]);
+
+    let main_file = FileId(0);
+    let ext_file = FileId(1);
+    let mut file_set = FileSet::default();
+    file_set.insert(
+        main_file,
+        VfsPath::new(main_root.join("CommonModules/М/Ext/Module.bsl").to_string_lossy().as_ref()),
+    );
+    file_set.insert(
+        ext_file,
+        VfsPath::new(ext_root.join("CommonModules/М/Ext/Module.bsl").to_string_lossy().as_ref()),
+    );
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    db.set_file_source_root(main_file, SourceRootId(0));
+    db.set_file_source_root(ext_file, SourceRootId(0));
+    db.set_file_text(main_file, base);
+    db.set_file_text(ext_file, ext);
+
+    let eid = ide_db::effective_target(&db, ext_file).expect("extension pairs to base");
+    let inference = hir::infer_effective(&db, eid);
+    let unresolved = inference
+        .diagnostics
+        .iter()
+        .filter_map(|(_, diagnostic)| match diagnostic {
+            hir::InferenceDiagnostic::UnresolvedField { field_name, .. } => {
+                Some(field_name.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        !unresolved.contains(&"Расш_Константа"),
+        "inserted extension code must resolve metadata in the extension-visible context; got {unresolved:?}",
+    );
+}
+
+#[test]
 fn extension_diagnostics_are_a_stable_superset_without_spurious_inference() {
     let fx = setup();
     let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());

@@ -874,6 +874,42 @@ mod tests {
     }
 
     #[test]
+    fn merge_extension_overlay_preserves_base_tabular_section_columns() {
+        use crate::tabular_section::{TabularSection, TabularSectionAttribute};
+        use uuid::Uuid;
+
+        let mut base = Configuration::new("Base");
+        let mut base_document = MetadataObject::new(MdoType::Document, "ЧекККМ");
+        let mut base_section = TabularSection::new(Uuid::new_v4(), "Запасы");
+        base_section.set_attributes(vec![TabularSectionAttribute::new(
+            Uuid::new_v4(),
+            "КлючСвязи",
+            AttributeType::String { length: Some(36) },
+        )]);
+        base_document.add_tabular_section(base_section);
+        base.add_metadata_object(base_document);
+
+        let mut extension = Configuration::new("Extension");
+        let mut extension_document = MetadataObject::new(MdoType::Document, "ЧекККМ");
+        let mut extension_section = TabularSection::new(Uuid::new_v4(), "Запасы");
+        extension_section.set_attributes(vec![TabularSectionAttribute::new(
+            Uuid::new_v4(),
+            "Расш_Признак",
+            AttributeType::Boolean,
+        )]);
+        extension_document.add_tabular_section(extension_section);
+        extension.add_metadata_object(extension_document);
+
+        let merged = base.merged_with_extension(&extension);
+        let document =
+            merged.find_metadata_object(MdoType::Document, "ЧекККМ").expect("merged document");
+        let section = document.find_tabular_section("Запасы").expect("merged tabular section");
+        let columns = section.attributes().iter().map(|attr| attr.name()).collect::<Vec<_>>();
+
+        assert_eq!(columns, ["КлючСвязи", "Расш_Признак"]);
+    }
+
+    #[test]
     fn merge_extension_overlay_merges_borrowed_register_fields() {
         use crate::dimension::Dimension;
         use crate::register::{Register, RegisterAttribute, RegisterResource};

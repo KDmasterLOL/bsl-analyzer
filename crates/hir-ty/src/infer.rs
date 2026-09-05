@@ -817,11 +817,13 @@ impl<'db> InferenceContext<'db> {
 
     /// Inference over an effective `&ИзменениеИКонтроль` module: local bodies/symbols come
     /// from the spliced effective text (`local_symbols`), while configuration / metadata /
-    /// cross-module resolution keeps `context_file_id = base_file`. Identical to [`Self::new`]
+    /// cross-module resolution uses the extension file context. That context already sees the
+    /// base configuration plus declared dependencies and the extension itself, which is required
+    /// for inserted code to resolve extension-owned metadata. Identical to [`Self::new`]
     /// apart from same-module method/variable lookups, which route to `local_symbols`.
     pub fn new_effective(
         db: &'db dyn HirDatabase,
-        base_file_id: FileId,
+        context_file_id: FileId,
         local_symbols: Arc<ModuleInterface>,
         owner: DefWithBodyId,
         body: &Arc<Body>,
@@ -830,7 +832,7 @@ impl<'db> InferenceContext<'db> {
         // computed against the base file's item tree may belong to a woven
         // method rather than the one being inferred — disable availability
         // checks rather than misattribute them.
-        let mut ctx = Self::new_impl(db, base_file_id, owner, body, false);
+        let mut ctx = Self::new_impl(db, context_file_id, owner, body, false);
         ctx.local_symbols = Some(local_symbols);
         ctx
     }
@@ -3869,7 +3871,8 @@ pub fn infer_query<'db>(
 /// pair. Mirrors [`infer_query`] but runs every body inline through
 /// [`InferenceContext::new_effective`] — same-module method/variable lookups resolve
 /// against the effective symbol tree (so `#Вставка` code sees base siblings), while
-/// metadata / cross-module context stays the base file. It deliberately does NOT
+/// metadata / cross-module context is keyed by the extension file so inserted code sees
+/// the base, declared dependencies and its own extension overlay. It deliberately does NOT
 /// reuse `infer_method` / `infer_module_code`: those key on `ModuleId{base_file}` and
 /// would collide with the base module's own cached inference.
 #[salsa::tracked(lru = 256, heap_size = heap_estimate::inference_result_heap, returns(clone))]
@@ -3878,8 +3881,8 @@ pub fn infer_effective<'db>(
     eid: EffectiveModuleId<'db>,
 ) -> Arc<InferenceResult> {
     let base_file = eid.base_file(db);
-    let _p =
-        tracing::info_span!("infer_effective", ?base_file, ext_file = ?eid.ext_file(db)).entered();
+    let ext_file = eid.ext_file(db);
+    let _p = tracing::info_span!("infer_effective", ?base_file, ?ext_file).entered();
 
     let module_bodies = hir_def::effective_module::module_bodies_effective(db, eid);
     let interface = hir_def::effective_module::module_interface_effective(db, eid);
@@ -3892,7 +3895,7 @@ pub fn infer_effective<'db>(
     // therefore output-identical, while avoiding a re-inference of the whole — often large —
     // base module twice per extension file (the dominant cost on heavily-extended configs).
     let changed_ids: rustc_hash::FxHashSet<hir_def::MethodKey> = {
-        let ext_parse = db.parse(eid.ext_file(db));
+        let ext_parse = db.parse(ext_file);
         let changed_targets: rustc_hash::FxHashSet<String> = ext_parse
             .syntax_node()
             .children()
@@ -3924,7 +3927,7 @@ pub fn infer_effective<'db>(
         }
         let mut ctx = InferenceContext::new_effective(
             db,
-            base_file,
+            ext_file,
             interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),
@@ -3954,7 +3957,7 @@ pub fn infer_effective<'db>(
     if let Some(body) = module_bodies.module_code() {
         let mut ctx = InferenceContext::new_effective(
             db,
-            base_file,
+            ext_file,
             interface.clone(),
             DefWithBodyId::ModuleCode,
             &Arc::new(body.clone()),
@@ -3970,7 +3973,7 @@ pub fn infer_effective<'db>(
         }
         let mut ctx = InferenceContext::new_effective(
             db,
-            base_file,
+            ext_file,
             interface.clone(),
             DefWithBodyId::Method(local_id),
             &Arc::new(body.clone()),

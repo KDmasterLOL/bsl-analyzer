@@ -888,9 +888,15 @@ impl MetadataObject {
         }
 
         for tabular_section in &overlay.tabular_sections {
-            self.tabular_sections
-                .retain(|existing| !existing.name().eq_ignore_ascii_case(tabular_section.name()));
-            self.tabular_sections.push(tabular_section.clone());
+            if let Some(base_section) = self
+                .tabular_sections
+                .iter_mut()
+                .find(|existing| existing.name().eq_ignore_ascii_case(tabular_section.name()))
+            {
+                base_section.apply_extension_overlay(tabular_section);
+            } else {
+                self.tabular_sections.push(tabular_section.clone());
+            }
         }
 
         for child in &overlay.children {
