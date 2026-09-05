@@ -7,7 +7,7 @@
 use hir::ConfigsDatabase;
 use ide_db::base_db::{SourceDatabase, SourceRoot, SourceRootId};
 use ide_db::metadata::WorkspaceConfigsSnapshot;
-use ide_db::RootDatabaseImpl;
+use ide_db::{RootDatabase, RootDatabaseImpl};
 use std::path::PathBuf;
 use vfs::{FileId, FileSet, VfsPath};
 
@@ -91,6 +91,155 @@ fn visible_configurations_follow_the_dependency_matrix() {
         config_names(&db, files.independent),
         [None, Some("independent".to_string())],
         "an independent extension sees only base + itself",
+    );
+}
+
+fn unresolved_query_fields(db: &RootDatabaseImpl, file_id: FileId) -> Vec<String> {
+    let mut fields = db
+        .sdbl_hir_in_file(file_id)
+        .iter()
+        .flat_map(|(_, package)| {
+            package
+                .source_map
+                .tokens_by_category(sdbl_hir::TokenCategory::UnresolvedFieldName)
+                .iter()
+                .map(|token| token.text.to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    fields.sort();
+    fields
+}
+
+#[test]
+fn sdbl_query_fields_follow_the_dependency_overlay_matrix() {
+    let (mut db, files) = setup();
+    db.set_file_text(
+        files.tests,
+        r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Т.Вес, Т.Габарит ИЗ Справочник.Товары КАК Т";
+КонецПроцедуры"#,
+    );
+    db.set_file_text(
+        files.independent,
+        r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Т.Вес ИЗ Справочник.Товары КАК Т";
+КонецПроцедуры"#,
+    );
+
+    assert_eq!(
+        unresolved_query_fields(&db, files.tests),
+        Vec::<String>::new(),
+        "a dependent query must see fields added by its dependency and by itself",
+    );
+    assert_eq!(
+        unresolved_query_fields(&db, files.independent),
+        ["Вес".to_string()],
+        "an unrelated extension must not see a sibling extension's field",
+    );
+}
+
+#[test]
+fn sdbl_query_fields_follow_dependency_overlay_with_per_mdo_bootstrap() {
+    use bsl_metadata::MdoType;
+    use ide_db::metadata::{MdoEntry, MetadataListingData, RootKind};
+
+    let roots = [
+        fixture_root("base"),
+        fixture_root("yaxunit"),
+        fixture_root("tests_ext"),
+        fixture_root("independent"),
+    ];
+    let paths = vec![
+        (None, roots[0].clone()),
+        (Some("yaxunit".to_string()), roots[1].clone()),
+        (Some("tests".to_string()), roots[2].clone()),
+        (Some("independent".to_string()), roots[3].clone()),
+    ];
+    let mut db = RootDatabaseImpl::new();
+    db.set_workspace_configs_snapshot(WorkspaceConfigsSnapshot {
+        kinds: vec![RootKind::Base, RootKind::Extension, RootKind::Extension, RootKind::Extension],
+        canonical_paths: paths
+            .iter()
+            .map(|(_, path)| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+            .collect(),
+        paths,
+        closures: vec![vec![], vec![], vec![1], vec![]],
+        topological_order: vec![0, 1, 2, 3],
+        fingerprint: Some("sdbl-per-mdo".to_string()),
+    });
+
+    let tests_module = FileId::from_raw(20);
+    let independent_module = FileId::from_raw(21);
+    let base_catalog = FileId::from_raw(22);
+    let yaxunit_catalog = FileId::from_raw(23);
+    let tests_catalog = FileId::from_raw(24);
+    let mut file_set = FileSet::default();
+    for (file, path) in [
+        (tests_module, roots[2].join("CommonModules/МодульТестов/Ext/Module.bsl")),
+        (independent_module, roots[3].join("CommonModules/МодульНезависимый/Ext/Module.bsl")),
+        (base_catalog, roots[0].join("Catalogs/Товары.xml")),
+        (yaxunit_catalog, roots[1].join("Catalogs/Товары.xml")),
+        (tests_catalog, roots[2].join("Catalogs/Товары.xml")),
+    ] {
+        file_set.insert(file, VfsPath::new(path.to_string_lossy().to_string()));
+    }
+    db.set_source_root(SourceRootId(0), SourceRoot::new_local(file_set));
+    for file in [tests_module, independent_module, base_catalog, yaxunit_catalog, tests_catalog] {
+        db.set_file_source_root(file, SourceRootId(0));
+    }
+    db.set_file_text(
+        tests_module,
+        r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Т.Вес, Т.Габарит ИЗ Справочник.Товары КАК Т";
+КонецПроцедуры"#,
+    );
+    db.set_file_text(
+        independent_module,
+        r#"Процедура Тест()
+    Запрос = Новый Запрос;
+    Запрос.Текст = "ВЫБРАТЬ Т.Вес ИЗ Справочник.Товары КАК Т";
+КонецПроцедуры"#,
+    );
+    db.set_file_text(
+        base_catalog,
+        &std::fs::read_to_string(roots[0].join("Catalogs/Товары.xml")).unwrap(),
+    );
+    db.set_file_text(
+        yaxunit_catalog,
+        &std::fs::read_to_string(roots[1].join("Catalogs/Товары.xml")).unwrap(),
+    );
+    db.set_file_text(
+        tests_catalog,
+        &std::fs::read_to_string(roots[2].join("Catalogs/Товары.xml")).unwrap(),
+    );
+
+    let listing = |file| MetadataListingData {
+        entries: vec![MdoEntry {
+            kind: MdoType::Catalog,
+            name: "Товары".to_string(),
+            main: file,
+            predefined: None,
+        }],
+        ..MetadataListingData::default()
+    };
+    db.set_metadata_listing(&roots[0].to_string_lossy(), listing(base_catalog));
+    db.set_metadata_listing(&roots[1].to_string_lossy(), listing(yaxunit_catalog));
+    db.set_metadata_listing(&roots[2].to_string_lossy(), listing(tests_catalog));
+    db.set_metadata_listing(&roots[3].to_string_lossy(), MetadataListingData::default());
+
+    assert_eq!(
+        unresolved_query_fields(&db, tests_module),
+        Vec::<String>::new(),
+        "per-MDO SDBL lowering must compose base + dependency + own metadata overlays",
+    );
+    assert_eq!(
+        unresolved_query_fields(&db, independent_module),
+        ["Вес".to_string()],
+        "per-MDO SDBL lowering must keep unrelated extension fields invisible",
     );
 }
 
