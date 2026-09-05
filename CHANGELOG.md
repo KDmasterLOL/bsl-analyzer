@@ -105,6 +105,8 @@ and this project adheres to [Date-based Versioning](docs/contributing/VERSIONING
 
 ### Fixed
 
+- CLI `analyze` больше не запускает диагностики по общей конфигурации из `[source.configuration]`: её BSL остаётся загруженным semantic context для resolution и weaving, но diagnostic subjects ограничены локальными расширениями и внешними объектами. Явный `[source].root`/`--configuration-root` по-прежнему анализируется полностью.
+
 - `UnresolvedField` теперь проверяет заимствованные элементы управляемых форм против актуальной базовой конфигурации: ссылка `Элементы.<имя>` на control из `<BaseForm>`, удалённый в target base, диагностируется до загрузки расширения; собственные controls расширения и controls, сохранившиеся в target base, не затрагиваются.
 
 - `$/cancelRequest` доходит до многофайловых обработчиков LSP: токен отмены

@@ -316,6 +316,10 @@ version = "11.5.22.129"
         vec![MISSING_MODULE.to_string()],
         "the shared configuration must provide the base module context"
     );
+    assert!(
+        run.file_event(MAIN_MODULE).is_none(),
+        "a shared configuration is a semantic dependency, not a diagnostic subject"
+    );
 }
 
 #[test]
@@ -338,6 +342,10 @@ fn binding_the_main_configuration_resolves_calls_into_it() {
         bound.unresolved_modules(EXT_MODULE),
         vec![MISSING_MODULE.to_string()],
         "binding must resolve the main configuration's module and leave only the missing one"
+    );
+    assert!(
+        bound.file_event(MAIN_MODULE).is_some(),
+        "an explicit --configuration-root remains a diagnostic subject"
     );
 }
 

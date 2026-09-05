@@ -380,7 +380,6 @@ fn analyze_salsa(
     let author_filter =
         build_author_filter(&source_dir, &ignored_authors, &proj_config.analysis.ignored_authors)?;
 
-    let _metadata = proj_config.load_metadata(&source_dir)?;
     let configuration_path = proj_config.resolve_configuration_path(&source_dir)?;
 
     // Scope the file walk to the configuration source root (+ extension roots)
@@ -418,6 +417,7 @@ fn analyze_salsa(
         eprintln!("warning: {notice}");
     }
     let source_roots = project.source_roots();
+    let diagnostic_roots = project.diagnostic_roots();
 
     tracing::info!("Creating database");
     let mut db = RootDatabaseImpl::default();
@@ -452,26 +452,43 @@ fn analyze_salsa(
         all_file_ids.push((file_id, path.clone()));
     }
 
-    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref scope) = scope {
-        let filtered: Vec<_> =
-            all_file_ids.iter().filter(|(_, path)| scope.is_file_in_scope(path)).cloned().collect();
+    let subject_file_ids: Vec<_> = all_file_ids
+        .iter()
+        .filter(|(_, path)| diagnostic_roots.iter().any(|root| path.starts_with(root)))
+        .cloned()
+        .collect();
+    if subject_file_ids.len() != all_file_ids.len() {
         tracing::info!(
-            "Analysis scope (base '{}'): {} of {} files",
+            "Diagnostic subjects: {} of {} loaded BSL files across {} analysis root(s)",
+            subject_file_ids.len(),
+            all_file_ids.len(),
+            diagnostic_roots.len()
+        );
+    }
+
+    let file_ids: Vec<(FileId, PathBuf)> = if let Some(ref scope) = scope {
+        let filtered: Vec<_> = subject_file_ids
+            .iter()
+            .filter(|(_, path)| scope.is_file_in_scope(path))
+            .cloned()
+            .collect();
+        tracing::info!(
+            "Analysis scope (base '{}'): {} of {} subject files",
             scope.base_ref(),
             filtered.len(),
-            all_file_ids.len()
+            subject_file_ids.len()
         );
         if !quiet && !jsonl {
             println!(
-                "Analysis scope (base '{}'): {} of {} files",
+                "Analysis scope (base '{}'): {} of {} subject files",
                 scope.base_ref(),
                 filtered.len(),
-                all_file_ids.len()
+                subject_file_ids.len()
             );
         }
         filtered
     } else {
-        all_file_ids.clone()
+        subject_file_ids
     };
 
     let file_set_arc = Arc::new(file_set);

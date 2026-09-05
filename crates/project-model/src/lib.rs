@@ -347,6 +347,33 @@ impl Project {
         roots
     }
 
+    /// Roots that are actual diagnostic subjects. A configuration bound through
+    /// `[source.configuration]` is a semantic dependency: its metadata and BSL
+    /// must stay in the workspace for resolution/weaving, but when the project
+    /// also has local extensions or external objects it must not be diagnosed as
+    /// if it were project-owned source. Explicit `[source].root` configurations
+    /// keep the historical behaviour and remain diagnostic subjects.
+    pub fn diagnostic_roots(&self) -> Vec<PathBuf> {
+        if self.config.configuration_dependency.is_none() {
+            return self.source_roots();
+        }
+
+        let mut roots: Vec<PathBuf> =
+            self.extension_paths.iter().map(|(_, path)| path.clone()).collect();
+        roots.extend(self.external_paths.iter().map(|(_, path)| path.clone()));
+        if let Some(extension) = self.extension_in_config_location.as_ref() {
+            if !roots.iter().any(|root| root == extension) {
+                roots.push(extension.clone());
+            }
+        }
+
+        if roots.is_empty() {
+            self.source_roots()
+        } else {
+            roots
+        }
+    }
+
     pub fn configuration_path(&self) -> Option<&Path> {
         self.source_path.as_deref()
     }
