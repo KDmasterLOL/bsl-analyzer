@@ -14,13 +14,25 @@ use crate::Diagnostic;
 /// siblings absent from the standalone ext file) — the orchestrator suppresses them and
 /// republishes the merged-module result instead.
 pub(crate) fn cav_body_ranges(root: &SyntaxNode) -> Vec<TextRange> {
-    root.children()
-        .filter(|n| matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF))
-        .filter(|method| hir::extract_change_and_validate(method).is_some())
+    change_and_validate_methods(root)
         .filter_map(|method| {
             method.children().find(|n| n.kind() == SyntaxKind::STMT_LIST).map(|n| n.text_range())
         })
         .collect()
+}
+
+/// Full source ranges of change-and-validate methods. Raw extension syntax inside these
+/// methods is not an executable BSL program by itself: deleted and inserted fragments are
+/// intentionally present at the same time. Once an effective module is available, syntax
+/// diagnostics for these ranges must come from that effective parse instead.
+pub(crate) fn cav_method_ranges(root: &SyntaxNode) -> Vec<TextRange> {
+    change_and_validate_methods(root).map(|method| method.text_range()).collect()
+}
+
+fn change_and_validate_methods(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    root.children()
+        .filter(|n| matches!(n.kind(), SyntaxKind::PROCEDURE_DEF | SyntaxKind::FUNCTION_DEF))
+        .filter(|method| hir::extract_change_and_validate(method).is_some())
 }
 
 /// `true` when `range` is fully contained in any of `ranges`.
@@ -97,6 +109,18 @@ mod tests {
         let slice = &code[usize::from(ranges[0].start())..usize::from(ranges[0].end())];
         assert!(slice.contains("А = 1;"), "covers the CAV body: {slice:?}");
         assert!(!slice.contains("Б = 2;"), "excludes the ordinary method: {slice:?}");
+    }
+
+    #[test]
+    fn cav_method_ranges_cover_the_whole_change_and_validate_method() {
+        let code = "&ИзменениеИКонтроль(\"M\")\nПроцедура Расш1_M()\nА = 1;\nКонецПроцедуры\n\nПроцедура Обычная()\nКонецПроцедуры";
+        let root = parse_root(code);
+        let methods = cav_method_ranges(&root);
+        assert_eq!(methods.len(), 1);
+        let slice = &code[usize::from(methods[0].start())..usize::from(methods[0].end())];
+        assert!(slice.contains("Расш1_M"));
+        assert!(slice.contains("КонецПроцедуры"));
+        assert!(!slice.contains("Обычная"));
     }
 
     #[test]

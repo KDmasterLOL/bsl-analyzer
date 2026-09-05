@@ -203,6 +203,51 @@ fn extension_diagnostics_are_a_stable_superset_without_spurious_inference() {
 }
 
 #[test]
+fn change_and_validate_raw_parse_errors_are_replaced_by_effective_parse() {
+    let base = "Процедура Цель() Экспорт\n\tЕсли Условие Тогда\n\t\tЗначение = 1;\n\tКонецЕсли;\nКонецПроцедуры";
+    let ext = "&ИзменениеИКонтроль(\"Цель\")\nПроцедура Расш1_Цель()\n#Удаление\n\tЕсли Условие Тогда\n#КонецУдаления\n#Вставка\n\tЕсли Условие И ДопУсловие Тогда\n#КонецВставки\n\t\tЗначение = 1;\n\tКонецЕсли;\nКонецПроцедуры";
+
+    assert!(
+        !parser::parse(ext).errors().is_empty(),
+        "the raw extension delta must reproduce the parser false positive"
+    );
+    let fx = setup_with(base, ext);
+    assert!(
+        ide_db::effective_target(fx.analysis.database(), fx.ext_file).is_some(),
+        "the same source must form a usable effective module"
+    );
+
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+    assert!(
+        !diags.iter().any(|d| d.code == ide::DiagnosticCode::ParseError),
+        "raw #Удаление/#Вставка syntax must be superseded by the valid effective parse; got {:?}",
+        diags
+            .iter()
+            .filter(|d| d.code == ide::DiagnosticCode::ParseError)
+            .map(|d| (&d.message, d.range))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn change_and_validate_effective_insert_parse_error_is_reported() {
+    let base = "Процедура Цель() Экспорт\n\tЕсли Условие Тогда\n\t\tЗначение = 1;\n\tКонецЕсли;\nКонецПроцедуры";
+    let ext = "&ИзменениеИКонтроль(\"Цель\")\nПроцедура Расш1_Цель()\n#Удаление\n\tЕсли Условие Тогда\n#КонецУдаления\n#Вставка\n\tЕсли Тогда\n#КонецВставки\n\t\tЗначение = 1;\n\tКонецЕсли;\nКонецПроцедуры";
+    let fx = setup_with(base, ext);
+    assert!(
+        ide_db::effective_target(fx.analysis.database(), fx.ext_file).is_some(),
+        "malformed inserted BSL must still reach the effective parse"
+    );
+
+    let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());
+    assert!(
+        diags.iter().any(|d| d.code == ide::DiagnosticCode::ParseError),
+        "a syntax error authored in #Вставка must survive effective remapping; got {:?}",
+        diags.iter().map(|d| (d.code, d.range)).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn weaving_interceptor_signature_mismatch_is_reported() {
     let fx = setup_with(SIG_BASE, SIG_EXT_BAD);
     let diags = fx.analysis.diagnostics(fx.ext_file, &DiagnosticsConfig::all_enabled());

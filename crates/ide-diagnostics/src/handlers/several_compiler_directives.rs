@@ -1,6 +1,7 @@
 use crate::define_metadata;
 use crate::metadata::*;
 use crate::{Diagnostic, DiagnosticCode, DiagnosticsContext};
+use hir::AnnotationKind;
 use ide_db::TextRange;
 
 pub const METADATA: DiagnosticMetadata = define_metadata! {
@@ -28,25 +29,40 @@ pub fn check(ctx: &DiagnosticsContext) -> Vec<Diagnostic> {
     let item_tree = ctx.item_tree();
 
     for (_, proc) in item_tree.procedures() {
-        if proc.annotations.len() > 1 {
+        if compilation_directive_count(&proc.annotations) > 1 {
             diagnostics.push(make_diagnostic(proc.name_range, code, ctx));
         }
     }
 
     for (_, func) in item_tree.functions() {
-        if func.annotations.len() > 1 {
+        if compilation_directive_count(&func.annotations) > 1 {
             diagnostics.push(make_diagnostic(func.name_range, code, ctx));
         }
     }
 
     for (_, var) in item_tree.variables() {
-        if var.annotations.len() > 1 {
+        if compilation_directive_count(&var.annotations) > 1 {
             diagnostics.push(make_diagnostic(var.name_range, code, ctx));
         }
     }
 
     diagnostics.sort_by_key(|d| d.range.start());
     diagnostics
+}
+
+fn compilation_directive_count(annotations: &[hir::Annotation]) -> usize {
+    annotations.iter().filter(|annotation| is_compilation_directive(annotation.kind)).count()
+}
+
+fn is_compilation_directive(kind: AnnotationKind) -> bool {
+    matches!(
+        kind,
+        AnnotationKind::AtClient
+            | AnnotationKind::AtServer
+            | AnnotationKind::AtClientAtServer
+            | AnnotationKind::AtClientAtServerNoContext
+            | AnnotationKind::AtServerNoContext
+    )
 }
 
 fn make_diagnostic(range: TextRange, code: DiagnosticCode, ctx: &DiagnosticsContext) -> Diagnostic {
@@ -138,6 +154,21 @@ mod tests {
               message: Указано более одной директивы компиляции
               severity: Critical"#]]
         .assert_eq(&format_diags(code, &diagnostics));
+    }
+
+    #[test]
+    fn extension_interception_annotation_is_not_a_second_compilation_directive() {
+        let code = r#"&НаКлиенте
+&После("ПриПереключенииКассыККМ")
+Процедура НК_ПриПереключенииКассыККМ()
+КонецПроцедуры
+
+&НаСервере
+&ИзменениеИКонтроль("ПроверитьОбщуюВозможностьРаботы")
+Процедура НК_ПроверитьОбщуюВозможностьРаботы(Отказ)
+КонецПроцедуры"#;
+        let diagnostics = check_ast_diagnostic(code, super::check);
+        expect![[r#""#]].assert_eq(&format_diags(code, &diagnostics));
     }
 
     #[test]

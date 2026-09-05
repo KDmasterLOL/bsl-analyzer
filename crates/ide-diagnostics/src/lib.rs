@@ -179,6 +179,16 @@ pub fn apply_extension_merge<'db>(
     // `&ИзменениеИКонтроль` method bodies: copied-base statements reference base siblings;
     // owned by the effective pass (remapped to `#Вставка`), so excluded from the weaving pass.
     let cav_bodies = effective::cav_body_ranges(&root);
+    let cav_methods = effective::cav_method_ranges(&root);
+    if effective.is_some() {
+        // A raw extension method contains both #Удаление and #Вставка alternatives, so it is
+        // not necessarily valid BSL before 1C applies the change-and-validate splice. Syntax
+        // errors in a successfully paired method are therefore owned by the effective parse.
+        standalone.retain(|diag| {
+            diag.code != DiagnosticCode::ParseError
+                || !effective::range_inside_any(diag.range, &cav_methods)
+        });
+    }
 
     // Strip the standalone BASE-SENSITIVE diagnostics by IDENTITY, recomputed on the same
     // provider the caller used. Removing by identity — not by `DiagnosticCode` — is essential:
@@ -236,6 +246,10 @@ pub fn apply_extension_merge<'db>(
         let eff_provider = ide_db::SalsaProvider::with_file_set(db, config_path_input, file_set)
             .with_effective(eid, file_id);
         let eff_ctx = DiagnosticsContext::new(config, file_id, &eff_provider);
+        let eff_parse_errors =
+            safe_collect("merge:effective_parse", || handlers::parse_error::check(&eff_ctx));
+        standalone.extend(effective::remap_inserted(eff_parse_errors, &effmod.segments));
+
         let eff_base_sensitive =
             safe_collect("merge:effective_base_sensitive", || collect_base_sensitive(&eff_ctx));
         standalone.extend(effective::remap_inserted(eff_base_sensitive, &effmod.segments));
